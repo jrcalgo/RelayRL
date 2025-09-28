@@ -1,55 +1,67 @@
-/// **Client Modules**: Handles agent implementations and inter-agent communication.
+/// **Client Modules**: Handles client-side runtime coordination and actor management.
 ///
-/// These modules include different agent communication strategies, such as:
-/// - `agent_wrapper`: Provides Python-accessible agent wrappers for easy integration.
-/// - `agent_grpc`: Uses gRPC for agent-server interaction.
-/// - `agent_zmq`: Uses ZeroMQ for lightweight, high-speed messaging.
+/// The client module provides a comprehensive runtime system for managing RL agents:
+/// - `agent`: Public interface for agent implementations and wrappers
+/// - `runtime`: Internal runtime system including:
+///   - `actor`: Individual agent actor implementations
+///   - `coordination`: Manages lifecycle, scaling, metrics, and state across actors
+///   - `router`: Message routing between actors and transport layers
+///   - `transport`: Network transport implementations (gRPC, ZeroMQ)
 pub mod client {
-    #[cfg(feature = "grpc_network")]
-    pub mod agent_grpc;
-    #[cfg(any(
-        feature = "networks",
-        feature = "grpc_network",
-        feature = "zmq_network"
-    ))]
-    pub mod agent_wrapper;
-    #[cfg(feature = "zmq_network")]
-    pub mod agent_zmq;
+    pub mod agent;
+    mod runtime {
+        mod actor;
+        mod coordination {
+            mod coordinator;
+            mod lifecycle_manager;
+            mod metrics_manager;
+            mod scale_manager;
+            mod state_manager;
+        }
+        mod router;
+        #[cfg(feature = "networks")]
+        mod transport {
+            #[cfg(feature = "grpc_network")]
+            mod tonic;
+            #[cfg(feature = "zmq_network")]
+            mod zmq;
+        }
+    }
 }
 
-/// **Server Modules**: Implements RelayRL training servers and communication channels.
-///
-/// The training server is responsible for managing reinforcement learning updates,
-/// handling incoming trajectories, and updating models. This module includes:
-/// - `training_server_wrapper`: Provides utility functions for handling training requests.
-/// - `training_grpc`: Implements gRPC-based training server communication.
-/// - `training_zmq`: Implements ZeroMQ-based training server communication.
-/// - `mod python_subprocesses`: Contains Python subprocess management for server interactions.
-///     - `python_training_tensorboard`: Manages TensorBoard integration for training visualization.
-///     - `python_channel_request`: Manages Python-command-based server interactions.
+    /// **Server Modules**: Implements RelayRL training servers and communication channels.
+    ///
+    /// The server module provides a comprehensive runtime system for managing RL training:
+    /// - `training_server`: Public interface for training server implementations
+    /// - `runtime`: Internal runtime system including:
+    ///   - `coordination`: Manages lifecycle, scaling, metrics, and state for training
+    ///   - `python_subprocesses`: Python subprocess management for server interactions
+    ///     - `python_algorithm_request`: Manages Python-command-based algorithm interactions
+    ///     - `python_training_tensorboard`: Manages TensorBoard integration for training visualization
+    ///   - `transport`: Network transport implementations (gRPC, ZeroMQ)
+    ///   - `router`: Message routing between workers and transport layers
+    ///   - `worker`: Individual training worker implementations
 pub mod server {
-    #[cfg(feature = "grpc_network")]
-    pub mod training_grpc;
-    #[cfg(any(
-        feature = "networks",
-        feature = "grpc_network",
-        feature = "zmq_network"
-    ))]
-    pub mod training_server_wrapper;
-    #[cfg(feature = "zmq_network")]
-    pub mod training_zmq;
-    pub(crate) mod python_subprocesses {
-        #[cfg(any(
-            feature = "networks",
-            feature = "grpc_network",
-            feature = "zmq_network"
-        ))]
-        pub(crate) mod python_algorithm_request;
-        #[cfg(any(
-            feature = "networks",
-            feature = "grpc_network",
-            feature = "zmq_network"
-        ))]
-        pub(crate) mod python_training_tensorboard;
+    pub mod training_server;
+    mod runtime {
+        mod coordination {
+            mod coordinator;
+            mod lifecycle_manager;
+            mod metrics_manager;
+            mod scale_manager;
+            mod state_manager;
+        }
+        mod python_subprocesses {
+            mod python_algorithm_request;
+            mod python_training_tensorboard;
+        }
+        mod transport {
+            #[cfg(feature = "grpc_network")]
+            mod tonic;
+            #[cfg(feature = "zmq_network")]
+            mod zmq;
+        }
+        mod router;
+        mod worker;
     }
 }

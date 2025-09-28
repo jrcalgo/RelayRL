@@ -59,6 +59,11 @@ log = { version = "0.4.27", features = ["kv"] }
 notify = { version = "6.1.1", optional = true }
 futures = "0.3.31"
 tiny_http = { version = "0.12.0", optional = true }
+burn = "0.18.0"
+burn-ndarray = "0.18.0"
+tract-onnx = "0.22.0"
+dfdx = "0.13.0"
+cudarc = "0.17.3"
 
 # Build dependencies (used during compilation).
 [build-dependencies]
