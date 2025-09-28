@@ -1,0 +1,87 @@
+{
+    "server_config": {
+        "config_path": "server_config.json",
+        "default_hyperparameters": {
+            "DDPG": {
+                "seed": 1,
+                "gamma": 0.99,
+                "tau": 1e-2,
+                "learning_rate": 3e-3,
+                "batch_size": 128,
+                "buffer_size": 50000,
+                "learning_starts": 128,
+                "policy_frequency": 1,  
+                "noise_scale": 0.1,
+                "train_iters": 50
+            },
+            "PPO": {
+                "discrete": true,
+                "seed": 0,
+                "traj_per_epoch": 1,
+                "clip_ratio": 0.1,
+                "gamma": 0.99,
+                "lam": 0.97,
+                "pi_lr": 3e-4,
+                "vf_lr": 3e-4,
+                "train_pi_iters": 40,
+                "train_v_iters": 40,
+                "target_kl": 0.01
+            },
+            "REINFORCE": {
+                "discrete": true,
+                "with_vf_baseline": true,
+                "seed": 1,
+                "traj_per_epoch": 8,
+                "gamma": 0.98,
+                "lam": 0.97,
+                "pi_lr": 3e-4,
+                "vf_lr": 1e-3,
+                "train_vf_iters": 80
+            },
+            "TD3": {
+                "seed": 1,
+                "gamma": 0.99,
+                "tau": 0.005,
+                "learning_rate": 3e-4,
+                "batch_size": 128,
+                "buffer_size": 50000,
+                "exploration_noise": 0.1,
+                "policy_noise": 0.2,
+                "noise_clip": 0.5,
+                "learning_starts": 25000,
+                "policy_frequency": 2
+            }
+        },
+        "training_tensorboard": {
+            "_comment1": "Runs `tensorboard --logdir /logs` in cwd on start up of server.",
+            "launch_tb_on_startup": true,
+            "_comment2": "scalar tags can be any column header from `progress.txt` files.",
+            "_comment3": "For more than one tag, separate by semi-colon (;)",
+            "scalar_tags": "AverageEpRet;LossQ",
+            "global_step_tag": "Epoch"
+        }
+    },
+    "transport_config": {
+        "addresses": {
+            "_comment": "gRPC uses only this address (prefix is unused).",
+            "training_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "50051"
+            },
+            "trajectory_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7776"
+            },
+            "agent_listener": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7777"
+            }
+        },
+        "grpc_idle_timeout": 30,
+        "local_model_path": "server_model.pt",
+        "max_traj_length": 1000
+    }
+}

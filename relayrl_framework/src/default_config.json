@@ -1,0 +1,46 @@
+{
+    "algorithms": {
+        "REINFORCE": {
+            "discrete": true,
+            "with_vf_baseline": false,
+            "seed": 1,
+            "traj_per_epoch": 8,
+            "gamma": 0.98,
+            "lam": 0.97,
+            "pi_lr": 3e-4,
+            "vf_lr": 1e-3,
+            "train_vf_iters": 80
+        }
+    },
+    "grpc_idle_timeout": 30,
+    "max_traj_length": 1000,
+    "model_paths": {
+        "client_model": "client_model.pt",
+        "server_model": "server_model.pt"
+    },
+    "server": {
+        "_comment": "gRPC uses only this address (prefix is unused).",
+        "training_server": {
+            "prefix": "tcp://",
+            "host": "127.0.0.1",
+            "port": "50051"
+        },
+        "trajectory_server": {
+            "prefix": "tcp://",
+            "host": "127.0.0.1",
+            "port": "7776"
+        },
+        "agent_listener": {
+            "prefix": "tcp://",
+            "host": "127.0.0.1",
+            "port": "7777"
+        }
+    },
+    "training_tensorboard": {
+        "_comment1": "Runs `tensorboard --logdir /logs` in cwd on start up of server.",
+        "launch_tb_on_startup": true,
+        "_comment2": "scalar tags can be any column header from `progress.txt` files.",
+        "scalar_tags": "AverageEpRet;LossQ",
+        "global_step_tag": "Epoch"
+    }
+}

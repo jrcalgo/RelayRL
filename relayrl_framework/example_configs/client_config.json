@@ -1,0 +1,35 @@
+{
+    "client_config": {
+        "actor_count": 2,
+        "_comment1": "For >= 2 distinct actors, algorithm_name value format as PPO;REINFORCE;...",
+        "_comment2": "For multiagent algorithms with single inference (1 actor), use single algorithm name.",
+        "_comment3": "If > 1 actors and single algorithm name, default to algorithm name for all actors.",
+        "algorithm_name": "PPO;REINFORCE",
+        "config_path": "client_config.json",
+        "default_device": "cuda",
+        "default_model": ""
+    },
+    "transport_config": {
+        "addresses": {
+            "_comment": "gRPC uses only this address (prefix is unused).",
+            "training_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "50051"
+            },
+            "trajectory_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7776"
+            },
+            "agent_listener": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7777"
+            }
+        },
+        "grpc_idle_timeout": 30,
+        "local_model_path": "client_model.pt",
+        "max_traj_length": 1000
+    }
+}

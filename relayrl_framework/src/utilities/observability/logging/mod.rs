@@ -1,0 +1,96 @@
+//! RL4Sys Logging Module
+//!
+//! This module provides logging functionality for the RL4Sys framework,
+//! enabling client and server components to emit structured logs for debugging,
+//! monitoring, and auditing purposes.
+
+use std::sync::Once;
+use log::LevelFilter;
+use log4rs::{
+    append::console::{ConsoleAppender, Target},
+    config::{Appender, Config, Root},
+    filter::threshold::ThresholdFilter,
+};
+
+// Re-export log to provide users with a consistent interface
+pub use log::{debug, error, info, trace, warn, Level};
+
+// Module exports
+pub mod builder;
+pub mod filters;
+pub mod sinks;
+
+// Global initialization guard
+static INIT: Once = Once::new();
+
+/// Initializes the logging subsystem with default configuration
+/// 
+/// This function is called automatically when the observability module
+/// is initialized. It configures log4rs with sensible defaults.
+pub fn init_logging() {
+    INIT.call_once(|| {
+        // Set up default console logger
+        let stdout = ConsoleAppender::builder()
+            .target(Target::Stdout)
+            .build();
+
+        // Create a basic configuration
+        let config = Config::builder()
+            .appender(
+                Appender::builder()
+                    .filter(Box::new(ThresholdFilter::new(LevelFilter::Info)))
+                    .build("stdout", Box::new(stdout)),
+            )
+            .build(
+                Root::builder()
+                    .appender("stdout")
+                    .build(LevelFilter::Info),
+            )
+            .unwrap();
+
+        // Initialize the logger with this configuration
+        match log4rs::init_config(config) {
+            Ok(_) => log::info!("RL4Sys logging initialized with default configuration"),
+            Err(e) => eprintln!("Failed to initialize RL4Sys logging: {}", e),
+        }
+    });
+}
+
+/// Initializes logging with a custom configuration file
+///
+/// # Arguments
+///
+/// * `config_path` - Path to the log4rs YAML configuration file
+///
+/// # Returns
+///
+/// * `Result<(), String>` - Success or error message
+pub fn init_logging_from_file(config_path: &str) -> Result<(), String> {
+    INIT.call_once(|| {
+        match log4rs::init_file(config_path, Default::default()) {
+            Ok(_) => log::info!("RL4Sys logging initialized from config file: {}", config_path),
+            Err(e) => return Err(format!("Failed to initialize logging: {}", e)),
+        }
+    });
+    
+    Ok(())
+}
+
+/// Resets and reconfigures logging with builder-created configuration
+///
+/// # Arguments
+///
+/// * `config` - log4rs::Config to use for reconfiguration
+///
+/// # Returns
+///
+/// * `Result<(), String>` - Success or error message
+pub fn reconfigure_logging(config: Config) -> Result<(), String> {
+    match log4rs::init_config(config) {
+        Ok(_) => {
+            log::info!("RL4Sys logging reconfigured successfully");
+            Ok(())
+        },
+        Err(e) => Err(format!("Failed to reconfigure logging: {}", e)),
+    }
+} 

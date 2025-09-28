@@ -1,0 +1,7 @@
+pytorch=2.5.1
+numpy
+pandas
+matplotlib
+seaborn
+scipy
+relayrl_framework
