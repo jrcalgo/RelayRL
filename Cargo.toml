@@ -1,2 +1,3 @@
 [workspace]
 members = ["relayrl_framework", "relayrl_python", "relayrl_wasm", "relayrl_cli", "relayrl_types"]
+resolver = "3"
