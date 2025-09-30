@@ -7,7 +7,7 @@ use crate::types::action::{RelayRLAction, TensorData};
 use crate::network::client::agent_grpc::RelayRLAgentGrpcTrait;
 use crate::network::client::agent_wrapper::RelayRLAgent;
 use crate::network::client::agent_zmq::RelayRLAgentZmqTrait;
-use crate::sys_utils::tokio_utils::get_or_init_tokio_runtime;
+use crate::utilities::tokio_utils::get_or_init_tokio_runtime;
 use pyo3::types::PyAnyMethods;
 use pyo3::{Bound, Py, PyAny, PyErr, PyResult, Python, pyclass, pyfunction, pymethods};
 use std::ops::{Deref, DerefMut};
@@ -18,7 +18,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 use tokio::sync::{RwLock as TokioRwLock, RwLock, RwLockWriteGuard};
 
 #[cfg(feature = "console-subscriber")]
-use crate::sys_utils::tokio::utils::get_or_init_console_subscriber;
+use crate::utilities::tokio::utils::get_or_init_console_subscriber;
 
 /// A Python-facing wrapper around RelayRLAgent.
 ///

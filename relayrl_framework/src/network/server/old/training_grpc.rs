@@ -6,14 +6,14 @@ use crate::network::server::python_subprocesses::python_algorithm_request::{
     PythonAlgorithmCommand, PythonAlgorithmRequest,
 };
 use crate::network::server::python_subprocesses::python_training_tensorboard::PythonTrainingTensorboard;
-use crate::sys_utils::grpc_utils::{
+use crate::utilities::grpc_utils::{
     grpc_trajectory_to_relayrl_trajectory, serialize_model,
 };
 use crate::proto::{
     ActionResponse, RelayRlAction as grpc_RelayRLAction, RelayRlModel as RelayRLModel, RequestModel,
     Trajectory as grpc_Trajectory, relay_rl_route_server::RelayRlRouteServer as RelayRLRouteServer,
 };
-use crate::sys_utils::config_loader::{
+use crate::utilities::config_loader::{
     ConfigLoader, DEFAULT_CONFIG_CONTENT, DEFAULT_CONFIG_PATH, LoadedAlgorithmParams,
 };
 use crate::types::trajectory::RelayRLTrajectory;

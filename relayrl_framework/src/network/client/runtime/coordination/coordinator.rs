@@ -13,8 +13,8 @@ use tokio::sync::RwLock;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::transport::{client_transport_factory, TransportClient};
 use crate::resolve_client_config_json_path;
-use crate::sys_utils::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
-use crate::sys_utils::observability::logging::builder::LoggingBuilder;
+use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
+use crate::utilities::observability::logging::builder::LoggingBuilder;
 use crate::types::action::RL4SysAction;
 use tokio::task::JoinHandle;
 use std::path::PathBuf;
@@ -25,7 +25,7 @@ use tokio::fs;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-pub(crate) const CHANNEL_THROUGHPUT: usize = 100_000;
+pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
 pub trait ClientInterface {
     fn new(transport_type: TransportType) -> Self;
@@ -48,7 +48,7 @@ pub trait ClientInterface {
     );
     async fn _new_actor(&self, device: Device, default_model: Option<CModule>);
     async fn _remove_actor(&mut self, id: Uuid);
-    async fn _get_actors(&self) -> (Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>) ;
+    async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String>;
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String>;
     async fn _request_for_action(
         &self,
@@ -67,7 +67,7 @@ pub struct CoordinatorParams {
     logger: LoggingBuilder,
     transport: Arc<TransportClient>,
     lifecycle: LifeCycleManager,
-    state: Arc<RwLock<StateManager>>,
+    state: Arc<StateManager>,
     scaling: ScaleManager,
     metrics: MetricsManager,
 }
@@ -164,7 +164,7 @@ impl ClientInterface for ClientCoordinator {
             logger,
             transport: shared_transport,
             lifecycle,
-            state: Arc::new(RwLock::new(shared_state)),
+            state: Arc::from(shared_state),
             scaling,
             metrics,
         });
@@ -200,9 +200,9 @@ impl ClientInterface for ClientCoordinator {
                 let actor_config: Arc<_> = params.lifecycle.get_active_config();
 
                 let pid: u32 = std::process::id();
-                let pid_bytes = pid.to_be_bytes();
+                let pid_bytes: [u8; _]= pid.to_be_bytes();
 
-                let mut pid_buf = [0u8; 16];
+                let mut pid_buf: [u8; 16] = [0u8; 16];
                 pid_buf[..4].copy_from_slice(&pid_bytes);
 
                 let id: Uuid = Uuid::new_v8(pid_buf);
@@ -216,10 +216,10 @@ impl ClientInterface for ClientCoordinator {
                         .to_string()
                         + &*String::from(id),
                 ));
-                params.state.read().await.__new_actor(id, default_device, actor_model_path, params.transport.clone()).await;
+                params.state.__new_actor(id, default_device, actor_model_path, params.transport.clone()).await;
             }
             None => {
-                eprintln!("[Coordinator] No runtime instance to _shutdown...");
+                eprintln!("[Coordinator] No runtime instance to _new_actor...");
             }
         }
     }
@@ -227,25 +227,30 @@ impl ClientInterface for ClientCoordinator {
     async fn _remove_actor(&mut self, id: Uuid) {
         match &self.runtime_params {
             Some(params) => {
-                if let Ok(mut state) = params.state.write().await {
+                if let Ok(mut state) = params.state {
                     state.__remove_actor(id);
+                } else {
+                    eprintln!("[Coordinator] No runtime state instance to _remove_actor...");
                 }
             }
             None => {
-                eprintln!("[Coordinator] No runtime instance to _shutdown...");
+                eprintln!("[Coordinator] No runtime instance to _remove_actor...");
             }
         }
     }
 
-    async fn _get_actors(&self) -> (Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>) {
+    async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
         match &self.runtime_params {
             Some(params) => {
-                if let Ok(state) = params.state.read().await {
-                    state.__get_actors()
+                if let Ok(state) = params.state {
+                    Ok(state.__get_actors())
+                }
+                else {
+                    Err("[Coordinator] No runtime state instance to _get_actors...".to_string())
                 }
             }
             None => {
-                eprintln!("[Coordinator] No runtime instance to _shutdown...");
+                Err("[Coordinator] No runtime parameter instance to _get_actors...".to_string())
             }
         }
     }
@@ -344,7 +349,7 @@ impl ClientInterface for ClientCoordinator {
                     };
 
                     let runtime_params = self.runtime_params.as_ref().unwrap();
-                    if let sender = runtime_params.state.read().await.tx_to_router.clone() {
+                    if let sender = runtime_params.state.tx_to_router.clone() {
                         let _ = sender.send(model_version_message).await;
                     };
 
@@ -362,8 +367,8 @@ impl ClientInterface for ClientCoordinator {
     async fn _scale_up(&mut self, router_add: i32) {
         match &mut self.runtime_params {
             Some(params) => {
-                let global_bus_rx = params.state.read().await.global_bus_rx.clone();
-                let shared_state = params.state.read().await.clone();
+                let global_bus_rx = params.state.global_bus_rx.clone();
+                let shared_state = params.state.clone();
                 params.scaling.__scale_up(router_add, global_bus_rx, shared_state).await;
             }
             None => {

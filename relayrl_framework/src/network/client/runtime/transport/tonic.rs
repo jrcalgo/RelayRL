@@ -9,7 +9,7 @@ use crate::network::{validate_model, HotReloadableModel};
 #[cfg(feature = "grpc_network")]
 use crate::orchestration::tonic::grpc_utils::{serialize_model, deserialize_model, serialize_action};
 #[cfg(feature = "grpc_network")]
-use crate::sys_utils::configuration::ClientConfigLoader;
+use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "grpc_network")]
 use crate::types::action::RL4SysAction;
 #[cfg(feature = "grpc_network")]

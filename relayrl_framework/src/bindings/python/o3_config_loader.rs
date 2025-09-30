@@ -8,10 +8,10 @@ use pyo3::types::PyDict;
 use pyo3::{pyclass, pymethods};
 use std::path::PathBuf;
 
-use crate::sys_utils::config_loader::{
+use crate::utilities::config_loader::{
     ConfigLoader, LoadedAlgorithmParams, ServerParams, TensorboardParams,
 };
-use crate::sys_utils::misc_utils::round_to_8_decimals;
+use crate::utilities::misc_utils::round_to_8_decimals;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// A Python-exposed struct that wraps the RelayRL `ConfigLoader`.

@@ -1,7 +1,7 @@
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-use crate::sys_utils::configuration::ClientConfigLoader;
+use crate::utilities::configuration::ClientConfigLoader;
 use crate::network::client::runtime::transport::TransportClient;
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -62,10 +62,10 @@ impl StateManager {
             self.__remove_actor(id);
         }
 
-        let default_model: Option<CModule> = self.default_model.unwrap_or_else(|| {
+        let default_model: Option<CModule> = Some(self.default_model.unwrap_or_else(|| {
             let loader = ClientConfigLoader::load_config(&self.shared_config.client_config.config_path);
             loader.client_config.default_model
-        });
+        }));
         let shared_config: Arc<ClientConfigLoader> = self.shared_config.clone();
 
         let (tx_to_actor, rx_from_global) = mpsc::channel(
@@ -114,10 +114,10 @@ impl StateManager {
         self.actor_inboxes.remove(&id);
     }
 
-    pub(crate) fn __get_actors(&self) -> (Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>) {
+    pub(crate) fn __get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
         let actor_ids = self.get_actor_id_list();
         let actor_handles = actor_ids.iter().map(|id| self.get_actor_handle(*id).unwrap()).collect();
-        (actor_ids, actor_handles)
+        Ok((actor_ids, actor_handles))
     }
 
     pub(crate) fn __set_actor_id(&mut self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {

@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tch::{CModule, Device, Tensor};
 use uuid::Uuid;
+use tokio::task::JoinHandle;
 
 struct AgentStartParameters {
     actor_count: i64,
@@ -138,7 +139,7 @@ impl RL4SysAgent {
     }
 
     /// Request actions from actors
-    pub async fn request_for_action(
+    pub async fn request_action(
         &self,
         ids: Vec<Uuid>,
         observation: Tensor,
@@ -175,7 +176,7 @@ pub trait RL4SysAgentActors {
         default_model: Option<CModule>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     fn remove_actor(&self, id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
-    fn get_actors(&self) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)>> + Send + '_>>;
+    fn get_actors(&self) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)> + Send + '_>>;
     fn set_actor_id(
         &self,
         current_id: Uuid,
@@ -201,7 +202,7 @@ impl RL4SysAgentActors for RL4SysAgent {
         })
     }
 
-    fn get_actors(&self) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)>> + Send + '_>> {
+    fn get_actors(&self) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)> + Send + '_>> {
         Box::pin(async move {
             self.coordinator._get_actors().await
         })

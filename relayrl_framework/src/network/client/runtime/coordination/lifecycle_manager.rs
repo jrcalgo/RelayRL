@@ -1,4 +1,4 @@
-use crate::sys_utils::config_builder::ClientConfig;
+use crate::utilities::config_builder::ClientConfig;
 use log::{info, warn};
 use std::path::PathBuf;
 use std::sync::Arc;

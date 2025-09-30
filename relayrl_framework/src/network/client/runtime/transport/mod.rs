@@ -1,5 +1,5 @@
 use crate::network::TransportType;
-use crate::sys_utils::configuration::ClientConfigLoader;
+use crate::utilities::configuration::ClientConfigLoader;
 use crate::types::trajectory::RL4SysTrajectory;
 use serde::Serialize;
 use serde_pickle as pickle;

@@ -43,7 +43,7 @@
 use crate::network::client::agent_grpc::RelayRLAgentGrpc;
 #[cfg(feature = "zmq_network")]
 use crate::network::client::agent_zmq::RelayRLAgentZmq;
-use crate::sys_utils::config_loader::{ConfigLoader, DEFAULT_CONFIG_CONTENT, DEFAULT_CONFIG_PATH};
+use crate::utilities::config_loader::{ConfigLoader, DEFAULT_CONFIG_CONTENT, DEFAULT_CONFIG_PATH};
 use crate::types::action::{RelayRLData, TensorData};
 use crate::{get_or_create_config_json_path, resolve_config_json_path};
 use std::collections::HashMap;

@@ -7,7 +7,7 @@ use crate::proto::{
     ActionResponse, RelayRlAction as grpc_RelayRLAction, RelayRlModel as RelayRLModel, RequestModel,
     Trajectory as grpc_Trajectory,
 };
-use crate::sys_utils::config_loader::{DEFAULT_CONFIG_CONTENT, DEFAULT_CONFIG_PATH};
+use crate::utilities::config_loader::{DEFAULT_CONFIG_CONTENT, DEFAULT_CONFIG_PATH};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,8 +21,8 @@ use tonic::Request;
 use tonic::transport::{Channel, Endpoint, Error};
 
 use crate::network::client::agent_wrapper::{convert_generic_dict, validate_model};
-use crate::sys_utils::grpc_utils::{deserialize_model, serialize_action};
-use crate::sys_utils::config_loader::ConfigLoader;
+use crate::utilities::grpc_utils::{deserialize_model, serialize_action};
+use crate::utilities::config_loader::ConfigLoader;
 use crate::types::action::{RelayRLAction, RelayRLData, TensorData};
 use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 

@@ -9,7 +9,7 @@ use crate::network::server::python_subprocesses::python_training_tensorboard::Py
 use crate::network::server::training_server_wrapper::{
     MultiactorParams, PythonSubprocesses, resolve_new_training_server_address,
 };
-use crate::sys_utils::config_loader::{
+use crate::utilities::config_loader::{
     ConfigLoader, DEFAULT_CONFIG_CONTENT, DEFAULT_CONFIG_PATH, ServerParams,
 };
 use crate::types::action::RelayRLAction;

@@ -5,7 +5,8 @@ use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::{HotReloadableModel, validate_model, TransportType};
 use crate::orchestration::tokio::utils::get_or_init_tokio_runtime;
 use crate::orchestration::tonic::grpc_utils::deserialize_model;
-use crate::sys_utils::configuration::ClientConfigLoader;
+use crate::utilities::configuration::ClientConfigLoader;
+use crate::types::network::NetworkParticipant;
 use crate::types::action::RL4SysAction;
 use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
 use std::path::PathBuf;
@@ -71,7 +72,7 @@ impl ActorEntity for Actor {
             model: None,
             model_path,
             model_latest_version: 0,
-            current_traj: RL4SysTrajectory::new(max_length, None),
+            current_traj: RL4SysTrajectory::new(max_length, NetworkParticipant::RL4SysAgent, &shared_config.client_config.config_path),
             rx_from_router,
             shared_tx_to_sender,
             transport: Some(transport),

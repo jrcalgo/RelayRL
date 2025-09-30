@@ -4,7 +4,7 @@ use crate::network::client::runtime::router::{
 };
 use crate::network::client::runtime::transport::TransportClient;
 use crate::network::random_uuid;
-use crate::sys_utils::configuration::ClientConfigLoader;
+use crate::utilities::configuration::ClientConfigLoader;
 use dashmap::DashMap;
 use rand::Rng;
 use std::sync::Arc;

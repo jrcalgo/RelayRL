@@ -17,7 +17,7 @@ use tokio::sync::{Notify, oneshot as tokio_oneshot};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tokio::task::spawn;
 
-use crate::sys_utils::misc_utils::PythonResponse;
+use crate::utilities::misc_utils::PythonResponse;
 
 #[cfg(any(
     feature = "networks",

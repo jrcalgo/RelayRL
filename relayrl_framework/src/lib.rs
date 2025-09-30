@@ -46,32 +46,7 @@ mod types;
 /// **Development Templates**: Provides base algorithm and application templates for RL4Sys.
 /// These templates serve as foundations for extending or customizing RL environments, models,
 /// or training strategies.
-mod dev_templates;
-
-#[cfg(feature = "python_bindings")]
-use crate::bindings::python::network::client::o3_agent::PyRL4SysAgent;
-#[cfg(feature = "python_bindings")]
-use crate::bindings::python::network::server::o3_training_server::PyTrainingServer;
-#[cfg(any(
-    feature = "networks",
-    feature = "grpc_network",
-    feature = "zmq_network",
-    feature = "python_bindings"
-))]
-use crate::bindings::python::o3_action::PyRL4SysAction;
-#[cfg(feature = "python_bindings")]
-use crate::bindings::python::o3_config_loader::PyConfigLoader;
-#[cfg(any(
-    feature = "networks",
-    feature = "grpc_network",
-    feature = "zmq_network",
-    feature = "python_bindings"
-))]
-use crate::bindings::python::o3_trajectory::PyRL4SysTrajectory;
-#[cfg(feature = "python_bindings")]
-use pyo3::prelude::*;
-#[cfg(feature = "python_bindings")]
-use pyo3::{Bound, PyResult, pymodule};
+pub mod templates;
 
 /// **Protocol Buffers (Protobuf) for gRPC Communication**
 ///
@@ -84,7 +59,7 @@ mod proto {
 
 /// **System Utilities**: Provides helper functions for gRPC communication, model serialization,
 /// and configuration resolution. These utilities support seamless inter-module communication.
-pub(crate) mod utilities {
+pub mod utilities {
     pub mod configuration;
     pub(crate) mod misc_utils;
     #[cfg(any(
@@ -112,97 +87,4 @@ pub(crate) mod utilities {
             pub(crate) mod registry;
         }
     }
-}
-
-/// **Python Bindings for RL4Sys**: This module contains the Rust-to-Python bindings,
-/// exposing RL4Sys components as Python classes. The `o3_*` modules implement PyO3-compatible
-/// wrappers for core structures, enabling smooth Python interaction.
-pub(crate) mod bindings {
-    pub(crate) mod python {
-        #[cfg(any(
-            feature = "networks",
-            feature = "grpc_network",
-            feature = "zmq_network",
-            feature = "python_bindings"
-        ))]
-        #[cfg_attr(bench, visibility = "pub")]
-        pub(crate) mod o3_action;
-        #[cfg(feature = "python_bindings")]
-        #[cfg_attr(bench, visibility = "pub")]
-        pub(crate) mod o3_config_loader;
-        #[cfg(any(
-            feature = "networks",
-            feature = "grpc_network",
-            feature = "zmq_network",
-            feature = "python_bindings"
-        ))]
-        #[cfg_attr(bench, visibility = "pub")]
-        pub(crate) mod o3_trajectory;
-
-        /// **Network Python Wrappers**: Exposes the RL4Sys network components to Python.
-        #[cfg(feature = "python_bindings")]
-        pub(crate) mod network {
-            /// **Client Python Wrappers**: Wraps RL4Sys agents for Python integration.
-            pub(crate) mod client {
-                pub(crate) mod o3_agent;
-            }
-
-            /// **Server Python Wrappers**: Exposes the RL4Sys training server to Python.
-            pub(crate) mod server {
-                pub(crate) mod o3_training_server;
-            }
-        }
-    }
-
-    #[cfg(feature = "wasm_bindings")]
-    pub(crate) mod wasm {
-        pub(crate) mod wasm_action;
-        pub(crate) mod wasm_config_loader;
-        pub(crate) mod wasm_trajectory;
-        pub(crate) mod client {
-            pub(crate) mod wasm_agent;
-        }
-    }
-}
-
-/// ### RL4Sys Python Module Definition
-///
-/// This function defines `rl4sys_framework`, the Python module for RL4Sys bindings.
-///
-/// It registers the following Python classes:
-/// - `ConfigLoader`
-/// - `TrainingServer`
-/// - `RL4SysAgent`
-/// - `RL4SysTrajectory`
-/// - `RL4SysAction`
-///
-/// This allows Python users to easily import and use RL4Sys functionalities via:
-///
-/// ```python
-/// from rl4sys_framework import RL4SysAgent, RL4SysTrajectory, RL4SysAction
-/// ```
-///
-#[cfg(feature = "python_bindings")]
-#[pymodule(name = "rl4sys_framework")]
-fn rl4sys_framework(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Register Python-accessible classes from the Rust implementation.
-    m.add_class::<PyConfigLoader>()?;
-    m.add_class::<PyTrainingServer>()?;
-    m.add_class::<PyRL4SysAgent>()?;
-    m.add_class::<PyRL4SysTrajectory>()?;
-    m.add_class::<PyRL4SysAction>()?;
-
-    // Define Python `__all__` to indicate available imports.
-    m.add(
-        "__all__",
-        vec![
-            "ConfigLoader",
-            "TrainingServer",
-            "RL4SysAgent",
-            "RL4SysTrajectory",
-            "RL4SysAction",
-        ],
-    )?;
-
-    Ok(())
 }

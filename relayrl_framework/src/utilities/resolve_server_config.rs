@@ -1,4 +1,4 @@
-use crate::sys_utils::config_loader::{ServerConfig, ServerParams};
+use crate::utilities::config_loader::{ServerConfig, ServerParams};
 
 /// Responsible for resolving RL4Sys server configurations
 /// and storing the new parameters.

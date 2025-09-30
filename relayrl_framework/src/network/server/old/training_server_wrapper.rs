@@ -45,7 +45,7 @@
 use crate::network::server::training_grpc::TrainingServerGrpc;
 #[cfg(any(feature = "networks", feature = "zmq_network"))]
 use crate::network::server::training_zmq::TrainingServerZmq;
-use crate::sys_utils::config_loader::{
+use crate::utilities::config_loader::{
     ConfigLoader, DEFAULT_CONFIG_CONTENT, DEFAULT_CONFIG_PATH, ServerParams,
 };
 use crate::{get_or_create_config_json_path, resolve_config_json_path};

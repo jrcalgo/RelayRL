@@ -9,22 +9,22 @@
 ///   - `transport`: Network transport implementations (gRPC, ZeroMQ)
 pub mod client {
     pub mod agent;
-    mod runtime {
-        mod actor;
-        mod coordination {
-            mod coordinator;
-            mod lifecycle_manager;
-            mod metrics_manager;
-            mod scale_manager;
-            mod state_manager;
+    pub(crate) mod runtime {
+        pub(crate) mod actor;
+        pub(crate) mod coordination {
+            pub(crate) mod coordinator;
+            pub(crate) mod lifecycle_manager;
+            pub(crate) mod metrics_manager;
+            pub(crate) mod scale_manager;
+            pub(crate) mod state_manager;
         }
-        mod router;
+        pub(crate) mod router;
         #[cfg(feature = "networks")]
-        mod transport {
+        pub(crate) mod transport {
             #[cfg(feature = "grpc_network")]
-            mod tonic;
+            pub(crate) mod tonic;
             #[cfg(feature = "zmq_network")]
-            mod zmq;
+            pub(crate) mod zmq;
         }
     }
 }
@@ -43,25 +43,25 @@ pub mod client {
     ///   - `worker`: Individual training worker implementations
 pub mod server {
     pub mod training_server;
-    mod runtime {
-        mod coordination {
-            mod coordinator;
-            mod lifecycle_manager;
-            mod metrics_manager;
-            mod scale_manager;
-            mod state_manager;
+    pub(crate) mod runtime {
+        pub(crate) mod coordination {
+            pub(crate) mod coordinator;
+            pub(crate) mod lifecycle_manager;
+            pub(crate) mod metrics_manager;
+            pub(crate) mod scale_manager;
+            pub(crate) mod state_manager;
         }
-        mod python_subprocesses {
-            mod python_algorithm_request;
-            mod python_training_tensorboard;
+        pub(crate) mod python_subprocesses {
+            pub(crate) mod python_algorithm_request;
+            pub(crate) mod python_training_tensorboard;
         }
-        mod transport {
+        pub(crate) mod transport {
             #[cfg(feature = "grpc_network")]
-            mod tonic;
+            pub(crate) mod tonic;
             #[cfg(feature = "zmq_network")]
-            mod zmq;
+            pub(crate) mod zmq;
         }
-        mod router;
-        mod worker;
+        pub(crate) mod router;
+        pub(crate) mod worker;
     }
 }

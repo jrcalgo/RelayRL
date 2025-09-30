@@ -10,7 +10,7 @@ use std::thread;
 #[cfg(feature = "prometheus")]
 use prometheus::{self, Encoder, TextEncoder};
 
-use crate::sys_utils::observability::metrics::registry::MetricsRegistry;
+use crate::utilities::observability::metrics::registry::MetricsRegistry;
 
 // Configuration for the Prometheus HTTP server
 static mut PROMETHEUS_PORT: u16 = 9090;
@@ -110,7 +110,7 @@ pub fn init_prometheus_exporter_with_settings(
 #[cfg(feature = "prometheus")]
 fn gather_metrics() -> Vec<prometheus::proto::MetricFamily> {
     // TODO: Fix global_registry import
-    // use crate::sys_utils::observability::metrics::global_registry;
+    // use crate::utilities::observability::metrics::global_registry;
 
     // let registry = global_registry();
     // let registry = registry.lock().unwrap();

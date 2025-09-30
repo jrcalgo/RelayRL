@@ -18,7 +18,7 @@ use zmq::{Context, Socket};
     feature = "python_bindings"
 ))]
 use crate::bindings::python::o3_trajectory::PyRL4SysTrajectory;
-use crate::sys_utils::configuration::{ClientConfigLoader, ServerConfigLoader};
+use crate::utilities::configuration::{ClientConfigLoader, ServerConfigLoader};
 
 /// Trait that defines the interface for trajectory handling.
 ///

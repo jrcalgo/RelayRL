@@ -4,7 +4,7 @@
 //! toggling TensorBoard functionality.
 
 use crate::network::server::training_server_wrapper::{Hyperparams, TrainingServer};
-use crate::sys_utils::tokio_utils::get_or_init_tokio_runtime;
+use crate::utilities::tokio_utils::get_or_init_tokio_runtime;
 use pyo3::prelude::*;
 use pyo3::{PyResult, pyclass, pymethods};
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 use tokio::sync::{RwLock as TokioRwLock, RwLockWriteGuard};
 
 #[cfg(feature = "console-subscriber")]
-use crate::sys_utils::tokio::utils::get_or_init_console_subscriber;
+use crate::utilities::tokio::utils::get_or_init_console_subscriber;
 
 /// A Python-friendly wrapper for parsing `Hyperparams` from Python objects.
 /// This struct supports either a dictionary of string-to-string parameters
