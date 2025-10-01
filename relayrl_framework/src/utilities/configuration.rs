@@ -1,4 +1,4 @@
-use crate::network::Hyperparams;
+use crate::types::Hyperparams;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -121,7 +121,7 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
         "algorithm_name": "PPO;REINFORCE",
         "config_path": "client_config.json",
         "default_device": "cuda",
-        "default_model": ""
+        "default_model_path": ""
     },
     "transport_config": {
         "addresses": {
@@ -455,20 +455,13 @@ where
     Ok(s.split(';').map(|s| s.to_string()).collect())
 }
 
-/// Paths for loading (client operation) and saving (server operation) models.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ModelPaths {
-    pub client_model: Option<String>,
-    pub server_model: Option<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClientConfigParams {
     pub actor_count: u64,
     pub algorithm_name: String,
     pub config_path: PathBuf,
     pub default_device: String,
-    pub initial_model_path: PathBuf,
+    pub default_model_path: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -503,7 +496,7 @@ impl ClientConfigLoader {
                 algorithm_name: _algorithm_name,
                 config_path: _config_path,
                 default_device: client_config.default_device,
-                initial_model_path: client_config.initial_model_path,
+                default_model_path: client_config.default_model_path,
             },
             transport_config,
         }
@@ -523,7 +516,7 @@ impl ClientConfigLoader {
                             algorithm_name: "".to_string(),
                             config_path: PathBuf::from("client_config.json"),
                             default_device: "cpu".to_string(),
-                            initial_model_path: PathBuf::from(""),
+                            default_model_path: PathBuf::from(""),
                         },
                         transport_config: TransportConfigBuilder::build_default()
                     }
@@ -554,8 +547,8 @@ impl ClientConfigLoader {
         &self.client_config.default_device
     }
 
-    pub fn get_initial_model_path(&self) -> &PathBuf {
-        &self.client_config.initial_model_path
+    pub fn get_default_model_path(&self) -> &PathBuf {
+        &self.client_config.default_model_path
     }
 
     pub fn get_transport_config(&self) -> &TransportConfigParams {
@@ -568,7 +561,7 @@ pub trait ClientConfigBuildParams {
     fn set_algorithm_name(&mut self, algorithm_name: &str) -> &mut Self;
     fn set_config_path(&mut self, config_path: &str) -> &mut Self;
     fn set_default_device(&mut self, default_device: &str) -> &mut Self;
-    fn set_initial_model_path(&mut self, initial_model: &str) -> &mut Self;
+    fn set_default_model_path(&mut self, initial_model: &str) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
     fn build(&self) -> ClientConfigLoader;
     fn build_default() -> ClientConfigLoader;
@@ -579,7 +572,7 @@ pub struct ClientConfigBuilder {
     algorithm_name: Option<String>,
     config_path: Option<PathBuf>,
     default_device: Option<String>,
-    initial_model_path: Option<PathBuf>,
+    default_model_path: Option<PathBuf>,
     transport_config: Option<TransportConfigParams>,
 }
 
@@ -604,8 +597,8 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         self
     }
 
-    fn set_initial_model_path(&mut self, initial_model: &str) -> &mut Self {
-        self.initial_model_path = Some(PathBuf::from(initial_model));
+    fn set_default_model_path(&mut self, initial_model: &str) -> &mut Self {
+        self.default_model_path = Some(PathBuf::from(initial_model));
         self
     }
 
@@ -629,8 +622,8 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 .default_device
                 .clone()
                 .unwrap_or_else(|| "cpu".to_string()),
-            initial_model_path: self
-                .initial_model_path
+            default_model_path: self
+                .default_model_path
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("")),
         };
@@ -660,7 +653,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 algorithm_name: "".to_string(),
                 config_path: PathBuf::from("client_config.json"),
                 default_device: "cpu".to_string(),
-                initial_model_path: PathBuf::from(""),
+                default_model_path: PathBuf::from(""),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }
@@ -672,7 +665,7 @@ pub struct ServerConfigParams {
     pub config_path: PathBuf,
     pub default_hyperparameters: Option<AlgorithmConfig>,
     pub training_tensorboard: TensorboardParams,
-    pub initial_model_path: PathBuf,
+    pub default_model_path: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -719,7 +712,7 @@ impl ServerConfigLoader {
                                 scalar_tags: vec!["AverageEpRet".to_string(), "StdEpRet".to_string()],
                                 global_step_tag: "Epoch".to_string(),
                             },
-                            initial_model_path: PathBuf::from(""),
+                            default_model_path: PathBuf::from(""),
                         },
                         transport_config: TransportConfigBuilder::build_default(),
                     }
@@ -746,8 +739,8 @@ impl ServerConfigLoader {
         &self.server_config.training_tensorboard
     }
 
-    pub fn get_initial_model_path(&self) -> &PathBuf {
-        &self.server_config.initial_model_path
+    pub fn get_default_model_path(&self) -> &PathBuf {
+        &self.server_config.default_model_path
     }
 
     pub fn get_transport_config(&self) -> &TransportConfigParams {
@@ -768,7 +761,7 @@ pub trait ServerConfigBuildParams {
         scalar_tags: &str,
         global_step_tag: &str,
     ) -> &mut Self;
-    fn set_initial_model_path(&mut self, initial_model: &str) -> &mut Self;
+    fn set_default_model_path(&mut self, initial_model: &str) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
     fn build(&self) -> ServerConfigLoader;
     fn build_default() -> ServerConfigLoader;
@@ -778,7 +771,7 @@ pub struct ServerConfigBuilder {
     config_path: Option<PathBuf>,
     default_hyperparameters: Option<AlgorithmConfig>,
     training_tensorboard: Option<TensorboardParams>,
-    initial_model_path: Option<PathBuf>,
+    default_model_path: Option<PathBuf>,
     transport_config: Option<TransportConfigParams>,
 }
 
@@ -1027,8 +1020,8 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
         self
     }
 
-    fn set_initial_model_path(&mut self, initial_model: &str) -> &mut Self {
-        self.initial_model_path = Some(PathBuf::from(initial_model));
+    fn set_default_model_path(&mut self, initial_model: &str) -> &mut Self {
+        self.default_model_path = Some(PathBuf::from(initial_model));
         self
     }
 
@@ -1051,8 +1044,8 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
                     global_step_tag: "Epoch".to_string(),
                 }
             }),
-            initial_model_path: self
-                .initial_model_path
+            default_model_path: self
+                .default_model_path
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("")),
         };
@@ -1085,7 +1078,7 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
                     scalar_tags: vec!["AverageEpRet".to_string(), "StdEpRet".to_string()],
                     global_step_tag: "Epoch".to_string(),
                 },
-                initial_model_path: PathBuf::from(""),
+                default_model_path: PathBuf::from(""),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }

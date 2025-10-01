@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex, Once};
 use opentelemetry::global::BoxedSpan;
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::{
-    KeyValue, global,
+    KeyValue,
+    global,
     metrics::{self, Counter as OtelCounter, Histogram as OtelHistogram, MeterProvider},
     // sdk::metrics::{controllers, processors, selectors}, // TODO: Update for newer OpenTelemetry version
 };

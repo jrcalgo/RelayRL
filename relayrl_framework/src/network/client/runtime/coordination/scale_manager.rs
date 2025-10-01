@@ -8,10 +8,10 @@ use crate::utilities::configuration::ClientConfigLoader;
 use dashmap::DashMap;
 use rand::Rng;
 use std::sync::Arc;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use tokio::sync::mpsc::Receiver;
 
 pub(crate) struct ServerAddresses {
     agent_listener_address: String,
@@ -37,7 +37,14 @@ pub(crate) struct ScaleManager {
 }
 
 impl ScaleManager {
-    pub(crate) fn new(shared_state: Arc<StateManager>, shared_config: Arc<ClientConfigLoader>, shared_transport: Arc<TransportClient>, rx_from_actor: Receiver<RoutedMessage>, agent_listener_address: String, training_server_address: String) -> Self {
+    pub(crate) fn new(
+        shared_state: Arc<StateManager>,
+        shared_config: Arc<ClientConfigLoader>,
+        shared_transport: Arc<TransportClient>,
+        rx_from_actor: Receiver<RoutedMessage>,
+        agent_listener_address: String,
+        training_server_address: String,
+    ) -> Self {
         Self {
             shared_state,
             shared_config,
@@ -51,21 +58,34 @@ impl ScaleManager {
         }
     }
 
-    pub(crate) async fn __scale_up(&mut self, router_add: i32, global_bus_rx: Receiver<RoutedMessage>, shared_state: Arc<StateManager>) {
+    pub(crate) async fn __scale_up(
+        &mut self,
+        router_add: u32,
+        global_bus_rx: Receiver<RoutedMessage>,
+        shared_state: Arc<StateManager>,
+    ) {
         if self.runtime_params.is_none() {
             self.runtime_params = Some(DashMap::new());
         }
 
         for i in 1..router_add {
             let receiver_state = self.shared_state.clone();
-            let receiver = ClientExternalReceiver::new(receiver_state.global_bus_tx.clone(), self.server_addresses.agent_listener_address.clone()).with_transport(self.shared_transport.clone());
+            let receiver = ClientExternalReceiver::new(
+                receiver_state.global_bus_tx.clone(),
+                self.server_addresses.agent_listener_address.clone(),
+            )
+            .with_transport(self.shared_transport.clone());
 
             let filter_state = self.shared_state.clone();
             let filter_rx = global_bus_rx;
             let filter = ClientFilter::new(filter_rx, filter_state);
 
             let sender_state = self.shared_state.clone();
-            let sender = ClientExternalSender::new(self.rx_from_actor, self.server_addresses.training_server_address.clone()).with_transport(self.shared_transport.clone());
+            let sender = ClientExternalSender::new(
+                self.rx_from_actor,
+                self.server_addresses.training_server_address.clone(),
+            )
+            .with_transport(self.shared_transport.clone());
 
             let receiver_loop = Self::_spawn_external_receiver(receiver).await;
             let filter_loop = Self::_spawn_central_filter(filter).await;
@@ -97,7 +117,7 @@ impl ScaleManager {
         }
     }
 
-    pub(crate) async fn __scale_down(&mut self, router_remove: i32) {
+    pub(crate) async fn __scale_down(&mut self, router_remove: u32) {
         match self.runtime_params {
             Some(ref mut params) => {
                 for _ in 0..router_remove {

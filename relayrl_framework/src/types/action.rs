@@ -195,61 +195,6 @@ pub enum RL4SysData {
     // Add other variants if ever needed
 }
 
-/// Implements conversion from a Python dictionary (PyDict) bound reference representing tensor data
-/// into a [TensorData] Rust object.
-///
-/// The dictionary is expected to have the keys "shape", "dtype", and "data".
-///
-/// # Arguments
-///
-/// * `tensor_data_dict` - A bound reference to a PyDict containing tensor data.
-///
-/// # Returns
-///
-/// A [Result] containing the constructed [TensorData] on success, or a [SafeTensorError] on failure.
-#[cfg(any(
-    feature = "networks",
-    feature = "grpc_network",
-    feature = "zmq_network",
-    feature = "python_bindings"
-))]
-impl TryFrom<Bound<'_, PyDict>> for TensorData {
-    type Error = SafeTensorError;
-
-    fn try_from(tensor_data_dict: Bound<'_, PyDict>) -> Result<Self, SafeTensorError> {
-        let shape: Bound<PyAny> = tensor_data_dict
-            .get_item("shape")
-            .expect("`shape` key not found")
-            .expect("`shape` value not found");
-        let shape_i64: Vec<i64> = shape
-            .extract::<Vec<i64>>()
-            .expect("failed to extract shape as i64");
-
-        let dtype: Bound<PyAny> = tensor_data_dict
-            .get_item("dtype")
-            .expect("`dtype` key not found")
-            .expect("`dtype` value not found");
-        let dtype_converted: DType = DType::try_from(
-            dtype
-                .extract::<String>()
-                .expect("failed to extract dtype as string")
-                .as_str(),
-        )?;
-
-        let data: Bound<PyAny> = tensor_data_dict
-            .get_item("data")
-            .expect("`data` key not found")
-            .expect("`data` value not found");
-        let data_bytes: Vec<u8> = data.extract().expect("failed to extract data as bytes");
-
-        Ok(TensorData {
-            shape: shape_i64,
-            dtype: dtype_converted,
-            data: data_bytes,
-        })
-    }
-}
-
 /// Implements conversion from a tch::Tensor reference to a [TensorData] object.
 ///
 /// The tensor is moved to the CPU, made contiguous, and its shape and data are extracted.
@@ -631,31 +576,5 @@ impl RL4SysAction {
             dtype: dtype_converted,
             data: bytes,
         })
-    }
-
-    /// Converts the current [`RL4SysAction`] into its Python representation.
-    ///
-    /// This function wraps the current action in a [`PyRL4SysAction`], making it accessible to Python code.
-    ///
-    /// # Returns
-    ///
-    /// A [`PyRL4SysAction`] containing the same internal action data.
-    #[cfg(any(
-        feature = "networks",
-        feature = "grpc_network",
-        feature = "zmq_network",
-        feature = "python_bindings"
-    ))]
-    pub fn into_py(self) -> PyRL4SysAction {
-        PyRL4SysAction {
-            inner: RL4SysAction {
-                obs: self.obs,
-                act: self.act,
-                mask: self.mask,
-                rew: self.rew,
-                data: self.data,
-                done: self.done,
-            },
-        }
     }
 }

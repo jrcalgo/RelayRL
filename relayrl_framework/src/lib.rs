@@ -48,27 +48,11 @@ mod types;
 /// or training strategies.
 pub mod templates;
 
-/// **Protocol Buffers (Protobuf) for gRPC Communication**
-///
-/// This module contains Rust code generated from `.proto` files using `tonic::include_proto!`,
-/// enabling structured message exchange between RL4Sys components.
-#[cfg(feature = "grpc_network")]
-mod proto {
-    tonic::include_proto!("rl4sys");
-}
-
 /// **System Utilities**: Provides helper functions for gRPC communication, model serialization,
 /// and configuration resolution. These utilities support seamless inter-module communication.
 pub mod utilities {
     pub mod configuration;
     pub(crate) mod misc_utils;
-    #[cfg(any(
-        feature = "networks",
-        feature = "grpc_network",
-        feature = "zmq_network"
-    ))]
-    pub(crate) mod resolve_server_config;
-
     pub(crate) mod observability {
         pub(crate) mod logging {
             mod sinks {
@@ -87,4 +71,13 @@ pub mod utilities {
             pub(crate) mod registry;
         }
     }
+}
+
+/// **Protocol Buffers (Protobuf) for gRPC Communication**
+///
+/// This module contains Rust code generated from `.proto` files using `tonic::include_proto!`,
+/// enabling structured message exchange between RL4Sys components.
+#[cfg(feature = "grpc_network")]
+mod proto {
+    tonic::include_proto!("rl4sys");
 }

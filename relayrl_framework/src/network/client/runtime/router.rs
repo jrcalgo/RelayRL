@@ -1,7 +1,7 @@
 use crate::network::client::runtime::coordination::state_manager::StateManager;
-use crate::network::client::runtime::transport::TransportClient;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
+use crate::network::client::runtime::transport::TransportClient;
 use crate::types::action::RL4SysAction;
 use crate::types::trajectory::RL4SysTrajectory;
 use dashmap::DashMap;
@@ -110,7 +110,11 @@ pub(crate) struct ClientExternalReceiver {
 
 impl ClientExternalReceiver {
     pub fn new(tx_to_router: Sender<RoutedMessage>, server_address: String) -> Self {
-        Self { tx_to_router, transport: None, server_address }
+        Self {
+            tx_to_router,
+            transport: None,
+            server_address,
+        }
     }
 
     pub fn with_transport(mut self, transport: Arc<TransportClient>) -> Self {
@@ -186,12 +190,11 @@ impl ClientExternalSender {
             actor_last_sent: DashMap::new(),
             traj_heap: Arc::new(Mutex::new(BinaryHeap::new())),
             transport: None,
-            server_address
+            server_address,
         }
     }
 
     pub fn with_transport(mut self, transport: TransportClient) -> Self {
-        use crate::network::client::runtime::transport::TransportClient;
 
         match transport {
             #[cfg(feature = "zmq_network")]
@@ -216,10 +219,19 @@ impl ClientExternalSender {
 
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                if let RoutedPayload::SendTrajectory { timestamp, trajectory } = msg.payload {
-                    let priority: i64 = Self::_compute_priority(actor_last_sent.clone(), msg.actor_id, timestamp);
+                if let RoutedPayload::SendTrajectory {
+                    timestamp,
+                    trajectory,
+                } = msg.payload
+                {
+                    let priority: i64 =
+                        Self::_compute_priority(actor_last_sent.clone(), msg.actor_id, timestamp);
 
-                    let queue_entry = SenderQueueEntry { priority, actor_id: msg.actor_id, traj_to_send: trajectory };
+                    let queue_entry = SenderQueueEntry {
+                        priority,
+                        actor_id: msg.actor_id,
+                        traj_to_send: trajectory,
+                    };
                     let heap_arc2 = heap_arc.clone();
                     tokio::spawn(async move {
                         let mut traj_heap = heap_arc2.lock().await;
@@ -252,7 +264,11 @@ impl ClientExternalSender {
         });
     }
 
-    fn _compute_priority(_actor_last_sent: DashMap<Uuid, i64>, id: Uuid, timestamp: Timestamp) -> PriorityRank {
+    fn _compute_priority(
+        _actor_last_sent: DashMap<Uuid, i64>,
+        id: Uuid,
+        timestamp: Timestamp,
+    ) -> PriorityRank {
         let last = match _actor_last_sent.get(&id) {
             Some(last_ref) => *last_ref as u64,
             None => 0,
@@ -274,7 +290,10 @@ impl ClientExternalSender {
             };
 
             match job_option {
-                Some(job) => self._send_trajectory(job, self.server_address.clone()).await,
+                Some(job) => {
+                    self._send_trajectory(job, self.server_address.clone())
+                        .await
+                }
                 None => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -286,34 +305,42 @@ impl ClientExternalSender {
         if let Some(transport) = &self.transport {
             // Update last sent timestamp for this actor
             self.actor_last_sent.insert(entry.actor_id, entry.priority);
-            
+
             // Send trajectory via transport
             match &**transport {
                 #[cfg(feature = "zmq_network")]
                 TransportClient::Sync(sync_client) => {
                     match sync_client.send_traj_to_server(entry.traj_to_send, &server_address) {
                         Ok(_) => {
-                            println!("[ClientExternalSender] Successfully sent trajectory for actor {}", entry.actor_id);
+                            println!(
+                                "[ClientExternalSender] Successfully sent trajectory for actor {}",
+                                entry.actor_id
+                            );
                         }
                         Err(e) => {
-                            eprintln!("[ClientExternalSender] Failed to send trajectory for actor {}: {}", entry.actor_id, e);
+                            eprintln!(
+                                "[ClientExternalSender] Failed to send trajectory for actor {}: {}",
+                                entry.actor_id, e
+                            );
                         }
                     }
                 }
                 #[cfg(feature = "grpc_network")]
                 TransportClient::Async(async_client) => {
-                    let grpc_traj = async_client.convert_rl4sys_to_proto_trajectory(&entry.traj_to_send);
-                    match async_client.send_traj_to_server(grpc_traj, &server_address) {
-                        Ok(_) => {
-                            println!("[ClientExternalSender] Successfully sent trajectory for actor {}", entry.actor_id);
-                        }
-                        Err(e) => {
-                            eprintln!("[ClientExternalSender] Failed to send trajectory for actor {}: {}", entry.actor_id, e);
-                        }
-                    }
+                    let grpc_traj =
+                        async_client.convert_rl4sys_to_proto_trajectory(&entry.traj_to_send);
+                    async_client
+                        .send_traj_to_server(grpc_traj, &server_address)
+                        .await;
+                    println!(
+                        "[ClientExternalSender] Successfully sent trajectory for actor {}",
+                        entry.actor_id
+                    );
                 }
                 _ => {
-                    eprintln!("[ClientExternalSender] No transport configured for sending trajectories");
+                    eprintln!(
+                        "[ClientExternalSender] No transport configured for sending trajectories"
+                    );
                 }
             }
         } else {

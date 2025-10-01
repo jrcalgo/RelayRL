@@ -1,8 +1,8 @@
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-use crate::utilities::configuration::ClientConfigLoader;
+use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
+use crate::utilities::configuration::ClientConfigLoader;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,12 +30,8 @@ impl StateManager {
         shared_config: Arc<ClientConfigLoader>,
         default_model: Option<CModule>,
     ) -> (Self, Receiver<RoutedMessage>, Receiver<RoutedMessage>) {
-        let (global_bus_tx, global_bus_rx) = mpsc::channel::<RoutedMessage>(
-            CHANNEL_THROUGHPUT,
-        );
-        let (tx_to_sender, rx_from_actor) = mpsc::channel::<RoutedMessage>(
-            CHANNEL_THROUGHPUT,
-        );
+        let (global_bus_tx, global_bus_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (tx_to_sender, rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         (
             Self {
                 shared_config,
@@ -54,7 +50,7 @@ impl StateManager {
         &mut self,
         id: Uuid,
         device: Device,
-        model_path: Option<PathBuf>,
+        default_model: Option<CModule>,
         transport: Arc<TransportClient>,
     ) {
         if self.actor_handles.contains_key(&id) {
@@ -62,21 +58,46 @@ impl StateManager {
             self.__remove_actor(id);
         }
 
-        let default_model: Option<CModule> = Some(self.default_model.unwrap_or_else(|| {
-            let loader = ClientConfigLoader::load_config(&self.shared_config.client_config.config_path);
-            loader.client_config.default_model
-        }));
+        let default_model = default_model.or_else(|| {
+            self.default_model.take().or_else(|| {
+                let loader =
+                    ClientConfigLoader::load_config(&self.shared_config.client_config.config_path);
+                let default_model_path_str = loader
+                    .client_config
+                    .default_model_path
+                    .to_str()
+                    .expect("[StateManager] Failed to convert path to string")
+                    .to_string();
+                if !default_model_path_str.is_empty() {
+                    Some(
+                        CModule::load(loader.client_config.default_model_path)
+                            .expect("[StateManager] Failed to load model from path"),
+                    )
+                } else {
+                    let local_model_path_str = loader
+                        .transport_config
+                        .local_model_path
+                        .to_str()
+                        .expect("[StateManager] Failed to convert path to string")
+                        .to_string();
+                    if !local_model_path_str.is_empty() {
+                        Some(
+                            CModule::load(loader.transport_config.local_model_path)
+                                .expect("[StateManager] Failed to load model from path"),
+                        )
+                    } else {
+                        None
+                    }
+                }
+            })
+        });
+
         let shared_config: Arc<ClientConfigLoader> = self.shared_config.clone();
 
-        let (tx_to_actor, rx_from_global) = mpsc::channel(
-            CHANNEL_THROUGHPUT,
-        );
+        let (tx_to_actor, rx_from_global) = mpsc::channel(CHANNEL_THROUGHPUT);
         self.actor_inboxes.insert(id, tx_to_actor.clone());
 
-        let model_path = match model_path {
-            Some(path) => path,
-            None => shared_config.transport_config.local_model_path.clone(),
-        };
+        let model_path = shared_config.transport_config.local_model_path.clone();
 
         let handle = Arc::new(tokio::spawn(async move {
             let (mut actor, handshake_flag) = Actor::new(
@@ -87,7 +108,7 @@ impl StateManager {
                 shared_config,
                 rx_from_global,
                 self.tx_to_sender.clone(),
-                transport.clone()
+                transport.clone(),
             )
             .await;
 
@@ -114,9 +135,14 @@ impl StateManager {
         self.actor_inboxes.remove(&id);
     }
 
-    pub(crate) fn __get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
+    pub(crate) fn __get_actors(
+        &self,
+    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
         let actor_ids = self.get_actor_id_list();
-        let actor_handles = actor_ids.iter().map(|id| self.get_actor_handle(*id).unwrap()).collect();
+        let actor_handles = actor_ids
+            .iter()
+            .map(|id| self.get_actor_handle(*id).unwrap())
+            .collect();
         Ok((actor_ids, actor_handles))
     }
 
@@ -131,7 +157,9 @@ impl StateManager {
         };
 
         match self.get_actor_handle(new_id) {
-            Some(handle) => return Err(format!("[StateManager] Actor ID {} already taken", new_id)),
+            Some(handle) => {
+                return Err(format!("[StateManager] Actor ID {} already taken", new_id));
+            }
             None => (),
         };
         match self.get_actor_inbox(new_id) {
@@ -148,7 +176,10 @@ impl StateManager {
     }
 
     fn get_actor_id_list(&self) -> Vec<ActorUuid> {
-        self.actor_handles.iter().map(|entry| entry.key().clone()).collect()
+        self.actor_handles
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     fn get_actor_handle(&self, id: Uuid) -> Option<Arc<JoinHandle<()>>> {

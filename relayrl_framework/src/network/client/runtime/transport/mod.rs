@@ -1,8 +1,9 @@
 use crate::network::TransportType;
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::types::trajectory::RL4SysTrajectory;
+use crate::network::client::runtime::router::RoutedMessage;
+use tch::CModule;
 use serde::Serialize;
-use serde_pickle as pickle;
 use std::io::Cursor;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -31,7 +32,7 @@ pub enum TransportClient {
 #[cfg(feature = "grpc_network")]
 #[async_trait]
 pub trait AsyncClientTransport: Send + Sync {
-    async fn initial_model_handshake(&self, model_server_address: &str) -> Option<Trajectory>;
+    async fn initial_model_handshake(&self, model_server_address: &str) -> Result<Option<CModule>, String>;
     async fn send_traj_to_server(&self, trajectory: Trajectory, training_server_address: &str);
     async fn listen_for_model(&self, model_server_address: &str);
     fn convert_rl4sys_to_proto_trajectory(&self, traj: &RL4SysTrajectory) -> Trajectory;
@@ -39,9 +40,9 @@ pub trait AsyncClientTransport: Send + Sync {
 
 #[cfg(feature = "zmq_network")]
 pub trait SyncClientTransport: Send + Sync {
-    fn initial_model_handshake(&self, model_server_address: &str) -> Option<RL4SysTrajectory>;
+    fn initial_model_handshake(&self, model_server_address: &str) -> Result<Option<CModule>, String>;
     fn send_traj_to_server(&self, trajectory: RL4SysTrajectory, training_server_address: &str) -> Result<(), String>;
-    fn listen_for_model(&self, model_server_address: &str, tx_to_router: Sender<crate::network::client::runtime::router::RoutedMessage>);
+    fn listen_for_model(&self, model_server_address: &str, tx_to_router: Sender<RoutedMessage>);
 }
 
 pub fn client_transport_factory(transport_type: TransportType, config: &ClientConfigLoader) -> TransportClient {

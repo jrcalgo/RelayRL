@@ -25,7 +25,6 @@ use crate::utilities::misc_utils::PythonResponse;
     feature = "zmq_network",
     feature = "python_bindings"
 ))]
-use crate::bindings::python::o3_trajectory::PyRL4SysTrajectory;
 
 const PYTHON_ALGORITHM_REPLY_SCRIPT: &str = "src/native/python/python_algorithm_reply.py";
 

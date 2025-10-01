@@ -1,8 +1,7 @@
-use crate::utilities::config_builder::ClientConfig;
+use crate::utilities::configuration::ClientConfigLoader;
 use log::{info, warn};
 use std::path::PathBuf;
 use std::sync::Arc;
-use notify::{RecursiveMode, Watcher, recommended_watcher};
 use tokio::signal;
 use tokio::sync::mpsc;
 
@@ -10,17 +9,17 @@ use tokio::sync::mpsc;
 ///
 /// Spins up and tears down futures cleanly
 pub(crate) struct LifeCycleManager {
-    config: ClientConfig,
+    config: ClientConfigLoader,
 }
 
 impl LifeCycleManager {
-    pub fn new(config: ClientConfig) -> Self {
+    pub fn new(config: ClientConfigLoader) -> Self {
         Self { config }
     }
 
     pub fn spawn(&self) {}
 
-    pub fn get_active_config(&self) -> Arc<ClientConfig> {
+    pub fn get_active_config(&self) -> Arc<ClientConfigLoader> {
         let config = self.config.clone();
         Arc::from(config)
     }

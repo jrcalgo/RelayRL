@@ -1,14 +1,14 @@
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
-use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
-use crate::network::{HotReloadableModel, validate_model, TransportType};
+use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
+use crate::network::{HotReloadableModel, TransportType, validate_model};
 use crate::orchestration::tokio::utils::get_or_init_tokio_runtime;
 use crate::orchestration::tonic::grpc_utils::deserialize_model;
-use crate::utilities::configuration::ClientConfigLoader;
-use crate::types::network::NetworkParticipant;
+use crate::types::NetworkParticipant;
 use crate::types::action::RL4SysAction;
 use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
+use crate::utilities::configuration::ClientConfigLoader;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tch::{CModule, Device, TchError};
@@ -72,7 +72,11 @@ impl ActorEntity for Actor {
             model: None,
             model_path,
             model_latest_version: 0,
-            current_traj: RL4SysTrajectory::new(max_length, NetworkParticipant::RL4SysAgent, &shared_config.client_config.config_path),
+            current_traj: RL4SysTrajectory::new(
+                max_length,
+                NetworkParticipant::RL4SysAgent,
+                &shared_config.client_config.config_path,
+            ),
             rx_from_router,
             shared_tx_to_sender,
             transport: Some(transport),
@@ -124,35 +128,84 @@ impl ActorEntity for Actor {
                         #[cfg(feature = "grpc_network")]
                         TransportClient::Async(async_tr) => {
                             // Use training server address for model handshake
-                            let training_server_address = format!("{}:{}", self.shared_config.transport_config.training_server_address.host, self.shared_config.transport_config.training_server_address.port);
-                            println!("[Actor {:?}] Starting async model handshake with {}", self.id, training_server_address);
-                            
-                            if let Some(trajectory) = async_tr.initial_model_handshake(&training_server_address).await {
-                                println!("[Actor {:?}] Model handshake successful, received model data", self.id);
+                            let training_server_address = format!(
+                                "{}:{}",
+                                self.shared_config
+                                    .transport_config
+                                    .training_server_address
+                                    .host,
+                                self.shared_config
+                                    .transport_config
+                                    .training_server_address
+                                    .port
+                            );
+                            println!(
+                                "[Actor {:?}] Starting async model handshake with {}",
+                                self.id, training_server_address
+                            );
+
+                            if let Ok(Some(model)) = async_tr
+                                .initial_model_handshake(&training_server_address)
+                                .await
+                            {
+                                println!(
+                                    "[Actor {:?}] Model handshake successful, received model data",
+                                    self.id
+                                );
                                 // Here you would process the received model data
                                 // This is a simplified implementation
                             } else {
-                                eprintln!("[Actor {:?}] Model handshake failed or no model update needed", self.id);
+                                eprintln!(
+                                    "[Actor {:?}] Model handshake failed or no model update needed",
+                                    self.id
+                                );
                             }
                         }
                         TransportClient::Sync(sync_tr) => {
                             // Use agent listener address for model handshake
-                            let model_server_address = format!("{}:{}", self.shared_config.transport_config.agent_listener_address.host, self.shared_config.transport_config.agent_listener_address.port);
-                            println!("[Actor {:?}] Starting sync model handshake with {}", self.id, model_server_address);
-                            
-                            if let Some(trajectory) = sync_tr.initial_model_handshake(&model_server_address) {
-                                println!("[Actor {:?}] Model handshake successful, received model data", self.id);
+                            let model_server_address = format!(
+                                "{}:{}",
+                                self.shared_config
+                                    .transport_config
+                                    .agent_listener_address
+                                    .host,
+                                self.shared_config
+                                    .transport_config
+                                    .agent_listener_address
+                                    .port
+                            );
+                            println!(
+                                "[Actor {:?}] Starting sync model handshake with {}",
+                                self.id, model_server_address
+                            );
+
+                            if let Some(trajectory) =
+                                sync_tr.initial_model_handshake(&model_server_address)
+                            {
+                                println!(
+                                    "[Actor {:?}] Model handshake successful, received model data",
+                                    self.id
+                                );
                                 // Here you would process the received model data
                             } else {
-                                eprintln!("[Actor {:?}] Model handshake failed or no model update needed", self.id);
+                                eprintln!(
+                                    "[Actor {:?}] Model handshake failed or no model update needed",
+                                    self.id
+                                );
                             }
                         }
                     }
                 } else {
-                    eprintln!("[Actor {:?}] No transport configured for model handshake", self.id);
+                    eprintln!(
+                        "[Actor {:?}] No transport configured for model handshake",
+                        self.id
+                    );
                 }
             } else {
-                println!("[Actor {:?}] Model already available, handshake not needed", self.id);
+                println!(
+                    "[Actor {:?}] Model already available, handshake not needed",
+                    self.id
+                );
             }
         }
     }
@@ -166,7 +219,8 @@ impl ActorEntity for Actor {
                 reply_to,
             } = msg.payload
             {
-                match model.forward(observation, mask, reward) {
+                let rt = get_or_init_tokio_runtime();
+                match rt.block_on(async { model.forward(observation, mask, reward).await }) {
                     Ok(r4sa) => {
                         self.current_traj.add_action(&r4sa);
                         reply_to

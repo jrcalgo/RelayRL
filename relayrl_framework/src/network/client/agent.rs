@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tch::{CModule, Device, Tensor};
-use uuid::Uuid;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 struct AgentStartParameters {
     actor_count: i64,
@@ -118,13 +118,12 @@ impl RL4SysAgent {
             .await
     }
 
-    pub async fn scale_throughput(&mut self, routers: i32) {
+    pub async fn scale_throughput(&mut self, routers: u32) {
         match routers {
             add if routers > 0 => {
                 self.coordinator._scale_up(add).await;
             }
             remove if routers < 0 => {
-                let remove = remove.abs();
                 self.coordinator._scale_down(remove).await;
             }
             _ => {
@@ -175,8 +174,13 @@ pub trait RL4SysAgentActors {
         device: Device,
         default_model: Option<CModule>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    fn remove_actor(&self, id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
-    fn get_actors(&self) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)> + Send + '_>>;
+    fn remove_actor(
+        &self,
+        id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
+    fn get_actors(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)> + Send + '_>>;
     fn set_actor_id(
         &self,
         current_id: Uuid,
@@ -191,21 +195,26 @@ impl RL4SysAgentActors for RL4SysAgent {
         default_model: Option<CModule>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator._new_actor(device, default_model).await;
+            self.coordinator
+                ._new_actor(device, default_model)
+                .await;
         })
     }
 
-    fn remove_actor(&self, id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+    fn remove_actor(
+        &self,
+        id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move {
             self.coordinator._remove_actor(id).await;
             Ok(())
         })
     }
 
-    fn get_actors(&self) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)> + Send + '_>> {
-        Box::pin(async move {
-            self.coordinator._get_actors().await
-        })
+    fn get_actors(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)> + Send + '_>> {
+        Box::pin(async move { self.coordinator._get_actors().await.expect("Failed to get actors") })
     }
 
     fn set_actor_id(
@@ -213,8 +222,6 @@ impl RL4SysAgentActors for RL4SysAgent {
         current_id: Uuid,
         new_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
-        Box::pin(async move {
-            self.coordinator._set_actor_id(current_id, new_id).await
-        })
+        Box::pin(async move { self.coordinator._set_actor_id(current_id, new_id).await })
     }
 }

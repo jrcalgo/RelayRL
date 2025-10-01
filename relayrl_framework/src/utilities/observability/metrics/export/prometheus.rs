@@ -65,7 +65,10 @@ pub fn init_prometheus_exporter() {
         thread::spawn(move || {
             // TODO: Fix tiny_http dependency
             // let server = tiny_http::Server::http(socket_addr).unwrap();
-            println!("[PrometheusExporter] HTTP server would start on {}", socket_addr);
+            println!(
+                "[PrometheusExporter] HTTP server would start on {}",
+                socket_addr
+            );
             log::info!(
                 "Prometheus metrics server started on http://{}/{}",
                 addr,
@@ -114,10 +117,10 @@ fn gather_metrics() -> Vec<prometheus::proto::MetricFamily> {
 
     // let registry = global_registry();
     // let registry = registry.lock().unwrap();
-    
+
     // Return empty metrics for now
     vec![]
-    
+
     // TODO: Fix when global_registry is available
     // if let Some(prometheus_registry) = registry.prometheus_registry() {
     //     prometheus_registry.gather()

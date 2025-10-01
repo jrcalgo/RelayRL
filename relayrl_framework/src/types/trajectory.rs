@@ -2,6 +2,7 @@
 //! the RL4SysTrajectory type and trait. It uses serde_pickle for serialization and ZMQ for sending
 //! the serialized data to a trajectory server.
 
+use crate::types::NetworkParticipant;
 use crate::types::action::RL4SysAction;
 use crate::types::action::RL4SysActionTrait;
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,6 @@ use zmq::{Context, Socket};
     feature = "zmq_network",
     feature = "python_bindings"
 ))]
-use crate::bindings::python::o3_trajectory::PyRL4SysTrajectory;
 use crate::utilities::configuration::{ClientConfigLoader, ServerConfigLoader};
 
 /// Trait that defines the interface for trajectory handling.
@@ -34,11 +34,6 @@ pub trait RL4SysTrajectoryTrait {
     /// * `action` - A reference to the action to be added.
     /// * `send_if_done` - A boolean flag that, if true and the action is terminal, will trigger sending the trajectory.
     fn add_action(&mut self, action: &Self::Action);
-}
-
-pub enum NetworkParticipant {
-    RL4SysAgent,
-    RL4SysTrainingServer,
 }
 
 /// The RL4SysTrajectory struct represents a trajectory composed of a sequence of actions.
@@ -63,20 +58,21 @@ impl RL4SysTrajectory {
     /// # Returns
     ///
     /// A new instance of RL4SysTrajectory.
-    pub fn new(max_length: Option<u128>, network_participant: NetworkParticipant, config_path: &PathBuf) -> Self {
-        let max_length: u128 = max_length
-            .unwrap_or_else(|| {
-                match network_participant {
-                    NetworkParticipant::RL4SysAgent => {
-                        let loader = ClientConfigLoader::load_config(config_path);
-                        loader.transport_config.max_traj_length
-                    },
-                    NetworkParticipant::RL4SysTrainingServer => {
-                        let loader = ServerConfigLoader::load_config(config_path);
-                        loader.transport_config.max_traj_length
-                    },
-                }
-            });
+    pub fn new(
+        max_length: Option<u128>,
+        network_participant: NetworkParticipant,
+        config_path: &PathBuf,
+    ) -> Self {
+        let max_length: u128 = max_length.unwrap_or_else(|| match network_participant {
+            NetworkParticipant::RL4SysAgent => {
+                let loader = ClientConfigLoader::load_config(config_path);
+                loader.transport_config.max_traj_length
+            }
+            NetworkParticipant::RL4SysTrainingServer => {
+                let loader = ServerConfigLoader::load_config(config_path);
+                loader.transport_config.max_traj_length
+            }
+        });
         println!(
             "[RL4SysTrajectory] New {:?} length trajectory created",
             max_length
@@ -85,26 +81,6 @@ impl RL4SysTrajectory {
         RL4SysTrajectory {
             max_length,
             actions: Vec::new(),
-        }
-    }
-
-    /// Converts the RL4SysTrajectory into its Python wrapper representation.
-    ///
-    /// # Returns
-    ///
-    /// A PyRL4SysTrajectory that wraps the current trajectory.
-    #[cfg(any(
-        feature = "networks",
-        feature = "grpc_network",
-        feature = "zmq_network",
-        feature = "python_bindings"
-    ))]
-    pub fn into_py(self) -> PyRL4SysTrajectory {
-        PyRL4SysTrajectory {
-            inner: RL4SysTrajectory {
-                max_length: self.max_length,
-                actions: self.actions,
-            },
         }
     }
 }

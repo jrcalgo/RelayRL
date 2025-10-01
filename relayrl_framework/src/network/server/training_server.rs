@@ -1,6 +1,6 @@
+use crate::network::TransportType;
 use std::path::PathBuf;
 use tch::{CModule, Device};
-use crate::network::TransportType;
 
 struct TrainingServerStartParameters {}
 
