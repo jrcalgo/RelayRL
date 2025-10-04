@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+relayrl_framework = { version = "0.5.0", features = ["utilities"]}
+serde = { version = "1.0", features = ["derive"] }
+safetensors = "0.5.3"
+bytemuck = "1.20.0"
+tch = { version = "0.18.1", features=["download-libtorch", "python-extension"] }

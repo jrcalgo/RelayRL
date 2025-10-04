@@ -1,14 +1,19 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use std::collections::HashMap;
+
+pub mod types {
+    pub mod action;
+    pub mod trajectory;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) enum NetworkParticipant {
+    RL4SysAgent,
+    RL4SysTrainingServer,
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+/// Hyperparams enum represents hyperparameter inputs which can be provided either as a map
+/// or as a list of argument strings.
+#[derive(Clone, Debug)]
+pub enum Hyperparams {
+    Map(HashMap<String, String>),
+    Args(Vec<String>),
 }
