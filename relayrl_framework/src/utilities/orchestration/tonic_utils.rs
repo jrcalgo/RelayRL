@@ -3,9 +3,9 @@
 //! conversion functions to support these operations.
 
 use crate::proto::{Action as GrpcRL4SysAction, Trajectory};
+use crate::types::NetworkParticipant;
 use crate::types::action::{RL4SysAction, SafeTensorError, TensorData};
 use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
-use crate::types::NetworkParticipant;
 
 use tch::{CModule, Device, TchError};
 use tempfile::NamedTempFile;
@@ -144,8 +144,11 @@ pub(crate) fn grpc_trajectory_to_rl4sys_trajectory(
     max_traj_length: u128,
     config_path: &PathBuf,
 ) -> RL4SysTrajectory {
-    let mut rl4sys_trajectory: RL4SysTrajectory =
-        RL4SysTrajectory::new(Some(max_traj_length), NetworkParticipant::RL4SysTrainingServer, config_path);
+    let mut rl4sys_trajectory: RL4SysTrajectory = RL4SysTrajectory::new(
+        Some(max_traj_length),
+        NetworkParticipant::RL4SysTrainingServer,
+        config_path,
+    );
 
     for action in trajectory.actions {
         let action: RL4SysAction =
