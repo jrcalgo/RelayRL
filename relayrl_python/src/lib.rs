@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 /// **Python Bindings for RL4Sys**: This module contains the Rust-to-Python bindings,
 /// exposing RL4Sys components as Python classes. The `o3_*` modules implement PyO3-compatible
 /// wrappers for core structures, enabling smooth Python interaction.
@@ -17,6 +19,16 @@ pub(crate) mod bindings {
         }
     }
 }
+
+/// A response received from the Python subprocess.
+///
+/// It contains a status string (e.g., "success") and an optional message.
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct PythonResponse {
+    pub(crate) status: String,
+    message: Option<String>,
+}
+
 
 /// ### RL4Sys Python Module Definition
 ///
