@@ -65,9 +65,8 @@ pub trait ClientInterface {
 
 pub struct CoordinatorParams {
     logger: LoggingBuilder,
-    transport: Arc<TransportClient>,
     lifecycle: LifeCycleManager,
-    state: Arc<StateManager>,
+    state: Arc<RwLock<StateManager>>,
     scaling: ScaleManager,
     metrics: MetricsManager,
 }
@@ -110,17 +109,15 @@ impl ClientInterface for ClientCoordinator {
 
         let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
-        let shared_transport = Arc::new(client_transport_factory(
-            self.transport_type,
-            &config_loader,
-        ));
+        let transport: TransportClient =
+            client_transport_factory(self.transport_type, &config_loader);
 
-        let lifecycle = LifeCycleManager::new(config_loader.to_owned());
-    
+        let lifecycle: LifeCycleManager = LifeCycleManager::new(config_loader.to_owned());
+
         let shared_state_config: Arc<ClientConfigLoader> = lifecycle.get_active_config();
 
         let default_model_for_state: Option<CModule> = default_model;
-        let (mut state, global_bus_rx, rx_from_actor) =
+        let (state, global_bus_rx, rx_from_actor) =
             StateManager::new(shared_state_config, default_model_for_state);
 
         let shared_scaling_config: Arc<ClientConfigLoader> = lifecycle.get_active_config();
@@ -176,34 +173,20 @@ impl ClientInterface for ClientCoordinator {
             ),
         };
 
-        let shared_state = Arc::from(state);
+        let shared_state = Arc::from(RwLock::new(state));
         let mut scaling = ScaleManager::new(
             shared_state.clone(),
             Arc::clone(&shared_scaling_config),
-            shared_transport.clone(),
+            transport,
             rx_from_actor,
             agent_listener_address,
             training_server_address,
         );
-        scaling
-            .__scale_up(1, global_bus_rx, shared_state.clone())
-            .await;
+        scaling.__scale_up(1, global_bus_rx).await;
 
         if actor_count > 0 {
             for _ in 0..actor_count {
-                let actor_config = config_loader.clone();
-
-                let pid: u32 = std::process::id();
-                let pid_bytes: [u8; _] = pid.to_be_bytes();
-
-                let mut pid_buf = [0u8; 16];
-                pid_buf[..4].copy_from_slice(&pid_bytes);
-
-                let id: Uuid = Uuid::new_v8(pid_buf);
-
-                shared_state
-                    .__new_actor(id, default_device, None, shared_transport.clone())
-                    .await;
+                Self::_new_actor(&self, default_device, default_model).await;
             }
         }
 
@@ -211,7 +194,6 @@ impl ClientInterface for ClientCoordinator {
 
         self.runtime_params = Some(CoordinatorParams {
             logger,
-            transport: shared_transport,
             lifecycle,
             state: Arc::from(shared_state),
             scaling,
@@ -246,7 +228,7 @@ impl ClientInterface for ClientCoordinator {
     async fn _new_actor(&self, device: Device, default_model: Option<CModule>) {
         match &self.runtime_params {
             Some(params) => {
-                let actor_config: Arc<_> = params.lifecycle.get_active_config();
+                let actor_config: Arc<ClientConfigLoader> = params.lifecycle.get_active_config();
 
                 let pid: u32 = std::process::id();
                 let pid_bytes: [u8; _] = pid.to_be_bytes();
@@ -258,7 +240,14 @@ impl ClientInterface for ClientCoordinator {
 
                 params
                     .state
-                    .__new_actor(id, device, default_model, params.transport.clone())
+                    .write()
+                    .await
+                    .__new_actor(
+                        id,
+                        device,
+                        default_model,
+                        params.scaling.shared_transport.clone(),
+                    )
                     .await;
             }
             None => {
@@ -270,11 +259,7 @@ impl ClientInterface for ClientCoordinator {
     async fn _remove_actor(&mut self, id: Uuid) {
         match &self.runtime_params {
             Some(params) => {
-                if let state = &params.state {
-                    state.__remove_actor(id);
-                } else {
-                    eprintln!("[Coordinator] No runtime state instance to _remove_actor...");
-                }
+                params.state.write().await.__remove_actor(id);
             }
             None => {
                 eprintln!("[Coordinator] No runtime instance to _remove_actor...");
@@ -284,13 +269,7 @@ impl ClientInterface for ClientCoordinator {
 
     async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
         match &self.runtime_params {
-            Some(params) => {
-                if let state = &params.state {
-                    Ok(state.__get_actors()?)
-                } else {
-                    Err("[Coordinator] No runtime state instance to _get_actors...".to_string())
-                }
-            }
+            Some(params) => Ok(params.state.read().await.__get_actors()?),
             None => {
                 Err("[Coordinator] No runtime parameter instance to _get_actors...".to_string())
             }
@@ -299,7 +278,7 @@ impl ClientInterface for ClientCoordinator {
 
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
         match &self.runtime_params {
-            Some(params) => params.state.__set_actor_id(current_id, new_id),
+            Some(params) => params.state.read().await.__set_actor_id(current_id, new_id),
             None => {
                 return Err("[Coordinator] No runtime instance to _shutdown...".to_string());
             }
@@ -321,7 +300,7 @@ impl ClientInterface for ClientCoordinator {
 
                     let mut obs_tensor = Tensor::zeros_like(&observation);
                     obs_tensor.copy_(&observation);
-                    
+
                     let mut mask_tensor: Tensor = Tensor::zeros_like(&mask);
                     mask_tensor.copy_(&mask);
 
@@ -337,9 +316,8 @@ impl ClientInterface for ClientCoordinator {
                     };
 
                     let runtime_params = self.runtime_params.as_ref().unwrap();
-                    if let sender = runtime_params.scaling.tx_to_router.clone() {
-                        let _ = sender.send(action_request_message).await;
-                    }
+                    let sender = runtime_params.scaling.tx_to_router.clone();
+                    let _ = sender.send(action_request_message).await;
 
                     match resp_rx.await.map_err(|e| e.to_string()) {
                         Ok(action) => actions.push((id, action)),
@@ -365,9 +343,8 @@ impl ClientInterface for ClientCoordinator {
                         payload: RoutedPayload::FlagLastInference { reward },
                     };
 
-                    if let sender = params.scaling.tx_to_router.clone() {
-                        let _ = sender.send(flag_last_action_message).await;
-                    }
+                    let sender = params.scaling.tx_to_router.clone();
+                    let _ = sender.send(flag_last_action_message).await;
                 }
             }
             None => {
@@ -390,9 +367,8 @@ impl ClientInterface for ClientCoordinator {
                     };
 
                     let runtime_params = self.runtime_params.as_ref().unwrap();
-                    if let sender = runtime_params.state.tx_to_router.clone() {
-                        let _ = sender.send(model_version_message).await;
-                    };
+                    let sender = runtime_params.state.tx_to_router.clone();
+                    let _ = sender.send(model_version_message).await;
 
                     match resp_rx.await.map_err(|e| e.to_string()) {
                         Ok(model_version) => versions.push((id, model_version)),
@@ -410,10 +386,7 @@ impl ClientInterface for ClientCoordinator {
             Some(params) => {
                 let global_bus_rx = params.state.global_bus_rx.clone();
                 let shared_state = params.state.clone();
-                params
-                    .scaling
-                    .__scale_up(router_add, global_bus_rx, shared_state)
-                    .await;
+                params.scaling.__scale_up(router_add, global_bus_rx).await;
             }
             None => {
                 eprintln!("[Coordinator] No runtime instance to _shutdown...");

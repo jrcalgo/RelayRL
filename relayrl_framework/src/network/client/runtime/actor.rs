@@ -3,17 +3,18 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
 use crate::network::{HotReloadableModel, TransportType, validate_model};
-use crate::orchestration::tokio::utils::get_or_init_tokio_runtime;
-use crate::orchestration::tonic::grpc_utils::deserialize_model;
 use crate::types::NetworkParticipant;
 use crate::types::action::RL4SysAction;
 use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
 use crate::utilities::configuration::ClientConfigLoader;
+use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
+use crate::utilities::orchestration::tonic_utils::deserialize_model;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tch::{CModule, Device, TchError};
 use tokio::sync::mpsc::{Receiver, Sender};
-use uuid::{Timestamp, Uuid};
+use uuid::{ClockSequence, Timestamp, Uuid};
 
 pub trait ActorEntity: Send + Sync + 'static {
     async fn new(
@@ -44,6 +45,7 @@ pub(crate) struct Actor {
     model: Option<HotReloadableModel>,
     model_path: PathBuf,
     model_latest_version: i64,
+    model_device: Device,
     current_traj: RL4SysTrajectory,
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_sender: Sender<RoutedMessage>,
@@ -72,6 +74,7 @@ impl ActorEntity for Actor {
             model: None,
             model_path,
             model_latest_version: 0,
+            model_device: device,
             current_traj: RL4SysTrajectory::new(
                 max_length,
                 NetworkParticipant::RL4SysAgent,
@@ -152,8 +155,30 @@ impl ActorEntity for Actor {
                                     "[Actor {:?}] Model handshake successful, received model data",
                                     self.id
                                 );
-                                // Here you would process the received model data
-                                // This is a simplified implementation
+
+                                // Save model to configured path
+                                if let Err(e) = model.save(&self.model_path) {
+                                    eprintln!("[Actor {:?}] Failed to save model: {}", self.id, e);
+                                }
+                                let version = self.model_latest_version + 1;
+
+                                match &self.model {
+                                    Some(model) => {
+                                        model.reload(self.model_path.clone(), version).await;
+                                    }
+                                    None => {
+                                        *self.model = Some(
+                                            HotReloadableModel::new_from_model(
+                                                model,
+                                                self.model_device,
+                                            )
+                                            .await
+                                            .expect(
+                                                "[ActorEntity] New model could not be created...",
+                                            ),
+                                        );
+                                    }
+                                }
                             } else {
                                 eprintln!(
                                     "[Actor {:?}] Model handshake failed or no model update needed",
@@ -179,14 +204,37 @@ impl ActorEntity for Actor {
                                 self.id, model_server_address
                             );
 
-                            if let Some(trajectory) =
+                            if let Ok(Some(model)) =
                                 sync_tr.initial_model_handshake(&model_server_address)
                             {
                                 println!(
                                     "[Actor {:?}] Model handshake successful, received model data",
                                     self.id
                                 );
-                                // Here you would process the received model data
+
+                                // Save model to configured path
+                                if let Err(e) = model.save(&self.model_path) {
+                                    eprintln!("[Actor {:?}] Failed to save model: {}", self.id, e);
+                                }
+                                let version = self.model_latest_version + 1;
+
+                                match &self.model {
+                                    Some(model) => {
+                                        model.reload(self.model_path.clone(), version).await;
+                                    }
+                                    None => {
+                                        self.model = Some(
+                                            HotReloadableModel::new_from_model(
+                                                model,
+                                                self.model_device,
+                                            )
+                                            .await
+                                            .expect(
+                                                "[ActorEntity] New model could not be created...",
+                                            ),
+                                        );
+                                    }
+                                }
                             } else {
                                 eprintln!(
                                     "[Actor {:?}] Model handshake failed or no model update needed",
@@ -251,7 +299,16 @@ impl ActorEntity for Actor {
                     actor_id: self.id,
                     protocol: RoutingProtocol::SendTrajectory,
                     payload: RoutedPayload::SendTrajectory {
-                        timestamp: Timestamp::now(()),
+                        timestamp: (
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Clock skew")
+                                .as_millis(),
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Clock skew")
+                                .as_nanos(),
+                        ),
                         trajectory: traj_clone,
                     },
                 }

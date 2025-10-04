@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tch::Tensor;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
 use uuid::{Timestamp, Uuid};
@@ -53,7 +54,7 @@ pub(crate) enum RoutedPayload {
         reply_to: oneshot::Sender<Vec<(Uuid, i64)>>,
     },
     SendTrajectory {
-        timestamp: Timestamp,
+        timestamp: (u128, u128),
         trajectory: RL4SysTrajectory,
     },
     Shutdown,
@@ -62,13 +63,13 @@ pub(crate) enum RoutedPayload {
 /// Intermediary routing process/filter for routing received models to specified ActorEntity
 pub(crate) struct ClientFilter {
     rx_from_receiver: Receiver<RoutedMessage>,
-    shared_agent_state: Arc<StateManager>,
+    shared_agent_state: Arc<RwLock<StateManager>>,
 }
 
 impl ClientFilter {
     pub(crate) fn new(
         rx_from_receiver: Receiver<RoutedMessage>,
-        shared_agent_state: Arc<StateManager>,
+        shared_agent_state: Arc<RwLock<StateManager>>,
     ) -> Self {
         Self {
             rx_from_receiver,
@@ -89,6 +90,8 @@ impl ClientFilter {
     async fn route(&self, msg: RoutedMessage) {
         let actor_id = msg.actor_id;
         self.shared_agent_state
+            .read()
+            .await
             .actor_inboxes
             .get(&actor_id)
             .expect("Actor not found")
@@ -118,7 +121,7 @@ impl ClientExternalReceiver {
     }
 
     pub fn with_transport(mut self, transport: Arc<TransportClient>) -> Self {
-        self.transport = Some(transport);
+        self.transport = Some(Arc::from(transport));
         self
     }
 
@@ -194,18 +197,8 @@ impl ClientExternalSender {
         }
     }
 
-    pub fn with_transport(mut self, transport: TransportClient) -> Self {
-
-        match transport {
-            #[cfg(feature = "zmq_network")]
-            TransportClient::Sync(sync_client) => {
-                self.transport = Some(Arc::new(TransportClient::Sync(sync_client)));
-            }
-            #[cfg(feature = "grpc_network")]
-            TransportClient::Async(async_client) => {
-                self.transport = Some(Arc::new(TransportClient::Async(async_client)));
-            }
-        }
+    pub fn with_transport(mut self, transport: Arc<TransportClient>) -> Self {
+        self.transport = Some(Arc::from(transport));
         self
     }
 
@@ -267,14 +260,15 @@ impl ClientExternalSender {
     fn _compute_priority(
         _actor_last_sent: DashMap<Uuid, i64>,
         id: Uuid,
-        timestamp: Timestamp,
+        timestamp: (u128, u128),
     ) -> PriorityRank {
+        // TODO: revise this questionably implemented priority scheme
         let last = match _actor_last_sent.get(&id) {
             Some(last_ref) => *last_ref as u64,
             None => 0,
         };
 
-        let (secs, nanos) = timestamp.to_unix();
+        let (secs, nanos) = timestamp;
         let ts_combined: u64 = (secs as usize + 1 / nanos as usize) as u64;
 
         let priority = ((last) << 32) | ((ts_combined) & 0xFFFF_FFFF);
@@ -335,11 +329,6 @@ impl ClientExternalSender {
                     println!(
                         "[ClientExternalSender] Successfully sent trajectory for actor {}",
                         entry.actor_id
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "[ClientExternalSender] No transport configured for sending trajectories"
                     );
                 }
             }

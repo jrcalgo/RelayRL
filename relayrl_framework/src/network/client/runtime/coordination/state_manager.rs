@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tch::{CModule, Device};
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
@@ -18,7 +19,7 @@ pub type ActorUuid = Uuid;
 /// In-memory actor state management and global channel transport
 pub(crate) struct StateManager {
     shared_config: Arc<ClientConfigLoader>,
-    default_model: Option<CModule>,
+    default_model: RwLock<Option<CModule>>,
     pub(crate) global_bus_tx: Sender<RoutedMessage>,
     tx_to_sender: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<Uuid, Sender<RoutedMessage>>,
@@ -35,7 +36,7 @@ impl StateManager {
         (
             Self {
                 shared_config,
-                default_model,
+                default_model: RwLock::new(default_model),
                 global_bus_tx,
                 tx_to_sender,
                 actor_inboxes: DashMap::new(),
@@ -58,8 +59,14 @@ impl StateManager {
             self.__remove_actor(id);
         }
 
-        let default_model = default_model.or_else(|| {
-            self.default_model.take().or_else(|| {
+        let default_model = if let Some(m) = default_model {
+            Some(m)
+        } else {
+            // try taking once from cached default_model
+            if let Some(m) = { self.get_default_model().await } {
+                Some(m)
+            } else {
+                // lazily load from config if configured
                 let loader =
                     ClientConfigLoader::load_config(&self.shared_config.client_config.config_path);
                 let default_model_path_str = loader
@@ -89,15 +96,17 @@ impl StateManager {
                         None
                     }
                 }
-            })
-        });
+            }
+        };
 
         let shared_config: Arc<ClientConfigLoader> = self.shared_config.clone();
-
         let (tx_to_actor, rx_from_global) = mpsc::channel(CHANNEL_THROUGHPUT);
         self.actor_inboxes.insert(id, tx_to_actor.clone());
-
         let model_path = shared_config.transport_config.local_model_path.clone();
+
+        let tx_to_sender = self.tx_to_sender.clone();
+        let transport = transport.clone();
+        let shared_config_cloned = shared_config.clone();
 
         let handle = Arc::new(tokio::spawn(async move {
             let (mut actor, handshake_flag) = Actor::new(
@@ -105,10 +114,10 @@ impl StateManager {
                 device,
                 default_model,
                 model_path,
-                shared_config,
+                shared_config_cloned,
                 rx_from_global,
-                self.tx_to_sender.clone(),
-                transport.clone(),
+                tx_to_sender,
+                transport,
             )
             .await;
 
@@ -118,7 +127,6 @@ impl StateManager {
                     protocol: RoutingProtocol::ModelHandshake,
                     payload: RoutedPayload::ModelHandshake,
                 };
-
                 let _ = tx_to_actor.send(model_handshake_ms).await;
             }
 
@@ -146,7 +154,7 @@ impl StateManager {
         Ok((actor_ids, actor_handles))
     }
 
-    pub(crate) fn __set_actor_id(&mut self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
+    pub(crate) fn __set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
         let current_id_handle = match self.get_actor_handle(current_id) {
             Some(handle) => handle.clone(),
             None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
@@ -156,16 +164,9 @@ impl StateManager {
             None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
         };
 
-        match self.get_actor_handle(new_id) {
-            Some(handle) => {
-                return Err(format!("[StateManager] Actor ID {} already taken", new_id));
-            }
-            None => (),
-        };
-        match self.get_actor_inbox(new_id) {
-            Some(inbox) => return Err(format!("[StateManager] Actor ID {} already taken", new_id)),
-            None => (),
-        };
+        if self.get_actor_handle(new_id).is_some() || self.get_actor_inbox(new_id).is_some() {
+            return Err(format!("[StateManager] Actor ID {} already taken", new_id));
+        }
 
         self.actor_handles.insert(new_id, current_id_handle);
         self.actor_handles.remove(&current_id);
@@ -190,5 +191,17 @@ impl StateManager {
 
     fn get_actor_inbox(&self, id: Uuid) -> Option<Sender<RoutedMessage>> {
         self.actor_inboxes.get(&id).map(|tx| tx.value().clone())
+    }
+
+    /// Get the default model if it exists
+    pub async fn get_default_model(&self) -> Option<CModule> {
+        if self.default_model.read().await.is_some() {
+            let mut m_clone: Option<CModule> = None;
+            if let Some(m) = self.default_model.read().await {
+                m_clone = Some(m);
+            }
+            return m_clone;
+        }
+        None
     }
 }

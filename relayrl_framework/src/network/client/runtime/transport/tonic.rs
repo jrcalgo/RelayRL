@@ -5,15 +5,15 @@ use crate::network::client::runtime::transport::AsyncClientTransport;
 #[cfg(feature = "grpc_network")]
 use crate::network::{HotReloadableModel, validate_model};
 #[cfg(feature = "grpc_network")]
-use crate::orchestration::tonic::grpc_utils::{
-    deserialize_model, serialize_action, serialize_model,
-};
-#[cfg(feature = "grpc_network")]
 use crate::types::action::RL4SysAction;
 #[cfg(feature = "grpc_network")]
 use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
 #[cfg(feature = "grpc_network")]
 use crate::utilities::configuration::ClientConfigLoader;
+#[cfg(feature = "grpc_network")]
+use crate::utilities::orchestration::tonic_utils::{
+    deserialize_model, serialize_action, serialize_model,
+};
 #[cfg(feature = "grpc_network")]
 use async_trait::async_trait;
 #[cfg(feature = "grpc_network")]
@@ -273,14 +273,13 @@ impl TonicClient {
             }
         }
     }
-
 }
 
 #[cfg(feature = "grpc_network")]
 #[async_trait]
 impl AsyncClientTransport for TonicClient {
     /// Helper method to perform initial handshake and return whether a model was received
-    pub async fn initial_model_handshake(
+    async fn initial_model_handshake(
         &self,
         training_server_address: &str,
     ) -> Result<Option<CModule>, String> {
@@ -317,13 +316,6 @@ impl AsyncClientTransport for TonicClient {
                                 validate_model(&model);
                                 println!("[TonicClient] Model validated and ready for use");
 
-                                // Save model to configured path
-                                if let Err(e) =
-                                    model.save(&client.config.transport_config.local_model_path)
-                                {
-                                    eprintln!("[TonicClient] Failed to save model: {}", e);
-                                }
-
                                 Ok(Some(model))
                             }
                             Err(e) => Err(format!("Failed to deserialize model: {}", e)),
@@ -343,7 +335,7 @@ impl AsyncClientTransport for TonicClient {
 
     async fn send_traj_to_server(
         &self,
-        trajectory: crate::proto::Trajectory,
+        trajectory: rl_service::Trajectory,
         training_server_address: &str,
     ) {
         let mut client = Self::new(&self.config);

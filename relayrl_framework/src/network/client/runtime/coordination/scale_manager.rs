@@ -6,8 +6,8 @@ use crate::network::client::runtime::transport::TransportClient;
 use crate::network::random_uuid;
 use crate::utilities::configuration::ClientConfigLoader;
 use dashmap::DashMap;
-use rand::Rng;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
@@ -28,9 +28,9 @@ pub(crate) struct RouterRuntimeParams {
 type RouterUuid = Uuid;
 
 pub(crate) struct ScaleManager {
-    shared_state: Arc<StateManager>,
+    shared_state: Arc<RwLock<StateManager>>,
     shared_config: Arc<ClientConfigLoader>,
-    shared_transport: Arc<TransportClient>,
+    pub(crate) shared_transport: Arc<TransportClient>,
     runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
     server_addresses: ServerAddresses,
     rx_from_actor: Receiver<RoutedMessage>,
@@ -38,9 +38,9 @@ pub(crate) struct ScaleManager {
 
 impl ScaleManager {
     pub(crate) fn new(
-        shared_state: Arc<StateManager>,
+        shared_state: Arc<RwLock<StateManager>>,
         shared_config: Arc<ClientConfigLoader>,
-        shared_transport: Arc<TransportClient>,
+        transport: TransportClient,
         rx_from_actor: Receiver<RoutedMessage>,
         agent_listener_address: String,
         training_server_address: String,
@@ -48,7 +48,7 @@ impl ScaleManager {
         Self {
             shared_state,
             shared_config,
-            shared_transport,
+            shared_transport: Arc::new(transport),
             runtime_params: None,
             server_addresses: ServerAddresses {
                 agent_listener_address,
@@ -62,7 +62,6 @@ impl ScaleManager {
         &mut self,
         router_add: u32,
         global_bus_rx: Receiver<RoutedMessage>,
-        shared_state: Arc<StateManager>,
     ) {
         if self.runtime_params.is_none() {
             self.runtime_params = Some(DashMap::new());

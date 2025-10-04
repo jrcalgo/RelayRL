@@ -61,9 +61,9 @@ pub mod server {
             pub(crate) mod scale_manager;
             pub(crate) mod state_manager;
         }
+        pub(crate) mod router;
         #[cfg(feature = "networks")]
         pub(crate) mod transport;
-        pub(crate) mod router;
         pub(crate) mod worker;
     }
 }

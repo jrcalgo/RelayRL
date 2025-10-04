@@ -30,12 +30,3 @@ where
         panic!("Unsupported type. Only f32 and f64 are allowed.");
     }
 }
-
-/// A response received from the Python subprocess.
-///
-/// It contains a status string (e.g., "success") and an optional message.
-#[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct PythonResponse {
-    pub(crate) status: String,
-    message: Option<String>,
-}

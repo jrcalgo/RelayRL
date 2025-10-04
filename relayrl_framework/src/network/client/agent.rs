@@ -175,7 +175,7 @@ pub trait RL4SysAgentActors {
         default_model: Option<CModule>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     fn remove_actor(
-        &self,
+        &mut self,
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
     fn get_actors(
@@ -195,18 +195,16 @@ impl RL4SysAgentActors for RL4SysAgent {
         default_model: Option<CModule>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator
-                ._new_actor(device, default_model)
-                .await;
+            self.coordinator._new_actor(device, default_model).await;
         })
     }
 
     fn remove_actor(
-        &self,
+        &mut self,
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator._remove_actor(id).await;
+            &mut self.coordinator._remove_actor(id).await;
             Ok(())
         })
     }
@@ -214,7 +212,12 @@ impl RL4SysAgentActors for RL4SysAgent {
     fn get_actors(
         &self,
     ) -> Pin<Box<dyn Future<Output = (Vec<Uuid>, Vec<Arc<JoinHandle<()>>>)> + Send + '_>> {
-        Box::pin(async move { self.coordinator._get_actors().await.expect("Failed to get actors") })
+        Box::pin(async move {
+            self.coordinator
+                ._get_actors()
+                .await
+                .expect("Failed to get actors")
+        })
     }
 
     fn set_actor_id(

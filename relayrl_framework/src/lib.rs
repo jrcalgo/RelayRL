@@ -40,7 +40,6 @@
 //!
 
 mod network;
-mod orchestration;
 mod types;
 
 /// **Development Templates**: Provides base algorithm and application templates for RL4Sys.
@@ -71,6 +70,7 @@ pub mod utilities {
             pub(crate) mod registry;
         }
     }
+    pub(crate) mod orchestration;
 }
 
 /// **Protocol Buffers (Protobuf) for gRPC Communication**
