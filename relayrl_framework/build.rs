@@ -5,8 +5,8 @@ use std::process::Command;
 /// The main function used for building the project.
 ///
 /// This function compiles the protocol buffer definitions specified in the
-/// "proto/rl4sys_grpc_protocols.proto" file using tonic_build. The generated
-/// Rust code is then used for gRPC communication within the RL4Sys framework.
+/// "proto/relayrl_grpc_protocols.proto" file using tonic_build. The generated
+/// Rust code is then used for gRPC communication within the RelayRL framework.
 ///
 /// # Returns
 ///
@@ -34,12 +34,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Compile the protocol buffer definitions located in the specified proto file.
 /// tonic_build::compile_protos will generate the corresponding Rust modules.
 fn build_protobuf() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::compile_protos("proto/rl4sys.proto")?;
+    tonic_build::compile_protos("proto/relayrl.proto")?;
     Ok(())
 }
 
 /// This is specifically for building the `training_data` component bindings, which includes
-/// [RL4SysAction] and [RL4SysTrajectory] implementations.
+/// [RelayRLAction] and [RelayRLTrajectory] implementations.
 fn build_data_bindings() -> Result<(), Box<dyn std::error::Error>> {
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
 
@@ -91,7 +91,7 @@ fn build_python_binary() -> Result<(), Box<dyn std::error::Error>> {
         .current_dir(&python_dir)
         .status()?;
     if !status.success() {
-        // Hard fail - RL4Sys Rust impl cannot function (right now) without a python binary
+        // Hard fail - RelayRL Rust impl cannot function (right now) without a python binary
         panic!("Failed to build python binary, exit status: {}", status);
     }
 

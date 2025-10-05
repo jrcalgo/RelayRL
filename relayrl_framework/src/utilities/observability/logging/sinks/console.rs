@@ -1,6 +1,6 @@
-//! RL4Sys Console Logging Sink
+//! RelayRL Console Logging Sink
 //!
-//! This module provides console output capabilities for the RL4Sys logging system,
+//! This module provides console output capabilities for the RelayRL logging system,
 //! allowing logs to be displayed to stdout and stderr with customizable formatting.
 
 use log4rs::{

@@ -1,6 +1,6 @@
-# Package metadata and basic configuration for the rl4sys_framework crate.
+# Package metadata and basic configuration for the relayrl_framework crate.
 [package]
-name = "rl4sys_framework"                 # The name of the package.
+name = "relayrl_framework"                 # The name of the package.
 version = "0.5.0"                         # Current version of the package.
 authors = ["DIRLab"]                      # List of authors.
 edition = "2024"                          # Rust edition being used.
@@ -16,7 +16,7 @@ all-features = true
 
 # Library configuration.
 [lib]
-name = "rl4sys_framework"                 # Name of the library.
+name = "relayrl_framework"                 # Name of the library.
 crate-type = ["rlib", "cdylib"]                   # Generate a cdylib for FFI (e.g., for Python bindings). rlib is the default library type.
 
 # Optional features.
@@ -26,11 +26,11 @@ full = ["networks", "logging", "metrics", "python_bindings", "wasm_bindings"]   
 networks = ["grpc_network", "zmq_network"]         # Enables networking modules with their accompanying python IPC.
 grpc_network = ["tonic", "prost", "tonic-build", "pyo3", "data_types"]        # Enables gRPC messaging support between agents and training server.
 zmq_network = ["zmq", "pyo3", "data_types"]           # Enables ZeroMQ messaging support between agents and training server.
-data_types = []          # Enables training data medium used in RL4Sys; compiles trajectory and action types.
+data_types = []          # Enables training data medium used in RelayRL; compiles trajectory and action types.
 logging = ["log4rs"]       # Enables logging support.
 metrics = ["prometheus", "opentelemetry"]       # Enables metrics support.
 python_ipc_channel = ["pyo3"]       # ***Currently unused; meant to abstract out pyo3 from networking modules.***
-python_bindings = ["networks"]       # Enables Python bindings of rl4sys_framework for export availability.
+python_bindings = ["networks"]       # Enables Python bindings of relayrl_framework for export availability.
 wasm_bindings = ["wasm-bindgen", "tonic", "prost", "tonic-build", "zmq", "pyo3"]        # ***Currently unused; webassembly bindings.***
 profile = ["flamegraph", "console-subscriber"]       # Enables runtime profiling support via flamegraph.
 
@@ -98,24 +98,6 @@ optional = true
 [dev-dependencies.criterion]
 version = "0.5.1"
 features = ["html_reports", "async_tokio"]
-
-# Benchmarks network inference, latency, and throughput
-[[bench]]
-name = "network_benchmarks"
-harness = false
-
-#
-#[[bench]]
-#name = "runtime_benchmarks"
-#harness = false
-#
-#[[bench]]
-#name = "o3_network_benchmarks"
-#harness = false
-#
-#[[bench]]
-#name = "o3_runtime_benchmarks"
-#harness = false
 
 # Development build profile.
 [profile.dev]

@@ -76,7 +76,7 @@ pub fn get_or_init_tokio_runtime() -> Arc<TokioRuntime> {
     let runtime_multi_thread: Arc<Runtime> = Arc::new(
         TokioBuilder::new_multi_thread()
             .worker_threads(worker_threads)
-            .thread_name("rl4sys::tokio_worker")
+            .thread_name("relayrl::tokio_worker")
             .thread_stack_size(10 * 1024 * 1024)
             .enable_all()
             .build()

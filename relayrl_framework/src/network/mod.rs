@@ -1,5 +1,5 @@
 use crate::types::Hyperparams;
-use crate::types::action::{RL4SysAction, RL4SysData, TensorData};
+use crate::types::action::{RelayRLAction, RelayRLData, TensorData};
 use rand::Rng;
 use std::collections::HashMap;
 use std::{
@@ -77,11 +77,11 @@ pub fn random_uuid(base: u32) -> Uuid {
 }
 
 /// Converts a generic dictionary (represented as a Vec of (IValue, IValue)) into a HashMap
-/// with String keys and RL4SysData values.
+/// with String keys and RelayRLData values.
 ///
 /// The function iterates over each key-value pair in the generic dictionary. If the key is a
 /// string and the value is one of the supported types (Tensor, Int, Double), it converts the value
-/// into the corresponding RL4SysData variant. For tensors, the value is first converted to a Float
+/// into the corresponding RelayRLData variant. For tensors, the value is first converted to a Float
 /// tensor before being transformed into TensorData.
 ///
 /// # Arguments
@@ -90,17 +90,17 @@ pub fn random_uuid(base: u32) -> Uuid {
 ///
 /// # Returns
 ///
-/// An Option containing a HashMap with String keys and RL4SysData values if conversion is successful;
+/// An Option containing a HashMap with String keys and RelayRLData values if conversion is successful;
 /// otherwise, None.
-pub fn convert_generic_dict(dict: &Vec<(IValue, IValue)>) -> Option<HashMap<String, RL4SysData>> {
-    let mut map: HashMap<String, RL4SysData> = HashMap::new();
+pub fn convert_generic_dict(dict: &Vec<(IValue, IValue)>) -> Option<HashMap<String, RelayRLData>> {
+    let mut map: HashMap<String, RelayRLData> = HashMap::new();
 
     for (k, v) in dict {
         if let IValue::String(s) = k {
             if let IValue::Tensor(tensor) = v {
                 map.insert(
                     s.clone(),
-                    RL4SysData::Tensor(
+                    RelayRLData::Tensor(
                         TensorData::try_from(&tensor.to_kind(Kind::Float))
                             .expect("Failed to convert tensor to TensorData"),
                     ),
@@ -108,10 +108,10 @@ pub fn convert_generic_dict(dict: &Vec<(IValue, IValue)>) -> Option<HashMap<Stri
             } else if let IValue::Int(i) = v {
                 map.insert(
                     s.clone(),
-                    RL4SysData::Int((*i).try_into().expect("Failed to convert int to i32")),
+                    RelayRLData::Int((*i).try_into().expect("Failed to convert int to i32")),
                 );
             } else if let IValue::Double(f) = v {
-                map.insert(s.clone(), RL4SysData::Double(*f));
+                map.insert(s.clone(), RelayRLData::Double(*f));
             }
         }
     }
@@ -228,13 +228,25 @@ pub struct HotReloadableModel {
     device: Device,
 }
 
+impl Clone for HotReloadableModel {
+    fn clone(&self) -> Self {
+        Self {
+            inner: RwLock::new(self.inner.blocking_read().clone()),
+            version: self.version.clone(),
+            device: self.device,
+        }
+    }
+}
+
 impl HotReloadableModel {
     /// Load the initial model from disk.
     pub async fn new_from_path<P: AsRef<Path>>(
         path: P,
         device: Device,
     ) -> Result<Self, tch::TchError> {
-        let module: Model = Arc::new(CModule::load(path)?);
+        let model = CModule::load(path)?;
+        validate_model(&model);
+        let module: Model = Arc::new(model);
         Ok(Self {
             inner: RwLock::new(module),
             version: Arc::from(AtomicI64::new(0)),
@@ -243,6 +255,7 @@ impl HotReloadableModel {
     }
 
     pub async fn new_from_model(model: CModule, device: Device) -> Result<Self, tch::TchError> {
+        validate_model(&model);
         let module: Model = Arc::new(model);
         Ok(Self {
             inner: RwLock::new(module),
@@ -276,7 +289,7 @@ impl HotReloadableModel {
         observation: Tensor,
         mask: Tensor,
         reward: f32,
-    ) -> Result<RL4SysAction, String> {
+    ) -> Result<RelayRLAction, String> {
         let action_result = {
             // Lock the model
             let model_guard: RwLockReadGuard<Model> = self.inner.read().await;
@@ -311,14 +324,14 @@ impl HotReloadableModel {
                 };
 
                 // Convert data
-                let data_dict: Option<HashMap<String, RL4SysData>> = match &outputs[1] {
+                let data_dict: Option<HashMap<String, RelayRLData>> = match &outputs[1] {
                     IValue::GenericDict(dict) => {
                         Some(convert_generic_dict(dict).expect("Failed to convert data dict"))
                     }
                     _ => Some(HashMap::new()),
                 };
 
-                // Build RL4SysAction with Tensors turned into `TensorData`
+                // Build RelayRLAction with Tensors turned into `TensorData`
                 let obs_td: TensorData =
                     TensorData::try_from(&obs).expect("Failed to convert obs to TensorData");
                 let act_td: TensorData = TensorData::try_from(&action_tensor)
@@ -326,7 +339,7 @@ impl HotReloadableModel {
                 let mask_td: TensorData =
                     TensorData::try_from(&mask).expect("Failed to convert mask to TensorData");
 
-                let r4sa: RL4SysAction = RL4SysAction::new(
+                let r4sa: RelayRLAction = RelayRLAction::new(
                     Some(obs_td),
                     Some(act_td),
                     Some(mask_td),

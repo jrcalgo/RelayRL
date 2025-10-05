@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package rl4sys;
+package relayrl;
 
 service RLService {
   // Fetch current policy model

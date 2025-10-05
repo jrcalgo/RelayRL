@@ -1,6 +1,6 @@
-//! RL4Sys Metrics Export Module
+//! RelayRL Metrics Export Module
 //!
-//! This module provides exporters for RL4Sys metrics, allowing metrics
+//! This module provides exporters for RelayRL metrics, allowing metrics
 //! to be exposed to external monitoring systems like Prometheus and OpenTelemetry.
 
 pub mod prometheus;

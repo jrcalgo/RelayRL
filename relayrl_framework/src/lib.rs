@@ -1,48 +1,48 @@
-//! # RL4Sys Framework Structure
-//! RL4Sys is a high-performance reinforcement learning framework designed for distributed
+//! # RelayRL Framework Structure
+//! RelayRL is a high-performance reinforcement learning framework designed for distributed
 //! and asynchronous RL training, particularly in high-performance computing (HPC) environments.
 //!
-//! RL4Sys follows a modular architecture with clearly defined roles for agents, training servers,
+//! RelayRL follows a modular architecture with clearly defined roles for agents, training servers,
 //! configuration management, and inter-process communication. These modules are structured into
 //! the following submodules:
 //!
 //! - **Client Modules** (`client::*`): Define agent implementations and wrappers for different communication
 //!   methods, such as gRPC and ZMQ.
-//! - **Server Modules** (`server::*`): Contain implementations for the RL4Sys training server, including
+//! - **Server Modules** (`server::*`): Contain implementations for the RelayRL training server, including
 //!   gRPC and ZMQ-based communication layers.
-//! - **Core Modules** (`action`, `config_loader`, `trajectory`): Define fundamental RL4Sys components,
+//! - **Core Modules** (`action`, `config_loader`, `trajectory`): Define fundamental RelayRL components,
 //!   including action handling, configuration parsing, and trajectory management.
 //! - **Python Bindings** (`bindings::*`): Expose the Rust implementation to Python via PyO3, enabling
-//!   Python scripts to interact with RL4Sys seamlessly.
+//!   Python scripts to interact with RelayRL seamlessly.
 //!
 //! ## Rust-to-Python Bindings
 //!
-//! RL4Sys provides a primary entry point for RL4Sys Python bindings using PyO3,
-//! allowing seamless integration of RL4Sys functionality into Python environments.
+//! RelayRL provides a primary entry point for RelayRL Python bindings using PyO3,
+//! allowing seamless integration of RelayRL functionality into Python environments.
 //!
 //! Agents, training servers, configuration loaders, actions, and trajectories are exposed as
-//! Python-accessible classes within the `rl4sys_framework` module. This enables Python users to
-//! interact with RL4Sys’s core functionality without directly handling the Rust backend.
+//! Python-accessible classes within the `relayrl_framework` module. This enables Python users to
+//! interact with RelayRL’s core functionality without directly handling the Rust backend.
 //!
 //! The exposed Python module includes the following key classes:
 //!
-//! - **`ConfigLoader`**: Manages configuration settings for RL4Sys components, including model paths
+//! - **`ConfigLoader`**: Manages configuration settings for RelayRL components, including model paths
 //!   and training parameters.
-//! - **`TrainingServer`**: Represents the RL4Sys training server, which is responsible for processing
+//! - **`TrainingServer`**: Represents the RelayRL training server, which is responsible for processing
 //!   and optimizing trajectories sent by agents.
-//! - **`RL4SysAgent`**: A Python wrapper for the RL4Sys agent, allowing interaction with the reinforcement
+//! - **`RelayRLAgent`**: A Python wrapper for the RelayRL agent, allowing interaction with the reinforcement
 //!   learning model and execution of actions.
-//! - **`RL4SysTrajectory`**: Handles the storage and management of action sequences (trajectories).
-//! - **`RL4SysAction`**: Represents individual actions taken within the RL environment, including
+//! - **`RelayRLTrajectory`**: Handles the storage and management of action sequences (trajectories).
+//! - **`RelayRLAction`**: Represents individual actions taken within the RL environment, including
 //!   observation, action, reward, and auxiliary data.
 //!
-//! ## Using RL4Sys
+//! ## Using RelayRL
 //!
 
 mod network;
 mod types;
 
-/// **Development Templates**: Provides base algorithm and application templates for RL4Sys.
+/// **Development Templates**: Provides base algorithm and application templates for RelayRL.
 /// These templates serve as foundations for extending or customizing RL environments, models,
 /// or training strategies.
 pub mod templates;
@@ -76,8 +76,8 @@ pub mod utilities {
 /// **Protocol Buffers (Protobuf) for gRPC Communication**
 ///
 /// This module contains Rust code generated from `.proto` files using `tonic::include_proto!`,
-/// enabling structured message exchange between RL4Sys components.
+/// enabling structured message exchange between RelayRL components.
 #[cfg(feature = "grpc_network")]
 mod proto {
-    tonic::include_proto!("rl4sys");
+    tonic::include_proto!("relayrl");
 }

@@ -1,6 +1,6 @@
-//! RL4Sys Metrics Registry
+//! RelayRL Metrics Registry
 //!
-//! This module provides a central registry for all metrics defined in the RL4Sys framework,
+//! This module provides a central registry for all metrics defined in the RelayRL framework,
 //! ensuring proper organization and access to metrics across components.
 
 use std::collections::{HashMap, HashSet};

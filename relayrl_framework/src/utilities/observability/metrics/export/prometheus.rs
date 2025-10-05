@@ -1,6 +1,6 @@
-//! RL4Sys Prometheus Metrics Exporter
+//! RelayRL Prometheus Metrics Exporter
 //!
-//! This module provides Prometheus integration for the RL4Sys metrics system,
+//! This module provides Prometheus integration for the RelayRL metrics system,
 //! enabling export of metrics to Prometheus monitoring infrastructure.
 
 use std::net::SocketAddr;

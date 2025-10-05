@@ -1,6 +1,6 @@
-//! RL4Sys Logging Module
+//! RelayRL Logging Module
 //!
-//! This module provides logging functionality for the RL4Sys framework,
+//! This module provides logging functionality for the RelayRL framework,
 //! enabling client and server components to emit structured logs for debugging,
 //! monitoring, and auditing purposes.
 
@@ -50,8 +50,8 @@ pub fn init_logging() {
 
         // Initialize the logger with this configuration
         match log4rs::init_config(config) {
-            Ok(_) => log::info!("RL4Sys logging initialized with default configuration"),
-            Err(e) => eprintln!("Failed to initialize RL4Sys logging: {}", e),
+            Ok(_) => log::info!("RelayRL logging initialized with default configuration"),
+            Err(e) => eprintln!("Failed to initialize RelayRL logging: {}", e),
         }
     });
 }
@@ -68,7 +68,7 @@ pub fn init_logging() {
 pub fn init_logging_from_file(config_path: &str) -> Result<(), String> {
     INIT.call_once(|| {
         match log4rs::init_file(config_path, Default::default()) {
-            Ok(_) => log::info!("RL4Sys logging initialized from config file: {}", config_path),
+            Ok(_) => log::info!("RelayRL logging initialized from config file: {}", config_path),
             Err(e) => return Err(format!("Failed to initialize logging: {}", e)),
         }
     });
@@ -88,7 +88,7 @@ pub fn init_logging_from_file(config_path: &str) -> Result<(), String> {
 pub fn reconfigure_logging(config: Config) -> Result<(), String> {
     match log4rs::init_config(config) {
         Ok(_) => {
-            log::info!("RL4Sys logging reconfigured successfully");
+            log::info!("RelayRL logging reconfigured successfully");
             Ok(())
         },
         Err(e) => Err(format!("Failed to reconfigure logging: {}", e)),

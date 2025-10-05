@@ -1,6 +1,6 @@
-// RL4Sys Observability Module
+// RelayRL Observability Module
 //
-// This module provides observability features for the RL4Sys framework,
+// This module provides observability features for the RelayRL framework,
 // including logging and metrics functionality for distributed reinforcement
 // learning applications.
 

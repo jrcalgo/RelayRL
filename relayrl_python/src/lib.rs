@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// **Python Bindings for RL4Sys**: This module contains the Rust-to-Python bindings,
-/// exposing RL4Sys components as Python classes. The `o3_*` modules implement PyO3-compatible
+/// **Python Bindings for RelayRL**: This module contains the Rust-to-Python bindings,
+/// exposing RelayRL components as Python classes. The `o3_*` modules implement PyO3-compatible
 /// wrappers for core structures, enabling smooth Python interaction.
 pub(crate) mod bindings {
     pub(crate) mod python {
@@ -30,25 +30,25 @@ pub(crate) struct PythonResponse {
 }
 
 
-/// ### RL4Sys Python Module Definition
+/// ### RelayRL Python Module Definition
 ///
-/// This function defines `rl4sys_framework`, the Python module for RL4Sys bindings.
+/// This function defines `relayrl_framework`, the Python module for RelayRL bindings.
 ///
 /// It registers the following Python classes:
 /// - `ConfigLoader`
 /// - `TrainingServer`
-/// - `RL4SysAgent`
-/// - `RL4SysTrajectory`
-/// - `RL4SysAction`
+/// - `RelayRLAgent`
+/// - `RelayRLTrajectory`
+/// - `RelayRLAction`
 ///
-/// This allows Python users to easily import and use RL4Sys functionalities via:
+/// This allows Python users to easily import and use RelayRL functionalities via:
 ///
 /// ```python
-/// from rl4sys_framework import RL4SysAgent, RL4SysTrajectory, RL4SysAction
+/// from relayrl_framework import RelayRLAgent, RelayRLTrajectory, RelayRLAction
 /// ```
 ///
 #[pymodule(name = "relayrl_framework")]
-fn rl4sys_framework(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn relayrl_framework(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register Python-accessible classes from the Rust implementation.
     m.add_class::<PyConfiguration>()?;
     m.add_class::<PyRelayRLTrainingServer>()?;

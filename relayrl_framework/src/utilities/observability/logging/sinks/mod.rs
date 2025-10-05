@@ -1,6 +1,6 @@
-//! RL4Sys Logging Sinks
+//! RelayRL Logging Sinks
 //!
-//! This module contains various logging sinks (outputs) used by the RL4Sys
+//! This module contains various logging sinks (outputs) used by the RelayRL
 //! framework for directing logs to different destinations.
 
 pub mod console;

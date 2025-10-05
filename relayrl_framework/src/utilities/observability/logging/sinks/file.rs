@@ -1,6 +1,6 @@
-//! RL4Sys File Logging Sink
+//! RelayRL File Logging Sink
 //!
-//! This module provides file output capabilities for the RL4Sys logging system,
+//! This module provides file output capabilities for the RelayRL logging system,
 //! allowing logs to be persisted to disk with configurable rotation policies.
 
 use log4rs::{
@@ -51,7 +51,7 @@ pub fn create_size_rotating_appender(
     file_size_mb: u64,
     rotation_count: u32,
 ) -> RollingFileAppender {
-    let path_str = base_path.to_str().unwrap_or("logs/rl4sys.log");
+    let path_str = base_path.to_str().unwrap_or("logs/relayrl.log");
     let base_filename = path_str.to_string();
 
     // Configure the rotation policy
@@ -100,7 +100,7 @@ pub fn create_daily_rotating_appender(
     base_path: &Path,
     rotation_count: u32,
 ) -> RollingFileAppender {
-    let path_str = base_path.to_str().unwrap_or("logs/rl4sys.log");
+    let path_str = base_path.to_str().unwrap_or("logs/relayrl.log");
     let base_filename = path_str.to_string();
 
     // Configure the daily rotation policy

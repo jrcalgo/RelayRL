@@ -1,6 +1,6 @@
-//! RL4Sys Metrics Module
+//! RelayRL Metrics Module
 //!
-//! This module provides metrics and telemetry capabilities for the RL4Sys framework,
+//! This module provides metrics and telemetry capabilities for the RelayRL framework,
 //! enabling performance monitoring, profiling, and distributed tracing.
 
 use std::sync::{Arc, Mutex, Once};

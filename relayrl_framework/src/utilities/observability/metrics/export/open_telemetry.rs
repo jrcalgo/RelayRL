@@ -1,6 +1,6 @@
-//! RL4Sys OpenTelemetry Metrics Exporter
+//! RelayRL OpenTelemetry Metrics Exporter
 //!
-//! This module provides OpenTelemetry integration for the RL4Sys metrics system,
+//! This module provides OpenTelemetry integration for the RelayRL metrics system,
 //! enabling distributed tracing and metrics collection.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use opentelemetry::{
 static INIT: Once = Once::new();
 
 // Static configuration
-static mut OTEL_SERVICE_NAME: &str = "rl4sys";
+static mut OTEL_SERVICE_NAME: &str = "relayrl";
 static mut OTEL_EXPORT_INTERVAL_MILLIS: u64 = 10000; // 10 seconds
 
 /// Set the service name for OpenTelemetry
@@ -118,7 +118,7 @@ fn init_opentelemetry_impl() {
     );
 }
 
-/// Track an RL4Sys counter with OpenTelemetry
+/// Track an RelayRL counter with OpenTelemetry
 ///
 /// # Arguments
 ///
@@ -139,7 +139,7 @@ pub fn track_counter(name: &str, value: u64, labels: &HashMap<String, String>) {
     counter.add(value, &attributes);
 }
 
-/// Track an RL4Sys histogram with OpenTelemetry
+/// Track an RelayRL histogram with OpenTelemetry
 ///
 /// # Arguments
 ///
@@ -160,7 +160,7 @@ pub fn track_histogram(name: &str, value: f64, labels: &HashMap<String, String>)
     histogram.record(value, &attributes);
 }
 
-/// Create an RL4Sys span for tracing
+/// Create an RelayRL span for tracing
 ///
 /// # Arguments
 ///

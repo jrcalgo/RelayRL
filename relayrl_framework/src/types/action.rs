@@ -1,4 +1,4 @@
-//! This module provides functionality for converting between internal RL4Sys tensor/action types
+//! This module provides functionality for converting between internal RelayRL tensor/action types
 //! and their serialized representations using safetensors. It also defines error types and conversion
 //! functions to support these operations, as well as integration with Python via pyo3.
 
@@ -182,7 +182,7 @@ pub struct TensorData {
 ///
 /// This enum includes variants for tensors (as [TensorData]) and for common primitive data types.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum RL4SysData {
+pub enum RelayRLData {
     Tensor(TensorData),
     Byte(u8),
     Short(i16),
@@ -340,25 +340,25 @@ impl TryFrom<TensorData> for Tensor {
     }
 }
 
-/// A marker trait for RL4SysAction, used strictly for type checking.
-pub trait RL4SysActionTrait {}
+/// A marker trait for RelayRLAction, used strictly for type checking.
+pub trait RelayRLActionTrait {}
 
-/// The core RL4SysAction struct that represents an action in the RL4Sys framework.
+/// The core RelayRLAction struct that represents an action in the RelayRL framework.
 ///
-/// An RL4SysAction holds optional serialized tensor data for observation, action, and mask,
+/// An RelayRLAction holds optional serialized tensor data for observation, action, and mask,
 /// a reward value, optional auxiliary data as a HashMap, and flags indicating whether the action
 /// is terminal and whether the reward was updated.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct RL4SysAction {
+pub struct RelayRLAction {
     pub obs: Option<TensorData>,
     pub act: Option<TensorData>,
     pub mask: Option<TensorData>,
     pub rew: f32,
-    pub data: Option<HashMap<String, RL4SysData>>,
+    pub data: Option<HashMap<String, RelayRLData>>,
     pub done: bool,
 }
 
-/// Implementation of RL4SysAction.
+/// Implementation of RelayRLAction.
 ///
 /// This implementation provides:
 /// - A constructor for creating a new action,
@@ -366,8 +366,8 @@ pub struct RL4SysAction {
 /// - A setter method for updating the reward,
 /// - And methods for converting between raw tensors and serialized actions,
 ///   as well as converting the action to a Python-compatible representation.
-impl RL4SysAction {
-    /// Constructs a new [`RL4SysAction`] from the provided parameters.
+impl RelayRLAction {
+    /// Constructs a new [`RelayRLAction`] from the provided parameters.
     ///
     /// # Arguments
     ///
@@ -381,16 +381,16 @@ impl RL4SysAction {
     ///
     /// # Returns
     ///
-    /// A new [`RL4SysAction`] instance.
+    /// A new [`RelayRLAction`] instance.
     pub fn new(
         obs: Option<TensorData>,
         act: Option<TensorData>,
         mask: Option<TensorData>,
         rew: f32,
-        data: Option<HashMap<String, RL4SysData>>,
+        data: Option<HashMap<String, RelayRLData>>,
         done: bool,
     ) -> Self {
-        RL4SysAction {
+        RelayRLAction {
             obs,
             act,
             mask,
@@ -423,7 +423,7 @@ impl RL4SysAction {
     }
 
     /// Returns a reference to the auxiliary data hashmap, if available.
-    pub fn get_data(&self) -> Option<&HashMap<String, RL4SysData>> {
+    pub fn get_data(&self) -> Option<&HashMap<String, RelayRLData>> {
         self.data.as_ref()
     }
 
@@ -444,12 +444,12 @@ impl RL4SysAction {
     }
 }
 
-/// A marker trait implementation for RL4SysAction used strictly for type checking.
-impl RL4SysActionTrait for RL4SysAction {}
+/// A marker trait implementation for RelayRLAction used strictly for type checking.
+impl RelayRLActionTrait for RelayRLAction {}
 
-/// Implementation of additional methods for RL4SysData.
-impl RL4SysData {
-    /// Converts a tch::Tensor to an [`RL4SysData::Tensor`] variant by converting it to [TensorData].
+/// Implementation of additional methods for RelayRLData.
+impl RelayRLData {
+    /// Converts a tch::Tensor to an [`RelayRLData::Tensor`] variant by converting it to [TensorData].
     ///
     /// # Arguments
     ///
@@ -457,19 +457,19 @@ impl RL4SysData {
     ///
     /// # Returns
     ///
-    /// A [`Result`] containing [`RL4SysData::Tensor(TensorData)`] on success, or a [SafeTensorError] on failure.
+    /// A [`Result`] containing [`RelayRLData::Tensor(TensorData)`] on success, or a [SafeTensorError] on failure.
     pub fn from_tensor(tensor: &Tensor) -> Result<Self, SafeTensorError> {
         let tensor_data = TensorData::try_from(tensor)?;
-        Ok(RL4SysData::Tensor(tensor_data))
+        Ok(RelayRLData::Tensor(tensor_data))
     }
 }
 
-/// Additional conversion functions and utilities for RL4SysAction.
-impl RL4SysAction {
+/// Additional conversion functions and utilities for RelayRLAction.
+impl RelayRLAction {
     /// Converts raw tch::Tensor objects (observation, action, mask) into serialized [TensorData] objects
-    /// and constructs an [`RL4SysAction`].
+    /// and constructs an [`RelayRLAction`].
     ///
-    /// This function attempts to convert each provided tensor into a [TensorData] object using [RL4SysData::from_tensor].
+    /// This function attempts to convert each provided tensor into a [TensorData] object using [RelayRLData::from_tensor].
     /// If a conversion fails, an error is returned.
     ///
     /// # Arguments
@@ -484,33 +484,33 @@ impl RL4SysAction {
     ///
     /// # Returns
     ///
-    /// A [`Result`] containing the constructed [`RL4SysAction`] on success, or a [SafeTensorError] on failure.
+    /// A [`Result`] containing the constructed [`RelayRLAction`] on success, or a [SafeTensorError] on failure.
     pub fn from_tensors(
         obs: Option<&Tensor>,
         action: Option<&Tensor>,
         mask: Option<&Tensor>,
         rew: f32,
-        data: Option<HashMap<String, RL4SysData>>,
+        data: Option<HashMap<String, RelayRLData>>,
         done: bool,
     ) -> Result<Self, SafeTensorError> {
-        let obs_data: Option<RL4SysData> = obs
-            .map(RL4SysData::from_tensor)
+        let obs_data: Option<RelayRLData> = obs
+            .map(RelayRLData::from_tensor)
             .transpose()
             .map_err(|e| SafeTensorError::TensorConversionError(e.to_string()))?;
 
-        let act_data: Option<RL4SysData> = action
-            .map(RL4SysData::from_tensor)
+        let act_data: Option<RelayRLData> = action
+            .map(RelayRLData::from_tensor)
             .transpose()
             .map_err(|e| SafeTensorError::TensorConversionError(e.to_string()))?;
 
-        let mask_data: Option<RL4SysData> = mask
-            .map(RL4SysData::from_tensor)
+        let mask_data: Option<RelayRLData> = mask
+            .map(RelayRLData::from_tensor)
             .transpose()
             .map_err(|e| SafeTensorError::TensorConversionError(e.to_string()))?;
 
-        Ok(RL4SysAction {
+        Ok(RelayRLAction {
             obs: obs_data.map(|data| {
-                if let RL4SysData::Tensor(tensor_data) = data {
+                if let RelayRLData::Tensor(tensor_data) = data {
                     tensor_data
                 } else {
                     TensorData {
@@ -521,7 +521,7 @@ impl RL4SysAction {
                 }
             }),
             act: act_data.map(|data| {
-                if let RL4SysData::Tensor(tensor_data) = data {
+                if let RelayRLData::Tensor(tensor_data) = data {
                     tensor_data
                 } else {
                     TensorData {
@@ -532,7 +532,7 @@ impl RL4SysAction {
                 }
             }),
             mask: mask_data.map(|data| {
-                if let RL4SysData::Tensor(tensor_data) = data {
+                if let RelayRLData::Tensor(tensor_data) = data {
                     tensor_data
                 } else {
                     TensorData {

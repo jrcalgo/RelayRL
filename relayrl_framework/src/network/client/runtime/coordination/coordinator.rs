@@ -1,4 +1,5 @@
 use crate::get_or_create_client_config_json_path;
+use crate::network::HotReloadableModel;
 use crate::network::client::runtime::actor::ActorEntity;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
 use crate::network::client::runtime::coordination::metrics_manager::MetricsManager;
@@ -12,7 +13,7 @@ use crate::network::client::runtime::router::{
 use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
 use crate::network::{TransportType, random_uuid};
 use crate::resolve_client_config_json_path;
-use crate::types::action::RL4SysAction;
+use crate::types::action::RelayRLAction;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 use crate::utilities::observability::logging::builder::LoggingBuilder;
 use rand::Rng;
@@ -46,7 +47,7 @@ pub trait ClientInterface {
         algorithm_name: String,
         config_path: Option<PathBuf>,
     );
-    async fn _new_actor(&self, device: Device, default_model: Option<CModule>);
+    async fn _new_actor(&self, device: Device, default_model: Option<HotReloadableModel>);
     async fn _remove_actor(&mut self, id: Uuid);
     async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String>;
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String>;
@@ -56,7 +57,7 @@ pub trait ClientInterface {
         observation: Tensor,
         mask: Tensor,
         reward: f32,
-    ) -> Result<Vec<(Uuid, Arc<RL4SysAction>)>, String>;
+    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String>;
     async fn _flag_last_action(&self, ids: Vec<Uuid>, reward: Option<f32>);
     async fn _get_model_version(&self, ids: Vec<Uuid>) -> Result<Vec<(Uuid, i64)>, String>;
     async fn _scale_up(&mut self, router_add: u32);
@@ -116,9 +117,17 @@ impl ClientInterface for ClientCoordinator {
 
         let shared_state_config: Arc<ClientConfigLoader> = lifecycle.get_active_config();
 
-        let default_model_for_state: Option<CModule> = default_model;
+        let reloadable_default_model = match default_model {
+            Some(model) => Some(
+                HotReloadableModel::new_from_model(model, default_device)
+                    .await
+                    .expect("[Coordinator] Failed to create reloadable default model..."),
+            ),
+            None => None,
+        };
+
         let (state, global_bus_rx, rx_from_actor) =
-            StateManager::new(shared_state_config, default_model_for_state);
+            StateManager::new(shared_state_config, reloadable_default_model.clone());
 
         let shared_scaling_config: Arc<ClientConfigLoader> = lifecycle.get_active_config();
 
@@ -173,20 +182,22 @@ impl ClientInterface for ClientCoordinator {
             ),
         };
 
+        let shared_global_bus_rx = Arc::new(RwLock::new(global_bus_rx));
         let shared_state = Arc::from(RwLock::new(state));
         let mut scaling = ScaleManager::new(
             shared_state.clone(),
             Arc::clone(&shared_scaling_config),
+            shared_global_bus_rx,
             transport,
             rx_from_actor,
             agent_listener_address,
             training_server_address,
         );
-        scaling.__scale_up(1, global_bus_rx).await;
+        scaling.__scale_up(1).await;
 
         if actor_count > 0 {
             for _ in 0..actor_count {
-                Self::_new_actor(&self, default_device, default_model).await;
+                Self::_new_actor(&self, default_device, reloadable_default_model.clone()).await;
             }
         }
 
@@ -225,11 +236,9 @@ impl ClientInterface for ClientCoordinator {
         .await;
     }
 
-    async fn _new_actor(&self, device: Device, default_model: Option<CModule>) {
+    async fn _new_actor(&self, device: Device, default_model: Option<HotReloadableModel>) {
         match &self.runtime_params {
             Some(params) => {
-                let actor_config: Arc<ClientConfigLoader> = params.lifecycle.get_active_config();
-
                 let pid: u32 = std::process::id();
                 let pid_bytes: [u8; _] = pid.to_be_bytes();
 
@@ -278,7 +287,7 @@ impl ClientInterface for ClientCoordinator {
 
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
         match &self.runtime_params {
-            Some(params) => params.state.read().await.__set_actor_id(current_id, new_id),
+            Some(params) => params.state.write().await.__set_actor_id(current_id, new_id),
             None => {
                 return Err("[Coordinator] No runtime instance to _shutdown...".to_string());
             }
@@ -291,12 +300,18 @@ impl ClientInterface for ClientCoordinator {
         observation: Tensor,
         mask: Tensor,
         reward: f32,
-    ) -> Result<Vec<(Uuid, Arc<RL4SysAction>)>, String> {
+    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String> {
         match &self.runtime_params {
             Some(_) => {
                 let mut actions = Vec::with_capacity(ids.len());
+
+                let router_runtime_params = self.runtime_params.as_ref().expect("No runtime params").scaling.runtime_params.as_ref().expect("No scaling runtime params");
                 for id in ids {
-                    let (resp_tx, resp_rx) = oneshot::channel::<Arc<RL4SysAction>>();
+                    if !router_runtime_params.contains_key(&id) {
+                        continue;
+                    }
+
+                    let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
 
                     let mut obs_tensor = Tensor::zeros_like(&observation);
                     obs_tensor.copy_(&observation);
@@ -315,8 +330,7 @@ impl ClientInterface for ClientCoordinator {
                         },
                     };
 
-                    let runtime_params = self.runtime_params.as_ref().unwrap();
-                    let sender = runtime_params.scaling.tx_to_router.clone();
+                    let sender = router_runtime_params.get(&id).expect("No router runtime params").tx_to_router.clone();
                     let _ = sender.send(action_request_message).await;
 
                     match resp_rx.await.map_err(|e| e.to_string()) {
@@ -334,8 +348,14 @@ impl ClientInterface for ClientCoordinator {
 
     async fn _flag_last_action(&self, ids: Vec<Uuid>, reward: Option<f32>) {
         match &self.runtime_params {
-            Some(params) => {
+            Some(_) => {
+                let router_runtime_params = self.runtime_params.as_ref().expect("No runtime params").scaling.runtime_params.as_ref().expect("No scaling runtime params");
+                
                 for id in ids {
+                    if !router_runtime_params.contains_key(&id) {
+                        continue;
+                    }
+
                     let reward: f32 = reward.unwrap_or(0.0);
                     let flag_last_action_message = RoutedMessage {
                         actor_id: id,
@@ -343,7 +363,7 @@ impl ClientInterface for ClientCoordinator {
                         payload: RoutedPayload::FlagLastInference { reward },
                     };
 
-                    let sender = params.scaling.tx_to_router.clone();
+                    let sender = router_runtime_params.get(&id).expect("No router runtime params").tx_to_router.clone();
                     let _ = sender.send(flag_last_action_message).await;
                 }
             }
@@ -357,7 +377,13 @@ impl ClientInterface for ClientCoordinator {
         match &self.runtime_params {
             Some(_) => {
                 let mut versions = Vec::with_capacity(ids.len());
+                let router_runtime_params = self.runtime_params.as_ref().expect("No runtime params").scaling.runtime_params.as_ref().expect("No scaling runtime params");
+
                 for id in ids {
+                    if !router_runtime_params.contains_key(&id) {
+                        continue;
+                    }
+
                     let (resp_tx, resp_rx) = oneshot::channel::<i64>();
 
                     let model_version_message = RoutedMessage {
@@ -366,8 +392,7 @@ impl ClientInterface for ClientCoordinator {
                         payload: RoutedPayload::ModelVersion { reply_to: resp_tx },
                     };
 
-                    let runtime_params = self.runtime_params.as_ref().unwrap();
-                    let sender = runtime_params.state.tx_to_router.clone();
+                    let sender = router_runtime_params.get(&id).expect("No router runtime params").tx_to_router.clone();
                     let _ = sender.send(model_version_message).await;
 
                     match resp_rx.await.map_err(|e| e.to_string()) {
@@ -384,9 +409,7 @@ impl ClientInterface for ClientCoordinator {
     async fn _scale_up(&mut self, router_add: u32) {
         match &mut self.runtime_params {
             Some(params) => {
-                let global_bus_rx = params.state.global_bus_rx.clone();
-                let shared_state = params.state.clone();
-                params.scaling.__scale_up(router_add, global_bus_rx).await;
+                params.scaling.__scale_up(router_add).await;
             }
             None => {
                 eprintln!("[Coordinator] No runtime instance to _shutdown...");

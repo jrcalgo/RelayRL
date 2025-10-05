@@ -4,8 +4,8 @@ use crate::network::client::runtime::transport::SyncClientTransport;
 use crate::network::client::runtime::transport::serialize_trajectory;
 use crate::network::{HotReloadableModel, validate_model};
 use crate::types::NetworkParticipant;
-use crate::types::action::RL4SysAction;
-use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
+use crate::types::action::RelayRLAction;
+use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 use crate::utilities::configuration::ClientConfigLoader;
 use std::fs::File;
 use std::io::Write;
@@ -52,7 +52,7 @@ impl ZmqClient {
         pid_buf[..4].copy_from_slice(&pid_bytes);
 
         // Generate a unique client identity
-        let client_identity = format!("RL4SysClient-{}", Uuid::new_v8(pid_buf));
+        let client_identity = format!("RelayRLClient-{}", Uuid::new_v8(pid_buf));
 
         Self {
             agent_listener_address,
@@ -176,7 +176,7 @@ impl SyncClientTransport for ZmqClient {
 
     fn send_traj_to_server(
         &self,
-        trajectory: RL4SysTrajectory,
+        trajectory: RelayRLTrajectory,
         _training_server_address: &str,
     ) -> Result<(), String> {
         let context = Context::new();

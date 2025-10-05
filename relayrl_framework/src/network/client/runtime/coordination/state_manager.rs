@@ -1,3 +1,4 @@
+use crate::network::HotReloadableModel;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
@@ -19,7 +20,7 @@ pub type ActorUuid = Uuid;
 /// In-memory actor state management and global channel transport
 pub(crate) struct StateManager {
     shared_config: Arc<ClientConfigLoader>,
-    default_model: RwLock<Option<CModule>>,
+    default_model: Option<HotReloadableModel>,
     pub(crate) global_bus_tx: Sender<RoutedMessage>,
     tx_to_sender: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<Uuid, Sender<RoutedMessage>>,
@@ -29,14 +30,14 @@ pub(crate) struct StateManager {
 impl StateManager {
     pub(crate) fn new(
         shared_config: Arc<ClientConfigLoader>,
-        default_model: Option<CModule>,
+        shared_default_model: Option<HotReloadableModel>,
     ) -> (Self, Receiver<RoutedMessage>, Receiver<RoutedMessage>) {
         let (global_bus_tx, global_bus_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_sender, rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         (
             Self {
                 shared_config,
-                default_model: RwLock::new(default_model),
+                default_model: shared_default_model,
                 global_bus_tx,
                 tx_to_sender,
                 actor_inboxes: DashMap::new(),
@@ -51,7 +52,7 @@ impl StateManager {
         &mut self,
         id: Uuid,
         device: Device,
-        default_model: Option<CModule>,
+        default_model: Option<HotReloadableModel>,
         transport: Arc<TransportClient>,
     ) {
         if self.actor_handles.contains_key(&id) {
@@ -59,42 +60,49 @@ impl StateManager {
             self.__remove_actor(id);
         }
 
-        let default_model = if let Some(m) = default_model {
-            Some(m)
+        let default_model = if let Some(model) = default_model {
+            Some(model)
+        } else if let Some(model) = { self.default_model.clone() } {
+            Some(model)
+        // try taking once from cached default_model
         } else {
-            // try taking once from cached default_model
-            if let Some(m) = { self.get_default_model().await } {
-                Some(m)
+            // lazily load from config if configured
+            let loader =
+                ClientConfigLoader::load_config(&self.shared_config.client_config.config_path);
+            let default_model_path_str = loader
+                .client_config
+                .default_model_path
+                .to_str()
+                .expect("[StateManager] Failed to convert path to string")
+                .to_string();
+
+            if !default_model_path_str.is_empty() {
+                Some(
+                    HotReloadableModel::new_from_path(
+                        loader.client_config.default_model_path,
+                        device,
+                    )
+                    .await
+                    .expect("[StateManager] Failed to load model from path"),
+                )
             } else {
-                // lazily load from config if configured
-                let loader =
-                    ClientConfigLoader::load_config(&self.shared_config.client_config.config_path);
-                let default_model_path_str = loader
-                    .client_config
-                    .default_model_path
+                let local_model_path_str = loader
+                    .transport_config
+                    .local_model_path
                     .to_str()
                     .expect("[StateManager] Failed to convert path to string")
                     .to_string();
-                if !default_model_path_str.is_empty() {
+                if !local_model_path_str.is_empty() {
                     Some(
-                        CModule::load(loader.client_config.default_model_path)
-                            .expect("[StateManager] Failed to load model from path"),
+                        HotReloadableModel::new_from_path(
+                            loader.transport_config.local_model_path,
+                            device,
+                        )
+                        .await
+                        .expect("[StateManager] Failed to load model from path"),
                     )
                 } else {
-                    let local_model_path_str = loader
-                        .transport_config
-                        .local_model_path
-                        .to_str()
-                        .expect("[StateManager] Failed to convert path to string")
-                        .to_string();
-                    if !local_model_path_str.is_empty() {
-                        Some(
-                            CModule::load(loader.transport_config.local_model_path)
-                                .expect("[StateManager] Failed to load model from path"),
-                        )
-                    } else {
-                        None
-                    }
+                    None
                 }
             }
         };
@@ -191,17 +199,5 @@ impl StateManager {
 
     fn get_actor_inbox(&self, id: Uuid) -> Option<Sender<RoutedMessage>> {
         self.actor_inboxes.get(&id).map(|tx| tx.value().clone())
-    }
-
-    /// Get the default model if it exists
-    pub async fn get_default_model(&self) -> Option<CModule> {
-        if self.default_model.read().await.is_some() {
-            let mut m_clone: Option<CModule> = None;
-            if let Some(m) = self.default_model.read().await {
-                m_clone = Some(m);
-            }
-            return m_clone;
-        }
-        None
     }
 }

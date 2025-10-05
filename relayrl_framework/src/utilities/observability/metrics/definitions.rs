@@ -1,6 +1,6 @@
-//! RL4Sys Metrics Definitions
+//! RelayRL Metrics Definitions
 //!
-//! This module defines the core metric types used throughout the RL4Sys framework,
+//! This module defines the core metric types used throughout the RelayRL framework,
 //! including counters, gauges, and histograms.
 
 use std::collections::HashMap;

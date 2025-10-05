@@ -6,8 +6,8 @@ pub mod types {
 }
 
 pub(crate) enum NetworkParticipant {
-    RL4SysAgent,
-    RL4SysTrainingServer,
+    RelayRLAgent,
+    RelayRLTrainingServer,
 }
 
 /// Hyperparams enum represents hyperparameter inputs which can be provided either as a map

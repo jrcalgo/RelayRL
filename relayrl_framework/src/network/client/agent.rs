@@ -1,8 +1,9 @@
+use crate::network::HotReloadableModel;
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
     ClientCoordinator, ClientInterface,
 };
-use crate::types::action::RL4SysAction;
+use crate::types::action::RelayRLAction;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -11,7 +12,7 @@ use tch::{CModule, Device, Tensor};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-struct AgentStartParameters {
+pub struct AgentStartParameters {
     actor_count: i64,
     default_device: Device,
     default_model: Option<CModule>,
@@ -19,8 +20,8 @@ struct AgentStartParameters {
     config_path: Option<PathBuf>,
 }
 
-/// Builder for RL4SysAgent
-pub struct RL4SysAgentBuilder {
+/// Builder for RelayRLAgent
+pub struct RelayRLAgentBuilder {
     transport_type: TransportType,
     actor_count: Option<i64>,
     default_device: Option<Device>,
@@ -29,7 +30,7 @@ pub struct RL4SysAgentBuilder {
     config_path: Option<PathBuf>,
 }
 
-impl RL4SysAgentBuilder {
+impl RelayRLAgentBuilder {
     /// Create a new builder with required transport type
     pub fn builder(transport_type: TransportType) -> Self {
         Self {
@@ -67,10 +68,10 @@ impl RL4SysAgentBuilder {
         self
     }
 
-    /// Build and start the RL4SysAgent, returning a running instance
-    pub async fn build(self) -> Result<(RL4SysAgent, AgentStartParameters), String> {
+    /// Build and start the RelayRLAgent, returning a running instance
+    pub async fn build(self) -> Result<(RelayRLAgent, AgentStartParameters), String> {
         // Initialize agent object
-        let agent: RL4SysAgent = RL4SysAgent::new(self.transport_type);
+        let agent: RelayRLAgent = RelayRLAgent::new(self.transport_type);
 
         // Tuple parameters
         let startup_params = AgentStartParameters {
@@ -86,11 +87,11 @@ impl RL4SysAgentBuilder {
 }
 
 /// Thin facade over ClientCoordinator
-pub struct RL4SysAgent {
+pub struct RelayRLAgent {
     coordinator: ClientCoordinator,
 }
 
-impl RL4SysAgent {
+impl RelayRLAgent {
     /// Create a new agent with given network
     pub fn new(transport_type: TransportType) -> Self {
         Self {
@@ -118,16 +119,16 @@ impl RL4SysAgent {
             .await
     }
 
-    pub async fn scale_throughput(&mut self, routers: u32) {
+    pub async fn scale_throughput(&mut self, routers: i32) {
         match routers {
             add if routers > 0 => {
-                self.coordinator._scale_up(add).await;
+                self.coordinator._scale_up(add as u32).await;
             }
             remove if routers < 0 => {
-                self.coordinator._scale_down(remove).await;
+                self.coordinator._scale_down(remove.abs() as u32).await;
             }
             _ => {
-                eprintln!("[RL4SysAgent] No change; zero routers requested.");
+                eprintln!("[RelayRLAgent] No change; zero routers requested.");
             }
         }
     }
@@ -144,7 +145,7 @@ impl RL4SysAgent {
         observation: Tensor,
         mask: Tensor,
         reward: f32,
-    ) -> Result<Vec<(Uuid, Arc<RL4SysAction>)>, String> {
+    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String> {
         self.coordinator
             ._request_for_action(ids, observation, mask, reward)
             .await
@@ -168,11 +169,11 @@ impl RL4SysAgent {
 }
 
 /// Actor management trait using boxed futures
-pub trait RL4SysAgentActors {
+pub trait RelayRLAgentActors {
     fn new_actor(
         &self,
         device: Device,
-        default_model: Option<CModule>,
+        default_model: Option<HotReloadableModel>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     fn remove_actor(
         &mut self,
@@ -188,11 +189,11 @@ pub trait RL4SysAgentActors {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
 }
 
-impl RL4SysAgentActors for RL4SysAgent {
+impl RelayRLAgentActors for RelayRLAgent {
     fn new_actor(
         &self,
         device: Device,
-        default_model: Option<CModule>,
+        default_model: Option<HotReloadableModel>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             self.coordinator._new_actor(device, default_model).await;

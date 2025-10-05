@@ -4,8 +4,8 @@ use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
 use crate::network::{HotReloadableModel, TransportType, validate_model};
 use crate::types::NetworkParticipant;
-use crate::types::action::RL4SysAction;
-use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
+use crate::types::action::RelayRLAction;
+use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
 use crate::utilities::orchestration::tonic_utils::deserialize_model;
@@ -20,7 +20,7 @@ pub trait ActorEntity: Send + Sync + 'static {
     async fn new(
         id: Uuid,
         device: Device,
-        model: Option<CModule>,
+        model: Option<HotReloadableModel>,
         model_path: PathBuf,
         shared_config: Arc<ClientConfigLoader>,
         rx_from_router: Receiver<RoutedMessage>,
@@ -30,7 +30,7 @@ pub trait ActorEntity: Send + Sync + 'static {
     where
         Self: Sized;
     async fn spawn_loop(&mut self);
-    async fn _initial_model_handshake(&self, msg: RoutedMessage);
+    async fn _initial_model_handshake(&mut self, msg: RoutedMessage);
     fn __request_for_action(&mut self, msg: RoutedMessage);
     fn __flag_last_action(&mut self, msg: RoutedMessage);
     fn __get_model_version(&self, msg: RoutedMessage);
@@ -46,7 +46,7 @@ pub(crate) struct Actor {
     model_path: PathBuf,
     model_latest_version: i64,
     model_device: Device,
-    current_traj: RL4SysTrajectory,
+    current_traj: RelayRLTrajectory,
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_sender: Sender<RoutedMessage>,
     transport: Option<Arc<TransportClient>>,
@@ -57,7 +57,7 @@ impl ActorEntity for Actor {
     async fn new(
         id: Uuid,
         device: Device,
-        model: Option<CModule>,
+        model: Option<HotReloadableModel>,
         model_path: PathBuf,
         shared_config: Arc<ClientConfigLoader>,
         rx_from_router: Receiver<RoutedMessage>,
@@ -75,9 +75,9 @@ impl ActorEntity for Actor {
             model_path,
             model_latest_version: 0,
             model_device: device,
-            current_traj: RL4SysTrajectory::new(
+            current_traj: RelayRLTrajectory::new(
                 max_length,
-                NetworkParticipant::RL4SysAgent,
+                NetworkParticipant::RelayRLAgent,
                 &shared_config.client_config.config_path,
             ),
             rx_from_router,
@@ -89,13 +89,7 @@ impl ActorEntity for Actor {
         let mut model_init_flag: bool = false;
         match model {
             Some(some_model) => {
-                validate_model(&some_model);
-                actor.model = Some(
-                    HotReloadableModel::new_from_model(some_model, device)
-                        .await
-                        .ok()
-                        .expect("[ActorEntity] New model could not be created..."),
-                );
+                actor.model = Some(some_model);
             }
             None => {
                 eprintln!(
@@ -123,7 +117,7 @@ impl ActorEntity for Actor {
         }
     }
 
-    async fn _initial_model_handshake(&self, msg: RoutedMessage) {
+    async fn _initial_model_handshake(&mut self, msg: RoutedMessage) {
         if let RoutedPayload::ModelHandshake = msg.payload {
             if self.model.is_none() {
                 if let Some(transport) = &self.transport {
@@ -167,7 +161,7 @@ impl ActorEntity for Actor {
                                         model.reload(self.model_path.clone(), version).await;
                                     }
                                     None => {
-                                        *self.model = Some(
+                                        self.model = Some(
                                             HotReloadableModel::new_from_model(
                                                 model,
                                                 self.model_device,
@@ -288,8 +282,8 @@ impl ActorEntity for Actor {
 
     fn __flag_last_action(&mut self, msg: RoutedMessage) {
         if let RoutedPayload::FlagLastInference { reward } = msg.payload {
-            let mut last_action: RL4SysAction =
-                RL4SysAction::new(None, None, None, reward, None, true);
+            let mut last_action: RelayRLAction =
+                RelayRLAction::new(None, None, None, reward, None, true);
             last_action.update_reward(reward);
             self.current_traj.add_action(&last_action);
 

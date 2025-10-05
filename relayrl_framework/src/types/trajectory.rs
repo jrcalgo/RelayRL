@@ -1,10 +1,10 @@
 //! This module provides utilities for serializing and sending trajectories as well as defining
-//! the RL4SysTrajectory type and trait. It uses serde_pickle for serialization and ZMQ for sending
+//! the RelayRLTrajectory type and trait. It uses serde_pickle for serialization and ZMQ for sending
 //! the serialized data to a trajectory server.
 
 use crate::types::NetworkParticipant;
-use crate::types::action::RL4SysAction;
-use crate::types::action::RL4SysActionTrait;
+use crate::types::action::RelayRLAction;
+use crate::types::action::RelayRLActionTrait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 #[cfg(feature = "zmq_network")]
@@ -24,9 +24,9 @@ use crate::utilities::configuration::{ClientConfigLoader, ServerConfigLoader};
 ///
 /// Any trajectory struct must implement this trait, which requires a method to add an action
 /// to the trajectory. The method may also send the trajectory if a terminal action is encountered.
-pub trait RL4SysTrajectoryTrait {
+pub trait RelayRLTrajectoryTrait {
     /// The associated action type that this trajectory holds.
-    type Action: RL4SysActionTrait;
+    type Action: RelayRLActionTrait;
     /// Adds an action to the trajectory.
     ///
     /// # Arguments
@@ -36,19 +36,19 @@ pub trait RL4SysTrajectoryTrait {
     fn add_action(&mut self, action: &Self::Action);
 }
 
-/// The RL4SysTrajectory struct represents a trajectory composed of a sequence of actions.
+/// The RelayRLTrajectory struct represents a trajectory composed of a sequence of actions.
 ///
 /// It stores an optional trajectory server address, a maximum trajectory length, and a vector of actions.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RL4SysTrajectory {
+pub struct RelayRLTrajectory {
     /// The maximum number of actions allowed in the trajectory.
     max_length: u128,
     /// A vector storing the actions in the trajectory.
-    pub actions: Vec<RL4SysAction>,
+    pub actions: Vec<RelayRLAction>,
 }
 
-impl RL4SysTrajectory {
-    /// Creates a new RL4SysTrajectory.
+impl RelayRLTrajectory {
+    /// Creates a new RelayRLTrajectory.
     ///
     /// # Arguments
     ///
@@ -57,48 +57,48 @@ impl RL4SysTrajectory {
     ///
     /// # Returns
     ///
-    /// A new instance of RL4SysTrajectory.
+    /// A new instance of RelayRLTrajectory.
     pub fn new(
         max_length: Option<u128>,
         network_participant: NetworkParticipant,
         config_path: &PathBuf,
     ) -> Self {
         let max_length: u128 = max_length.unwrap_or_else(|| match network_participant {
-            NetworkParticipant::RL4SysAgent => {
+            NetworkParticipant::RelayRLAgent => {
                 let loader = ClientConfigLoader::load_config(config_path);
                 loader.transport_config.max_traj_length
             }
-            NetworkParticipant::RL4SysTrainingServer => {
+            NetworkParticipant::RelayRLTrainingServer => {
                 let loader = ServerConfigLoader::load_config(config_path);
                 loader.transport_config.max_traj_length
             }
         });
         println!(
-            "[RL4SysTrajectory] New {:?} length trajectory created",
+            "[RelayRLTrajectory] New {:?} length trajectory created",
             max_length
         );
 
-        RL4SysTrajectory {
+        RelayRLTrajectory {
             max_length,
             actions: Vec::new(),
         }
     }
 }
 
-/// Implementation of the RL4SysTrajectoryTrait for RL4SysTrajectory.
+/// Implementation of the RelayRLTrajectoryTrait for RelayRLTrajectory.
 ///
 /// This implementation defines how an action is added to the trajectory. If the trajectory reaches
 /// its maximum length and the send_if_done flag is set along with the action being terminal,
 /// the trajectory is sent to the training server and then cleared.
-impl RL4SysTrajectoryTrait for RL4SysTrajectory {
-    type Action = RL4SysAction;
+impl RelayRLTrajectoryTrait for RelayRLTrajectory {
+    type Action = RelayRLAction;
 
     /// Adds an action to the trajectory and conditionally sends it if the trajectory is full and the action is terminal.
     ///
     /// # Arguments
     ///
-    /// * `action` - A reference to the RL4SysAction to be added.
-    fn add_action(&mut self, action: &RL4SysAction) {
+    /// * `action` - A reference to the RelayRLAction to be added.
+    fn add_action(&mut self, action: &RelayRLAction) {
         let action_done: bool = action.done;
 
         self.actions.push(action.to_owned());

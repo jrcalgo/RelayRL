@@ -19,10 +19,10 @@ pub(crate) struct ServerAddresses {
 }
 
 pub(crate) struct RouterRuntimeParams {
-    receiver_loop: JoinHandle<()>,
-    filter_loop: JoinHandle<()>,
-    sender_loop: JoinHandle<()>,
-    tx_to_router: Sender<RoutedMessage>,
+    pub(crate) receiver_loop: JoinHandle<()>,
+    pub(crate) filter_loop: JoinHandle<()>,
+    pub(crate) sender_loop: JoinHandle<()>,
+    pub(crate) tx_to_router: Sender<RoutedMessage>,
 }
 
 type RouterUuid = Uuid;
@@ -30,16 +30,18 @@ type RouterUuid = Uuid;
 pub(crate) struct ScaleManager {
     shared_state: Arc<RwLock<StateManager>>,
     shared_config: Arc<ClientConfigLoader>,
+    pub(crate) shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
     pub(crate) shared_transport: Arc<TransportClient>,
-    runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
+    pub(crate) runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
     server_addresses: ServerAddresses,
-    rx_from_actor: Receiver<RoutedMessage>,
+    rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
 }
 
 impl ScaleManager {
     pub(crate) fn new(
         shared_state: Arc<RwLock<StateManager>>,
         shared_config: Arc<ClientConfigLoader>,
+        shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
         transport: TransportClient,
         rx_from_actor: Receiver<RoutedMessage>,
         agent_listener_address: String,
@@ -48,40 +50,40 @@ impl ScaleManager {
         Self {
             shared_state,
             shared_config,
+            shared_global_bus_rx,
             shared_transport: Arc::new(transport),
             runtime_params: None,
             server_addresses: ServerAddresses {
                 agent_listener_address,
                 training_server_address,
             },
-            rx_from_actor,
+            rx_from_actor: Arc::new(RwLock::new(rx_from_actor)),
         }
     }
 
     pub(crate) async fn __scale_up(
         &mut self,
-        router_add: u32,
-        global_bus_rx: Receiver<RoutedMessage>,
+        router_add: u32
     ) {
         if self.runtime_params.is_none() {
             self.runtime_params = Some(DashMap::new());
         }
 
         for i in 1..router_add {
-            let receiver_state = self.shared_state.clone();
+            let shared_receiver_state = self.shared_state.clone();
             let receiver = ClientExternalReceiver::new(
-                receiver_state.global_bus_tx.clone(),
+                shared_receiver_state.write().await.global_bus_tx.clone(),
                 self.server_addresses.agent_listener_address.clone(),
             )
             .with_transport(self.shared_transport.clone());
 
-            let filter_state = self.shared_state.clone();
-            let filter_rx = global_bus_rx;
-            let filter = ClientFilter::new(filter_rx, filter_state);
+            let shared_filter_state = self.shared_state.clone();
+            let filter_rx = self.shared_global_bus_rx.clone();
+            let filter = ClientFilter::new(filter_rx, shared_filter_state);
 
-            let sender_state = self.shared_state.clone();
+            let shared_sender_state = self.shared_state.clone();
             let sender = ClientExternalSender::new(
-                self.rx_from_actor,
+                self.rx_from_actor.clone(),
                 self.server_addresses.training_server_address.clone(),
             )
             .with_transport(self.shared_transport.clone());
@@ -94,7 +96,7 @@ impl ScaleManager {
                 receiver_loop,
                 filter_loop,
                 sender_loop,
-                tx_to_router: sender_state.global_bus_tx.clone(),
+                tx_to_router: shared_sender_state.write().await.global_bus_tx.clone(),
             };
 
             let mut router_id = random_uuid(i as u32);

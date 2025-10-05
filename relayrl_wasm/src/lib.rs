@@ -1,5 +1,5 @@
-/// **WASM Bindings for RL4Sys**: This module contains the Rust-to-WASM bindings,
-/// exposing RL4Sys components as WASM-compatible classes. The `wasm_*` modules implement
+/// **WASM Bindings for RelayRL**: This module contains the Rust-to-WASM bindings,
+/// exposing RelayRL components as WASM-compatible classes. The `wasm_*` modules implement
 /// wasm-bindgen-compatible wrappers for core structures, enabling smooth JavaScript interaction.
 pub(crate) mod bindings {
     pub(crate) mod wasm {

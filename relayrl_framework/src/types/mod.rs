@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-/// **Core RL4Sys Data Types**: Define the primary data structures used
+/// **Core RelayRL Data Types**: Define the primary data structures used
 /// throughout the framework. These include:
 /// - `trajectory`: Defines trajectory management and serialization logic.
 /// - `action`: Handles action structures and data.
@@ -10,8 +10,8 @@ pub mod action;
 pub mod trajectory;
 
 pub(crate) enum NetworkParticipant {
-    RL4SysAgent,
-    RL4SysTrainingServer,
+    RelayRLAgent,
+    RelayRLTrainingServer,
 }
 
 /// Hyperparams enum represents hyperparameter inputs which can be provided either as a map

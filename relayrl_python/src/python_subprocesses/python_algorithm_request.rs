@@ -2,7 +2,7 @@
 //! to handle commands from the Rust side (such as saving the model or receiving trajectories).
 //! It uses asynchronous tasks to communicate with the Python process via its standard input/output.
 
-use crate::types::trajectory::RL4SysTrajectory;
+use crate::types::trajectory::RelayRLTrajectory;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::ops::Deref;
@@ -35,7 +35,7 @@ const PYTHON_ALGORITHM_REPLY_SCRIPT: &str = "src/native/python/python_algorithm_
 #[derive(Debug)]
 pub enum PythonAlgorithmCommand {
     SaveModel(tokio_oneshot::Sender<bool>),
-    ReceiveTrajectory(tokio_oneshot::Sender<bool>, RL4SysTrajectory),
+    ReceiveTrajectory(tokio_oneshot::Sender<bool>, RelayRLTrajectory),
 }
 
 /// A request sent from Rust to the Python subprocess.
@@ -44,7 +44,7 @@ pub enum PythonAlgorithmCommand {
 #[derive(Serialize, Deserialize)]
 struct PythonRequest {
     command: String,
-    trajectory: Option<PyRL4SysTrajectory>,
+    trajectory: Option<PyRelayRLTrajectory>,
 }
 
 /// The PythonAlgorithmRequest manages a Python subprocess that executes a command worker script.

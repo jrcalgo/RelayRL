@@ -1,7 +1,7 @@
-//! RL4Sys Logging Builder
+//! RelayRL Logging Builder
 //!
 //! This module provides a fluent builder API for constructing
-//! custom logging configurations for the RL4Sys framework.
+//! custom logging configurations for the RelayRL framework.
 
 use super::sinks::{console::create_console_appender, file::create_file_appender};
 use log::LevelFilter;
@@ -107,7 +107,7 @@ impl LoggingBuilder {
     ///
     /// # Arguments
     ///
-    /// * `module` - The module path (e.g., "rl4sys_framework::network")
+    /// * `module` - The module path (e.g., "relayrl_framework::network")
     /// * `level` - The log level for this module
     ///
     /// # Returns

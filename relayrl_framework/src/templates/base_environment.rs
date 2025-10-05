@@ -1,10 +1,10 @@
-//! This module defines traits for training and testing environments in the RL4Sys framework.
+//! This module defines traits for training and testing environments in the RelayRL framework.
 //! These traits provide a common interface for building observations, running the environment loop,
 //! and (in the case of training) calculating performance metrics during model training.
 
 /// The `EnvironmentTrainingTrait` defines the interface that must be implemented by any
 /// environment where a model is trained. Implementing this trait allows an environment to
-/// interact with the RL4Sys framework's training pipeline.
+/// interact with the RelayRL framework's training pipeline.
 ///
 /// # Methods
 ///

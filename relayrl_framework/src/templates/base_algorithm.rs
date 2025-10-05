@@ -1,20 +1,20 @@
 //! This module defines a trait that must be implemented by any learning algorithm
-//! (such as DQN, PPO, etc.) that is integrated with the RL4Sys framework. The trait
+//! (such as DQN, PPO, etc.) that is integrated with the RelayRL framework. The trait
 //! specifies the required functionality for saving models, receiving trajectories,
 //! training the model, and logging training epochs.
 
-use crate::types::action::RL4SysActionTrait;
-use crate::types::trajectory::RL4SysTrajectoryTrait;
+use crate::types::action::RelayRLActionTrait;
+use crate::types::trajectory::RelayRLTrajectoryTrait;
 
 /// The `AlgorithmTrait` defines the interface that every algorithm implementation must fulfill.
 ///
 /// # Associated Types
 ///
 /// * `Action`: Represents the type of action that the algorithm produces. This type must implement
-///   the [`RL4SysActionTrait`].
+///   the [`RelayRLActionTrait`].
 ///
 /// * `Trajectory`: Represents the type of trajectory (a sequence of actions) that the algorithm uses
-///   for training. This type must implement [`RL4SysTrajectoryTrait`] with its `Action` type matching `Self::Action`.
+///   for training. This type must implement [`RelayRLTrajectoryTrait`] with its `Action` type matching `Self::Action`.
 ///
 /// # Required Methods
 ///
@@ -33,8 +33,8 @@ use crate::types::trajectory::RL4SysTrajectoryTrait;
 ///   Log the training status or results for the current epoch. This may include metrics such as loss,
 ///   reward averages, etc.
 pub trait AlgorithmTrait {
-    type Action: RL4SysActionTrait;
-    type Trajectory: RL4SysTrajectoryTrait<Action = Self::Action>;
+    type Action: RelayRLActionTrait;
+    type Trajectory: RelayRLTrajectoryTrait<Action = Self::Action>;
 
     /// Saves the current model to a file specified by `filename`.
     ///

@@ -5,9 +5,9 @@ use crate::network::client::runtime::transport::AsyncClientTransport;
 #[cfg(feature = "grpc_network")]
 use crate::network::{HotReloadableModel, validate_model};
 #[cfg(feature = "grpc_network")]
-use crate::types::action::RL4SysAction;
+use crate::types::action::RelayRLAction;
 #[cfg(feature = "grpc_network")]
-use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
+use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 #[cfg(feature = "grpc_network")]
 use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "grpc_network")]
@@ -39,7 +39,7 @@ use uuid::{Timestamp, Uuid};
 // Generated proto definitions
 #[cfg(feature = "grpc_network")]
 pub mod rl_service {
-    tonic::include_proto!("rl4sys");
+    tonic::include_proto!("relayrl");
 }
 
 #[cfg(feature = "grpc_network")]
@@ -133,7 +133,7 @@ impl TonicClient {
         Ok(response.into_inner())
     }
 
-    fn convert_rl4sys_to_proto_trajectory(&self, traj: &RL4SysTrajectory) -> Trajectory {
+    fn convert_relayrl_to_proto_trajectory(&self, traj: &RelayRLTrajectory) -> Trajectory {
         let actions: Vec<Action> = traj
             .actions
             .iter()
@@ -230,10 +230,10 @@ impl TonicClient {
         Ok(())
     }
 
-    /// Helper method to send an RL4SysTrajectory directly (for compatibility with internal usage)
-    pub async fn send_rl4sys_trajectory(
+    /// Helper method to send an RelayRLTrajectory directly (for compatibility with internal usage)
+    pub async fn send_relayrl_trajectory(
         &self,
-        trajectory: RL4SysTrajectory,
+        trajectory: RelayRLTrajectory,
         training_server_address: &str,
     ) -> Result<(), String> {
         let mut client = Self::new(&self.config);
@@ -246,7 +246,7 @@ impl TonicClient {
             return Err(format!("Failed to initialize algorithm: {}", e));
         }
 
-        let proto_trajectory = client.convert_rl4sys_to_proto_trajectory(&trajectory);
+        let proto_trajectory = client.convert_relayrl_to_proto_trajectory(&trajectory);
 
         match client
             .send_trajectories_with_timeout(training_server_address, vec![proto_trajectory])
@@ -446,7 +446,7 @@ impl AsyncClientTransport for TonicClient {
         }
     }
 
-    fn convert_rl4sys_to_proto_trajectory(&self, traj: &RL4SysTrajectory) -> Trajectory {
+    fn convert_relayrl_to_proto_trajectory(&self, traj: &RelayRLTrajectory) -> Trajectory {
         // Delegate to the existing implementation method
         let actions: Vec<Action> = traj
             .actions

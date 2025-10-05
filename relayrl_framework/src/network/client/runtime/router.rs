@@ -2,8 +2,8 @@ use crate::network::client::runtime::coordination::state_manager::StateManager;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::TransportClient;
-use crate::types::action::RL4SysAction;
-use crate::types::trajectory::RL4SysTrajectory;
+use crate::types::action::RelayRLAction;
+use crate::types::trajectory::RelayRLTrajectory;
 use dashmap::DashMap;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ pub(crate) enum RoutedPayload {
         observation: Tensor,
         mask: Tensor,
         reward: f32,
-        reply_to: oneshot::Sender<Arc<RL4SysAction>>,
+        reply_to: oneshot::Sender<Arc<RelayRLAction>>,
     },
     FlagLastInference {
         reward: f32,
@@ -55,20 +55,20 @@ pub(crate) enum RoutedPayload {
     },
     SendTrajectory {
         timestamp: (u128, u128),
-        trajectory: RL4SysTrajectory,
+        trajectory: RelayRLTrajectory,
     },
     Shutdown,
 }
 
 /// Intermediary routing process/filter for routing received models to specified ActorEntity
 pub(crate) struct ClientFilter {
-    rx_from_receiver: Receiver<RoutedMessage>,
+    rx_from_receiver: Arc<RwLock<Receiver<RoutedMessage>>>,
     shared_agent_state: Arc<RwLock<StateManager>>,
 }
 
 impl ClientFilter {
     pub(crate) fn new(
-        rx_from_receiver: Receiver<RoutedMessage>,
+        rx_from_receiver: Arc<RwLock<Receiver<RoutedMessage>>>,
         shared_agent_state: Arc<RwLock<StateManager>>,
     ) -> Self {
         Self {
@@ -78,7 +78,7 @@ impl ClientFilter {
     }
 
     pub(crate) async fn spawn_loop(&mut self) {
-        while let Some(msg) = self.rx_from_receiver.recv().await {
+        while let Some(msg) = self.rx_from_receiver.write().await.recv().await {
             if let RoutingProtocol::Shutdown = msg.protocol {
                 self.route(msg).await;
                 break;
@@ -152,7 +152,7 @@ type PriorityRank = i64;
 struct SenderQueueEntry {
     priority: PriorityRank, // lower = sooner, higher = later
     actor_id: Uuid,
-    traj_to_send: RL4SysTrajectory,
+    traj_to_send: RelayRLTrajectory,
 }
 
 impl Eq for SenderQueueEntry {}
@@ -178,7 +178,7 @@ impl Ord for SenderQueueEntry {
 /// Receives trajectories from ActorEntity and creates send_traj tasks to send to a training server
 pub(crate) struct ClientExternalSender {
     active: AtomicBool,
-    rx_from_actor: Receiver<RoutedMessage>,
+    rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
     actor_last_sent: DashMap<Uuid, i64>,
     traj_heap: Arc<Mutex<BinaryHeap<SenderQueueEntry>>>,
     transport: Option<Arc<TransportClient>>,
@@ -186,7 +186,7 @@ pub(crate) struct ClientExternalSender {
 }
 
 impl ClientExternalSender {
-    pub fn new(rx_from_actor: Receiver<RoutedMessage>, server_address: String) -> Self {
+    pub fn new(rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>, server_address: String) -> Self {
         Self {
             active: AtomicBool::new(false),
             rx_from_actor,
@@ -206,12 +206,12 @@ impl ClientExternalSender {
         self.active.store(true, Ordering::SeqCst);
 
         let (_tx_dummy, rx_dummy) = tokio::sync::mpsc::channel(1);
-        let mut rx = std::mem::replace(&mut self.rx_from_actor, rx_dummy);
+        let rx = std::mem::replace(&mut self.rx_from_actor, Arc::new(RwLock::new(rx_dummy)));
         let heap_arc = self.traj_heap.clone();
         let actor_last_sent = self.actor_last_sent.clone();
 
         tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
+            while let Some(msg) = rx.write().await.recv().await {
                 if let RoutedPayload::SendTrajectory {
                     timestamp,
                     trajectory,
@@ -242,7 +242,7 @@ impl ClientExternalSender {
         &self,
         id: Uuid,
         priority_rank: i64,
-        trajectory: RL4SysTrajectory,
+        trajectory: RelayRLTrajectory,
     ) {
         let queue_entry = SenderQueueEntry {
             priority: priority_rank as PriorityRank,
@@ -322,7 +322,7 @@ impl ClientExternalSender {
                 #[cfg(feature = "grpc_network")]
                 TransportClient::Async(async_client) => {
                     let grpc_traj =
-                        async_client.convert_rl4sys_to_proto_trajectory(&entry.traj_to_send);
+                        async_client.convert_relayrl_to_proto_trajectory(&entry.traj_to_send);
                     async_client
                         .send_traj_to_server(grpc_traj, &server_address)
                         .await;

@@ -1,21 +1,21 @@
-//! This module provides utilities for converting between internal RL4Sys action and tensor types
+//! This module provides utilities for converting between internal RelayRL action and tensor types
 //! and their serialized representations using safetensors. It also defines error types and
 //! conversion functions to support these operations.
 
-use crate::proto::{Action as GrpcRL4SysAction, Trajectory};
+use crate::proto::{Action as GrpcRelayRLAction, Trajectory};
 use crate::types::NetworkParticipant;
-use crate::types::action::{RL4SysAction, SafeTensorError, TensorData};
-use crate::types::trajectory::{RL4SysTrajectory, RL4SysTrajectoryTrait};
+use crate::types::action::{RelayRLAction, SafeTensorError, TensorData};
+use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 
 use tch::{CModule, Device, TchError};
 use tempfile::NamedTempFile;
 
-use crate::types::action::RL4SysData;
+use crate::types::action::RelayRLData;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Serializes an internal [`RL4SysAction`] into its gRPC representation.
+/// Serializes an internal [`RelayRLAction`] into its gRPC representation.
 ///
 /// For each tensor field (observation, action, and mask), if present, the function extracts its
 /// underlying serialized byte vector; otherwise, it produces an empty vector. Additionally, if
@@ -23,13 +23,13 @@ use std::path::PathBuf;
 ///
 /// # Arguments
 ///
-/// * `action` - A reference to the [`RL4SysAction`] instance to be serialized.
+/// * `action` - A reference to the [`RelayRLAction`] instance to be serialized.
 ///
 /// # Returns
 ///
-/// A [`GrpcRL4SysAction`] struct containing the serialized observation, action, mask, reward,
+/// A [`GrpcRelayRLAction`] struct containing the serialized observation, action, mask, reward,
 /// auxiliary data, and flags.
-pub(crate) fn serialize_action(action: &RL4SysAction) -> GrpcRL4SysAction {
+pub(crate) fn serialize_action(action: &RelayRLAction) -> GrpcRelayRLAction {
     // Retrieve serialized bytes for each tensor field; use an empty vector if absent.
     let obs_bytes = action
         .obs
@@ -48,13 +48,13 @@ pub(crate) fn serialize_action(action: &RL4SysAction) -> GrpcRL4SysAction {
     let data: HashMap<String, Vec<u8>> = action.data.as_ref().map_or_else(HashMap::new, |map| {
         map.iter()
             .map(|(k, v)| {
-                let serialized = serde_json::to_vec(v).expect("Serialization of RL4SysData failed");
+                let serialized = serde_json::to_vec(v).expect("Serialization of RelayRLData failed");
                 (k.clone(), serialized)
             })
             .collect()
     });
 
-    GrpcRL4SysAction {
+    GrpcRelayRLAction {
         obs: obs_bytes,
         action: act_bytes,
         mask: mask_bytes,
@@ -64,59 +64,59 @@ pub(crate) fn serialize_action(action: &RL4SysAction) -> GrpcRL4SysAction {
     }
 }
 
-/// Deserializes a gRPC action message into an internal [`RL4SysAction`].
+/// Deserializes a gRPC action message into an internal [`RelayRLAction`].
 ///
 /// For each tensor field, if the provided byte vector is nonempty, it attempts to convert the bytes
-/// back into a tensor representation via [`RL4SysAction::from_bytes`]. It also deserializes any
+/// back into a tensor representation via [`RelayRLAction::from_bytes`]. It also deserializes any
 /// auxiliary data from JSON bytes.
 ///
 /// # Arguments
 ///
-/// * `grpc_action` - A [`GrpcRL4SysAction`] containing the serialized action data.
+/// * `grpc_action` - A [`GrpcRelayRLAction`] containing the serialized action data.
 ///
 /// # Returns
 ///
 /// A [`Result`] which is:
-/// - `Ok(RL4SysAction)` if deserialization succeeds, or
+/// - `Ok(RelayRLAction)` if deserialization succeeds, or
 /// - `Err(SafeTensorError)` if any conversion fails.
 pub(crate) fn deserialize_action(
-    grpc_action: GrpcRL4SysAction,
-) -> Result<RL4SysAction, SafeTensorError> {
+    grpc_action: GrpcRelayRLAction,
+) -> Result<RelayRLAction, SafeTensorError> {
     // Convert observation bytes to tensor if available.
     let obs: Option<TensorData> = if grpc_action.obs.is_empty() {
         None
     } else {
-        Some(RL4SysAction::from_bytes(grpc_action.obs)?)
+        Some(RelayRLAction::from_bytes(grpc_action.obs)?)
     };
 
     // Convert action bytes to tensor if available.
     let act: Option<TensorData> = if grpc_action.action.is_empty() {
         None
     } else {
-        Some(RL4SysAction::from_bytes(grpc_action.action)?)
+        Some(RelayRLAction::from_bytes(grpc_action.action)?)
     };
 
     // Convert mask bytes to tensor if available.
     let mask: Option<TensorData> = if grpc_action.mask.is_empty() {
         None
     } else {
-        Some(RL4SysAction::from_bytes(grpc_action.mask)?)
+        Some(RelayRLAction::from_bytes(grpc_action.mask)?)
     };
 
     // Deserialize auxiliary data from JSON bytes if available.
-    let data: Option<HashMap<String, RL4SysData>> = if grpc_action.data.is_empty() {
+    let data: Option<HashMap<String, RelayRLData>> = if grpc_action.data.is_empty() {
         None
     } else {
         let mut map = HashMap::new();
         for (k, v) in grpc_action.data.into_iter() {
-            let deserialized: RL4SysData = serde_json::from_slice(&v)
+            let deserialized: RelayRLData = serde_json::from_slice(&v)
                 .map_err(|e| SafeTensorError::SerializationError(e.to_string()))?;
             map.insert(k, deserialized);
         }
         Some(map)
     };
 
-    Ok(RL4SysAction {
+    Ok(RelayRLAction {
         obs,
         act,
         mask,
@@ -126,10 +126,10 @@ pub(crate) fn deserialize_action(
     })
 }
 
-/// Converts a gRPC [`Trajectory`] into an internal [`RL4SysTrajectory`].
+/// Converts a gRPC [`Trajectory`] into an internal [`RelayRLTrajectory`].
 ///
 /// This function deserializes each action in the provided gRPC trajectory and adds it to a new
-/// [`RL4SysTrajectory`] with the specified maximum trajectory length.
+/// [`RelayRLTrajectory`] with the specified maximum trajectory length.
 ///
 /// # Arguments
 ///
@@ -138,25 +138,25 @@ pub(crate) fn deserialize_action(
 ///
 /// # Returns
 ///
-/// An [`RL4SysTrajectory`] constructed from the deserialized actions.
-pub(crate) fn grpc_trajectory_to_rl4sys_trajectory(
+/// An [`RelayRLTrajectory`] constructed from the deserialized actions.
+pub(crate) fn grpc_trajectory_to_relayrl_trajectory(
     trajectory: Trajectory,
     max_traj_length: u128,
     config_path: &PathBuf,
-) -> RL4SysTrajectory {
-    let mut rl4sys_trajectory: RL4SysTrajectory = RL4SysTrajectory::new(
+) -> RelayRLTrajectory {
+    let mut relayrl_trajectory: RelayRLTrajectory = RelayRLTrajectory::new(
         Some(max_traj_length),
-        NetworkParticipant::RL4SysTrainingServer,
+        NetworkParticipant::RelayRLTrainingServer,
         config_path,
     );
 
     for action in trajectory.actions {
-        let action: RL4SysAction =
+        let action: RelayRLAction =
             deserialize_action(action).expect("failed to deserialize action");
-        rl4sys_trajectory.add_action(&action);
+        relayrl_trajectory.add_action(&action);
     }
 
-    rl4sys_trajectory
+    relayrl_trajectory
 }
 
 /// Serializes a TorchScript model (`CModule`) into a vector of bytes.

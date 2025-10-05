@@ -1,7 +1,7 @@
-//! RL4Sys Logging Filters
+//! RelayRL Logging Filters
 //!
 //! This module provides custom logging filters to control log output
-//! based on the needs of the RL4Sys framework.
+//! based on the needs of the RelayRL framework.
 
 use log::Level;
 use log4rs::filter::Filter;
