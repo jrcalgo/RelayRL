@@ -13,7 +13,7 @@ use tch::Tensor;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
-use uuid::{Timestamp, Uuid};
+use uuid::Uuid;
 
 pub(crate) struct RoutedMessage {
     pub actor_id: Uuid,

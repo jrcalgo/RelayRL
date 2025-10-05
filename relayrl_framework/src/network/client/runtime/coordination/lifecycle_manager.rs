@@ -1,9 +1,6 @@
 use crate::utilities::configuration::ClientConfigLoader;
-use log::{info, warn};
-use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::signal;
-use tokio::sync::mpsc;
+use std::path::PathBuf;
 
 /// Orchestrates startup/shutdown signals (SIGINT, config-changes)
 ///
@@ -30,5 +27,5 @@ impl LifeCycleManager {
 
     fn _handle_shutdown_signal(&self) {}
 
-    async fn _handle_config_change(&self, path: PathBuf) {}
+    async fn _handle_config_change(&self, _path: PathBuf) {}
 }

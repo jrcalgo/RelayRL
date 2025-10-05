@@ -1,26 +1,23 @@
-use crate::get_or_create_client_config_json_path;
 use crate::network::HotReloadableModel;
-use crate::network::client::runtime::actor::ActorEntity;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
-use crate::network::client::runtime::coordination::metrics_manager::MetricsManager;
+use crate::utilities::observability::metrics::MetricsManager;
 use crate::network::client::runtime::coordination::scale_manager::ScaleManager;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::{
-    ClientExternalReceiver, ClientExternalSender, ClientFilter, RoutedMessage, RoutedPayload,
+    RoutedMessage, RoutedPayload,
     RoutingProtocol,
 };
 use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
-use crate::network::{TransportType, random_uuid};
-use crate::resolve_client_config_json_path;
+use crate::network::{TransportType};
 use crate::types::action::RelayRLAction;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
+use crate::utilities::observability;
 use crate::utilities::observability::logging::builder::LoggingBuilder;
-use rand::Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tch::{CModule, Device, Tensor};
-use tokio::fs;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -35,7 +32,7 @@ pub trait ClientInterface {
         actor_count: i64,
         default_device: Device,
         default_model: Option<CModule>,
-        algorithm_name: String,
+        _algorithm_name: String,
         config_path: Option<PathBuf>,
     );
     async fn _shutdown(&mut self);
@@ -90,7 +87,7 @@ impl ClientInterface for ClientCoordinator {
         actor_count: i64,
         default_device: Device,
         default_model: Option<CModule>,
-        algorithm_name: String,
+        _algorithm_name: String,
         config_path: Option<PathBuf>,
     ) {
         let logger = LoggingBuilder::new();
@@ -201,12 +198,12 @@ impl ClientInterface for ClientCoordinator {
             }
         }
 
-        let metrics = MetricsManager::new();
+        let metrics = observability::init_observability();
 
         self.runtime_params = Some(CoordinatorParams {
             logger,
             lifecycle,
-            state: Arc::from(shared_state),
+            state: shared_state,
             scaling,
             metrics,
         });
@@ -240,12 +237,14 @@ impl ClientInterface for ClientCoordinator {
         match &self.runtime_params {
             Some(params) => {
                 let pid: u32 = std::process::id();
-                let pid_bytes: [u8; _] = pid.to_be_bytes();
+                let pid_bytes: [u8; 4] = pid.to_be_bytes();
 
                 let mut pid_buf: [u8; 16] = [0u8; 16];
                 pid_buf[..4].copy_from_slice(&pid_bytes);
 
                 let id: Uuid = Uuid::new_v8(pid_buf);
+
+                params.metrics.record_counter("actors_created", 1, &[]);
 
                 params
                     .state
@@ -268,6 +267,7 @@ impl ClientInterface for ClientCoordinator {
     async fn _remove_actor(&mut self, id: Uuid) {
         match &self.runtime_params {
             Some(params) => {
+                params.metrics.record_counter("actors_removed", 1, &[]);
                 params.state.write().await.__remove_actor(id);
             }
             None => {
@@ -293,7 +293,7 @@ impl ClientInterface for ClientCoordinator {
                 .await
                 .__set_actor_id(current_id, new_id),
             None => {
-                return Err("[Coordinator] No runtime instance to _shutdown...".to_string());
+                Err("[Coordinator] No runtime instance to _shutdown...".to_string())
             }
         }
     }
@@ -306,7 +306,9 @@ impl ClientInterface for ClientCoordinator {
         reward: f32,
     ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String> {
         match &self.runtime_params {
-            Some(_) => {
+            Some(params) => {
+                let start_time = Instant::now();
+                let num_ids = ids.len() as u64;
                 let mut actions = Vec::with_capacity(ids.len());
 
                 let router_runtime_params = self
@@ -353,6 +355,15 @@ impl ClientInterface for ClientCoordinator {
                         Err(e) => return Err(e),
                     }
                 }
+
+                let duration = start_time.elapsed().as_secs_f64();
+                params
+                    .metrics
+                    .record_histogram("action_request_latency", duration, &[]);
+                params
+                    .metrics
+                    .record_counter("action_requests", num_ids, &[]);
+
                 Ok(actions)
             }
             None => Err("[Coordinator] No runtime instance to _shutdown..."

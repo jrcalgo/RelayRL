@@ -3,7 +3,6 @@
 //! conversion functions to support these operations.
 
 use crate::proto::{Action as GrpcRelayRLAction, Trajectory};
-use crate::types::NetworkParticipant;
 use crate::types::action::{RelayRLAction, SafeTensorError, TensorData};
 use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 
@@ -144,11 +143,7 @@ pub(crate) fn grpc_trajectory_to_relayrl_trajectory(
     max_traj_length: u128,
     config_path: &PathBuf,
 ) -> RelayRLTrajectory {
-    let mut relayrl_trajectory: RelayRLTrajectory = RelayRLTrajectory::new(
-        Some(max_traj_length),
-        NetworkParticipant::RelayRLTrainingServer,
-        config_path,
-    );
+    let mut relayrl_trajectory: RelayRLTrajectory = RelayRLTrajectory::new(max_traj_length);
 
     for action in trajectory.actions {
         let action: RelayRLAction =

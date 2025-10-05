@@ -1,19 +1,14 @@
 #[cfg(feature = "grpc_network")]
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
-#[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 #[cfg(feature = "grpc_network")]
-use crate::network::{HotReloadableModel, validate_model};
+use crate::network::validate_model;
 #[cfg(feature = "grpc_network")]
-use crate::types::action::RelayRLAction;
-#[cfg(feature = "grpc_network")]
-use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
+use crate::types::trajectory::RelayRLTrajectory;
 #[cfg(feature = "grpc_network")]
 use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "grpc_network")]
-use crate::utilities::orchestration::tonic_utils::{
-    deserialize_model, serialize_action, serialize_model,
-};
+use crate::utilities::orchestration::tonic_utils::
+    deserialize_model;
 #[cfg(feature = "grpc_network")]
 use async_trait::async_trait;
 #[cfg(feature = "grpc_network")]
@@ -24,17 +19,13 @@ use std::sync::{
     atomic::{AtomicI64, Ordering},
 };
 #[cfg(feature = "grpc_network")]
-use tch::{CModule, TchError};
-#[cfg(feature = "grpc_network")]
-use tokio::sync::mpsc::Sender;
+use tch::CModule;
 #[cfg(feature = "grpc_network")]
 use tokio::time::{Duration, timeout};
 #[cfg(feature = "grpc_network")]
 use tonic::Request;
 #[cfg(feature = "grpc_network")]
 use tonic::transport::Channel;
-#[cfg(feature = "grpc_network")]
-use uuid::{Timestamp, Uuid};
 
 // Generated proto definitions
 #[cfg(feature = "grpc_network")]
@@ -44,7 +35,7 @@ pub mod rl_service {
 
 #[cfg(feature = "grpc_network")]
 use rl_service::{
-    Action, GetModelRequest, InitRequest, InitResponse, ModelResponse, ParameterValue,
+    Action, GetModelRequest, InitRequest, ModelResponse, ParameterValue,
     SendTrajectoriesRequest, SendTrajectoriesResponse, Trajectory,
     rl_service_client::RlServiceClient,
 };

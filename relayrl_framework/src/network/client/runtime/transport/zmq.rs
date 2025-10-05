@@ -1,17 +1,11 @@
-use crate::get_or_create_client_config_json_path;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::SyncClientTransport;
 use crate::network::client::runtime::transport::serialize_trajectory;
-use crate::network::{HotReloadableModel, validate_model};
-use crate::types::NetworkParticipant;
-use crate::types::action::RelayRLAction;
-use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
+use crate::network::validate_model;
+use crate::types::trajectory::RelayRLTrajectory;
 use crate::utilities::configuration::ClientConfigLoader;
-use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tch::{CModule, Device};
+use tch::CModule;
 use tempfile::NamedTempFile;
 use tokio::task;
 use uuid::Uuid;
@@ -217,7 +211,6 @@ impl SyncClientTransport for ZmqClient {
         >,
     ) {
         let sub_address = self.training_server_address.clone();
-        let identity = self.client_identity.clone();
 
         task::spawn_blocking(move || {
             let context = Context::new();

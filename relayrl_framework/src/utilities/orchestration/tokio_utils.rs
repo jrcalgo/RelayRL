@@ -1,20 +1,19 @@
 use once_cell::sync::Lazy;
 use std::convert::TryInto;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::runtime::{Builder as TokioBuilder, Runtime};
 
 #[cfg(feature = "console-subscriber")]
-static CONSOLE_SUBSCRIBER_STATUS: Lazy<Arc<RwLock<AtomicBool>>> =
-    Lazy::new(|| Arc::new(RwLock::new(AtomicBool::new(false))));
+static CONSOLE_SUBSCRIBER_STATUS: Lazy<Arc<RwLock<std::sync::atomic::AtomicBool>>> =
+    Lazy::new(|| Arc::new(RwLock::new(std::sync::atomic::AtomicBool::new(false))));
 
 #[cfg(feature = "console-subscriber")]
 pub(crate) fn register_console_subscriber_status(status: bool) {
     let mut registery = CONSOLE_SUBSCRIBER_STATUS
         .write()
         .expect("Console Subscriber Status unavailable");
-    *registery = AtomicBool::from(status);
+    *registery = std::sync::atomic::AtomicBool::from(status);
 }
 
 #[cfg(feature = "console-subscriber")]

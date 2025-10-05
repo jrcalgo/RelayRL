@@ -205,7 +205,7 @@ impl RelayRLAgentActors for RelayRLAgent {
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move {
-            &mut self.coordinator._remove_actor(id).await;
+            let _ = &mut self.coordinator._remove_actor(id).await;
             Ok(())
         })
     }

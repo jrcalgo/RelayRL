@@ -2,23 +2,9 @@
 //! the RelayRLTrajectory type and trait. It uses serde_pickle for serialization and ZMQ for sending
 //! the serialized data to a trajectory server.
 
-use crate::types::NetworkParticipant;
 use crate::types::action::RelayRLAction;
 use crate::types::action::RelayRLActionTrait;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-#[cfg(feature = "zmq_network")]
-use zmq;
-#[cfg(feature = "zmq_network")]
-use zmq::{Context, Socket};
-
-#[cfg(any(
-    feature = "networks",
-    feature = "grpc_network",
-    feature = "zmq_network",
-    feature = "python_bindings"
-))]
-use crate::utilities::configuration::{ClientConfigLoader, ServerConfigLoader};
 
 /// Trait that defines the interface for trajectory handling.
 ///
@@ -52,27 +38,12 @@ impl RelayRLTrajectory {
     ///
     /// # Arguments
     ///
-    /// * `max_length` - An optional maximum trajectory length. Must be provided.
-    /// * `trajectory_server` - An optional trajectory server address.
+    /// * `max_length` - The maximum trajectory length to retain before clearing.
     ///
     /// # Returns
     ///
     /// A new instance of RelayRLTrajectory.
-    pub fn new(
-        max_length: Option<u128>,
-        network_participant: NetworkParticipant,
-        config_path: &PathBuf,
-    ) -> Self {
-        let max_length: u128 = max_length.unwrap_or_else(|| match network_participant {
-            NetworkParticipant::RelayRLAgent => {
-                let loader = ClientConfigLoader::load_config(config_path);
-                loader.transport_config.max_traj_length
-            }
-            NetworkParticipant::RelayRLTrainingServer => {
-                let loader = ServerConfigLoader::load_config(config_path);
-                loader.transport_config.max_traj_length
-            }
-        });
+    pub fn new(max_length: u128) -> Self {
         println!(
             "[RelayRLTrajectory] New {:?} length trajectory created",
             max_length

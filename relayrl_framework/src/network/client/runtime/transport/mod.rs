@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_pickle as pickle;
 use std::io::Cursor;
-use std::sync::Arc;
 use tch::CModule;
 use tokio::sync::mpsc::Sender;
 

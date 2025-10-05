@@ -63,24 +63,19 @@ impl TrainingServerBuilder {
     }
 
     pub async fn build(self) -> Result<TrainingServer, String> {
-        let actor_count = self.actor_count.unwrap_or(1);
-        let default_device = self.default_device.unwrap_or(Device::Cpu);
-        let default_model = self.default_model;
-        let algorithm_name = self
+        let _actor_count = self.actor_count.unwrap_or(1);
+        let _default_device = self.default_device.unwrap_or(Device::Cpu);
+        let _default_model = self.default_model;
+        let _algorithm_name = self
             .algorithm_name
             .unwrap_or_else(|| "default_algorithm".to_string());
-        let config_path = self
+        let _config_path = self
             .config_path
             .unwrap_or_else(|| PathBuf::from("config.json"));
 
         // Initialize the server with the provided parameters
         let server = TrainingServer::new(
             self.network_type,
-            actor_count,
-            default_device,
-            default_model,
-            algorithm_name,
-            config_path,
         );
 
         Ok(server)

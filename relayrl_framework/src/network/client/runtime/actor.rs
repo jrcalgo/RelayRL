@@ -1,9 +1,7 @@
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 #[cfg(feature = "grpc_network")]
-use crate::network::client::runtime::transport::AsyncClientTransport;
-use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
-use crate::network::{HotReloadableModel, TransportType, validate_model};
-use crate::types::NetworkParticipant;
+use crate::network::client::runtime::transport::TransportClient;
+use crate::network::{HotReloadableModel, validate_model};
 use crate::types::action::RelayRLAction;
 use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 use crate::utilities::configuration::ClientConfigLoader;
@@ -14,7 +12,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tch::{CModule, Device, TchError};
 use tokio::sync::mpsc::{Receiver, Sender};
-use uuid::{ClockSequence, Timestamp, Uuid};
+use uuid::Uuid;
 
 pub trait ActorEntity: Send + Sync + 'static {
     async fn new(
@@ -35,8 +33,8 @@ pub trait ActorEntity: Send + Sync + 'static {
     fn __flag_last_action(&mut self, msg: RoutedMessage);
     fn __get_model_version(&self, msg: RoutedMessage);
     async fn _refresh_model(&self, msg: RoutedMessage);
-    fn __get_actor_statistics(&self, msg: RoutedMessage);
-    async fn _handle_shutdown(&self, msg: RoutedMessage);
+    fn __get_actor_statistics(&self, _msg: RoutedMessage);
+    async fn _handle_shutdown(&self, _msg: RoutedMessage);
 }
 
 /// Responsible for performing inference with an in-memory TorchScript model
@@ -67,7 +65,7 @@ impl ActorEntity for Actor {
     where
         Self: Sized,
     {
-        let max_length = Some(shared_config.transport_config.max_traj_length);
+        let max_length = shared_config.transport_config.max_traj_length;
 
         let mut actor = Self {
             id,
@@ -75,11 +73,7 @@ impl ActorEntity for Actor {
             model_path,
             model_latest_version: 0,
             model_device: device,
-            current_traj: RelayRLTrajectory::new(
-                max_length,
-                NetworkParticipant::RelayRLAgent,
-                &shared_config.client_config.config_path,
-            ),
+            current_traj: RelayRLTrajectory::new(max_length),
             rx_from_router,
             shared_tx_to_sender,
             transport: Some(transport),
@@ -158,7 +152,13 @@ impl ActorEntity for Actor {
 
                                 match &self.model {
                                     Some(model) => {
-                                        model.reload(self.model_path.clone(), version).await;
+                                        let model_version = model.reload(self.model_path.clone(), version).await;
+                                        match model_version {
+                                            Ok(_) => (),
+                                            Err(e) => {
+                                                eprintln!("[Actor {:?}] Failed to reload model: {}", self.id, e);
+                                            }
+                                        }
                                     }
                                     None => {
                                         self.model = Some(
@@ -214,7 +214,13 @@ impl ActorEntity for Actor {
 
                                 match &self.model {
                                     Some(model) => {
-                                        model.reload(self.model_path.clone(), version).await;
+                                        let model_version = model.reload(self.model_path.clone(), version).await;
+                                        match model_version {
+                                            Ok(_) => (),
+                                            Err(e) => {
+                                                eprintln!("[Actor {:?}] Failed to reload model: {}", self.id, e);
+                                            }
+                                        }
                                     }
                                     None => {
                                         self.model = Some(
@@ -368,7 +374,7 @@ impl ActorEntity for Actor {
         }
     }
 
-    fn __get_actor_statistics(&self, msg: RoutedMessage) {}
+    fn __get_actor_statistics(&self, _msg: RoutedMessage) {}
 
-    async fn _handle_shutdown(&self, msg: RoutedMessage) {}
+    async fn _handle_shutdown(&self, _msg: RoutedMessage) {}
 }

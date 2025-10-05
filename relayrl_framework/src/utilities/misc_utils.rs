@@ -1,11 +1,5 @@
-use serde::{Deserialize, Serialize};
 use std::any::TypeId;
-
-macro_rules! arc {
-    ($($elem:expr),*) => {{
-        Arc::new([$($elem),*])
-    }};
-}
+use std::mem::size_of;
 
 pub(crate) fn round_to_8_decimals<N>(num: N) -> N
 where

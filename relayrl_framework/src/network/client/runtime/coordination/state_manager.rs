@@ -5,10 +5,8 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 use dashmap::DashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tch::{CModule, Device};
-use tokio::sync::RwLock;
+use tch::Device;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;

@@ -52,24 +52,7 @@ pub mod templates;
 pub mod utilities {
     pub mod configuration;
     pub(crate) mod misc_utils;
-    pub(crate) mod observability {
-        pub(crate) mod logging {
-            mod sinks {
-                pub(crate) mod console;
-                pub(crate) mod file;
-            }
-            pub(crate) mod builder;
-            pub(crate) mod filters;
-        }
-        pub(crate) mod metrics {
-            mod export {
-                mod open_telemetry;
-                mod prometheus;
-            }
-            pub(crate) mod definitions;
-            pub(crate) mod registry;
-        }
-    }
+    pub mod observability;
     pub(crate) mod orchestration;
 }
 
