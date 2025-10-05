@@ -8,16 +8,10 @@ pub mod open_telemetry;
 
 // Re-export commonly used functions
 pub use prometheus::{
-    init_prometheus_exporter,
-    init_prometheus_exporter_with_settings,
-    set_prometheus_host,
-    set_prometheus_port,
-    set_prometheus_endpoint,
+    create_prometheus_registry,
+    get_metrics_as_string,
 };
 
 pub use open_telemetry::{
-    init_opentelemetry,
     init_opentelemetry_with_otlp,
-    set_service_name,
-    set_export_interval,
 }; 

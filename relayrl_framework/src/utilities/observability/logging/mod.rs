@@ -4,7 +4,7 @@
 //! enabling client and server components to emit structured logs for debugging,
 //! monitoring, and auditing purposes.
 
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use log::LevelFilter;
 use log4rs::{
     append::console::{ConsoleAppender, Target},
@@ -66,14 +66,18 @@ pub fn init_logging() {
 ///
 /// * `Result<(), String>` - Success or error message
 pub fn init_logging_from_file(config_path: &str) -> Result<(), String> {
+    let result = Mutex::new(Ok(()));
     INIT.call_once(|| {
         match log4rs::init_file(config_path, Default::default()) {
             Ok(_) => log::info!("RelayRL logging initialized from config file: {}", config_path),
-            Err(e) => return Err(format!("Failed to initialize logging: {}", e)),
+            Err(e) => {
+                let mut result_guard = result.lock().unwrap();
+                *result_guard = Err(format!("Failed to initialize logging: {}", e));
+            }
         }
     });
-    
-    Ok(())
+
+    result.into_inner().unwrap()
 }
 
 /// Resets and reconfigures logging with builder-created configuration

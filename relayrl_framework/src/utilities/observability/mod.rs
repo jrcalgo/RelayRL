@@ -12,11 +12,20 @@ pub mod logging;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 
+#[cfg(feature = "metrics")]
+use metrics::MetricsManager;
+
 /// Initialize all observability components based on current configuration
+#[cfg(feature = "metrics")]
+pub fn init_observability() -> MetricsManager {
+    #[cfg(feature = "logging")]
+    logging::init_logging();
+
+    metrics::init_metrics()
+}
+
+#[cfg(not(feature = "metrics"))]
 pub fn init_observability() {
     #[cfg(feature = "logging")]
     logging::init_logging();
-    
-    #[cfg(feature = "metrics")]
-    metrics::init_metrics();
 } 

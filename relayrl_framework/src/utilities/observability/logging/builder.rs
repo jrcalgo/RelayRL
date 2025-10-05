@@ -20,6 +20,7 @@ pub struct LoggingBuilder {
     config_builder: ConfigBuilder,
     root_builder: RootBuilder,
     appenders: Vec<String>,
+    level: LevelFilter,
 }
 
 impl LoggingBuilder {
@@ -29,6 +30,7 @@ impl LoggingBuilder {
             config_builder: Config::builder(),
             root_builder: Root::builder(),
             appenders: Vec::new(),
+            level: LevelFilter::Info,
         }
     }
 
@@ -99,7 +101,7 @@ impl LoggingBuilder {
     ///
     /// * `Self` - The builder instance for method chaining
     pub fn with_level(mut self, level: LevelFilter) -> Self {
-        self.root_builder = self.root_builder.build(level);
+        self.level = level;
         self
     }
 
@@ -130,7 +132,9 @@ impl LoggingBuilder {
             return Err("At least one appender must be configured".to_string());
         }
 
-        match self.config_builder.build(self.root_builder) {
+        let root = self.root_builder.build(self.level);
+
+        match self.config_builder.build(root) {
             Ok(config) => Ok(config),
             Err(e) => Err(format!("Failed to build log configuration: {}", e)),
         }

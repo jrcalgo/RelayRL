@@ -1,88 +1,67 @@
-# Package metadata and basic configuration for the relayrl_framework crate.
 [package]
-name = "relayrl_framework"                 # The name of the package.
-version = "0.5.0"                         # Current version of the package.
-authors = ["DIRLab"]                      # List of authors.
-edition = "2024"                          # Rust edition being used.
-description = "A system-oriented reinforcement learning framework using a Rust backend with Python interfaces."  # Brief description.
-readme = "README.md"                      # Path to the README file.
-keywords = ['reinforcement', 'learning', 'rl-framework', 'client-server', 'system-integration']  # Keywords for discovery.
-categories = ['science', 'simulation', 'asynchronous', 'network-programming']  # Crates.io categories.
-license = "MIT"                           # License identifier.
+name = "relayrl_framework"
+version = "0.5.0"
+authors = ["jrcalgo <jacksonr1212@outlook.com>"]
+edition = "2024"
+description = "A system-oriented reinforcement learning framework using a Rust backend with Python interfaces."
+readme = "README.md"
+keywords = ['reinforcement', 'learning', 'rl-framework', 'client-server', 'system-integration']
+categories = ['science', 'simulation', 'asynchronous', 'network-programming']
+license = "Apache-2.0"
 
-# documentation configuration.
 [package.metadata.docs.rs]
 all-features = true
 
-# Library configuration.
 [lib]
-name = "relayrl_framework"                 # Name of the library.
-crate-type = ["rlib", "cdylib"]                   # Generate a cdylib for FFI (e.g., for Python bindings). rlib is the default library type.
+name = "relayrl_framework"
+crate-type = ["rlib", "cdylib"]
 
-# Optional features.
 [features]
 default = ["networks", "logging", "metrics"]       # Enables default and necessary features for operation in Rust.
-full = ["networks", "logging", "metrics", "python_bindings", "wasm_bindings"]       # Enables all supported features.
 networks = ["grpc_network", "zmq_network"]         # Enables networking modules with their accompanying python IPC.
-grpc_network = ["tonic", "prost", "tonic-build", "pyo3", "data_types"]        # Enables gRPC messaging support between agents and training server.
-zmq_network = ["zmq", "pyo3", "data_types"]           # Enables ZeroMQ messaging support between agents and training server.
-data_types = []          # Enables training data medium used in RelayRL; compiles trajectory and action types.
+grpc_network = ["tonic", "prost", "tonic-build"]        # Enables gRPC messaging support between agents and training server.
+zmq_network = ["zmq"]           # Enables ZeroMQ messaging support between agents and training server.
 logging = ["log4rs"]       # Enables logging support.
-metrics = ["prometheus", "opentelemetry"]       # Enables metrics support.
-python_ipc_channel = ["pyo3"]       # ***Currently unused; meant to abstract out pyo3 from networking modules.***
-python_bindings = ["networks"]       # Enables Python bindings of relayrl_framework for export availability.
-wasm_bindings = ["wasm-bindgen", "tonic", "prost", "tonic-build", "zmq", "pyo3"]        # ***Currently unused; webassembly bindings.***
+metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]       # Enables metrics support.
 profile = ["flamegraph", "console-subscriber"]       # Enables runtime profiling support via flamegraph.
 
-# Dependencies required at runtime.
 [dependencies]
 zmq = { version = "0.10.0", optional = true }                               # ZeroMQ messaging library.
 tonic = { version = "0.12.3", optional = true }                             # gRPC library for Rust.
 prost = { version = "0.13.5", optional = true }                             # Protobuf serialization library for tonic.
 log4rs = { version = "1.3.0", optional = true }                              # Logging library.
-prometheus = { version = "0.14.0", optional = true }                        # Prometheus metrics library.
-opentelemetry = { version = "0.29.1", optional = true }                     # OpenTelemetry tracing library.
-tch = { version = "0.18.1", features=["download-libtorch", "python-extension"] }  # Torch library with Python extension support.
+prometheus = { version = "0.14.0", optional = true, features = ["process"] } # Prometheus metrics library.
+opentelemetry = { version = "0.31.0", optional = true} # OpenTelemetry tracing library.
+opentelemetry_sdk = { version = "0.31.0", optional = true, features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", optional = true }
+tch = { version = "0.18.1", features = ["download-libtorch", "python-extension"] } # Torch library with Python extension support.
 safetensors = "0.5.3"                       # Library for tensor serialization.
-tokio = { version = "1.44.2", features = ["full"] }  # Asynchronous runtime.
-once_cell = "1.20.2"              # Lazy initialization of static data.
-tempfile = "3.17.1"               # For temporary file creation.
-serde = { version = "1.0.215", features = ["derive"] }  # Serialization framework with derive macros.
-serde_json = "1.0.133"          # JSON serialization.
-serde-pickle = "1.2.0"                        # Serialization using the pickle format.
-bytemuck = "1.20.0"               # Safe zero-copy conversion between data representations.
+tokio = { version = "1.35.1", features = ["full"] }  # Asynchronous runtime.
+once_cell = "1.19.0"              # Lazy initialization of static data.
+tempfile = "3.9.0"               # For temporary file creation.
+serde = { version = "1.0.195", features = ["derive"] }  # Serialization framework with derive macros.
+serde_json = "1.0.111"          # JSON serialization.
+serde-pickle = "1.1.1"                        # Serialization using the pickle format.
+bytemuck = "1.14.1"               # Safe zero-copy conversion between data representations.
 rand = "0.8.5"          # Random number generation library.
-dashmap = "6.1.0"
-async-trait = "0.1.83"                                                   # Enables async functions in traits.
-uuid = { version = "1.16.0", features = ["v8"] }
-log = { version = "0.4.27", features = ["kv"] }
+dashmap = "5.5.3"
+async-trait = "0.1.89"                                                   # Enables async functions in traits.
+uuid = { version = "1.18.1", features = ["v8"] }
+log = { version = "0.4.28", features = ["kv"] }
 notify = { version = "6.1.1", optional = true }
-futures = "0.3.31"
+futures = "0.3.30"
 tiny_http = { version = "0.12.0", optional = true }
+# TODO: Add support for these dependencies and remove tch entirely from relayrl_framework
 # burn = "0.18.0"
 # burn-ndarray = "0.18.0"
 # tract-onnx = "0.22.0"
 # dfdx = "0.13.0"
 # cudarc = "0.17.3"
 
-# Build dependencies (used during compilation).
 [build-dependencies]
 pyo3-build-config = "0.24.2"
-tonic-build = { version = "0.12.3", optional = true }       # Used to compile protobuf files with tonic.
+tonic-build = { version = "0.12.3", optional = true }
 
-# Python bindings.
-[dependencies.pyo3]
-version = "0.24.2"                # Version of the pyo3 crate for Python interop.
-default-features = false
-features = ["extension-module", "experimental-async"]
-optional = true
-
-# WebAssembly bindings.
-[dependencies.wasm-bindgen]
-version = "0.2.100"
-optional = true
-
-# Optional dependency for flamegraph support.
 [dependencies.flamegraph]
 version = "0.6.7"
 optional = true
@@ -99,12 +78,10 @@ optional = true
 version = "0.5.1"
 features = ["html_reports", "async_tokio"]
 
-# Development build profile.
 [profile.dev]
-opt-level = 0                                # No optimizations for quicker compile times and easier debugging.
-debug = true                                 # Include debug symbols.
+opt-level = 0
+debug = true
 
-# Release build profile.
 [profile.release]
-opt-level = 3                                # High optimization level for runtime performance.
-debug = true                                 # Include debug symbols in release builds for troubleshooting.
+opt-level = 3
+debug = true
