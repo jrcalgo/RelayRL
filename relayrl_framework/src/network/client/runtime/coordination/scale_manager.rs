@@ -61,10 +61,7 @@ impl ScaleManager {
         }
     }
 
-    pub(crate) async fn __scale_up(
-        &mut self,
-        router_add: u32
-    ) {
+    pub(crate) async fn __scale_up(&mut self, router_add: u32) {
         if self.runtime_params.is_none() {
             self.runtime_params = Some(DashMap::new());
         }

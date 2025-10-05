@@ -287,7 +287,11 @@ impl ClientInterface for ClientCoordinator {
 
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
         match &self.runtime_params {
-            Some(params) => params.state.write().await.__set_actor_id(current_id, new_id),
+            Some(params) => params
+                .state
+                .write()
+                .await
+                .__set_actor_id(current_id, new_id),
             None => {
                 return Err("[Coordinator] No runtime instance to _shutdown...".to_string());
             }
@@ -305,7 +309,14 @@ impl ClientInterface for ClientCoordinator {
             Some(_) => {
                 let mut actions = Vec::with_capacity(ids.len());
 
-                let router_runtime_params = self.runtime_params.as_ref().expect("No runtime params").scaling.runtime_params.as_ref().expect("No scaling runtime params");
+                let router_runtime_params = self
+                    .runtime_params
+                    .as_ref()
+                    .expect("No runtime params")
+                    .scaling
+                    .runtime_params
+                    .as_ref()
+                    .expect("No scaling runtime params");
                 for id in ids {
                     if !router_runtime_params.contains_key(&id) {
                         continue;
@@ -330,7 +341,11 @@ impl ClientInterface for ClientCoordinator {
                         },
                     };
 
-                    let sender = router_runtime_params.get(&id).expect("No router runtime params").tx_to_router.clone();
+                    let sender = router_runtime_params
+                        .get(&id)
+                        .expect("No router runtime params")
+                        .tx_to_router
+                        .clone();
                     let _ = sender.send(action_request_message).await;
 
                     match resp_rx.await.map_err(|e| e.to_string()) {
@@ -349,8 +364,15 @@ impl ClientInterface for ClientCoordinator {
     async fn _flag_last_action(&self, ids: Vec<Uuid>, reward: Option<f32>) {
         match &self.runtime_params {
             Some(_) => {
-                let router_runtime_params = self.runtime_params.as_ref().expect("No runtime params").scaling.runtime_params.as_ref().expect("No scaling runtime params");
-                
+                let router_runtime_params = self
+                    .runtime_params
+                    .as_ref()
+                    .expect("No runtime params")
+                    .scaling
+                    .runtime_params
+                    .as_ref()
+                    .expect("No scaling runtime params");
+
                 for id in ids {
                     if !router_runtime_params.contains_key(&id) {
                         continue;
@@ -363,7 +385,11 @@ impl ClientInterface for ClientCoordinator {
                         payload: RoutedPayload::FlagLastInference { reward },
                     };
 
-                    let sender = router_runtime_params.get(&id).expect("No router runtime params").tx_to_router.clone();
+                    let sender = router_runtime_params
+                        .get(&id)
+                        .expect("No router runtime params")
+                        .tx_to_router
+                        .clone();
                     let _ = sender.send(flag_last_action_message).await;
                 }
             }
@@ -377,7 +403,14 @@ impl ClientInterface for ClientCoordinator {
         match &self.runtime_params {
             Some(_) => {
                 let mut versions = Vec::with_capacity(ids.len());
-                let router_runtime_params = self.runtime_params.as_ref().expect("No runtime params").scaling.runtime_params.as_ref().expect("No scaling runtime params");
+                let router_runtime_params = self
+                    .runtime_params
+                    .as_ref()
+                    .expect("No runtime params")
+                    .scaling
+                    .runtime_params
+                    .as_ref()
+                    .expect("No scaling runtime params");
 
                 for id in ids {
                     if !router_runtime_params.contains_key(&id) {
@@ -392,7 +425,11 @@ impl ClientInterface for ClientCoordinator {
                         payload: RoutedPayload::ModelVersion { reply_to: resp_tx },
                     };
 
-                    let sender = router_runtime_params.get(&id).expect("No router runtime params").tx_to_router.clone();
+                    let sender = router_runtime_params
+                        .get(&id)
+                        .expect("No router runtime params")
+                        .tx_to_router
+                        .clone();
                     let _ = sender.send(model_version_message).await;
 
                     match resp_rx.await.map_err(|e| e.to_string()) {

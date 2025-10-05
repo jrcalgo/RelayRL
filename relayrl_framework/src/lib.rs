@@ -22,7 +22,7 @@
 //!
 //! Agents, training servers, configuration loaders, actions, and trajectories are exposed as
 //! Python-accessible classes within the `relayrl_framework` module. This enables Python users to
-//! interact with RelayRL’s core functionality without directly handling the Rust backend.
+//! interact with RelayRL's core functionality without directly handling the Rust backend.
 //!
 //! The exposed Python module includes the following key classes:
 //!

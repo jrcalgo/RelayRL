@@ -5,7 +5,7 @@ use std::process::Command;
 /// The main function used for building the project.
 ///
 /// This function compiles the protocol buffer definitions specified in the
-/// "proto/relayrl_grpc_protocols.proto" file using tonic_build. The generated
+/// "proto/relayrl.proto" file using tonic_build. The generated
 /// Rust code is then used for gRPC communication within the RelayRL framework.
 ///
 /// # Returns

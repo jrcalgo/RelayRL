@@ -186,7 +186,10 @@ pub(crate) struct ClientExternalSender {
 }
 
 impl ClientExternalSender {
-    pub fn new(rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>, server_address: String) -> Self {
+    pub fn new(
+        rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
+        server_address: String,
+    ) -> Self {
         Self {
             active: AtomicBool::new(false),
             rx_from_actor,
@@ -268,8 +271,8 @@ impl ClientExternalSender {
             None => 0,
         };
 
-        let (secs, nanos) = timestamp;
-        let ts_combined: u64 = (secs as usize + 1 / nanos as usize) as u64;
+        let (micros, nanos) = timestamp;
+        let ts_combined: u64 = (micros as usize + 1 / nanos as usize) as u64;
 
         let priority = ((last) << 32) | ((ts_combined) & 0xFFFF_FFFF);
         priority as PriorityRank
