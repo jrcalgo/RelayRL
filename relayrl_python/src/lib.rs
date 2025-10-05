@@ -1,4 +1,10 @@
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use relayrl_framework::utilities::configuration::ConfigLoader;
+use relayrl_framework::network::server::training_server::TrainingServer;
+use relayrl_framework::network::client::agent::RelayRLAgent;
+use relayrl_framework::types::trajectory::RelayRLTrajectory;
+use relayrl_framework::types::action::RelayRLAction;
 
 /// **Python Bindings for RelayRL**: This module contains the Rust-to-Python bindings,
 /// exposing RelayRL components as Python classes. The `o3_*` modules implement PyO3-compatible
@@ -29,6 +35,25 @@ pub(crate) struct PythonResponse {
     message: Option<String>,
 }
 
+#[pyclass(name = "ConfigLoader")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PyConfiguration(pub ConfigLoader);
+
+#[pyclass(name = "RelayRLAgent")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PyRelayRLAgent(pub RelayRLAgent);
+
+#[pyclass(name = "RelayRLTrainingServer")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PyRelayRLTrainingServer(pub TrainingServer);
+
+#[pyclass(name = "RelayRLTrajectory")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PyRelayRLTrajectory(pub RelayRLTrajectory);
+
+#[pyclass(name = "RelayRLAction")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PyRelayRLAction(pub RelayRLAction);
 
 /// ### RelayRL Python Module Definition
 ///

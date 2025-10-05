@@ -5,11 +5,6 @@ pub mod types {
     pub mod trajectory;
 }
 
-pub(crate) enum NetworkParticipant {
-    RelayRLAgent,
-    RelayRLTrainingServer,
-}
-
 /// Hyperparams enum represents hyperparameter inputs which can be provided either as a map
 /// or as a list of argument strings.
 #[derive(Clone, Debug)]
