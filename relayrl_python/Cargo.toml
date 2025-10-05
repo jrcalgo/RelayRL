@@ -3,4 +3,14 @@ name = "relayrl_python"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[features]
+default = ["python_ipc_channel", "python_bindings"]
+python_ipc_channel = ["pyo3"]       # ***Currently unused; meant to abstract out pyo3 from networking modules.***
+python_bindings = []       # Enables Python bindings of relayrl_framework for export availability.
+
+# Python bindings.
+[dependencies.pyo3]
+version = "0.24.2"                # Version of the pyo3 crate for Python interop.
+default-features = false
+features = ["extension-module", "experimental-async"]
+optional = true

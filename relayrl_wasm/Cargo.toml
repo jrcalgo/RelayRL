@@ -3,4 +3,10 @@ name = "relayrl_wasm"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[features]
+wasm_bindings = ["wasm-bindgen"]        # ***Currently unused; webassembly bindings.***
+
+# WebAssembly bindings.
+[dependencies.wasm-bindgen]
+version = "0.2.100"
+optional = true
