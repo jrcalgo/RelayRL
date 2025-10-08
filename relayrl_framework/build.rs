@@ -1,7 +1,3 @@
-use std::fs::create_dir_all;
-use std::path::Path;
-use std::process::Command;
-
 /// The main function used for building the project.
 ///
 /// This function compiles the protocol buffer definitions specified in the
@@ -13,20 +9,9 @@ use std::process::Command;
 /// * `Ok(())` if the proto compilation succeeds.
 /// * An error of type `Box<dyn std::error::Error>` if compilation fails.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    pyo3_build_config::add_extension_module_link_args();
-
     // Builds the protocol buffer definitions
     #[cfg(feature = "grpc_network")]
     build_protobuf()?;
-
-    // TODO: Builds python bindings for PyOxidizer binary (this is w.i.p.)
-    // without this, assume end-user has an installation of Python capable of using
-    // maturin and PyTorch == 2.5.1. Different build instructions may be needed
-    // #[cfg(feature = "compile_python_binary")]
-    // {
-    //     build_data_bindings()?;
-    //     build_python_binary()?;
-    // }
 
     Ok(())
 }
