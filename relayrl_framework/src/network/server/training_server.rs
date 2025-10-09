@@ -74,9 +74,7 @@ impl TrainingServerBuilder {
             .unwrap_or_else(|| PathBuf::from("config.json"));
 
         // Initialize the server with the provided parameters
-        let server = TrainingServer::new(
-            self.network_type,
-        );
+        let server = TrainingServer::new(self.network_type);
 
         Ok(server)
     }

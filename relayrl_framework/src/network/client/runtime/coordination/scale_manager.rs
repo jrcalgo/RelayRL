@@ -1,3 +1,4 @@
+use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::{
     ClientExternalReceiver, ClientExternalSender, ClientFilter, RoutedMessage,
@@ -29,18 +30,19 @@ type RouterUuid = Uuid;
 
 pub(crate) struct ScaleManager {
     shared_state: Arc<RwLock<StateManager>>,
-    shared_config: Arc<ClientConfigLoader>,
+    shared_config: Arc<RwLock<ClientConfigLoader>>,
     pub(crate) shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
     pub(crate) shared_transport: Arc<TransportClient>,
     pub(crate) runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
     server_addresses: ServerAddresses,
     rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
+    lifecycle: Option<LifeCycleManager>,
 }
 
 impl ScaleManager {
     pub(crate) fn new(
         shared_state: Arc<RwLock<StateManager>>,
-        shared_config: Arc<ClientConfigLoader>,
+        shared_config: Arc<RwLock<ClientConfigLoader>>,
         shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
         transport: TransportClient,
         rx_from_actor: Receiver<RoutedMessage>,
@@ -58,7 +60,13 @@ impl ScaleManager {
                 training_server_address,
             },
             rx_from_actor: Arc::new(RwLock::new(rx_from_actor)),
+            lifecycle: None,
         }
+    }
+
+    pub(crate) fn with_lifecycle(mut self, lifecycle: LifeCycleManager) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
     }
 
     pub(crate) async fn __scale_up(&mut self, router_add: u32) {
@@ -74,9 +82,20 @@ impl ScaleManager {
             )
             .with_transport(self.shared_transport.clone());
 
+            let receiver = if let Some(lc) = &self.lifecycle {
+                receiver.with_shutdown(lc.subscribe_shutdown())
+            } else {
+                receiver
+            };
+
             let shared_filter_state = self.shared_state.clone();
             let filter_rx = self.shared_global_bus_rx.clone();
             let filter = ClientFilter::new(filter_rx, shared_filter_state);
+            let mut filter = if let Some(lc) = &self.lifecycle {
+                filter.with_shutdown(lc.subscribe_shutdown())
+            } else {
+                filter
+            };
 
             let shared_sender_state = self.shared_state.clone();
             let sender = ClientExternalSender::new(
@@ -84,6 +103,11 @@ impl ScaleManager {
                 self.server_addresses.training_server_address.clone(),
             )
             .with_transport(self.shared_transport.clone());
+            let sender = if let Some(lc) = &self.lifecycle {
+                sender.with_shutdown(lc.subscribe_shutdown())
+            } else {
+                sender
+            };
 
             let receiver_loop = Self::_spawn_external_receiver(receiver).await;
             let filter_loop = Self::_spawn_central_filter(filter).await;

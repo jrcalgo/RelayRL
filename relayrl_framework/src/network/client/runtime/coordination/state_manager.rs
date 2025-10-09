@@ -1,12 +1,14 @@
 use crate::network::HotReloadableModel;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tch::Device;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
@@ -17,17 +19,17 @@ pub type ActorUuid = Uuid;
 
 /// In-memory actor state management and global channel transport
 pub(crate) struct StateManager {
-    shared_config: Arc<ClientConfigLoader>,
+    shared_config: Arc<RwLock<ClientConfigLoader>>,
     default_model: Option<HotReloadableModel>,
     pub(crate) global_bus_tx: Sender<RoutedMessage>,
     tx_to_sender: Sender<RoutedMessage>,
-    pub(crate) actor_inboxes: DashMap<Uuid, Sender<RoutedMessage>>,
+    pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
 }
 
 impl StateManager {
     pub(crate) fn new(
-        shared_config: Arc<ClientConfigLoader>,
+        shared_config: Arc<RwLock<ClientConfigLoader>>,
         shared_default_model: Option<HotReloadableModel>,
     ) -> (Self, Receiver<RoutedMessage>, Receiver<RoutedMessage>) {
         let (global_bus_tx, global_bus_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
@@ -65,9 +67,10 @@ impl StateManager {
         // try taking once from cached default_model
         } else {
             // lazily load from config if configured
-            let loader =
-                ClientConfigLoader::load_config(&self.shared_config.client_config.config_path);
+            let loader = self.shared_config.clone();
             let default_model_path_str = loader
+                .read()
+                .await
                 .client_config
                 .default_model_path
                 .to_str()
@@ -77,7 +80,7 @@ impl StateManager {
             if !default_model_path_str.is_empty() {
                 Some(
                     HotReloadableModel::new_from_path(
-                        loader.client_config.default_model_path,
+                        loader.read().await.client_config.default_model_path.clone(),
                         device,
                     )
                     .await
@@ -85,6 +88,8 @@ impl StateManager {
                 )
             } else {
                 let local_model_path_str = loader
+                    .read()
+                    .await
                     .transport_config
                     .local_model_path
                     .to_str()
@@ -93,7 +98,12 @@ impl StateManager {
                 if !local_model_path_str.is_empty() {
                     Some(
                         HotReloadableModel::new_from_path(
-                            loader.transport_config.local_model_path,
+                            loader
+                                .read()
+                                .await
+                                .transport_config
+                                .local_model_path
+                                .clone(),
                             device,
                         )
                         .await
@@ -105,10 +115,15 @@ impl StateManager {
             }
         };
 
-        let shared_config: Arc<ClientConfigLoader> = self.shared_config.clone();
+        let shared_config: Arc<RwLock<ClientConfigLoader>> = self.shared_config.clone();
         let (tx_to_actor, rx_from_global) = mpsc::channel(CHANNEL_THROUGHPUT);
         self.actor_inboxes.insert(id, tx_to_actor.clone());
-        let model_path = shared_config.transport_config.local_model_path.clone();
+        let model_path = shared_config
+            .read()
+            .await
+            .transport_config
+            .local_model_path
+            .clone();
 
         let tx_to_sender = self.tx_to_sender.clone();
         let transport = transport.clone();
@@ -139,6 +154,39 @@ impl StateManager {
             actor.spawn_loop().await
         }));
         self.actor_handles.insert(id, handle);
+    }
+
+    pub(crate) async fn __shutdown_all_actors(&self) {
+        // Send Shutdown message to every actor inbox; actors will flush and exit
+        for entry in self.actor_inboxes.iter() {
+            let actor_id = *entry.key();
+            let tx = entry.value().clone();
+            let shutdown_msg = RoutedMessage {
+                actor_id,
+                protocol: RoutingProtocol::Shutdown,
+                payload: RoutedPayload::Shutdown,
+            };
+            let _ = tx.send(shutdown_msg).await;
+
+            let handle = self
+                .actor_handles
+                .get(&actor_id)
+                .expect("[StateManager] Actor handle not found");
+            handle.abort();
+        }
+    }
+
+    pub(crate) fn spawn_shutdown_watcher(
+        shared_state: Arc<RwLock<StateManager>>,
+        lifecycle: LifeCycleManager,
+    ) {
+        tokio::spawn(async move {
+            let mut rx = lifecycle.subscribe_shutdown();
+            // Wait for shutdown signal
+            let _ = rx.recv().await;
+            // Propagate shutdown to all actors
+            shared_state.read().await.__shutdown_all_actors().await;
+        });
     }
 
     pub(crate) fn __remove_actor(&mut self, id: Uuid) {

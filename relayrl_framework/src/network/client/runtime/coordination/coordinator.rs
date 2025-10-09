@@ -1,19 +1,16 @@
 use crate::network::HotReloadableModel;
+use crate::network::TransportType;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
-use crate::utilities::observability::metrics::MetricsManager;
 use crate::network::client::runtime::coordination::scale_manager::ScaleManager;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
-use crate::network::client::runtime::router::{
-    RoutedMessage, RoutedPayload,
-    RoutingProtocol,
-};
+use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
-use crate::network::{TransportType};
 use crate::types::action::RelayRLAction;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 use crate::utilities::observability;
 use crate::utilities::observability::logging::builder::LoggingBuilder;
+use crate::utilities::observability::metrics::MetricsManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -111,8 +108,9 @@ impl ClientInterface for ClientCoordinator {
             client_transport_factory(self.transport_type, &config_loader);
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(config_loader.to_owned());
+        lifecycle.spawn_loop();
 
-        let shared_state_config: Arc<ClientConfigLoader> = lifecycle.get_active_config();
+        let shared_state_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
 
         let reloadable_default_model = match default_model {
             Some(model) => Some(
@@ -126,7 +124,7 @@ impl ClientInterface for ClientCoordinator {
         let (state, global_bus_rx, rx_from_actor) =
             StateManager::new(shared_state_config, reloadable_default_model.clone());
 
-        let shared_scaling_config: Arc<ClientConfigLoader> = lifecycle.get_active_config();
+        let shared_scaling_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
 
         let (training_server_address, agent_listener_address) = match self.transport_type {
             TransportType::ZMQ => (
@@ -181,6 +179,8 @@ impl ClientInterface for ClientCoordinator {
 
         let shared_global_bus_rx = Arc::new(RwLock::new(global_bus_rx));
         let shared_state = Arc::from(RwLock::new(state));
+        // Subscribe to lifecycle shutdown and propagate to all actors
+        StateManager::spawn_shutdown_watcher(shared_state.clone(), lifecycle.clone());
         let mut scaling = ScaleManager::new(
             shared_state.clone(),
             Arc::clone(&shared_scaling_config),
@@ -189,7 +189,8 @@ impl ClientInterface for ClientCoordinator {
             rx_from_actor,
             agent_listener_address,
             training_server_address,
-        );
+        )
+        .with_lifecycle(lifecycle.clone());
         scaling.__scale_up(1).await;
 
         if actor_count > 0 {
@@ -210,8 +211,26 @@ impl ClientInterface for ClientCoordinator {
     }
 
     async fn _shutdown(&mut self) {
-        let runtime_params = self.runtime_params.take().unwrap();
-        runtime_params.lifecycle._shutdown();
+        if let Some(mut runtime_params) = self.runtime_params.take() {
+            runtime_params.lifecycle._shutdown();
+
+            runtime_params
+                .state
+                .read()
+                .await
+                .__shutdown_all_actors()
+                .await;
+
+            let router_count: u32 = runtime_params
+                .scaling
+                .runtime_params
+                .as_ref()
+                .map(|m| m.len() as u32)
+                .unwrap_or(0);
+            if router_count > 0 {
+                runtime_params.scaling.__scale_down(router_count).await;
+            }
+        }
     }
 
     async fn _restart(
@@ -292,9 +311,7 @@ impl ClientInterface for ClientCoordinator {
                 .write()
                 .await
                 .__set_actor_id(current_id, new_id),
-            None => {
-                Err("[Coordinator] No runtime instance to _shutdown...".to_string())
-            }
+            None => Err("[Coordinator] No runtime instance to _shutdown...".to_string()),
         }
     }
 

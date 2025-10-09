@@ -7,8 +7,7 @@ use crate::types::trajectory::RelayRLTrajectory;
 #[cfg(feature = "grpc_network")]
 use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "grpc_network")]
-use crate::utilities::orchestration::tonic_utils::
-    deserialize_model;
+use crate::utilities::orchestration::tonic_utils::deserialize_model;
 #[cfg(feature = "grpc_network")]
 use async_trait::async_trait;
 #[cfg(feature = "grpc_network")]
@@ -35,9 +34,8 @@ pub mod rl_service {
 
 #[cfg(feature = "grpc_network")]
 use rl_service::{
-    Action, GetModelRequest, InitRequest, ModelResponse, ParameterValue,
-    SendTrajectoriesRequest, SendTrajectoriesResponse, Trajectory,
-    rl_service_client::RlServiceClient,
+    Action, GetModelRequest, InitRequest, ModelResponse, ParameterValue, SendTrajectoriesRequest,
+    SendTrajectoriesResponse, Trajectory, rl_service_client::RlServiceClient,
 };
 
 #[cfg(feature = "grpc_network")]

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tch::{CModule, Device, TchError};
+use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use uuid::Uuid;
 
@@ -20,7 +21,7 @@ pub trait ActorEntity: Send + Sync + 'static {
         device: Device,
         model: Option<HotReloadableModel>,
         model_path: PathBuf,
-        shared_config: Arc<ClientConfigLoader>,
+        shared_config: Arc<RwLock<ClientConfigLoader>>,
         rx_from_router: Receiver<RoutedMessage>,
         tx_to_sender: Sender<RoutedMessage>,
         transport: Arc<TransportClient>,
@@ -48,7 +49,7 @@ pub(crate) struct Actor {
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_sender: Sender<RoutedMessage>,
     transport: Option<Arc<TransportClient>>,
-    shared_config: Arc<ClientConfigLoader>,
+    shared_config: Arc<RwLock<ClientConfigLoader>>,
 }
 
 impl ActorEntity for Actor {
@@ -57,7 +58,7 @@ impl ActorEntity for Actor {
         device: Device,
         model: Option<HotReloadableModel>,
         model_path: PathBuf,
-        shared_config: Arc<ClientConfigLoader>,
+        shared_config: Arc<RwLock<ClientConfigLoader>>,
         rx_from_router: Receiver<RoutedMessage>,
         shared_tx_to_sender: Sender<RoutedMessage>,
         transport: Arc<TransportClient>,
@@ -65,7 +66,7 @@ impl ActorEntity for Actor {
     where
         Self: Sized,
     {
-        let max_length = shared_config.transport_config.max_traj_length;
+        let max_length = shared_config.read().await.transport_config.max_traj_length;
 
         let mut actor = Self {
             id,
@@ -105,7 +106,10 @@ impl ActorEntity for Actor {
                 RoutingProtocol::ModelVersion => self.__get_model_version(msg),
                 RoutingProtocol::ModelUpdate => self._refresh_model(msg).await,
                 RoutingProtocol::ActorStatistics => self.__get_actor_statistics(msg),
-                RoutingProtocol::Shutdown => self._handle_shutdown(msg).await,
+                RoutingProtocol::Shutdown => {
+                    self._handle_shutdown(msg).await;
+                    break;
+                }
                 _ => {}
             }
         }
@@ -122,10 +126,14 @@ impl ActorEntity for Actor {
                             let training_server_address = format!(
                                 "{}:{}",
                                 self.shared_config
+                                    .read()
+                                    .await
                                     .transport_config
                                     .training_server_address
                                     .host,
                                 self.shared_config
+                                    .read()
+                                    .await
                                     .transport_config
                                     .training_server_address
                                     .port
@@ -152,11 +160,15 @@ impl ActorEntity for Actor {
 
                                 match &self.model {
                                     Some(model) => {
-                                        let model_version = model.reload(self.model_path.clone(), version).await;
+                                        let model_version =
+                                            model.reload(self.model_path.clone(), version).await;
                                         match model_version {
                                             Ok(_) => (),
                                             Err(e) => {
-                                                eprintln!("[Actor {:?}] Failed to reload model: {}", self.id, e);
+                                                eprintln!(
+                                                    "[Actor {:?}] Failed to reload model: {}",
+                                                    self.id, e
+                                                );
                                             }
                                         }
                                     }
@@ -185,10 +197,14 @@ impl ActorEntity for Actor {
                             let model_server_address = format!(
                                 "{}:{}",
                                 self.shared_config
+                                    .read()
+                                    .await
                                     .transport_config
                                     .agent_listener_address
                                     .host,
                                 self.shared_config
+                                    .read()
+                                    .await
                                     .transport_config
                                     .agent_listener_address
                                     .port
@@ -214,11 +230,15 @@ impl ActorEntity for Actor {
 
                                 match &self.model {
                                     Some(model) => {
-                                        let model_version = model.reload(self.model_path.clone(), version).await;
+                                        let model_version =
+                                            model.reload(self.model_path.clone(), version).await;
                                         match model_version {
                                             Ok(_) => (),
                                             Err(e) => {
-                                                eprintln!("[Actor {:?}] Failed to reload model: {}", self.id, e);
+                                                eprintln!(
+                                                    "[Actor {:?}] Failed to reload model: {}",
+                                                    self.id, e
+                                                );
                                             }
                                         }
                                     }
@@ -376,5 +396,30 @@ impl ActorEntity for Actor {
 
     fn __get_actor_statistics(&self, _msg: RoutedMessage) {}
 
-    async fn _handle_shutdown(&self, _msg: RoutedMessage) {}
+    async fn _handle_shutdown(&self, _msg: RoutedMessage) {
+        if !self.current_traj.actions.is_empty() {
+            let send_traj_msg = {
+                let traj_clone = self.current_traj.clone();
+                RoutedMessage {
+                    actor_id: self.id,
+                    protocol: RoutingProtocol::SendTrajectory,
+                    payload: RoutedPayload::SendTrajectory {
+                        timestamp: (
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Clock skew")
+                                .as_millis(),
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Clock skew")
+                                .as_nanos(),
+                        ),
+                        trajectory: traj_clone,
+                    },
+                }
+            };
+
+            let _ = self.shared_tx_to_sender.send(send_traj_msg).await;
+        }
+    }
 }

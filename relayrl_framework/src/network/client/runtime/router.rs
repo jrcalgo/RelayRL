@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tch::Tensor;
 use tokio::sync::RwLock;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
@@ -64,6 +65,7 @@ pub(crate) enum RoutedPayload {
 pub(crate) struct ClientFilter {
     rx_from_receiver: Arc<RwLock<Receiver<RoutedMessage>>>,
     shared_agent_state: Arc<RwLock<StateManager>>,
+    shutdown: Option<broadcast::Receiver<()>>,
 }
 
 impl ClientFilter {
@@ -74,16 +76,41 @@ impl ClientFilter {
         Self {
             rx_from_receiver,
             shared_agent_state,
+            shutdown: None,
         }
     }
 
+    pub(crate) fn with_shutdown(mut self, rx: broadcast::Receiver<()>) -> Self {
+        self.shutdown = Some(rx);
+        self
+    }
+
     pub(crate) async fn spawn_loop(&mut self) {
-        while let Some(msg) = self.rx_from_receiver.write().await.recv().await {
-            if let RoutingProtocol::Shutdown = msg.protocol {
-                self.route(msg).await;
-                break;
+        let mut shutdown = self.shutdown.take();
+        let mut rx_guard = self.rx_from_receiver.write().await;
+        loop {
+            tokio::select! {
+                msg_opt = rx_guard.recv() => {
+                    match msg_opt {
+                        Some(msg) => {
+                            if let RoutingProtocol::Shutdown = msg.protocol {
+                                self.route(msg).await;
+                                break;
+                            }
+                            self.route(msg).await;
+                        }
+                        None => break,
+                    }
+                }
+                _ = async {
+                    match &mut shutdown {
+                        Some(rx) => { let _ = rx.recv().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    break;
+                }
             }
-            self.route(msg).await;
         }
     }
 
@@ -109,6 +136,7 @@ pub(crate) struct ClientExternalReceiver {
     tx_to_router: Sender<RoutedMessage>,
     transport: Option<Arc<TransportClient>>,
     server_address: String,
+    shutdown: Option<broadcast::Receiver<()>>,
 }
 
 impl ClientExternalReceiver {
@@ -117,11 +145,17 @@ impl ClientExternalReceiver {
             tx_to_router,
             transport: None,
             server_address,
+            shutdown: None,
         }
     }
 
     pub fn with_transport(mut self, transport: Arc<TransportClient>) -> Self {
         self.transport = Some(Arc::from(transport));
+        self
+    }
+
+    pub fn with_shutdown(mut self, rx: broadcast::Receiver<()>) -> Self {
+        self.shutdown = Some(rx);
         self
     }
 
@@ -183,6 +217,7 @@ pub(crate) struct ClientExternalSender {
     traj_heap: Arc<Mutex<BinaryHeap<SenderQueueEntry>>>,
     transport: Option<Arc<TransportClient>>,
     server_address: String,
+    shutdown: Option<broadcast::Receiver<()>>,
 }
 
 impl ClientExternalSender {
@@ -197,6 +232,7 @@ impl ClientExternalSender {
             traj_heap: Arc::new(Mutex::new(BinaryHeap::new())),
             transport: None,
             server_address,
+            shutdown: None,
         }
     }
 
@@ -205,39 +241,53 @@ impl ClientExternalSender {
         self
     }
 
+    pub fn with_shutdown(mut self, rx: broadcast::Receiver<()>) -> Self {
+        self.shutdown = Some(rx);
+        self
+    }
+
     pub(crate) async fn spawn_loop(mut self) {
         self.active.store(true, Ordering::SeqCst);
 
         let (_tx_dummy, rx_dummy) = tokio::sync::mpsc::channel(1);
         let rx = std::mem::replace(&mut self.rx_from_actor, Arc::new(RwLock::new(rx_dummy)));
-        let heap_arc = self.traj_heap.clone();
-        let actor_last_sent = self.actor_last_sent.clone();
+        let mut rx_guard = rx.write().await;
+        let mut shutdown = self.shutdown.take();
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
 
-        tokio::spawn(async move {
-            while let Some(msg) = rx.write().await.recv().await {
-                if let RoutedPayload::SendTrajectory {
-                    timestamp,
-                    trajectory,
-                } = msg.payload
-                {
-                    let priority: i64 =
-                        Self::_compute_priority(actor_last_sent.clone(), msg.actor_id, timestamp);
-
-                    let queue_entry = SenderQueueEntry {
-                        priority,
-                        actor_id: msg.actor_id,
-                        traj_to_send: trajectory,
-                    };
-                    let heap_arc2 = heap_arc.clone();
-                    tokio::spawn(async move {
-                        let mut traj_heap = heap_arc2.lock().await;
-                        traj_heap.push(queue_entry);
-                    });
+        while self.active.load(Ordering::SeqCst) {
+            tokio::select! {
+                msg_opt = rx_guard.recv() => {
+                    if let Some(msg) = msg_opt {
+                        if let RoutedPayload::SendTrajectory { timestamp, trajectory } = msg.payload {
+                            let priority: i64 = Self::_compute_priority(self.actor_last_sent.clone(), msg.actor_id, timestamp);
+                            let queue_entry = SenderQueueEntry { priority, actor_id: msg.actor_id, traj_to_send: trajectory };
+                            let heap_arc2 = self.traj_heap.clone();
+                            tokio::spawn(async move {
+                                let mut traj_heap = heap_arc2.lock().await;
+                                traj_heap.push(queue_entry);
+                            });
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    let job_option = { let mut heap = self.traj_heap.lock().await; heap.pop() };
+                    if let Some(job) = job_option { self._send_trajectory(job, self.server_address.clone()).await; }
+                }
+                _ = async {
+                    match &mut shutdown {
+                        Some(rx) => { let _ = rx.recv().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.active.store(false, Ordering::SeqCst);
+                    break;
                 }
             }
-        });
+        }
 
-        self._process_heap().await;
         self.active.store(false, Ordering::SeqCst);
     }
 
@@ -276,26 +326,6 @@ impl ClientExternalSender {
 
         let priority = ((last) << 32) | ((ts_combined) & 0xFFFF_FFFF);
         priority as PriorityRank
-    }
-
-    async fn _process_heap(&mut self) {
-        // TODO: add polling here instead of loop
-        while self.active.load(Ordering::SeqCst) {
-            let job_option = {
-                let mut heap = self.traj_heap.lock().await;
-                heap.pop()
-            };
-
-            match job_option {
-                Some(job) => {
-                    self._send_trajectory(job, self.server_address.clone())
-                        .await
-                }
-                None => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
     }
 
     async fn _send_trajectory(&self, entry: SenderQueueEntry, server_address: String) {

@@ -26,6 +26,11 @@
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7777"
+            },
+            "inference_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7778"
             }
         },
         "grpc_idle_timeout": 30,
