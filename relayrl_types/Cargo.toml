@@ -1,11 +1,22 @@
 [package]
 name = "relayrl_types"
 version = "0.1.0"
+authors = ["jrcalgo <jacksonr1212@outlook.com>"]
 edition = "2024"
+description = "Data types for the RelayRL framework."
+readme = "README.md"
+keywords = ['reinforcement', 'learning', 'safetensors', 'tensors', 'data-types']
+categories = ['science', 'data-structures', 'encoding']
+license = "Apache-2.0"
 
 [dependencies]
-# relayrl_framework = { version = "0.5.0", features = ["utilities"]}
 serde = { version = "1.0", features = ["derive"] }
 safetensors = "0.5.3"
 bytemuck = "1.20.0"
 tch = { version = "0.18.1", features=["download-libtorch", "python-extension"] }
+# TODO: Add support for these dependencies and remove tch entirely from relayrl_types
+# burn = "0.18.0"
+# burn-ndarray = "0.18.0"
+# tract-onnx = "0.22.0"
+# dfdx = "0.13.0"
+# cudarc = "0.17.3"

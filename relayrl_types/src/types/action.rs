@@ -350,12 +350,12 @@ pub trait RelayRLActionTrait {}
 /// is terminal and whether the reward was updated.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RelayRLAction {
-    pub obs: Option<TensorData>,
-    pub act: Option<TensorData>,
-    pub mask: Option<TensorData>,
-    pub rew: f32,
-    pub data: Option<HashMap<String, RelayRLData>>,
-    pub done: bool,
+    pub(crate) obs: Option<TensorData>,
+    pub(crate) act: Option<TensorData>,
+    pub(crate) mask: Option<TensorData>,
+    pub(crate) rew: f32,
+    pub(crate) data: Option<HashMap<String, RelayRLData>>,
+    pub(crate) done: bool,
 }
 
 /// Implementation of RelayRLAction.
