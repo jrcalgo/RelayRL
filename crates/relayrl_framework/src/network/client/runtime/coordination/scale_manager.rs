@@ -226,43 +226,49 @@ impl ScaleManager {
             eprintln!("Aborting scale down operation...");
             return;
         }
-    
+
         match self.runtime_params {
             Some(ref mut params) => {
                 let initial_router_count = params.len();
-                
+
                 if initial_router_count < router_remove as usize {
                     eprintln!(
                         "Cannot remove {} routers: only {} routers exist",
                         router_remove, initial_router_count
                     );
-                    
-                    
-                    let _ = self._send_scaling_complete(ScalingOperation::ScaleDown).await;
+
+                    let _ = self
+                        ._send_scaling_complete(ScalingOperation::ScaleDown)
+                        .await;
                     return;
                 }
-    
-                let old_actor_mappings = self.shared_state.blocking_read().get_actor_router_mappings();
-    
-                let (router_ids, removed_routers, current_router_count) = tokio::task::block_in_place(|| {
-                    let mut removed: Vec<(RouterUuid, RouterRuntimeParams)> = Vec::new();
-                    
-                    for _ in 0..router_remove {
-                        if let Some(router_entry) = params.iter().next() {
-                            let router_id = *router_entry.key();
-                            
-                            if let Some((id, params_val)) = params.remove(&router_id) {
-                                removed.push((id, params_val));
+
+                let old_actor_mappings = self
+                    .shared_state
+                    .blocking_read()
+                    .get_actor_router_mappings();
+
+                let (router_ids, removed_routers, current_router_count) =
+                    tokio::task::block_in_place(|| {
+                        let mut removed: Vec<(RouterUuid, RouterRuntimeParams)> = Vec::new();
+
+                        for _ in 0..router_remove {
+                            if let Some(router_entry) = params.iter().next() {
+                                let router_id = *router_entry.key();
+
+                                if let Some((id, params_val)) = params.remove(&router_id) {
+                                    removed.push((id, params_val));
+                                }
                             }
                         }
-                    }
-                    
-                    let remaining_router_ids: Vec<RouterUuid> = params.iter().map(|router| *router.key()).collect();
-                    let count = params.len();
-                    
-                    (remaining_router_ids, removed, count)
-                });
-    
+
+                        let remaining_router_ids: Vec<RouterUuid> =
+                            params.iter().map(|router| *router.key()).collect();
+                        let count = params.len();
+
+                        (remaining_router_ids, removed, count)
+                    });
+
                 if current_router_count != initial_router_count - (router_remove as usize) {
                     eprintln!(
                         "Router removal verification failed: expected {} routers, but have {}",
@@ -270,26 +276,28 @@ impl ScaleManager {
                         current_router_count
                     );
                     eprintln!("Rolling back: restoring removed routers...");
-                    
+
                     for (router_id, router_params) in removed_routers {
                         params.insert(router_id, router_params);
                     }
-                    
-                    let _ = self._send_scaling_complete(ScalingOperation::ScaleDown).await;
+
+                    let _ = self
+                        ._send_scaling_complete(ScalingOperation::ScaleDown)
+                        .await;
                     return;
                 }
-    
+
                 for (router_id, router_params) in &removed_routers {
                     router_params.receiver_loop.abort();
                     router_params.filter_loop.abort();
                     router_params.sender_loop.abort();
                     eprintln!("Router with ID {} has been removed.", router_id);
                 }
-    
+
                 self.shared_state
                     .blocking_write()
                     .distribute_actors(router_ids.clone());
-    
+
                 if let Err(e) = self
                     ._send_scaling_complete(ScalingOperation::ScaleDown)
                     .await
@@ -302,21 +310,22 @@ impl ScaleManager {
                     self.shared_state
                         .blocking_write()
                         .restore_actor_router_mappings(old_actor_mappings);
-                    
+
                     eprintln!("Partial rollback complete. Manual intervention may be required.");
                     return;
                 }
-    
+
                 eprintln!(
                     "Scale down successful: {} router(s) removed, total routers: {}",
-                    router_remove,
-                    current_router_count
+                    router_remove, current_router_count
                 );
             }
             None => {
                 eprintln!("No routers to scale down.");
-                
-                let _ = self._send_scaling_complete(ScalingOperation::ScaleDown).await;
+
+                let _ = self
+                    ._send_scaling_complete(ScalingOperation::ScaleDown)
+                    .await;
             }
         }
     }

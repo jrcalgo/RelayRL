@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tch::Tensor;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
@@ -336,9 +336,9 @@ impl ClientExternalSender {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        
+
         let age_millis = now_millis.saturating_sub(traj_millis);
-        
+
         let recent_sends = match actor_last_sent.get(&id) {
             Some(last_ref) => (*last_ref / 1000).max(0), // Decay factor
             None => 0,
@@ -346,7 +346,7 @@ impl ClientExternalSender {
 
         let actor_burden = recent_sends * 10_000; // Weight actor balance
         let priority = actor_burden - (age_millis.min(i64::MAX as u128) as i64);
-        
+
         priority as PriorityRank
     }
 
