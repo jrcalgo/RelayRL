@@ -1,4 +1,5 @@
 use crate::network::TransportType;
+use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::types::trajectory::RelayRLTrajectory;
 use crate::utilities::configuration::ClientConfigLoader;
@@ -39,6 +40,8 @@ pub trait AsyncClientTransport: Send + Sync {
     async fn send_traj_to_server(&self, trajectory: Trajectory, training_server_address: &str);
     async fn listen_for_model(&self, model_server_address: &str);
     fn convert_relayrl_to_proto_trajectory(&self, traj: &RelayRLTrajectory) -> Trajectory;
+    async fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String>;
+    async fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String>;
 }
 
 #[cfg(feature = "zmq_network")]
@@ -53,6 +56,8 @@ pub trait SyncClientTransport: Send + Sync {
         training_server_address: &str,
     ) -> Result<(), String>;
     fn listen_for_model(&self, model_server_address: &str, tx_to_router: Sender<RoutedMessage>);
+    fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String>;
+    fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String>;
 }
 
 pub fn client_transport_factory(

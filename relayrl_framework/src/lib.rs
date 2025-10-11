@@ -39,6 +39,7 @@
 //! ## Using RelayRL
 //!
 
+/// **Network Modules**: Provides the core networking functionality for RelayRL, including gRPC and ZMQ communication layers.
 mod network;
 mod types;
 

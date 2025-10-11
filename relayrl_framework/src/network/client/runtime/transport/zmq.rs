@@ -1,3 +1,4 @@
+use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::SyncClientTransport;
 use crate::network::client::runtime::transport::serialize_trajectory;
@@ -243,5 +244,15 @@ impl SyncClientTransport for ZmqClient {
                 }
             }
         });
+    }
+
+    fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String> {
+        // TODO: implement
+        Ok(())
+    }
+
+    fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String> {
+        // TODO: implement
+        Ok(())
     }
 }

@@ -2,6 +2,7 @@ use crate::network::HotReloadableModel;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
+use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
@@ -25,6 +26,7 @@ pub(crate) struct StateManager {
     tx_to_sender: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
+    actor_router_addresses: DashMap<ActorUuid, RouterUuid>,
 }
 
 impl StateManager {
@@ -42,6 +44,7 @@ impl StateManager {
                 tx_to_sender,
                 actor_inboxes: DashMap::new(),
                 actor_handles: DashMap::new(),
+                actor_router_addresses: DashMap::new(),
             },
             global_bus_rx,
             rx_from_actor,
@@ -182,9 +185,8 @@ impl StateManager {
     ) {
         tokio::spawn(async move {
             let mut rx = lifecycle.subscribe_shutdown();
-            // Wait for shutdown signal
+
             let _ = rx.recv().await;
-            // Propagate shutdown to all actors
             shared_state.read().await.__shutdown_all_actors().await;
         });
     }
@@ -230,10 +232,38 @@ impl StateManager {
         Ok(())
     }
 
+    pub(crate) fn distribute_actors(&self, router_ids: Vec<RouterUuid>) {
+        if router_ids.is_empty() {
+            return;
+        }
+
+        let actor_ids = self.get_actor_id_list();
+
+        for (i, actor_id) in actor_ids.iter().enumerate() {
+            let router_id = router_ids[i % router_ids.len()];
+            self.actor_router_addresses.insert(*actor_id, router_id);
+        }
+    }
+
+    pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterUuid)> {
+        self.actor_router_addresses
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect()
+    }
+
+    pub(crate) fn restore_actor_router_mappings(&self, mappings: Vec<(ActorUuid, RouterUuid)>) {
+        self.actor_router_addresses.clear();
+
+        for (actor_id, router_id) in mappings {
+            self.actor_router_addresses.insert(actor_id, router_id);
+        }
+    }
+
     fn get_actor_id_list(&self) -> Vec<ActorUuid> {
         self.actor_handles
             .iter()
-            .map(|entry| entry.key().clone())
+            .map(|entry| *entry.key())
             .collect()
     }
 

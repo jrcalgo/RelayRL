@@ -1,3 +1,4 @@
+use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
@@ -31,6 +32,9 @@ pub(crate) enum RoutingProtocol {
     ActorStatistics,
     SendTrajectory,
     Shutdown,
+    ScalingWarning,
+    ScalingConfirmation,
+    ScalingAck,
 }
 
 pub(crate) enum RoutedPayload {
@@ -59,6 +63,18 @@ pub(crate) enum RoutedPayload {
         trajectory: RelayRLTrajectory,
     },
     Shutdown,
+    ScalingWarning {
+        operation: ScalingOperation,
+        reply_to: oneshot::Sender<Result<(), String>>,
+    },
+    ScalingConfirmation {
+        operation: ScalingOperation,
+        reply_to: oneshot::Sender<Result<(), String>>,
+    },
+    ScalingAck {
+        success: bool,
+        message: String,
+    },
 }
 
 /// Intermediary routing process/filter for routing received models to specified ActorEntity

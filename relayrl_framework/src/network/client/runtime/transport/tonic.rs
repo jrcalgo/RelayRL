@@ -1,4 +1,6 @@
 #[cfg(feature = "grpc_network")]
+use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+#[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 #[cfg(feature = "grpc_network")]
 use crate::network::validate_model;
@@ -478,5 +480,15 @@ impl AsyncClientTransport for TonicClient {
                 .current_version
                 .load(std::sync::atomic::Ordering::SeqCst) as i32,
         }
+    }
+
+    async fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String> {
+        // TODO: implement
+        Ok(())
+    }
+
+    async fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String> {
+        // TODO: implement
+        Ok(())
     }
 }
