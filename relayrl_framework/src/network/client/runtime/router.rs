@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use tch::Tensor;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
@@ -327,20 +327,26 @@ impl ClientExternalSender {
     }
 
     fn _compute_priority(
-        _actor_last_sent: DashMap<Uuid, i64>,
+        actor_last_sent: DashMap<Uuid, i64>,
         id: Uuid,
         timestamp: (u128, u128),
     ) -> PriorityRank {
-        // TODO: revise this questionably implemented priority scheme
-        let last = match _actor_last_sent.get(&id) {
-            Some(last_ref) => *last_ref as u64,
+        let (traj_millis, _) = timestamp;
+        let now_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        
+        let age_millis = now_millis.saturating_sub(traj_millis);
+        
+        let recent_sends = match actor_last_sent.get(&id) {
+            Some(last_ref) => (*last_ref / 1000).max(0), // Decay factor
             None => 0,
         };
 
-        let (micros, nanos) = timestamp;
-        let ts_combined: u64 = (micros as usize + 1 / nanos as usize) as u64;
-
-        let priority = ((last) << 32) | ((ts_combined) & 0xFFFF_FFFF);
+        let actor_burden = recent_sends * 10_000; // Weight actor balance
+        let priority = actor_burden - (age_millis.min(i64::MAX as u128) as i64);
+        
         priority as PriorityRank
     }
 
