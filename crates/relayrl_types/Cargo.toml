@@ -9,15 +9,60 @@ keywords = ['reinforcement', 'learning', 'safetensors', 'tensors', 'data-types']
 categories = ['science', 'data-structures', 'encoding']
 license = "Apache-2.0"
 
+[features]
+default = ["ndarray-backend"]
+ 
+ndarray-backend = ["burn-ndarray"]
+tch-backend = ["burn-tch"]
+
+encryption = ["chacha20poly1305"]
+compression = ["lz4_flex", "zstd"]
+integrity = ["blake3"]
+quantization = ["half"]
+metadata = ["bincode"]
+zerocopy = ["bytes"]
+
+network-basic = ["compression", "integrity", "zerocopy"]
+network-secure = ["network-basic", "encryption"]
+network-full = ["network-secure", "metadata", "quantization"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-safetensors = "0.5.3"
+
 bytemuck = "1.20.0"
-tch = { version = "0.18.1", features=["download-libtorch", "python-extension"] }
 dashmap = "6.1.0"
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+
 # TODO: Add support for these dependencies and remove tch entirely from relayrl_types
-# burn = "0.18.0"
-# burn-ndarray = "0.18.0"
-# tract-onnx = "0.22.0"
-# dfdx = "0.13.0"
-# cudarc = "0.17.3"
+burn-tensor = "0.18.0"
+burn-ndarray = {version = "0.18.0", optional = true}
+burn-tch = {version = "0.18.0", optional = true}
+# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.5.1)
+
+[dependencies.blake3]
+version = "1.8.2"
+optional = true
+
+[dependencies.bytes]
+version = "1.10.1"
+optional = true
+
+[dependencies.zstd]
+version = "0.13.3"
+optional = true
+
+[dependencies.lz4_flex]
+version = "0.11.5"
+optional = true
+
+[dependencies.chacha20poly1305]
+version = "0.10.1"
+optional = true
+
+[dependencies.bincode]
+version = "2.0.1"
+optional = true
+
+[dependencies.half]
+version = "2.7.0"
+optional = true

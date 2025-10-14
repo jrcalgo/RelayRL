@@ -1,86 +1,464 @@
-//! This module provides utilities for serializing and sending trajectories as well as defining
-//! the RelayRLTrajectory type and trait. It uses serde_pickle for serialization and ZMQ for sending
-//! the serialized data to a trajectory server.
+//! RelayRL Trajectory types for collecting sequences of actions
+//! 
+//! Trajectories are sequences of actions that form episodes in reinforcement learning.
+//! Supports batching, compression, and network transmission optimizations.
 
-use crate::types::action::RelayRLAction;
-use crate::types::action::RelayRLActionTrait;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use crate::types::action::{RelayRLAction, ActionError};
 
-/// Trait that defines the interface for trajectory handling.
-///
-/// Any trajectory struct must implement this trait, which requires a method to add an action
-/// to the trajectory. The method may also send the trajectory if a terminal action is encountered.
-pub trait RelayRLTrajectoryTrait {
-    /// The associated action type that this trajectory holds.
-    type Action: RelayRLActionTrait;
-    /// Adds an action to the trajectory.
-    ///
-    /// # Arguments
-    ///
-    /// * `action` - A reference to the action to be added.
-    /// * `send_if_done` - A boolean flag that, if true and the action is terminal, will trigger sending the trajectory.
-    fn add_action(&mut self, action: &Self::Action);
+#[cfg(feature = "metadata")]
+use crate::types::action::CodecConfig;
+
+#[cfg(feature = "compression")]
+use crate::utilities::compress::{CompressedData, CompressionScheme};
+#[cfg(feature = "encryption")]
+use crate::utilities::encrypt::{EncryptedData, EncryptionKey};
+#[cfg(feature = "integrity")]
+use crate::utilities::integrity::Checksum;
+#[cfg(feature = "metadata")]
+use crate::utilities::metadata::TensorMetadata;
+#[cfg(feature = "integrity")]
+use crate::utilities::chunking::{ChunkedTensor, TensorChunk};
+
+/// Get current Unix timestamp
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Failed to get current timestamp")
+        .as_secs()
 }
 
-/// The RelayRLTrajectory struct represents a trajectory composed of a sequence of actions.
-///
-/// It stores an optional trajectory server address, a maximum trajectory length, and a vector of actions.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// Core trajectory structure for RelayRL
+/// 
+/// A trajectory is a sequence of actions representing an episode or partial episode.
+/// Includes metadata for tracking provenance and enabling distributed training.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayRLTrajectory {
-    /// The maximum number of actions allowed in the trajectory.
-    max_length: u128,
-    /// A vector storing the actions in the trajectory.
     pub actions: Vec<RelayRLAction>,
+    pub max_length: usize,
+    pub agent_id: Option<Uuid>,
+    pub timestamp: u64,
+    pub episode: Option<u64>,
+    pub training_step: Option<u64>,
 }
 
 impl RelayRLTrajectory {
-    /// Creates a new RelayRLTrajectory.
-    ///
-    /// # Arguments
-    ///
-    /// * `max_length` - An optional maximum trajectory length. Must be provided.
-    /// * `trajectory_server` - An optional trajectory server address.
-    ///
-    /// # Returns
-    ///
-    /// A new instance of RelayRLTrajectory.
-    pub fn new(max_length: u128) -> Self {
-        println!(
-            "[RelayRLTrajectory] New {:?} length trajectory created",
-            max_length
-        );
-
-        RelayRLTrajectory {
+    pub fn new(max_length: usize) -> Self {
+        Self {
+            actions: Vec::with_capacity(max_length),
             max_length,
-            actions: Vec::new(),
+            agent_id: None,
+            timestamp: current_timestamp(),
+            episode: None,
+            training_step: None,
+        }
+    }
+
+    pub fn with_agent_id(max_length: usize, agent_id: Uuid) -> Self {
+        Self {
+            actions: Vec::with_capacity(max_length),
+            max_length,
+            agent_id: Some(agent_id),
+            timestamp: current_timestamp(),
+            episode: None,
+            training_step: None,
+        }
+    }
+
+    pub fn with_metadata(
+        max_length: usize,
+        agent_id: Option<Uuid>,
+        episode: Option<u64>,
+        training_step: Option<u64>,
+    ) -> Self {
+        Self {
+            actions: Vec::with_capacity(max_length),
+            max_length,
+            agent_id,
+            timestamp: current_timestamp(),
+            episode,
+            training_step,
+        }
+    }
+
+    /// Returns true if trajectory should be flushed (reached max length or episode ended)
+    pub fn add_action(&mut self, action: RelayRLAction) -> bool {
+        let is_done = action.get_done();
+        self.actions.push(action);
+
+        is_done || self.actions.len() >= self.max_length
+    }
+
+    pub fn add_action_ref(&mut self, action: &RelayRLAction) -> bool {
+        self.add_action(action.clone())
+    }
+
+    pub fn clear(&mut self) {
+        self.actions.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.actions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+
+    /// Check terminal action present
+    pub fn is_complete(&self) -> bool {
+        self.actions.last().is_some_and(|a| a.get_done())
+    }
+
+    /// Check trajectory has reached max length
+    pub fn is_full(&self) -> bool {
+        self.actions.len() >= self.max_length
+    }
+
+    pub fn total_reward(&self) -> f32 {
+        self.actions.iter().map(|a| a.get_rew()).sum()
+    }
+
+    /// Get average reward per step
+    pub fn avg_reward(&self) -> f32 {
+        if self.actions.is_empty() {
+            0.0
+        } else {
+            self.total_reward() / self.actions.len() as f32
+        }
+    }
+
+    pub fn age_seconds(&self) -> u64 {
+        current_timestamp().saturating_sub(self.timestamp)
+    }
+
+    pub fn get_actions(&self) -> &[RelayRLAction] {
+        &self.actions
+    }
+
+    pub fn get_agent_id(&self) -> Option<&Uuid> {
+        self.agent_id.as_ref()
+    }
+
+    pub fn get_timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn get_episode(&self) -> Option<u64> {
+        self.episode
+    }
+
+    pub fn get_training_step(&self) -> Option<u64> {
+        self.training_step
+    }
+
+    pub fn set_agent_id(&mut self, agent_id: Uuid) {
+        self.agent_id = Some(agent_id);
+    }
+
+    pub fn set_episode(&mut self, episode: u64) {
+        self.episode = Some(episode);
+    }
+
+    pub fn set_training_step(&mut self, step: u64) {
+        self.training_step = Some(step);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodedTrajectory {
+    pub data: Vec<u8>,
+    
+    #[cfg(feature = "metadata")]
+    pub metadata: Option<TensorMetadata>,
+    
+    /// Was compression applied?
+    #[cfg(feature = "compression")]
+    pub compressed: bool,
+    
+    /// Was encryption applied?
+    #[cfg(feature = "encryption")]
+    pub encrypted: bool,
+    
+    /// Integrity checksum
+    #[cfg(feature = "integrity")]
+    pub checksum: Option<Checksum>,
+
+    pub num_actions: usize,
+    
+    /// bytes before encoding
+    pub original_size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum TrajectoryError {
+    SerializationError(String),
+    DeserializationError(String),
+    
+    #[cfg(feature = "compression")]
+    CompressionError(String),
+    #[cfg(feature = "encryption")]
+    EncryptionError(String),
+    #[cfg(feature = "integrity")]
+    IntegrityError(String),
+    ChunkingError(String),
+    
+    ActionError(ActionError),
+}
+
+impl std::fmt::Display for TrajectoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SerializationError(e) => write!(f, "[TrajectoryError] Serialization error: {}", e),
+            Self::DeserializationError(e) => write!(f, "[TrajectoryError] Deserialization error: {}", e),
+            #[cfg(feature = "compression")]
+            Self::CompressionError(e) => write!(f, "[TrajectoryError] Compression error: {}", e),
+            #[cfg(feature = "encryption")]
+            Self::EncryptionError(e) => write!(f, "[TrajectoryError] Encryption error: {}", e),
+            #[cfg(feature = "integrity")]
+            Self::IntegrityError(e) => write!(f, "[TrajectoryError] Integrity error: {}", e),
+            Self::ChunkingError(e) => write!(f, "[TrajectoryError] Chunking error: {}", e),
+            Self::ActionError(e) => write!(f, "[TrajectoryError] Action error: {}", e),
         }
     }
 }
 
-/// Implementation of the RelayRLTrajectoryTrait for RelayRLTrajectory.
-///
-/// This implementation defines how an action is added to the trajectory. If the trajectory reaches
-/// its maximum length and the send_if_done flag is set along with the action being terminal,
-/// the trajectory is sent to the training server and then cleared.
+impl std::error::Error for TrajectoryError {}
+
+impl From<ActionError> for TrajectoryError {
+    fn from(err: ActionError) -> Self {
+        TrajectoryError::ActionError(err)
+    }
+}
+
+impl RelayRLTrajectory {
+    /// Processing pipeline:
+    /// 1. Serialize to bincode
+    /// 2. Compress (if enabled)
+    /// 3. Encrypt (if enabled)
+    /// 4. Add integrity check (if enabled)
+    #[cfg(feature = "metadata")]
+    pub fn encode(&self, config: &CodecConfig) -> Result<EncodedTrajectory, TrajectoryError> {
+        let original_data = bincode::serialize(self)
+            .map_err(|e| TrajectoryError::SerializationError(e.to_string()))?;
+        
+        let original_size = original_data.len();
+        let mut data = original_data;
+
+        #[cfg(feature = "compression")]
+        let compressed = if let Some(scheme) = config.compression {
+            let compressed_data = CompressedData::compress(&data, scheme)
+                .map_err(|e| TrajectoryError::CompressionError(e.to_string()))?;
+            data = bincode::serialize(&compressed_data)
+                .map_err(|e| TrajectoryError::SerializationError(e.to_string()))?;
+            true
+        } else {
+            false
+        };
+
+        #[cfg(feature = "encryption")]
+        let encrypted = if let Some(key) = &config.encryption_key {
+            let encrypted_data = EncryptedData::encrypt(&data, key)
+                .map_err(|e| TrajectoryError::EncryptionError(e.to_string()))?;
+            data = bincode::serialize(&encrypted_data)
+                .map_err(|e| TrajectoryError::SerializationError(e.to_string()))?;
+            true
+        } else {
+            false
+        };
+
+        #[cfg(feature = "integrity")]
+        let checksum = if config.verify_integrity {
+            Some(crate::utilities::integrity::compute_checksum(&data))
+        } else {
+            None
+        };
+
+        Ok(EncodedTrajectory {
+            data,
+            #[cfg(feature = "metadata")]
+            metadata: None,
+            #[cfg(feature = "compression")]
+            compressed,
+            #[cfg(feature = "encryption")]
+            encrypted,
+            #[cfg(feature = "integrity")]
+            checksum,
+            num_actions: self.actions.len(),
+            original_size,
+        })
+    }
+
+    /// Reverses the encoding pipeline:
+    /// 1. Verify integrity (if enabled)
+    /// 2. Decrypt (if encrypted)
+    /// 3. Decompress (if compressed)
+    /// 4. Deserialize from bincode
+    #[cfg(feature = "metadata")]
+    pub fn decode(
+        encoded: &EncodedTrajectory,
+        config: &CodecConfig,
+    ) -> Result<Self, TrajectoryError> {
+        let mut data = encoded.data.clone();
+
+        #[cfg(feature = "integrity")]
+        if config.verify_integrity {
+            if let Some(expected_checksum) = encoded.checksum {
+                let computed = crate::utilities::integrity::compute_checksum(&data);
+                if computed != expected_checksum {
+                    return Err(TrajectoryError::IntegrityError(
+                        "Checksum mismatch".to_string()
+                    ));
+                }
+            }
+        }
+
+        #[cfg(feature = "encryption")]
+        if encoded.encrypted {
+            if let Some(key) = &config.encryption_key {
+                let encrypted_data: EncryptedData = bincode::deserialize(&data)
+                    .map_err(|e| TrajectoryError::DeserializationError(e.to_string()))?;
+                data = encrypted_data.decrypt(key)
+                    .map_err(|e| TrajectoryError::EncryptionError(e.to_string()))?;
+            } else {
+                return Err(TrajectoryError::EncryptionError(
+                    "Encryption key required but not provided".to_string()
+                ));
+            }
+        }
+
+        #[cfg(feature = "compression")]
+        if encoded.compressed {
+            let compressed_data: CompressedData = bincode::deserialize(&data)
+                .map_err(|e| TrajectoryError::DeserializationError(e.to_string()))?;
+            data = compressed_data.decompress()
+                .map_err(|e| TrajectoryError::CompressionError(e.to_string()))?;
+        }
+
+        let trajectory: RelayRLTrajectory = bincode::deserialize(&data)
+            .map_err(|e| TrajectoryError::DeserializationError(e.to_string()))?;
+
+        Ok(trajectory)
+    }
+
+    /// Serialize to bytes
+    #[cfg(feature = "metadata")]
+    pub fn to_bytes(&self) -> Result<Vec<u8>, TrajectoryError> {
+        bincode::serialize(self)
+            .map_err(|e| TrajectoryError::SerializationError(e.to_string()))
+    }
+
+    /// Deserialize from bytes
+    #[cfg(feature = "metadata")]
+    pub fn from_bytes(data: &[u8]) -> Result<Self, TrajectoryError> {
+        bincode::deserialize(data)
+            .map_err(|e| TrajectoryError::DeserializationError(e.to_string()))
+    }
+
+    /// Encode with chunking for large trajectories
+    #[cfg(all(feature = "metadata", feature = "integrity"))]
+    pub fn encode_chunked(
+        &self,
+        config: &CodecConfig,
+        chunk_size: usize,
+    ) -> Result<Vec<TensorChunk>, TrajectoryError> {
+        let encoded = self.encode(config)?;
+        let encoded_bytes = bincode::serialize(&encoded)
+            .map_err(|e| TrajectoryError::SerializationError(e.to_string()))?;
+
+        let chunked = ChunkedTensor::from_data(&encoded_bytes, chunk_size);
+        Ok(chunked.chunks().to_vec())
+    }
+
+    /// Reassemble from chunks
+    #[cfg(all(feature = "metadata", feature = "integrity"))]
+    pub fn decode_chunked(
+        chunks: &[TensorChunk],
+        config: &CodecConfig,
+    ) -> Result<Self, TrajectoryError> {
+        let reassembled = ChunkedTensor::reassemble(chunks)
+            .map_err(|e| TrajectoryError::ChunkingError(e.to_string()))?;
+        
+        let encoded: EncodedTrajectory = bincode::deserialize(&reassembled)
+            .map_err(|e| TrajectoryError::DeserializationError(e.to_string()))?;
+        
+        Self::decode(&encoded, config)
+    }
+}
+
+pub trait RelayRLTrajectoryTrait {
+    type Action;
+    
+    fn add_action(&mut self, action: &Self::Action);
+}
+
 impl RelayRLTrajectoryTrait for RelayRLTrajectory {
     type Action = RelayRLAction;
-
-    /// Adds an action to the trajectory and conditionally sends it if the trajectory is full and the action is terminal.
-    ///
-    /// # Arguments
-    ///
-    /// * `action` - A reference to the RelayRLAction to be added.
-    fn add_action(&mut self, action: &RelayRLAction) {
-        let action_done: bool = action.done;
-
-        self.actions.push(action.to_owned());
-
-        if action_done
-            && self.actions.len()
-                >= <u128 as TryInto<usize>>::try_into(self.max_length)
-                    .expect("Failed to convert max_length to usize")
-        {
-            self.actions.clear();
-        }
+    
+    fn add_action(&mut self, action: &Self::Action) {
+        self.add_action_ref(action);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trajectory_creation() {
+        let traj = RelayRLTrajectory::new(100);
+        assert_eq!(traj.len(), 0);
+        assert!(traj.is_empty());
+        assert!(!traj.is_complete());
+    }
+
+    #[test]
+    fn test_add_actions() {
+        let mut traj = RelayRLTrajectory::new(10);
+        let action = RelayRLAction::minimal(1.0, false);
+        
+        let should_flush = traj.add_action(action);
+        assert!(!should_flush);
+        assert_eq!(traj.len(), 1);
+    }
+
+    #[test]
+    fn test_trajectory_completion() {
+        let mut traj = RelayRLTrajectory::new(10);
+
+        for _ in 0..5 {
+            traj.add_action(RelayRLAction::minimal(1.0, false));
+        }
+        assert!(!traj.is_complete());
+        
+        traj.add_action(RelayRLAction::minimal(1.0, true));
+        assert!(traj.is_complete());
+    }
+
+    #[test]
+    fn test_trajectory_rewards() {
+        let mut traj = RelayRLTrajectory::new(10);
+        
+        for i in 1..=5 {
+            traj.add_action(RelayRLAction::minimal(i as f32, false));
+        }
+        
+        assert_eq!(traj.total_reward(), 15.0);
+        assert_eq!(traj.avg_reward(), 3.0);
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn test_trajectory_serialization() {
+        let mut traj = RelayRLTrajectory::new(10);
+        traj.add_action(RelayRLAction::minimal(1.5, true));
+        
+        let bytes = traj.to_bytes().unwrap();
+        let decoded = RelayRLTrajectory::from_bytes(&bytes).unwrap();
+        
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded.get_actions()[0].get_rew(), 1.5);
+    }
+}
+
