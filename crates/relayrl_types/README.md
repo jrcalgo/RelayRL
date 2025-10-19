@@ -27,6 +27,8 @@ encryption = ["chacha20poly1305"]   # ChaCha20-Poly1305 AEAD
 integrity = ["blake3"]              # BLAKE3 checksums
 metadata = ["bincode"]              # Metadata serialization
 quantization = ["half"]             # FP16/BF16 quantization
+zerocopy = ["bytes"]                # Zerocopy data conversions
+
 
 # Convenience bundles
 network-basic = ["compression", "integrity", "zerocopy"]
@@ -41,54 +43,50 @@ network-full = ["network-secure", "metadata", "quantization"]
 ```rust
 use relayrl_types::prelude::*;
 use uuid::Uuid;
-use burn_tensor::{Tensor, backend::Backend};
-use burn_ndarray::NdArray;
+use burn_tensor::Tensor;
+use burn_ndarray::NdArray; // enable feature: ndarray-backend
 
-// Create tensors using burn-ndarray backend
-type B = NdArray<f32>;
+// Create a Burn tensor (NdArray backend) and store as RelayRL TensorData
+let device = DeviceType::Cpu;
 
-// Create observation tensor (4 dimensional state)
-let obs_data = Tensor::<B, 1>::from_floats([1.0, 2.0, 3.0, 4.0], &Default::default());
-// Serialize tensor to TensorData
-let obs_tensor = TensorData::new(
-    vec![4],
-    DType::F32,
-    obs_data.to_data().bytes,  // Extract raw bytes
-    TensorBackend::NdArray,
-);
+// 1) Burn → RelayRL: Convert any Burn tensor into TensorData with a target dtype/backend
+let obs_burn = Tensor::<NdArray, 1>::from_floats([1.0, 2.0, 3.0, 4.0], &burn_tensor::Device::Cpu);
+let obs_td: TensorData = ConversionTensor {
+    tensor: obs_burn,
+    conversion_dtype: DType::NdArray(NdArrayDType::F32),
+}.try_into()?;
 
-let _obs_tensor = obs_tensor.to_tensor::
+let act_burn = Tensor::<NdArray, 1>::from_floats([0.5, -0.3], &burn_tensor::Device::Cpu);
+let act_td: TensorData = ConversionTensor {
+    tensor: act_burn,
+    conversion_dtype: DType::NdArray(NdArrayDType::F32),
+}.try_into()?;
 
-// Create action tensor (2 dimensional action)
-let act_data = Tensor::<B, 1>::from_floats([0.5, -0.3], &Default::default());
-let act_tensor = TensorData::new(
-    vec![2],
-    DType::F32,
-    act_data.to_data().bytes,
-    TensorBackend::NdArray,
-);
+// 2) RelayRL → Burn: Build Burn tensors from stored TensorData with a chosen backend/device
+//    Specify the backend type parameter; device is provided via DeviceType
+let obs_tensor_any = RelayRLAction::to_tensor::<NdArray>(&obs_td, &device)?; // Box<dyn Any>
+let act_tensor_any = RelayRLAction::to_tensor::<NdArray>(&act_td, &device)?;
 
-// Create an action with tensors
+// 3) Create an action with tensors
 let action = RelayRLAction::new(
-    Some(obs_tensor),               // observation
-    Some(act_tensor),               // action
-    None,                           // mask
-    1.5,                            // reward
-    false,                          // done
-    None,                           // auxiliary data
-    Some(Uuid::new_v4()),          // agent_id
+    Some(obs_td),                 // observation TensorData
+    Some(act_td),                 // action TensorData
+    None,                         // mask
+    1.5,                          // reward
+    false,                        // done
+    None,                         // auxiliary data
+    Some(Uuid::new_v4()),        // agent_id
 );
 
-// Create a trajectory and add actions
+// 4) Work with a trajectory
 let mut trajectory = RelayRLTrajectory::with_agent_id(1000, Uuid::new_v4());
 trajectory.add_action(action);
 
 println!("Total reward: {}", trajectory.total_reward());
 println!("Length: {}", trajectory.len());
 
-// Minimal action without tensors (useful for quick testing)
-let minimal_action = RelayRLAction::minimal(1.0, false);
-trajectory.add_action(minimal_action);
+// Minimal action without tensors
+trajectory.add_action(RelayRLAction::minimal(1.0, false));
 ```
 
 ## Codec Functionality
