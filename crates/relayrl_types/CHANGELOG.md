@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2025-10-19
+
+### Added
+- Generic tensor conversion: `ConversionTensor<B, D, K>` → `TensorData` using a target `conversion_dtype` (supports K = Float, Int, Bool)
+- Runtime device selection via `DeviceType` (Cpu, Cuda(idx), Mps) and backend resolution via `BackendMatcher`
+- Full support for `bf16` (when `quantization`/`half` feature is enabled) and `u8` int tensors on the `tch` backend
+
+### Changed
+- Refactored tensor/backends API into `types/tensor.rs` (centralized dtype, backend, device, and conversion utilities)
+- Replaced `TensorBackend` with `SupportedTensorBackend` for clearer runtime/backend intent
+- `RelayRLAction::to_tensor` and getters now accept `&DeviceType` for user-selected CPU/GPU
+- Adopted `bincode::serde::{encode_to_vec, decode_from_slice}` across encoding paths for consistency
+- Updated `burn-tch` import to `burn_tch::LibTorch as Tch` to align with 0.18 APIs
+- Crate metadata updated (repository, documentation URLs)
+
+### Fixed
+- Correct handling of `TchDType::Bf16` (distinct from `f16`) by converting through `bf16` to `f32`
+- Stable bool serialization by packing `Vec<bool>` to `Vec<u8>`
+- Resolved device associated-type mismatches by routing devices through `BackendMatcher`
+
+### Breaking
+- `RelayRLAction::to_tensor` signature changed to require `&DeviceType`; corresponding `get_*_tensor` helpers updated
+- `DType` streamlined under backends (`NdArray(...)` / `Tch(...)`); removed legacy `None` variant
+- Renamed/standardized backend enums to `SupportedTensorBackend`
+
 ## [0.2.0] - 2024-12-19
 
 ### Added

@@ -3,7 +3,7 @@ relayrl_types
 
 Core data types and encoding/decoding utilities for the RelayRL framework.
 
-[![Changelog](https://img.shields.io/badge/Changelog-0.2.0-blue.svg)](CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/Changelog-0.2.1-blue.svg)](CHANGELOG.md)
 
 ## Features
 
@@ -56,6 +56,8 @@ let obs_tensor = TensorData::new(
     obs_data.to_data().bytes,  // Extract raw bytes
     TensorBackend::NdArray,
 );
+
+let _obs_tensor = obs_tensor.to_tensor::
 
 // Create action tensor (2 dimensional action)
 let act_data = Tensor::<B, 1>::from_floats([0.5, -0.3], &Default::default());

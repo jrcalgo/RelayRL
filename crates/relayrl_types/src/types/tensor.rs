@@ -1,0 +1,577 @@
+use half::{bf16, f16};
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "ndarray-backend")]
+use burn_ndarray::NdArray;
+#[cfg(feature = "tch-backend")]
+use burn_tch::LibTorch as Tch;
+
+use burn_tensor::{
+    Bool, Float, Int, Shape, Tensor, TensorData as BurnTensorData, TensorKind, backend::Backend, BasicOps,
+};
+
+#[derive(Debug, Clone)]
+pub enum TensorError {
+    SerializationError(String),
+    DeserializationError(String),
+    BackendError(String),
+    DTypeError(String),
+}
+
+impl std::fmt::Display for TensorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SerializationError(e) => write!(f, "[TensorError] Serialization error: {}", e),
+            Self::DeserializationError(e) => {
+                write!(f, "[TensorError] Deserialization error: {}", e)
+            }
+            Self::BackendError(e) => write!(f, "[TensorError] Backend error: {}", e),
+            Self::DTypeError(e) => write!(f, "[TensorError] DType error: {}", e),
+        }
+    }
+}
+
+/// Tensor backend enumeration for runtime backend selection
+/// Constrains burn-tensor backends to tch and ndarray
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SupportedTensorBackend {
+    None,
+    /// CPU-based NdArray backend
+    #[cfg(feature = "ndarray-backend")]
+    NdArray,
+    /// LibTorch backend (GPU/CPU)
+    #[cfg(feature = "tch-backend")]
+    Tch,
+}
+
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+impl Default for SupportedTensorBackend {
+    fn default() -> Self {
+        #[cfg(feature = "ndarray-backend")]
+        return SupportedTensorBackend::NdArray;
+
+        #[cfg(feature = "tch-backend")]
+        return SupportedTensorBackend::Tch;
+    }
+}
+
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DeviceType {
+    Cpu,
+    #[cfg(feature = "tch-backend")]
+    Cuda(usize),
+    #[cfg(feature = "tch-backend")]
+    Mps,
+}
+
+impl Default for DeviceType {
+    fn default() -> Self {
+        DeviceType::Cpu
+    }
+}
+
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+pub trait BackendMatcher {
+    type Backend: Backend + 'static;
+
+    fn matches_backend(supported: &SupportedTensorBackend) -> bool;
+    fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError>;
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl BackendMatcher for NdArray {
+    type Backend = NdArray;
+
+    fn matches_backend(supported: &SupportedTensorBackend) -> bool {
+        *supported == SupportedTensorBackend::NdArray
+    }
+
+    fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
+        match device {
+            DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),
+            _ => Err(TensorError::BackendError(
+                "Unsupported device type".to_string(),
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "tch-backend")]
+impl BackendMatcher for Tch {
+    type Backend = Tch;
+
+    fn matches_backend(supported: &SupportedTensorBackend) -> bool {
+        *supported == SupportedTensorBackend::Tch
+    }
+
+    fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
+        match device {
+            DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),
+            #[cfg(feature = "tch-backend")]
+            DeviceType::Cuda(index) => Ok(burn_tensor::Device::<Self::Backend>::Cuda(*index)),
+            #[cfg(feature = "tch-backend")]
+            DeviceType::Mps => Ok(burn_tensor::Device::<Self::Backend>::Mps),
+        }
+    }
+}
+
+/// Data type enumeration for tensor serialization
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DType {
+    #[cfg(feature = "ndarray-backend")]
+    NdArray(NdArrayDType),
+    #[cfg(feature = "tch-backend")]
+    Tch(TchDType),
+}
+
+impl std::fmt::Display for DType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(feature = "ndarray-backend")]
+            DType::NdArray(ndarray) => write!(f, "NdArray({})", ndarray),
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(tch) => write!(f, "Tch({})", tch),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TchDType {
+    F16,
+    Bf16,
+    F32,
+    F64,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    Bool,
+}
+
+impl std::fmt::Display for TchDType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TchDType::F16 => write!(f, "F16"),
+            TchDType::Bf16 => write!(f, "Bf16"),
+            TchDType::F32 => write!(f, "F32"),
+            TchDType::F64 => write!(f, "F64"),
+            TchDType::I8 => write!(f, "I8"),
+            TchDType::I16 => write!(f, "I16"),
+            TchDType::I32 => write!(f, "I32"),
+            TchDType::I64 => write!(f, "I64"),
+            TchDType::U8 => write!(f, "U8"),
+            TchDType::Bool => write!(f, "Bool"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NdArrayDType {
+    F16,
+    F32,
+    F64,
+    I8,
+    I16,
+    I32,
+    I64,
+    Bool,
+}
+
+impl std::fmt::Display for NdArrayDType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NdArrayDType::F16 => write!(f, "F16"),
+            NdArrayDType::F32 => write!(f, "F32"),
+            NdArrayDType::F64 => write!(f, "F64"),
+            NdArrayDType::I8 => write!(f, "I8"),
+            NdArrayDType::I16 => write!(f, "I16"),
+            NdArrayDType::I32 => write!(f, "I32"),
+            NdArrayDType::I64 => write!(f, "I64"),
+            NdArrayDType::Bool => write!(f, "Bool"),
+        }
+    }
+}
+
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+pub struct FloatTensor<B: Backend + 'static, const D: usize> {
+    pub tensor: Tensor<B, D, Float>,
+    pub dtype: DType,
+}
+
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+pub struct IntTensor<B: Backend + 'static, const D: usize> {
+    pub tensor: Tensor<B, D, Int>,
+    pub dtype: DType,
+}
+
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+pub struct BoolTensor<B: Backend + 'static, const D: usize> {
+    pub tensor: Tensor<B, D, Bool>,
+    pub dtype: DType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TensorData {
+    pub(crate) shape: Vec<usize>,
+    pub(crate) dtype: DType,
+    pub(crate) data: Vec<u8>,
+    pub(crate) supported_backend: SupportedTensorBackend,
+}
+
+impl TensorData {
+    pub fn new(
+        shape: Vec<usize>,
+        dtype: DType,
+        data: Vec<u8>,
+        supported_backend: SupportedTensorBackend,
+    ) -> Self {
+        Self {
+            shape,
+            dtype,
+            data,
+            supported_backend,
+        }
+    }
+
+    pub fn num_el(&self) -> usize {
+        self.shape.iter().product()
+    }
+
+    pub fn size_in_bytes(&self) -> usize {
+        self.data.len()
+    }
+
+    fn get_backend_from_dtype(dtype: &DType) -> SupportedTensorBackend {
+        match dtype {
+            #[cfg(feature = "ndarray-backend")]
+            DType::NdArray(_) => SupportedTensorBackend::NdArray,
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(_) => SupportedTensorBackend::Tch
+        }
+    }
+}
+
+impl TensorData {
+    /// Convert TensorData to a Float Tensor
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+    pub fn to_float_tensor<B: BackendMatcher + 'static, const D: usize>(
+        &self,
+        device: &DeviceType,
+    ) -> Result<FloatTensor<B::Backend, D>, TensorError> {
+        let device: <<B as BackendMatcher>::Backend as Backend>::Device = B::get_device(device)?;
+
+        let shape: Shape = Shape::from(self.shape.as_slice());
+
+        match &self.dtype {
+            #[cfg(feature = "ndarray-backend")]
+            DType::NdArray(dtype) => {
+                match dtype {
+                    #[cfg(feature = "quantization")]
+                    NdArrayDType::F16 => {
+                        let values: &[f16] = bytemuck::cast_slice(&self.data);
+                        // Convert f16 to f32 for processing
+                        let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
+                        let data = BurnTensorData::new(f32_values, shape);
+                        Ok(FloatTensor {
+                            tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
+                            dtype: DType::NdArray(NdArrayDType::F16),
+                        })
+                    }
+                    NdArrayDType::F32 => {
+                        let values: &[f32] = bytemuck::cast_slice(&self.data);
+                        let data = BurnTensorData::new(values.to_vec(), shape);
+                        Ok(FloatTensor {
+                            tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
+                            dtype: DType::NdArray(NdArrayDType::F32),
+                        })
+                    }
+                    NdArrayDType::F64 => {
+                        let values: &[f64] = bytemuck::cast_slice(&self.data);
+                        let data = BurnTensorData::new(values.to_vec(), shape);
+                        Ok(FloatTensor {
+                            tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
+                            dtype: DType::NdArray(NdArrayDType::F64),
+                        })
+                    }
+                    _ => Err(TensorError::DTypeError(format!(
+                        "Cannot convert {:?} to Float tensor",
+                        dtype
+                    ))),
+                }
+            }
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(dtype) => match dtype {
+                TchDType::F16 => {
+                    let values: &[f16] = bytemuck::cast_slice(&self.data);
+                    let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
+                    let data = BurnTensorData::new(f32_values, shape);
+                    Ok(FloatTensor {
+                        tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::F16),
+                    })
+                }
+                TchDType::Bf16 => {
+                    let values: &[bf16] = bytemuck::cast_slice(&self.data);
+                    let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
+                    let data = BurnTensorData::new(f32_values, shape);
+                    Ok(FloatTensor {
+                        tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::Bf16),
+                    })
+                }
+                TchDType::F32 => {
+                    let values: &[f32] = bytemuck::cast_slice(&self.data);
+                    let data = BurnTensorData::new(values.to_vec(), shape);
+                    Ok(FloatTensor {
+                        tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::F32),
+                    })
+                }
+                TchDType::F64 => {
+                    let values: &[f64] = bytemuck::cast_slice(&self.data);
+                    let data = BurnTensorData::new(values.to_vec(), shape);
+                    Ok(FloatTensor {
+                        tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::F64),
+                    })
+                }
+                _ => Err(TensorError::DTypeError(format!(
+                    "Cannot convert {:?} to Float tensor",
+                    dtype
+                ))),
+            },
+        }
+    }
+
+    /// Convert TensorData to an Int Tensor
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+    pub fn to_int_tensor<B: BackendMatcher + 'static, const D: usize>(
+        &self,
+        device: &DeviceType,
+    ) -> Result<IntTensor<B::Backend, D>, TensorError> {
+        let device: <<B as BackendMatcher>::Backend as Backend>::Device = B::get_device(device)?;
+
+        let shape: Shape = Shape::from(self.shape.as_slice());
+
+        match &self.dtype {
+            DType::NdArray(dtype) => match dtype {
+                NdArrayDType::I8 => {
+                    let values: &[i8] = bytemuck::cast_slice(&self.data);
+                    let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                    let data = BurnTensorData::new(i32_values, shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::NdArray(NdArrayDType::I8),
+                    })
+                }
+                NdArrayDType::I16 => {
+                    let values: &[i16] = bytemuck::cast_slice(&self.data);
+                    let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                    let data = BurnTensorData::new(i32_values, shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::NdArray(NdArrayDType::I16),
+                    })
+                }
+                NdArrayDType::I32 => {
+                    let values: &[i32] = bytemuck::cast_slice(&self.data);
+                    let data = BurnTensorData::new(values.to_vec(), shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::NdArray(NdArrayDType::I32),
+                    })
+                }
+                NdArrayDType::I64 => {
+                    let values: &[i64] = bytemuck::cast_slice(&self.data);
+                    let data = BurnTensorData::new(values.to_vec(), shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::NdArray(NdArrayDType::I64),
+                    })
+                }
+                _ => Err(TensorError::DTypeError(format!(
+                    "Cannot convert {:?} to Int tensor",
+                    dtype
+                ))),
+            },
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(dtype) => match dtype {
+                TchDType::U8 => {
+                    let values: &[u8] = bytemuck::cast_slice(&self.data);
+                    let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                    let data = BurnTensorData::new(i32_values, shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::U8),
+                    })
+                }
+                TchDType::I8 => {
+                    let values: &[i8] = bytemuck::cast_slice(&self.data);
+                    let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                    let data = BurnTensorData::new(i32_values, shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::I8),
+                    })
+                }
+                TchDType::I16 => {
+                    let values: &[i16] = bytemuck::cast_slice(&self.data);
+                    let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                    let data = BurnTensorData::new(i32_values, shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::I16),
+                    })
+                }
+                TchDType::I32 => {
+                    let values: &[i32] = bytemuck::cast_slice(&self.data);
+                    let data = BurnTensorData::new(values.to_vec(), shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::I32),
+                    })
+                }
+                TchDType::I64 => {
+                    let values: &[i64] = bytemuck::cast_slice(&self.data);
+                    let data = BurnTensorData::new(values.to_vec(), shape);
+                    Ok(IntTensor {
+                        tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::I64),
+                    })
+                }
+                _ => Err(TensorError::DTypeError(format!(
+                    "Cannot convert {:?} to Int tensor",
+                    dtype
+                ))),
+            },
+        }
+    }
+
+    /// Convert TensorData to a Bool Tensor
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+    pub fn to_bool_tensor<B: BackendMatcher + 'static, const D: usize>(
+        &self,
+        device: &DeviceType,
+    ) -> Result<BoolTensor<B::Backend, D>, TensorError> {
+        let device: <<B as BackendMatcher>::Backend as Backend>::Device = B::get_device(device)?;
+
+        let shape: Shape = Shape::from(self.shape.as_slice());
+
+        match &self.dtype {
+            DType::NdArray(dtype) => match dtype {
+                NdArrayDType::Bool => {
+                    let values: &[u8] = bytemuck::cast_slice(&self.data);
+                    let bool_values: Vec<bool> = values.iter().map(|&v| v != 0).collect();
+                    let data = BurnTensorData::new(bool_values, shape);
+                    Ok(BoolTensor {
+                        tensor: Tensor::<B::Backend, D, Bool>::from_data(data, &device),
+                        dtype: DType::NdArray(NdArrayDType::Bool),
+                    })
+                }
+                _ => Err(TensorError::DTypeError(format!(
+                    "Cannot convert {:?} to Bool tensor",
+                    dtype
+                ))),
+            },
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(dtype) => match dtype {
+                TchDType::Bool => {
+                    let values: &[u8] = bytemuck::cast_slice(&self.data);
+                    let bool_values: Vec<bool> = values.iter().map(|&v| v != 0).collect();
+                    let data = BurnTensorData::new(bool_values, shape);
+                    Ok(BoolTensor {
+                        tensor: Tensor::<B::Backend, D, Bool>::from_data(data, &device),
+                        dtype: DType::Tch(TchDType::Bool),
+                    })
+                }
+                _ => Err(TensorError::DTypeError(format!(
+                    "Cannot convert {:?} to Bool tensor",
+                    dtype
+                ))),
+            },
+        }
+    }
+}
+
+/// Converts a burn-tensor tensor to a RelayRL tensor data structure
+#[derive(Debug, Clone)]
+pub struct ConversionTensor<B: Backend + 'static, const D: usize, K: TensorKind<B>> {
+    pub tensor: Tensor<B, D, K>,
+    pub conversion_dtype: DType,
+}
+
+impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>> TryFrom<ConversionTensor<B, D, K>> for TensorData {
+    type Error = TensorError;
+
+    fn try_from(t: ConversionTensor<B, D, K>) -> Result<Self, Self::Error> {
+        let data = t.tensor.to_data();
+        let shape = data.shape.clone();
+
+        fn pack_bytes<E: burn_tensor::Element>(data: &burn_tensor::TensorData) -> Result<Vec<u8>, TensorError> {
+            let v: Vec<E> = data.to_vec::<E>()
+                .map_err(|e| TensorError::DTypeError(format!("Element cast failed: {:?}", e)))?;
+            Ok(bytemuck::cast_slice(&v).to_vec())
+        }
+
+        fn pack_bools(data: &burn_tensor::TensorData) -> Result<Vec<u8>, TensorError> {
+            let v: Vec<bool> = data.to_vec::<bool>()
+                .map_err(|e| TensorError::DTypeError(format!("Bool cast failed: {:?}", e)))?;
+            Ok(v.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect())
+        }
+
+        let (supported_backend, bytes) = match &t.conversion_dtype {
+            #[cfg(feature = "ndarray-backend")]
+            DType::NdArray(nd) => {
+                use super::tensor::NdArrayDType::*;
+                let bytes = match nd {
+                    #[cfg(feature = "quantization")]
+                    F16 => pack_bytes::<half::f16>(&data)?,
+                    F32 => pack_bytes::<f32>(&data)?,
+                    F64 => pack_bytes::<f64>(&data)?,
+                    I8  => pack_bytes::<i8>(&data)?,
+                    I16 => pack_bytes::<i16>(&data)?,
+                    I32 => pack_bytes::<i32>(&data)?,
+                    I64 => pack_bytes::<i64>(&data)?,
+                    Bool => pack_bools(&data)?,
+                    #[cfg(not(feature = "quantization"))]
+                    F16 => return Err(TensorError::DTypeError("F16 requires 'quantization' feature".into())),
+                };
+                (SupportedTensorBackend::NdArray, bytes)
+            }
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(td) => {
+                use super::tensor::TchDType::*;
+                let bytes = match td {
+                    #[cfg(feature = "quantization")]
+                    F16  => pack_bytes::<half::f16>(&data)?,
+                    #[cfg(feature = "quantization")]
+                    Bf16 => pack_bytes::<half::bf16>(&data)?,
+                    F32  => pack_bytes::<f32>(&data)?,
+                    F64  => pack_bytes::<f64>(&data)?,
+                    I8   => pack_bytes::<i8>(&data)?,
+                    I16  => pack_bytes::<i16>(&data)?,
+                    I32  => pack_bytes::<i32>(&data)?,
+                    I64  => pack_bytes::<i64>(&data)?,
+                    U8   => pack_bytes::<u8>(&data)?,
+                    Bool => pack_bools(&data)?,
+                    #[cfg(not(feature = "quantization"))]
+                    F16  => return Err(TensorError::DTypeError("F16 requires 'quantization' feature".into())),
+                    #[cfg(not(feature = "quantization"))]
+                    Bf16 => return Err(TensorError::DTypeError("Bf16 requires 'quantization' feature".into())),
+                };
+                (SupportedTensorBackend::Tch, bytes)
+            }
+            _ => return Err(TensorError::BackendError("Unsupported or missing target backend for conversion".into())),
+        };
+
+        Ok(TensorData {
+            shape,
+            dtype: t.conversion_dtype,
+            data: bytes,
+            supported_backend,
+        })
+    }
+}

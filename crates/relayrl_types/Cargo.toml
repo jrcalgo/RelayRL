@@ -1,16 +1,18 @@
 [package]
 name = "relayrl_types"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["jrcalgo <jacksonr1212@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
+repository = "https://github.com/jrcalgo/relayrl"
+documentation = "https://docs.rs/crate/relayrl_types"
 readme = "README.md"
-keywords = ['reinforcement', 'learning', 'safetensors', 'tensors', 'data-types']
+keywords = ['networking', 'learning', 'tensors', 'data-types', 'serialization']
 categories = ['science', 'data-structures', 'encoding']
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend"]
+default = ["ndarray-backend", "network-full"]
  
 ndarray-backend = ["burn-ndarray"]
 tch-backend = ["burn-tch"]
@@ -27,7 +29,7 @@ network-secure = ["network-basic", "encryption"]
 network-full = ["network-secure", "metadata", "quantization"]
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"]}
 
 bytemuck = "1.20.0"
 dashmap = "6.1.0"
@@ -37,7 +39,9 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 burn-tensor = "0.18.0"
 burn-ndarray = {version = "0.18.0", optional = true}
 burn-tch = {version = "0.18.0", optional = true}
-# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.5.1)
+# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.3.0)
+# burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda (probably 0.3.0)
+# burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu (probably 0.3.0)
 
 [dependencies.blake3]
 version = "1.8.2"
@@ -61,6 +65,7 @@ optional = true
 
 [dependencies.bincode]
 version = "2.0.1"
+features = ["serde"]
 optional = true
 
 [dependencies.half]

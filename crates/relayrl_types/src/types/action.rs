@@ -1,12 +1,22 @@
 //! RelayRL Action types with burn tensor backend support
-//! 
+//!
 //! Provides flexible action representation supporting multiple backends (ndarray, tch)
 //! with integrated serialization, compression, encryption, and integrity checking.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use bincode::config;
 use uuid::Uuid;
 
+#[cfg(feature = "ndarray-backend")]
+use burn_ndarray::NdArray;
+#[cfg(feature = "tch-backend")]
+use burn_tch::LibTorch as Tch;
+use burn_tensor::{Bool, Float, Int, Tensor, backend::Backend};
+
+#[cfg(feature = "integrity")]
+use crate::utilities::chunking::{ChunkedTensor, TensorChunk};
 #[cfg(feature = "compression")]
 use crate::utilities::compress::{CompressedData, CompressionScheme};
 #[cfg(feature = "encryption")]
@@ -15,82 +25,11 @@ use crate::utilities::encrypt::{EncryptedData, EncryptionKey};
 use crate::utilities::integrity::Checksum;
 #[cfg(feature = "metadata")]
 use crate::utilities::metadata::TensorMetadata;
-#[cfg(feature = "integrity")]
-use crate::utilities::chunking::{ChunkedTensor, TensorChunk};
 
-/// Tensor backend enumeration for runtime backend selection
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum TensorBackend {
-    /// CPU-based NdArray backend
-    #[cfg(feature = "ndarray-backend")]
-    NdArray,
-    /// LibTorch backend (GPU/CPU)
-    #[cfg(feature = "tch-backend")]
-    Tch,
-}
-
-impl Default for TensorBackend {
-    fn default() -> Self {
-        #[cfg(feature = "ndarray-backend")]
-        return TensorBackend::NdArray;
-        
-        #[cfg(all(feature = "tch-backend", not(feature = "ndarray-backend")))]
-        return TensorBackend::Tch;
-    }
-}
-
-/// Data type enumeration for tensor serialization
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum DType {
-    U8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
-    Bool,
-}
-
-impl std::fmt::Display for DType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DType::U8 => write!(f, "U8"),
-            DType::I16 => write!(f, "I16"),
-            DType::I32 => write!(f, "I32"),
-            DType::I64 => write!(f, "I64"),
-            DType::F32 => write!(f, "F32"),
-            DType::F64 => write!(f, "F64"),
-            DType::Bool => write!(f, "Bool"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TensorData {
-    pub(crate) shape: Vec<usize>,
-    pub(crate) dtype: DType,
-    pub(crate) data: Vec<u8>,
-    pub(crate) backend: TensorBackend,
-}
-
-impl TensorData {
-    pub fn new(shape: Vec<usize>, dtype: DType, data: Vec<u8>, backend: TensorBackend) -> Self {
-        Self {
-            shape,
-            dtype,
-            data,
-            backend,
-        }
-    }
-
-    pub fn num_el(&self) -> usize {
-        self.shape.iter().product()
-    }
-
-    pub fn size_in_bytes(&self) -> usize {
-        self.data.len()
-    }
-}
+use super::tensor::{
+    BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
+    TensorError,
+};
 
 /// Additional data types that can be attached to actions via the `data` parameter
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,23 +56,15 @@ pub enum RelayRLData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayRLAction {
     pub(crate) obs: Option<TensorData>,
-    
     pub(crate) act: Option<TensorData>,
-    
     pub(crate) mask: Option<TensorData>,
-    
     pub(crate) rew: f32,
-    
     pub(crate) done: bool,
-    
     pub(crate) data: Option<HashMap<String, RelayRLData>>,
-    
     pub(crate) agent_id: Option<Uuid>,
-    
     pub(crate) timestamp: u64,
 }
 
-/// Get current Unix timestamp
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -142,7 +73,6 @@ fn current_timestamp() -> u64 {
 }
 
 impl RelayRLAction {
-    /// Create a new RelayRLAction
     pub fn new(
         obs: Option<TensorData>,
         act: Option<TensorData>,
@@ -164,6 +94,72 @@ impl RelayRLAction {
         }
     }
 
+    pub fn to_tensor<B: Backend + BackendMatcher + 'static>(
+        tensor_data: &TensorData,
+        device: &DeviceType,
+    ) -> Result<Box<dyn std::any::Any>, TensorError> {
+        if !B::matches_backend(&tensor_data.supported_backend) {
+            return Err(TensorError::BackendError(format!(
+                "Backend mismatch: expected {:?}, got {:?}",
+                tensor_data.supported_backend,
+                std::any::type_name::<B>()
+            )));
+        }
+
+        match tensor_data.supported_backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => match &tensor_data.dtype {
+                DType::NdArray(dtype) => match dtype {
+                    NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => tensor_data
+                        .to_float_tensor::<B, 1>(device)
+                        .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
+                    NdArrayDType::I8
+                    | NdArrayDType::I16
+                    | NdArrayDType::I32
+                    | NdArrayDType::I64 => tensor_data
+                        .to_int_tensor::<B, 1>(device)
+                        .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
+                    NdArrayDType::Bool => tensor_data
+                        .to_bool_tensor::<B, 1>(device)
+                        .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
+                    _ => Err(TensorError::DTypeError(format!(
+                        "NdArray dtype not supported: {:?}",
+                        tensor_data.dtype
+                    ))),
+                },
+                _ => Err(TensorError::DTypeError(format!(
+                    "Unsupported dtype for NdArray backend: {}",
+                    tensor_data.dtype
+                ))),
+            },
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => match &tensor_data.dtype {
+                DType::Tch(dtype) => match dtype {
+                    TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => tensor_data
+                        .to_float_tensor::<B, 1>(device)
+                        .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
+                    TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 => tensor_data
+                        .to_int_tensor::<B, 1>(device)
+                        .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
+                    TchDType::Bool => tensor_data
+                        .to_bool_tensor::<B, 1>(device)
+                        .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
+                    _ => Err(TensorError::DTypeError(format!(
+                        "Tch dtype not supported: {:?}",
+                        tensor_data.dtype
+                    ))),
+                },
+                _ => Err(TensorError::DTypeError(format!(
+                    "Unsupported dtype for Tch backend: {}",
+                    tensor_data.dtype
+                ))),
+            },
+            SupportedTensorBackend::None => {
+                Err(TensorError::BackendError("No backend selected".to_string()))
+            }
+        }
+    }
+
     pub fn minimal(rew: f32, done: bool) -> Self {
         Self {
             obs: None,
@@ -177,17 +173,43 @@ impl RelayRLAction {
         }
     }
 
-    // Getters
     pub fn get_obs(&self) -> Option<&TensorData> {
         self.obs.as_ref()
+    }
+
+    pub fn get_obs_tensor<B: Backend + BackendMatcher + 'static>(
+        &self,
+        device: &DeviceType,
+    ) -> Option<Box<dyn std::any::Any>> {
+        self.obs
+            .as_ref()
+            .and_then(|tensor_data| Self::to_tensor::<B>(tensor_data, device).ok())
     }
 
     pub fn get_act(&self) -> Option<&TensorData> {
         self.act.as_ref()
     }
 
+    pub fn get_act_tensor<B: Backend + BackendMatcher + 'static>(
+        &self,
+        device: &DeviceType,
+    ) -> Option<Box<dyn std::any::Any>> {
+        self.act
+            .as_ref()
+            .and_then(|tensor_data| Self::to_tensor::<B>(tensor_data, device).ok())
+    }
+
     pub fn get_mask(&self) -> Option<&TensorData> {
         self.mask.as_ref()
+    }
+
+    pub fn get_mask_tensor<B: Backend + BackendMatcher + 'static>(
+        &self,
+        device: &DeviceType,
+    ) -> Option<Box<dyn std::any::Any>> {
+        self.mask
+            .as_ref()
+            .and_then(|tensor_data| Self::to_tensor::<B>(tensor_data, device).ok())
     }
 
     pub fn get_rew(&self) -> f32 {
@@ -222,7 +244,6 @@ impl RelayRLAction {
         self.agent_id = Some(agent_id);
     }
 
-    /// Age of this action in seconds
     pub fn age_seconds(&self) -> u64 {
         current_timestamp().saturating_sub(self.timestamp)
     }
@@ -233,13 +254,13 @@ impl RelayRLAction {
 pub struct CodecConfig {
     #[cfg(feature = "compression")]
     pub compression: Option<CompressionScheme>,
-    
+
     #[cfg(feature = "encryption")]
     pub encryption_key: Option<EncryptionKey>,
-    
+
     #[cfg(feature = "integrity")]
     pub verify_integrity: bool,
-    
+
     #[cfg(feature = "metadata")]
     pub include_metadata: bool,
 }
@@ -250,13 +271,13 @@ impl Default for CodecConfig {
         Self {
             #[cfg(feature = "compression")]
             compression: Some(CompressionScheme::Lz4),
-            
+
             #[cfg(feature = "encryption")]
             encryption_key: None,
-            
+
             #[cfg(feature = "integrity")]
             verify_integrity: true,
-            
+
             #[cfg(feature = "metadata")]
             include_metadata: true,
         }
@@ -271,26 +292,20 @@ impl CodecConfig {
 
 #[derive(Debug, Clone)]
 pub enum ActionError {
-    SerializationError(String),
-    DeserializationError(String),
-    
+    TensorError(TensorError),
     #[cfg(feature = "compression")]
     CompressionError(String),
-    
     #[cfg(feature = "encryption")]
     EncryptionError(String),
-    
     #[cfg(feature = "integrity")]
     IntegrityError(String),
-    
     ChunkingError(String),
 }
 
 impl std::fmt::Display for ActionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SerializationError(e) => write!(f, "[ActionError] Serialization error: {}", e),
-            Self::DeserializationError(e) => write!(f, "[ActionError] Deserialization error: {}", e),
+            Self::TensorError(e) => write!(f, "[ActionError] Tensor error: {}", e),
             #[cfg(feature = "compression")]
             Self::CompressionError(e) => write!(f, "[ActionError] Compression error: {}", e),
             #[cfg(feature = "encryption")]
@@ -309,18 +324,12 @@ pub struct EncodedAction {
     pub data: Vec<u8>,
     #[cfg(feature = "metadata")]
     pub metadata: Option<TensorMetadata>,
-    
-    /// Was compression applied?
     #[cfg(feature = "compression")]
     pub compressed: bool,
-    /// Was encryption applied?
     #[cfg(feature = "encryption")]
     pub encrypted: bool,
-    /// Integrity checksum
     #[cfg(feature = "integrity")]
     pub checksum: Option<Checksum>,
-    
-    /// Original size in bytes before encoding
     pub original_size: usize,
 }
 
@@ -332,9 +341,9 @@ impl RelayRLAction {
     /// 4. Add integrity check (if enabled)
     #[cfg(feature = "metadata")]
     pub fn encode(&self, config: &CodecConfig) -> Result<EncodedAction, ActionError> {
-        let original_data = bincode::serialize(self)
-            .map_err(|e| ActionError::SerializationError(e.to_string()))?;
-        
+        let original_data = bincode::serde::encode_to_vec(self, config::standard())
+            .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
+
         let original_size = original_data.len();
         let mut data = original_data;
 
@@ -342,8 +351,8 @@ impl RelayRLAction {
         let compressed = if let Some(scheme) = config.compression {
             let compressed_data = CompressedData::compress(&data, scheme)
                 .map_err(|e| ActionError::CompressionError(e.to_string()))?;
-            data = bincode::serialize(&compressed_data)
-                .map_err(|e| ActionError::SerializationError(e.to_string()))?;
+            data = bincode::serde::encode_to_vec(&compressed_data, config::standard())
+                .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
             true
         } else {
             false
@@ -353,8 +362,8 @@ impl RelayRLAction {
         let encrypted = if let Some(key) = &config.encryption_key {
             let encrypted_data = EncryptedData::encrypt(&data, key)
                 .map_err(|e| ActionError::EncryptionError(e.to_string()))?;
-            data = bincode::serialize(&encrypted_data)
-                .map_err(|e| ActionError::SerializationError(e.to_string()))?;
+            data = bincode::serde::encode_to_vec(&encrypted_data, config::standard())
+                .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
             true
         } else {
             false
@@ -391,57 +400,58 @@ impl RelayRLAction {
         let mut data = encoded.data.clone();
 
         #[cfg(feature = "integrity")]
-        if config.verify_integrity {
-            if let Some(expected_checksum) = encoded.checksum {
-                let computed = crate::utilities::integrity::compute_checksum(&data);
-                if computed != expected_checksum {
-                    return Err(ActionError::IntegrityError(
-                        "Checksum mismatch".to_string()
-                    ));
-                }
+        if config.verify_integrity && encoded.checksum.is_some() {
+            let computed = crate::utilities::integrity::compute_checksum(&data);
+            if computed != encoded.checksum.unwrap() {
+                return Err(ActionError::IntegrityError("Checksum mismatch".to_string()));
             }
         }
 
         #[cfg(feature = "encryption")]
         if encoded.encrypted {
             if let Some(key) = &config.encryption_key {
-                let encrypted_data: EncryptedData = bincode::deserialize(&data)
-                    .map_err(|e| ActionError::DeserializationError(e.to_string()))?;
-                data = encrypted_data.decrypt(key)
+                let (encrypted_data, _): (EncryptedData, usize) =
+                    bincode::serde::decode_from_slice(&data, config::standard())
+                        .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
+                data = encrypted_data
+                    .decrypt(key)
                     .map_err(|e| ActionError::EncryptionError(e.to_string()))?;
             } else {
                 return Err(ActionError::EncryptionError(
-                    "Encryption key required but not provided".to_string()
+                    "Encryption key required but not provided".to_string(),
                 ));
             }
         }
 
         #[cfg(feature = "compression")]
         if encoded.compressed {
-            let compressed_data: CompressedData = bincode::deserialize(&data)
-                .map_err(|e| ActionError::DeserializationError(e.to_string()))?;
-            data = compressed_data.decompress()
+            let (compressed_data, _): (CompressedData, usize) =
+                bincode::serde::decode_from_slice(&data, config::standard())
+                    .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
+            data = compressed_data
+                .decompress()
                 .map_err(|e| ActionError::CompressionError(e.to_string()))?;
         }
 
-        let action: RelayRLAction = bincode::deserialize(&data)
-            .map_err(|e| ActionError::DeserializationError(e.to_string()))?;
+        let (action, _): (RelayRLAction, usize) =
+            bincode::serde::decode_from_slice(&data, config::standard())
+                .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
 
         Ok(action)
     }
 
     /// Serialize to bytes
     #[cfg(feature = "metadata")]
-    pub fn to_bytes(&self) -> Result<Vec<u8>, ActionError> {
-        bincode::serialize(self)
-            .map_err(|e| ActionError::SerializationError(e.to_string()))
+    pub fn to_bytes(&self) -> Result<Vec<u8>, TensorError> {
+        bincode::serde::encode_to_vec(self, config::standard())
+            .map_err(|e| TensorError::SerializationError(e.to_string()))
     }
 
     /// Deserialize from bytes
     #[cfg(feature = "metadata")]
-    pub fn from_bytes(data: &[u8]) -> Result<Self, ActionError> {
-        bincode::deserialize(data)
-            .map_err(|e| ActionError::DeserializationError(e.to_string()))
+    pub fn from_bytes(data: &[u8]) -> Result<(Self, usize), TensorError> {
+        bincode::serde::decode_from_slice(data, config::standard())
+            .map_err(|e| TensorError::DeserializationError(e.to_string()))
     }
 
     /// Encode with chunking for large actions
@@ -453,8 +463,8 @@ impl RelayRLAction {
     ) -> Result<Vec<TensorChunk>, ActionError> {
         let encoded = self.encode(config)?;
         // Serialize the entire EncodedAction structure
-        let encoded_bytes = bincode::serialize(&encoded)
-            .map_err(|e| ActionError::SerializationError(e.to_string()))?;
+        let encoded_bytes = bincode::serde::encode_to_vec(&encoded, config::standard())
+            .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
         let chunked = ChunkedTensor::from_data(&encoded_bytes, chunk_size);
         Ok(chunked.chunks().to_vec())
     }
@@ -467,11 +477,11 @@ impl RelayRLAction {
     ) -> Result<Self, ActionError> {
         let reassembled = ChunkedTensor::reassemble(chunks)
             .map_err(|e| ActionError::ChunkingError(e.to_string()))?;
-        
-        // Deserialize the EncodedAction structure from reassembled data
-        let encoded: EncodedAction = bincode::deserialize(&reassembled)
-            .map_err(|e| ActionError::DeserializationError(e.to_string()))?;
-        
+
+        let (encoded, _): (EncodedAction, usize) =
+            bincode::serde::decode_from_slice(&reassembled, config::standard())
+                .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
+
         Self::decode(&encoded, config)
     }
 }
@@ -493,10 +503,11 @@ mod tests {
     fn test_action_serialization() {
         let action = RelayRLAction::minimal(1.5, true);
         let bytes = action.to_bytes().unwrap();
-        let decoded = RelayRLAction::from_bytes(&bytes).unwrap();
-        
+        let (decoded, decoded_bytes_read) = RelayRLAction::from_bytes(&bytes).unwrap();
+
         assert_eq!(decoded.get_rew(), 1.5);
-        assert_eq!(decoded.get_done(), true);
+        assert!(decoded.get_done());
+        assert_eq!(decoded_bytes_read, bytes.len());
     }
 
     #[test]
