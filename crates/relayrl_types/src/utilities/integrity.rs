@@ -1,5 +1,5 @@
 //! Cryptographic integrity verification for tensor data
-//! 
+//!
 //! Uses BLAKE3 for fast, parallel hashing with cryptographic security.
 
 use serde::{Deserialize, Serialize};
@@ -24,10 +24,12 @@ impl VerifiedData {
         Self {
             data,
             checksum,
-            timestamp: Some(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()),
+            timestamp: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
         }
     }
 
@@ -64,7 +66,10 @@ impl VerifiedData {
                 .as_secs();
             let age = now.saturating_sub(timestamp);
             if age > max_age_secs {
-                return Err(IntegrityError::DataTooOld { age, max_age: max_age_secs });
+                return Err(IntegrityError::DataTooOld {
+                    age,
+                    max_age: max_age_secs,
+                });
             }
         }
         Ok(())
@@ -106,7 +111,11 @@ impl std::fmt::Display for IntegrityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChecksumMismatch { expected, computed } => {
-                write!(f, "Checksum mismatch: expected {:?}, got {:?}", expected, computed)
+                write!(
+                    f,
+                    "Checksum mismatch: expected {:?}, got {:?}",
+                    expected, computed
+                )
             }
             Self::DataTooOld { age, max_age } => {
                 write!(f, "Data too old: {} seconds (max {})", age, max_age)

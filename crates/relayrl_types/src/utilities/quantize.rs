@@ -84,19 +84,16 @@ impl QuantizedData {
 
     pub fn dequantize(&self) -> Vec<f32> {
         match self.scheme {
-            QuantizationScheme::None => {
-                bytemuck::cast_slice(&self.data).to_vec()
-            }
+            QuantizationScheme::None => bytemuck::cast_slice(&self.data).to_vec(),
             QuantizationScheme::Int8Symmetric => {
                 let quantized: &[i8] = bytemuck::cast_slice(&self.data);
                 quantized.iter().map(|&x| x as f32 * self.scale).collect()
             }
-            QuantizationScheme::Int8Asymmetric => {
-                self.data
-                    .iter()
-                    .map(|&x| (x as i32 - self.zero_point) as f32 * self.scale)
-                    .collect()
-            }
+            QuantizationScheme::Int8Asymmetric => self
+                .data
+                .iter()
+                .map(|&x| (x as i32 - self.zero_point) as f32 * self.scale)
+                .collect(),
             #[cfg(feature = "quantization")]
             QuantizationScheme::Float16 => {
                 let quantized: &[f16] = bytemuck::cast_slice(&self.data);

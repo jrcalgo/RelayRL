@@ -1,13 +1,13 @@
 //! Authenticated encryption for secure tensor transport
-//! 
+//!
 //! Uses ChaCha20-Poly1305 AEAD cipher - fast, secure, pure Rust.
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "encryption")]
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 
 /// 256-bit encryption key

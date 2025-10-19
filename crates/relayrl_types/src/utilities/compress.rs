@@ -1,5 +1,5 @@
 //! High-performance compression for tensor data transport
-//! 
+//!
 //! Supports multiple compression schemes optimized for different scenarios:
 //! - LZ4: Ultra-fast, real-time inference (3-4 GB/s)
 //! - Zstd: Best compression ratio for training data (5-10x reduction)
@@ -39,13 +39,9 @@ impl CompressedData {
         let original_size = data.len();
         let compressed = match scheme {
             CompressionScheme::None => data.to_vec(),
-            CompressionScheme::Lz4 => {
-                compress_prepend_size(data)
-            }
-            CompressionScheme::Zstd(level) => {
-                zstd_compress(data, level)
-                    .map_err(|e| CompressionError::ZstdError(e.to_string()))?
-            }
+            CompressionScheme::Lz4 => compress_prepend_size(data),
+            CompressionScheme::Zstd(level) => zstd_compress(data, level)
+                .map_err(|e| CompressionError::ZstdError(e.to_string()))?,
         };
         Ok(Self {
             data: compressed,
@@ -58,14 +54,10 @@ impl CompressedData {
     pub fn decompress(&self) -> Result<Vec<u8>, CompressionError> {
         match self.scheme {
             CompressionScheme::None => Ok(self.data.clone()),
-            CompressionScheme::Lz4 => {
-                decompress_size_prepended(&self.data)
-                    .map_err(|e| CompressionError::Lz4Error(e.to_string()))
-            }
-            CompressionScheme::Zstd(_) => {
-                zstd_decompress(&self.data, self.original_size)
-                    .map_err(|e| CompressionError::ZstdError(e.to_string()))
-            }
+            CompressionScheme::Lz4 => decompress_size_prepended(&self.data)
+                .map_err(|e| CompressionError::Lz4Error(e.to_string())),
+            CompressionScheme::Zstd(_) => zstd_decompress(&self.data, self.original_size)
+                .map_err(|e| CompressionError::ZstdError(e.to_string())),
         }
     }
 

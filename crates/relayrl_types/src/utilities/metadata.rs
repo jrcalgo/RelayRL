@@ -1,5 +1,6 @@
 //! Metadata and provenance tracking for RL telemetry data
 
+use bincode::config;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,12 @@ pub struct TensorMetadata {
     /// Custom key-value metadata
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MetadataError {
+    SerializationError(String),
+    DeserializationError(String),
 }
 
 impl TensorMetadata {
@@ -64,14 +71,16 @@ impl TensorMetadata {
 
     /// Serialize to compact binary format
     #[cfg(feature = "metadata")]
-    pub fn to_binary(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
+    pub fn to_binary(&self) -> Result<Vec<u8>, MetadataError> {
+        bincode::serde::encode_to_vec(self, config::standard())
+            .map_err(|e| MetadataError::SerializationError(e.to_string()))
     }
 
     /// Deserialize from binary format
     #[cfg(feature = "metadata")]
-    pub fn from_binary(data: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(data)
+    pub fn from_binary(data: &[u8]) -> Result<(Self, usize), MetadataError> {
+        bincode::serde::decode_from_slice(data, config::standard())
+            .map_err(|e| MetadataError::DeserializationError(e.to_string()))
     }
 }
 

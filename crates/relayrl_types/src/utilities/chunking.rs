@@ -96,7 +96,11 @@ impl std::fmt::Display for ChunkError {
         match self {
             Self::NoChunks => write!(f, "No chunks provided"),
             Self::MissingChunks { expected, received } => {
-                write!(f, "Missing chunks: expected {}, received {}", expected, received)
+                write!(
+                    f,
+                    "Missing chunks: expected {}, received {}",
+                    expected, received
+                )
             }
             Self::OutOfOrder => write!(f, "Chunks out of order"),
             Self::CorruptedChunk(id) => write!(f, "Chunk {} is corrupted", id),
