@@ -1,0 +1,34 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain:
+          - stable
+          - beta
+          - nightly
+    defaults:
+      run:
+        working-directory: crates
+
+    steps:
+    - uses: actions/checkout@v4
+    - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
+    - name: Build type system
+      run: cargo build -p relayrl_types --verbose
+    - name: Build framework
+      run: cargo build -p relayrl_framework --verbose
+    - name: Run tests
+      run: cargo test --verbose
