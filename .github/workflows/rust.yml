@@ -19,10 +19,12 @@ jobs:
           - stable
           - beta
           - nightly
+    defaults:
+      run:
+        working-directory: crates
 
     steps:
     - uses: actions/checkout@v4
-    - run: cd crates
     - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
     - name: Build framework
       run: cargo build -p relayrl_framework --verbose
