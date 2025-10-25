@@ -1,13 +1,14 @@
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::RoutedMessage;
-use crate::types::trajectory::RelayRLTrajectory;
 use crate::utilities::configuration::ClientConfigLoader;
+
+use relayrl_types::types::trajectory::RelayRLTrajectory;
+
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_pickle as pickle;
 use std::io::Cursor;
-use tch::CModule;
 use tokio::sync::mpsc::Sender;
 
 pub mod tonic;

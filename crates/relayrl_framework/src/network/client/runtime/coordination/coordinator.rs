@@ -6,15 +6,17 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
-use crate::types::action::RelayRLAction;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 use crate::utilities::observability;
 use crate::utilities::observability::logging::builder::LoggingBuilder;
 use crate::utilities::observability::metrics::MetricsManager;
+
+use relayrl_types::types::action::RelayRLAction;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tch::{CModule, Device, Tensor};
+
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;

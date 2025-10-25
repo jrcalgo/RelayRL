@@ -40,8 +40,7 @@
 //!
 
 /// **Network Modules**: Provides the core networking functionality for RelayRL, including gRPC and ZMQ communication layers.
-mod network;
-mod types;
+pub mod network;
 
 /// **Development Templates**: Provides base algorithm and application templates for RelayRL.
 /// These templates serve as foundations for extending or customizing RL environments, models,
@@ -64,4 +63,10 @@ pub mod utilities {
 #[cfg(feature = "grpc_network")]
 mod proto {
     tonic::include_proto!("relayrl");
+}
+
+pub mod prelude {
+    pub use crate::network::client::agent::RelayRLAgent;
+    pub use crate::network::server::inference_server::InferenceServer;
+    pub use crate::network::server::training_server::TrainingServer;
 }

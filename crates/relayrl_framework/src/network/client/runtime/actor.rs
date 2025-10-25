@@ -2,11 +2,13 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::TransportClient;
 use crate::network::{HotReloadableModel, validate_model};
-use crate::types::action::RelayRLAction;
-use crate::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
 use crate::utilities::orchestration::tonic_utils::deserialize_model;
+
+use relayrl_types::types::action::RelayRLAction;
+use relayrl_types::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

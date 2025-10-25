@@ -3,28 +3,36 @@ use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
     ClientCoordinator, ClientInterface,
 };
-use crate::types::action::RelayRLAction;
+
+use relayrl_types::prelude::DeviceType;
+use relayrl_types::types::action::RelayRLAction;
+
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use tch::{CModule, Device, Tensor};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 pub struct AgentStartParameters {
     actor_count: i64,
-    default_device: Device,
+    default_device: DeviceType,
     default_model: Option<CModule>,
     algorithm_name: String,
     config_path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for AgentStartParameters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AgentStartParameters")
+    }
 }
 
 /// Builder for RelayRLAgent
 pub struct RelayRLAgentBuilder {
     transport_type: TransportType,
     actor_count: Option<i64>,
-    default_device: Option<Device>,
+    default_device: Option<DeviceType>,
     default_model: Option<CModule>,
     algorithm_name: Option<String>,
     config_path: Option<PathBuf>,
@@ -48,7 +56,7 @@ impl RelayRLAgentBuilder {
         self
     }
 
-    pub fn default_device(mut self, device: Device) -> Self {
+    pub fn default_device(mut self, device: DeviceType) -> Self {
         self.default_device = Some(device);
         self
     }
@@ -76,7 +84,7 @@ impl RelayRLAgentBuilder {
         // Tuple parameters
         let startup_params = AgentStartParameters {
             actor_count: self.actor_count.unwrap_or(1),
-            default_device: self.default_device.unwrap_or(Device::Cpu),
+            default_device: self.default_device.unwrap_or(DeviceType::default()),
             default_model: self.default_model,
             algorithm_name: self.algorithm_name.ok_or("algorithm_name is required")?,
             config_path: self.config_path,
@@ -91,6 +99,12 @@ pub struct RelayRLAgent {
     coordinator: ClientCoordinator,
 }
 
+impl std::fmt::Debug for RelayRLAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RelayRLAgent")
+    }
+}
+
 impl RelayRLAgent {
     /// Create a new agent with given network
     pub fn new(transport_type: TransportType) -> Self {
@@ -103,7 +117,7 @@ impl RelayRLAgent {
     pub async fn start(
         self,
         actor_count: i64,
-        default_device: Device,
+        default_device: DeviceType,
         default_model: Option<CModule>,
         algorithm_name: String,
         config_path: Option<PathBuf>,
@@ -139,11 +153,11 @@ impl RelayRLAgent {
     }
 
     /// Request actions from actors
-    pub async fn request_action(
+    pub async fn request_action<B: Backend, D: DeviceType> (
         &self,
         ids: Vec<Uuid>,
-        observation: Tensor,
-        mask: Tensor,
+        observation: Tensor<B, D>,
+        mask: Tensor<B, D>,
         reward: f32,
     ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String> {
         self.coordinator

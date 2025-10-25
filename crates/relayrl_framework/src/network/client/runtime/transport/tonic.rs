@@ -5,13 +5,13 @@ use crate::network::client::runtime::transport::AsyncClientTransport;
 #[cfg(feature = "grpc_network")]
 use crate::network::validate_model;
 #[cfg(feature = "grpc_network")]
-use crate::types::trajectory::RelayRLTrajectory;
-#[cfg(feature = "grpc_network")]
 use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "grpc_network")]
 use crate::utilities::orchestration::tonic_utils::deserialize_model;
 #[cfg(feature = "grpc_network")]
 use async_trait::async_trait;
+#[cfg(feature = "grpc_network")]
+use relayrl_types::types::trajectory::RelayRLTrajectory;
 #[cfg(feature = "grpc_network")]
 use std::collections::HashMap;
 #[cfg(feature = "grpc_network")]
@@ -19,8 +19,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
 };
-#[cfg(feature = "grpc_network")]
-use tch::CModule;
 #[cfg(feature = "grpc_network")]
 use tokio::time::{Duration, timeout};
 #[cfg(feature = "grpc_network")]

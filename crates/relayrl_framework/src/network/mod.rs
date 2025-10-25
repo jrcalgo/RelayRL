@@ -1,5 +1,7 @@
-use crate::types::Hyperparams;
-use crate::types::action::{RelayRLAction, RelayRLData, TensorData};
+use relayrl_framework::Hyperparams;
+use relayrl_types::types::action::{RelayRLAction, RelayRLData, TensorData};
+use relayrl_types::types::tensor::TensorData;
+
 use rand::Rng;
 use std::collections::HashMap;
 use std::{
@@ -9,7 +11,6 @@ use std::{
         atomic::{AtomicI64, Ordering},
     },
 };
-use tch::{CModule, Device, IValue, Kind, Tensor, no_grad};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use uuid::Uuid;
 
@@ -282,10 +283,10 @@ impl HotReloadableModel {
     }
 
     /// Run inference with the currently loaded module.
-    pub async fn forward(
+    pub async fn forward<B: Backend, D: DeviceType>(
         &self,
-        observation: Tensor,
-        mask: Tensor,
+        observation: Tensor<B, D>,
+        mask: Tensor<B, D>,
         reward: f32,
     ) -> Result<RelayRLAction, String> {
         let action_result = {

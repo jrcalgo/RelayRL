@@ -3,10 +3,12 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 use crate::network::client::runtime::transport::SyncClientTransport;
 use crate::network::client::runtime::transport::serialize_trajectory;
 use crate::network::validate_model;
-use crate::types::trajectory::RelayRLTrajectory;
 use crate::utilities::configuration::ClientConfigLoader;
+
+use relayrl_types::types::trajectory::RelayRLTrajectory;
+
 use std::io::Write;
-use tch::CModule;
+
 use tempfile::NamedTempFile;
 use tokio::task;
 use uuid::Uuid;

@@ -3,14 +3,14 @@ use crate::network::client::runtime::coordination::state_manager::StateManager;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::TransportClient;
-use crate::types::action::RelayRLAction;
-use crate::types::trajectory::RelayRLTrajectory;
+use burn_tensor::Tensor;
 use dashmap::DashMap;
+use relayrl_types::types::action::RelayRLAction;
+use relayrl_types::types::trajectory::RelayRLTrajectory;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tch::Tensor;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -32,6 +32,7 @@ pub(crate) enum RoutingProtocol {
     ActorStatistics,
     SendTrajectory,
     Shutdown,
+
     ScalingWarning,
     ScalingConfirmation,
     ScalingAck,
@@ -326,6 +327,7 @@ impl ClientExternalSender {
         });
     }
 
+    /// Round robin priority computation
     fn _compute_priority(
         actor_last_sent: DashMap<Uuid, i64>,
         id: Uuid,
@@ -337,7 +339,9 @@ impl ClientExternalSender {
             .unwrap_or_default()
             .as_millis();
 
-        let age_millis = now_millis.saturating_sub(traj_millis);
+        const MAX_AGE_MILLIS: u128 = 300_000; // 5 mins
+
+        let age_millis = now_millis.saturating_sub(traj_millis).min(MAX_AGE_MILLIS);
 
         let recent_sends = match actor_last_sent.get(&id) {
             Some(last_ref) => (*last_ref / 1000).max(0), // Decay factor

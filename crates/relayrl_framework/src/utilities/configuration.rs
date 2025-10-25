@@ -1,4 +1,5 @@
-use crate::types::Hyperparams;
+use relayrl_types::Hyperparams;
+
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

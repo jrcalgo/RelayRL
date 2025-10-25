@@ -26,16 +26,18 @@ metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-ot
 profile = ["flamegraph", "console-subscriber"]       # Enables runtime profiling support via flamegraph.
 
 [dependencies]
+relayrl_types = "0.2.1"
+
 zmq = { version = "0.10.0", optional = true }                               # ZeroMQ messaging library.
 tonic = { version = "0.12.3", optional = true }                             # gRPC library for Rust.
 prost = { version = "0.13.5", optional = true }                             # Protobuf serialization library for tonic.
+
 log4rs = { version = "1.3.0", optional = true }                              # Logging library.
 prometheus = { version = "0.14.0", optional = true, features = ["process"] } # Prometheus metrics library.
 opentelemetry = { version = "0.31.0", optional = true} # OpenTelemetry tracing library.
 opentelemetry_sdk = { version = "0.31.0", optional = true, features = ["metrics", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.31.0", optional = true }
-tch = { version = "0.18.1", features = ["download-libtorch", "python-extension"] } # Torch library with Python extension support.
-safetensors = "0.5.3"                       # Library for tensor serialization.
+
 tokio = { version = "1.35.1", features = ["full"] }  # Asynchronous runtime.
 once_cell = "1.19.0"              # Lazy initialization of static data.
 tempfile = "3.9.0"               # For temporary file creation.
@@ -43,7 +45,8 @@ serde = { version = "1.0.195", features = ["derive"] }  # Serialization framewor
 serde_json = "1.0.111"          # JSON serialization.
 serde-pickle = "1.1.1"                        # Serialization using the pickle format.
 bytemuck = "1.14.1"               # Safe zero-copy conversion between data representations.
-rand = "0.8.5"          # Random number generation library.
+
+rand = "0.8.5"                      # Random number generation library.
 dashmap = "5.5.3"
 async-trait = "0.1.89"                                                   # Enables async functions in traits.
 uuid = { version = "1.18.1", features = ["v8"] }
@@ -52,11 +55,12 @@ notify = { version = "6.1.1", optional = true }
 futures = "0.3.30"
 tiny_http = { version = "0.12.0", optional = true }
 # TODO: Add support for these dependencies and remove tch entirely from relayrl_framework
-# burn = "0.18.0"
-# burn-ndarray = "0.18.0"
-# tract-onnx = "0.22.0"
-# dfdx = "0.13.0"
-# cudarc = "0.17.3"
+burn-tensor = "0.18.0"
+burn-import = "0.18.0"
+burn-ndarray = "0.18.0"
+burn-tch = "0.18.0"
+# TODO: Add Redis support for training data storagen & querying
+# redis = 0.32.7
 
 [build-dependencies]
 pyo3-build-config = "0.24.2"

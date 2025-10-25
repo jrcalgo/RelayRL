@@ -8,7 +8,7 @@ use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tch::Device;
+
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
