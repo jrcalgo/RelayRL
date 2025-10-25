@@ -7,7 +7,8 @@ use burn_ndarray::NdArray;
 use burn_tch::LibTorch as Tch;
 
 use burn_tensor::{
-    Bool, Float, Int, Shape, Tensor, TensorData as BurnTensorData, TensorKind, backend::Backend, BasicOps,
+    BasicOps, Bool, Float, Int, Shape, Tensor, TensorData as BurnTensorData, TensorKind,
+    backend::Backend,
 };
 
 #[derive(Debug, Clone)]
@@ -249,7 +250,7 @@ impl TensorData {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(_) => SupportedTensorBackend::NdArray,
             #[cfg(feature = "tch-backend")]
-            DType::Tch(_) => SupportedTensorBackend::Tch
+            DType::Tch(_) => SupportedTensorBackend::Tch,
         }
     }
 }
@@ -503,21 +504,27 @@ pub struct ConversionTensor<B: Backend + 'static, const D: usize, K: TensorKind<
     pub conversion_dtype: DType,
 }
 
-impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>> TryFrom<ConversionTensor<B, D, K>> for TensorData {
+impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>>
+    TryFrom<ConversionTensor<B, D, K>> for TensorData
+{
     type Error = TensorError;
 
     fn try_from(t: ConversionTensor<B, D, K>) -> Result<Self, Self::Error> {
         let data = t.tensor.to_data();
         let shape = data.shape.clone();
 
-        fn pack_bytes<E: burn_tensor::Element>(data: &burn_tensor::TensorData) -> Result<Vec<u8>, TensorError> {
-            let v: Vec<E> = data.to_vec::<E>()
+        fn pack_bytes<E: burn_tensor::Element>(
+            data: &burn_tensor::TensorData,
+        ) -> Result<Vec<u8>, TensorError> {
+            let v: Vec<E> = data
+                .to_vec::<E>()
                 .map_err(|e| TensorError::DTypeError(format!("Element cast failed: {:?}", e)))?;
             Ok(bytemuck::cast_slice(&v).to_vec())
         }
 
         fn pack_bools(data: &burn_tensor::TensorData) -> Result<Vec<u8>, TensorError> {
-            let v: Vec<bool> = data.to_vec::<bool>()
+            let v: Vec<bool> = data
+                .to_vec::<bool>()
                 .map_err(|e| TensorError::DTypeError(format!("Bool cast failed: {:?}", e)))?;
             Ok(v.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect())
         }
@@ -531,13 +538,17 @@ impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>> TryFr
                     F16 => pack_bytes::<half::f16>(&data)?,
                     F32 => pack_bytes::<f32>(&data)?,
                     F64 => pack_bytes::<f64>(&data)?,
-                    I8  => pack_bytes::<i8>(&data)?,
+                    I8 => pack_bytes::<i8>(&data)?,
                     I16 => pack_bytes::<i16>(&data)?,
                     I32 => pack_bytes::<i32>(&data)?,
                     I64 => pack_bytes::<i64>(&data)?,
                     Bool => pack_bools(&data)?,
                     #[cfg(not(feature = "quantization"))]
-                    F16 => return Err(TensorError::DTypeError("F16 requires 'quantization' feature".into())),
+                    F16 => {
+                        return Err(TensorError::DTypeError(
+                            "F16 requires 'quantization' feature".into(),
+                        ));
+                    }
                 };
                 (SupportedTensorBackend::NdArray, bytes)
             }
@@ -546,25 +557,37 @@ impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>> TryFr
                 use super::tensor::TchDType::*;
                 let bytes = match td {
                     #[cfg(feature = "quantization")]
-                    F16  => pack_bytes::<half::f16>(&data)?,
+                    F16 => pack_bytes::<half::f16>(&data)?,
                     #[cfg(feature = "quantization")]
                     Bf16 => pack_bytes::<half::bf16>(&data)?,
-                    F32  => pack_bytes::<f32>(&data)?,
-                    F64  => pack_bytes::<f64>(&data)?,
-                    I8   => pack_bytes::<i8>(&data)?,
-                    I16  => pack_bytes::<i16>(&data)?,
-                    I32  => pack_bytes::<i32>(&data)?,
-                    I64  => pack_bytes::<i64>(&data)?,
-                    U8   => pack_bytes::<u8>(&data)?,
+                    F32 => pack_bytes::<f32>(&data)?,
+                    F64 => pack_bytes::<f64>(&data)?,
+                    I8 => pack_bytes::<i8>(&data)?,
+                    I16 => pack_bytes::<i16>(&data)?,
+                    I32 => pack_bytes::<i32>(&data)?,
+                    I64 => pack_bytes::<i64>(&data)?,
+                    U8 => pack_bytes::<u8>(&data)?,
                     Bool => pack_bools(&data)?,
                     #[cfg(not(feature = "quantization"))]
-                    F16  => return Err(TensorError::DTypeError("F16 requires 'quantization' feature".into())),
+                    F16 => {
+                        return Err(TensorError::DTypeError(
+                            "F16 requires 'quantization' feature".into(),
+                        ));
+                    }
                     #[cfg(not(feature = "quantization"))]
-                    Bf16 => return Err(TensorError::DTypeError("Bf16 requires 'quantization' feature".into())),
+                    Bf16 => {
+                        return Err(TensorError::DTypeError(
+                            "Bf16 requires 'quantization' feature".into(),
+                        ));
+                    }
                 };
                 (SupportedTensorBackend::Tch, bytes)
             }
-            _ => return Err(TensorError::BackendError("Unsupported or missing target backend for conversion".into())),
+            _ => {
+                return Err(TensorError::BackendError(
+                    "Unsupported or missing target backend for conversion".into(),
+                ));
+            }
         };
 
         Ok(TensorData {

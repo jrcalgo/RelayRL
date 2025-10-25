@@ -341,8 +341,10 @@ impl RelayRLAction {
     /// 4. Add integrity check (if enabled)
     #[cfg(feature = "metadata")]
     pub fn encode(&self, config: &CodecConfig) -> Result<EncodedAction, ActionError> {
-        let original_data = bincode::serde::encode_to_vec(self, config::standard())
-            .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
+        let original_data =
+            bincode::serde::encode_to_vec(self, config::standard()).map_err(|e| {
+                ActionError::TensorError(TensorError::SerializationError(e.to_string()))
+            })?;
 
         let original_size = original_data.len();
         let mut data = original_data;
@@ -351,8 +353,9 @@ impl RelayRLAction {
         let compressed = if let Some(scheme) = config.compression {
             let compressed_data = CompressedData::compress(&data, scheme)
                 .map_err(|e| ActionError::CompressionError(e.to_string()))?;
-            data = bincode::serde::encode_to_vec(&compressed_data, config::standard())
-                .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
+            data = bincode::serde::encode_to_vec(&compressed_data, config::standard()).map_err(
+                |e| ActionError::TensorError(TensorError::SerializationError(e.to_string())),
+            )?;
             true
         } else {
             false
@@ -362,8 +365,9 @@ impl RelayRLAction {
         let encrypted = if let Some(key) = &config.encryption_key {
             let encrypted_data = EncryptedData::encrypt(&data, key)
                 .map_err(|e| ActionError::EncryptionError(e.to_string()))?;
-            data = bincode::serde::encode_to_vec(&encrypted_data, config::standard())
-                .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
+            data = bincode::serde::encode_to_vec(&encrypted_data, config::standard()).map_err(
+                |e| ActionError::TensorError(TensorError::SerializationError(e.to_string())),
+            )?;
             true
         } else {
             false
@@ -411,8 +415,9 @@ impl RelayRLAction {
         if encoded.encrypted {
             if let Some(key) = &config.encryption_key {
                 let (encrypted_data, _): (EncryptedData, usize) =
-                    bincode::serde::decode_from_slice(&data, config::standard())
-                        .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
+                    bincode::serde::decode_from_slice(&data, config::standard()).map_err(|e| {
+                        ActionError::TensorError(TensorError::DeserializationError(e.to_string()))
+                    })?;
                 data = encrypted_data
                     .decrypt(key)
                     .map_err(|e| ActionError::EncryptionError(e.to_string()))?;
@@ -426,16 +431,18 @@ impl RelayRLAction {
         #[cfg(feature = "compression")]
         if encoded.compressed {
             let (compressed_data, _): (CompressedData, usize) =
-                bincode::serde::decode_from_slice(&data, config::standard())
-                    .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
+                bincode::serde::decode_from_slice(&data, config::standard()).map_err(|e| {
+                    ActionError::TensorError(TensorError::DeserializationError(e.to_string()))
+                })?;
             data = compressed_data
                 .decompress()
                 .map_err(|e| ActionError::CompressionError(e.to_string()))?;
         }
 
         let (action, _): (RelayRLAction, usize) =
-            bincode::serde::decode_from_slice(&data, config::standard())
-                .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
+            bincode::serde::decode_from_slice(&data, config::standard()).map_err(|e| {
+                ActionError::TensorError(TensorError::DeserializationError(e.to_string()))
+            })?;
 
         Ok(action)
     }
@@ -463,8 +470,10 @@ impl RelayRLAction {
     ) -> Result<Vec<TensorChunk>, ActionError> {
         let encoded = self.encode(config)?;
         // Serialize the entire EncodedAction structure
-        let encoded_bytes = bincode::serde::encode_to_vec(&encoded, config::standard())
-            .map_err(|e| ActionError::TensorError(TensorError::SerializationError(e.to_string())))?;
+        let encoded_bytes =
+            bincode::serde::encode_to_vec(&encoded, config::standard()).map_err(|e| {
+                ActionError::TensorError(TensorError::SerializationError(e.to_string()))
+            })?;
         let chunked = ChunkedTensor::from_data(&encoded_bytes, chunk_size);
         Ok(chunked.chunks().to_vec())
     }
@@ -479,8 +488,9 @@ impl RelayRLAction {
             .map_err(|e| ActionError::ChunkingError(e.to_string()))?;
 
         let (encoded, _): (EncodedAction, usize) =
-            bincode::serde::decode_from_slice(&reassembled, config::standard())
-                .map_err(|e| ActionError::TensorError(TensorError::DeserializationError(e.to_string())))?;
+            bincode::serde::decode_from_slice(&reassembled, config::standard()).map_err(|e| {
+                ActionError::TensorError(TensorError::DeserializationError(e.to_string()))
+            })?;
 
         Self::decode(&encoded, config)
     }
