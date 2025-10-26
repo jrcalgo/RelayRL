@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [0.2.11] - 2025-10-26
 
 ### Changed
-- Made `TensorData.supported_backend` field public (was `pub(crate)`) for better external access to backend information
+- Made `TensorData` fields public (was `pub(crate)`) for better external access to backend information
 - Improved code formatting and readability in `ConversionTensor` implementation
 - Better error handling formatting for quantization feature requirements
 
