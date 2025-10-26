@@ -216,10 +216,10 @@ pub struct BoolTensor<B: Backend + 'static, const D: usize> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorData {
-    pub(crate) shape: Vec<usize>,
-    pub(crate) dtype: DType,
-    pub(crate) data: Vec<u8>,
-    pub(crate) supported_backend: SupportedTensorBackend,
+    pub shape: Vec<usize>,
+    pub dtype: DType,
+    pub data: Vec<u8>,
+    pub supported_backend: SupportedTensorBackend,
 }
 
 impl TensorData {

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.11] - 2025-10-26
+
+### Changed
+- Made `TensorData.supported_backend` field public (was `pub(crate)`) for better external access to backend information
+- Improved code formatting and readability in `ConversionTensor` implementation
+- Better error handling formatting for quantization feature requirements
+
+### Fixed
+- Import ordering in tensor module for better consistency
+
 ## [0.2.1] - 2025-10-19
 
 ### Added
@@ -27,7 +37,7 @@ All notable changes to this project will be documented in this file.
 - `DType` streamlined under backends (`NdArray(...)` / `Tch(...)`); removed legacy `None` variant
 - Renamed/standardized backend enums to `SupportedTensorBackend`
 
-## [0.2.0] - 2024-12-19
+## [0.2.0] - 2025-10-15
 
 ### Added
 - Multi-backend support: `burn-ndarray` (CPU) and `burn-tch` (GPU)
