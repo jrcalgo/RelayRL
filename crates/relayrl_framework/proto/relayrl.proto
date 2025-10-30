@@ -6,11 +6,13 @@ service RLService {
   // Fetch current policy model
   rpc GetModel(GetModelRequest) returns (ModelResponse);
   // Fetch action from Inference Server
-  rpc GetAction(GetActionRequest) returns (ActionResponse);
+  rpc GetAction(GetActionRequest) returns (GetActionResponse);
   // Send collected trajectories
   rpc SendTrajectories(SendTrajectoriesRequest) returns (SendTrajectoriesResponse);
   // Init a service
   rpc InitAlgorithm(InitRequest) returns (InitResponse);
+  rpc ScalingWarning(SendScalingWarningRequest) return (SendScalingWarningResponse);
+  rpc ScalingComplete(SendScalingCompleteRequest) return (SendScalingCompleteResponse);
 }
 
 message InitRequest {
@@ -64,7 +66,7 @@ message GetActionRequest {
   double reward = 5;
 }
 
-message ActionResponse {
+message GetActionResponse {
   EncodedAction action = 1;
 }
 
@@ -95,4 +97,20 @@ message SendTrajectoriesRequest {
 message SendTrajectoriesResponse {
   bool model_updated = 1;
   int32 new_version  = 2;
+}
+
+message SendScalingWarningRequest {
+  string client_id = 1;
+}
+
+message SendScalingWarningResponse {
+  bool sending_paused = 1;
+}
+
+message SendScalingCompleteRequest {
+  string client_id = 1;
+}
+
+message SendScalingCompleteResponse {
+  bool sending_resumed = 1;
 }
