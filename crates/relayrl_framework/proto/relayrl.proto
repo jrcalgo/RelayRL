@@ -105,6 +105,7 @@ message SendScalingWarningRequest {
 
 message SendScalingWarningResponse {
   bool sending_paused = 1;
+  string message = 2;
 }
 
 message SendScalingCompleteRequest {
@@ -113,4 +114,5 @@ message SendScalingCompleteRequest {
 
 message SendScalingCompleteResponse {
   bool sending_resumed = 1;
+  string message = 2;
 }
