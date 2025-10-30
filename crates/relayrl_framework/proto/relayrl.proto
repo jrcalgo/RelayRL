@@ -11,8 +11,8 @@ service RLService {
   rpc SendTrajectories(SendTrajectoriesRequest) returns (SendTrajectoriesResponse);
   // Init a service
   rpc InitAlgorithm(InitRequest) returns (InitResponse);
-  rpc ScalingWarning(SendScalingWarningRequest) return (SendScalingWarningResponse);
-  rpc ScalingComplete(SendScalingCompleteRequest) return (SendScalingCompleteResponse);
+  rpc ScalingWarning(SendScalingWarningRequest) returns (SendScalingWarningResponse);
+  rpc ScalingComplete(SendScalingCompleteRequest) returns (SendScalingCompleteResponse);
 }
 
 message InitRequest {
