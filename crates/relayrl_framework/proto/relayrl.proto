@@ -17,7 +17,7 @@ service RLService {
 
 message InitRequest {
   string client_id = 1;
-  repeated AlgorithmParameters algorithm_parameteres = 2;
+  repeated AlgorithmParameters algorithm_parameters = 2;
 }
 
 message AlgorithmParameters {
