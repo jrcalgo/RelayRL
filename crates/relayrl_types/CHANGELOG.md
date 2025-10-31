@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.11] - 2025-10-26
+## [0.2.12] - 2025-10-26
 
 ### Changed
 - Made `TensorData` fields public (was `pub(crate)`) for better external access to backend information
