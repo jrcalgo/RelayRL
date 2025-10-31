@@ -5,35 +5,24 @@ package relayrl;
 service RLService {
   // Fetch current policy model
   rpc GetModel(GetModelRequest) returns (ModelResponse);
-  // Fetch action from Inference Server
-  rpc GetAction(GetActionRequest) returns (GetActionResponse);
   // Send collected trajectories
   rpc SendTrajectories(SendTrajectoriesRequest) returns (SendTrajectoriesResponse);
   // Init a service
   rpc InitAlgorithm(InitRequest) returns (InitResponse);
-  rpc ScalingWarning(SendScalingWarningRequest) returns (SendScalingWarningResponse);
-  rpc ScalingComplete(SendScalingCompleteRequest) returns (SendScalingCompleteResponse);
 }
 
 message InitRequest {
   string client_id = 1;
-  repeated AlgorithmParameters algorithm_parameters = 2;
-}
-
-message AlgorithmParameters {
-  string algorithm_name = 1;
-  map<string, ParameterValue> algorithm_parameters = 2;
+  string algorithm_name = 2;
+  map<string, ParameterValue> algorithm_parameters = 3;
 }
 
 message ParameterValue {
   oneof value {
     int32 int_value = 1;
-    int64 long_value = 2;
-    uint32 uint_value = 3;
-    uint64 ulong_value = 4;
-    double float_value = 5;
-    string string_value = 6;
-    bool bool_value = 7;
+    double float_value = 2;
+    string string_value = 3;
+    bool bool_value = 4;
     // null is represented by not setting any value
   }
 }
@@ -45,74 +34,36 @@ message InitResponse {
 
 message GetModelRequest {
   string client_id = 1;
-  string actor_id = 2;
-  int32 actor_version = 3;
-  int32 expected_version = 4;
+  int32 client_version = 2;
+  int32 expected_version = 3;
 }
 
 message ModelResponse {
   int32 version = 1;
   bool is_diff = 2;
   bytes model_state = 3;
-  int32 input_dim = 4;
-  int32 output_dim = 5;
 }
 
-message GetActionRequest {
-  string client_id = 1;
-  repeated string actor_idx = 2;
-  bytes observation = 3;
-  bytes mask = 4;
-  double reward = 5;
+message Action {
+  bytes obs    = 1; // Serialized observation tensor
+  bytes action = 2; // Serialized action tensor
+  bytes mask = 3;  // Serialized  mask tensor
+  float reward = 4; // Serialized reward tensor
+  map<string, bytes> data = 5;  // additional data such as logp_a and v for certain algorithms.
+  bool done    = 6; // if this is the last action
 }
 
-message GetActionResponse {
-  EncodedAction action = 1;
-}
-
-message EncodedAction {
-  bytes data = 1;
-  optional bytes metadata = 2;
-  optional bool compressed = 3;
-  optional bool encrypted = 4;
-  optional bytes checksum = 5;
-  bytes original_size = 6;
-}
-
-message EncodedTrajectory {
-  repeated bytes data = 1;
-  optional bytes metadata = 2;
-  optional bool compressed = 3;
-  optional bool encrypted = 4;
-  optional bytes checksum = 5;
-  bytes num_actions = 6;
-  bytes original_size = 7;
+message Trajectory {
+  repeated Action actions = 1;
+  int32 version           = 2;
 }
 
 message SendTrajectoriesRequest {
   string client_id           = 1;
-  repeated EncodedTrajectory trajectories = 3;
+  repeated Trajectory trajectories = 2;
 }
 
 message SendTrajectoriesResponse {
   bool model_updated = 1;
   int32 new_version  = 2;
-}
-
-message SendScalingWarningRequest {
-  string client_id = 1;
-}
-
-message SendScalingWarningResponse {
-  bool sending_paused = 1;
-  string message = 2;
-}
-
-message SendScalingCompleteRequest {
-  string client_id = 1;
-}
-
-message SendScalingCompleteResponse {
-  bool sending_resumed = 1;
-  string message = 2;
 }
