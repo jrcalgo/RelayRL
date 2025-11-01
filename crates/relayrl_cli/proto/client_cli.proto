@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package client_cli;
+
+service ClientCLIService {
+
+}
+
+message 
