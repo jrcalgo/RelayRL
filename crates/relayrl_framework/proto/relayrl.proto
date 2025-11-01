@@ -54,8 +54,8 @@ message ModelResponse {
   int32 version = 1;
   bool is_diff = 2;
   bytes model_state = 3;
-  int32 input_dim = 4;
-  int32 output_dim = 5;
+  bytes input_dim = 4;
+  bytes output_dim = 5;
 }
 
 message GetActionRequest {
@@ -80,7 +80,7 @@ message EncodedAction {
 }
 
 message EncodedTrajectory {
-  repeated bytes data = 1;
+  bytes data = 1;
   optional bytes metadata = 2;
   optional bool compressed = 3;
   optional bool encrypted = 4;
@@ -90,7 +90,7 @@ message EncodedTrajectory {
 }
 
 message SendTrajectoriesRequest {
-  string client_id           = 1;
+  string client_id = 1;
   repeated EncodedTrajectory trajectories = 3;
 }
 

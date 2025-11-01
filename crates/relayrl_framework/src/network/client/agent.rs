@@ -1,11 +1,12 @@
-use crate::network::HotReloadableModel;
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
     ClientCoordinator, ClientInterface,
 };
 
-use relayrl_types::prelude::DeviceType;
+use burn_tensor::{Tensor, backend::Backend};
 use relayrl_types::types::action::RelayRLAction;
+use relayrl_types::types::tensor::{BackendMatcher, DeviceType, SupportedTensorBackend};
+use relayrl_types::types::model::{ModelModule, HotReloadableModel};
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -14,31 +15,31 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-pub struct AgentStartParameters {
+pub struct AgentStartParameters<B: Backend + BackendMatcher> {
     actor_count: i64,
     default_device: DeviceType,
-    default_model: Option<CModule>,
+    default_model: Option<ModelModule<B>>,
     algorithm_name: String,
     config_path: Option<PathBuf>,
 }
 
-impl std::fmt::Debug for AgentStartParameters {
+impl<B: Backend + BackendMatcher> std::fmt::Debug for AgentStartParameters<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "AgentStartParameters")
     }
 }
 
 /// Builder for RelayRLAgent
-pub struct RelayRLAgentBuilder {
+pub struct RelayRLAgentBuilder<B: Backend + BackendMatcher> {
     transport_type: TransportType,
     actor_count: Option<i64>,
     default_device: Option<DeviceType>,
-    default_model: Option<CModule>,
+    default_model: Option<ModelModule<B>>,
     algorithm_name: Option<String>,
     config_path: Option<PathBuf>,
 }
 
-impl RelayRLAgentBuilder {
+impl<B: Backend + BackendMatcher> RelayRLAgentBuilder<B> {
     /// Create a new builder with required transport type
     pub fn builder(transport_type: TransportType) -> Self {
         Self {
@@ -61,7 +62,7 @@ impl RelayRLAgentBuilder {
         self
     }
 
-    pub fn default_model(mut self, model: CModule) -> Self {
+    pub fn default_model(mut self, model: ModelModule<B>) -> Self {
         self.default_model = Some(model);
         self
     }
@@ -77,12 +78,12 @@ impl RelayRLAgentBuilder {
     }
 
     /// Build and start the RelayRLAgent, returning a running instance
-    pub async fn build(self) -> Result<(RelayRLAgent, AgentStartParameters), String> {
+    pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), String> {
         // Initialize agent object
-        let agent: RelayRLAgent = RelayRLAgent::new(self.transport_type);
+        let agent: RelayRLAgent<B> = RelayRLAgent::new(self.transport_type);
 
         // Tuple parameters
-        let startup_params = AgentStartParameters {
+        let startup_params = AgentStartParameters::<B> {
             actor_count: self.actor_count.unwrap_or(1),
             default_device: self.default_device.unwrap_or(DeviceType::default()),
             default_model: self.default_model,
@@ -95,21 +96,23 @@ impl RelayRLAgentBuilder {
 }
 
 /// Thin facade over ClientCoordinator
-pub struct RelayRLAgent {
-    coordinator: ClientCoordinator,
+pub struct RelayRLAgent<B: Backend + BackendMatcher> {
+    coordinator: ClientCoordinator<B>,
+    supported_backend: SupportedTensorBackend,
 }
 
-impl std::fmt::Debug for RelayRLAgent {
+impl<B: Backend + BackendMatcher> std::fmt::Debug for RelayRLAgent<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RelayRLAgent")
     }
 }
 
-impl RelayRLAgent {
+impl<B: Backend + BackendMatcher> RelayRLAgent<B> {
     /// Create a new agent with given network
     pub fn new(transport_type: TransportType) -> Self {
         Self {
-            coordinator: ClientCoordinator::new(transport_type),
+            coordinator: ClientCoordinator::<B>::new(transport_type),
+            supported_backend: SupportedTensorBackend::default(),
         }
     }
 
@@ -118,7 +121,7 @@ impl RelayRLAgent {
         self,
         actor_count: i64,
         default_device: DeviceType,
-        default_model: Option<CModule>,
+        default_model: Option<ModelModule<B>>,
         algorithm_name: String,
         config_path: Option<PathBuf>,
     ) {
@@ -153,16 +156,21 @@ impl RelayRLAgent {
     }
 
     /// Request actions from actors
-    pub async fn request_action<B: Backend, D: DeviceType> (
+    pub async fn request_action<const O: usize, const M: usize>(
         &self,
         ids: Vec<Uuid>,
-        observation: Tensor<B, D>,
-        mask: Tensor<B, D>,
+        observation: Tensor<B, O>,
+        mask: Tensor<B, M>,
         reward: f32,
     ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String> {
-        self.coordinator
-            ._request_for_action(ids, observation, mask, reward)
-            .await
+        match B::matches_backend(&self.supported_backend) {
+            true => {
+                self.coordinator
+                    ._request_action::<O, M>(ids, observation, mask, reward)
+                    .await
+            }
+            false => Err("Backend mismatch".to_string()),
+        }
     }
 
     /// Flag the last action
@@ -186,8 +194,8 @@ impl RelayRLAgent {
 pub trait RelayRLAgentActors {
     fn new_actor(
         &self,
-        device: Device,
-        default_model: Option<HotReloadableModel>,
+        device: DeviceType,
+        default_model: Option<ModelModule<B>>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     fn remove_actor(
         &mut self,
@@ -203,11 +211,11 @@ pub trait RelayRLAgentActors {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
 }
 
-impl RelayRLAgentActors for RelayRLAgent {
+impl<B: Backend + BackendMatcher> RelayRLAgentActors for RelayRLAgent<B> {
     fn new_actor(
         &self,
-        device: Device,
-        default_model: Option<HotReloadableModel>,
+        device: DeviceType,
+        default_model: Option<HotReloadableModel<B>>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             self.coordinator._new_actor(device, default_model).await;

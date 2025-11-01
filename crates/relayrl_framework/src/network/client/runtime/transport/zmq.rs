@@ -1,12 +1,15 @@
+use crate::model::ModelModule;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::SyncClientTransport;
 use crate::network::client::runtime::transport::serialize_trajectory;
-use crate::network::validate_model;
 use crate::utilities::configuration::ClientConfigLoader;
 
+use relayrl_types::types::model::utils::validate_model;
+use relayrl_types::types::tensor::BackendMatcher;
 use relayrl_types::types::trajectory::RelayRLTrajectory;
 
+use burn_tensor::backend::Backend;
 use std::io::Write;
 
 use tempfile::NamedTempFile;
@@ -90,11 +93,11 @@ impl ZmqClient {
     }
 }
 
-impl SyncClientTransport for ZmqClient {
+impl<B: Backend + BackendMatcher> SyncClientTransport<B> for ZmqClient {
     fn initial_model_handshake(
         &self,
         _model_server_address: &str,
-    ) -> Result<Option<CModule>, String> {
+    ) -> Result<Option<ModelModule<B>>, String> {
         let context = Context::new();
 
         // Use agent_listener_address for handshake
@@ -146,9 +149,9 @@ impl SyncClientTransport for ZmqClient {
                             return Ok(None);
                         }
 
-                        match CModule::load(temp_file.path()) {
+                        match ModelModule::<B>::load_from_path(temp_file.path()) {
                             Ok(model) => {
-                                validate_model(&model);
+                                validate_model::<B>(&model, model.input_dim, model.output_dim);
                                 println!("[ZmqClient] Model loaded and validated successfully");
                                 Ok(Some(model))
                             }
@@ -209,9 +212,7 @@ impl SyncClientTransport for ZmqClient {
     fn listen_for_model(
         &self,
         _model_server_address: &str,
-        tx_to_router: tokio::sync::mpsc::Sender<
-            crate::network::client::runtime::router::RoutedMessage,
-        >,
+        tx_to_router: tokio::sync::mpsc::Sender<RoutedMessage>,
     ) {
         let sub_address = self.training_server_address.clone();
 

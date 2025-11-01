@@ -26,7 +26,7 @@ metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-ot
 profile = ["flamegraph", "console-subscriber"]       # Enables runtime profiling support via flamegraph.
 
 [dependencies]
-relayrl_types = "0.2.1"
+relayrl_types = "0.2.12"
 
 zmq = { version = "0.10.0", optional = true }                               # ZeroMQ messaging library.
 tonic = { version = "0.12.3", optional = true }                             # gRPC library for Rust.
@@ -54,11 +54,12 @@ log = { version = "0.4.28", features = ["kv"] }
 notify = { version = "6.1.1", optional = true }
 futures = "0.3.30"
 tiny_http = { version = "0.12.0", optional = true }
-# TODO: Add support for these dependencies and remove tch entirely from relayrl_framework
+
 burn-tensor = "0.18.0"
 burn-import = "0.18.0"
 burn-ndarray = "0.18.0"
 burn-tch = "0.18.0"
+safetensors = "0.4"
 # TODO: Add Redis support for training data storagen & querying
 # redis = 0.32.7
 

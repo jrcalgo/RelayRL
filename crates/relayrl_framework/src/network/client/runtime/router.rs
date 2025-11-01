@@ -4,9 +4,12 @@ use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::TransportClient;
 use burn_tensor::Tensor;
+use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use relayrl_types::types::action::RelayRLAction;
+use relayrl_types::types::tensor::{BackendMatcher, TensorData};
 use relayrl_types::types::trajectory::RelayRLTrajectory;
+use std::any::Any;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,12 +43,7 @@ pub(crate) enum RoutingProtocol {
 
 pub(crate) enum RoutedPayload {
     ModelHandshake,
-    RequestInference {
-        observation: Tensor,
-        mask: Tensor,
-        reward: f32,
-        reply_to: oneshot::Sender<Arc<RelayRLAction>>,
-    },
+    RequestInference(Box<InferenceRequest>),
     FlagLastInference {
         reward: f32,
     },
@@ -64,6 +62,7 @@ pub(crate) enum RoutedPayload {
         trajectory: RelayRLTrajectory,
     },
     Shutdown,
+
     ScalingWarning {
         operation: ScalingOperation,
         reply_to: oneshot::Sender<Result<(), String>>,
@@ -78,17 +77,24 @@ pub(crate) enum RoutedPayload {
     },
 }
 
+pub(crate) struct InferenceRequest {
+    pub(crate) observation: Box<dyn Any + Send>,
+    pub(crate) mask: Box<dyn Any + Send>,
+    pub(crate) reward: f32,
+    pub(crate) reply_to: oneshot::Sender<Arc<RelayRLAction>>,
+}
+
 /// Intermediary routing process/filter for routing received models to specified ActorEntity
-pub(crate) struct ClientFilter {
+pub(crate) struct ClientFilter<B: Backend + BackendMatcher> {
     rx_from_receiver: Arc<RwLock<Receiver<RoutedMessage>>>,
-    shared_agent_state: Arc<RwLock<StateManager>>,
+    shared_agent_state: Arc<RwLock<StateManager<B>>>,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl ClientFilter {
+impl<B: Backend + BackendMatcher> ClientFilter<B> {
     pub(crate) fn new(
         rx_from_receiver: Arc<RwLock<Receiver<RoutedMessage>>>,
-        shared_agent_state: Arc<RwLock<StateManager>>,
+        shared_agent_state: Arc<RwLock<StateManager<B>>>,
     ) -> Self {
         Self {
             rx_from_receiver,
@@ -149,14 +155,14 @@ impl ClientFilter {
 //// Start of Packet Transportation/Receiver/Sender
 
 /// Listens & receives model bytes from a training server
-pub(crate) struct ClientExternalReceiver {
+pub(crate) struct ClientExternalReceiver<B: Backend + BackendMatcher> {
     tx_to_router: Sender<RoutedMessage>,
-    transport: Option<Arc<TransportClient>>,
+    transport: Option<Arc<TransportClient<B>>>,
     server_address: String,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl ClientExternalReceiver {
+impl<B: Backend + BackendMatcher> ClientExternalReceiver<B> {
     pub fn new(tx_to_router: Sender<RoutedMessage>, server_address: String) -> Self {
         Self {
             tx_to_router,
@@ -166,7 +172,7 @@ impl ClientExternalReceiver {
         }
     }
 
-    pub fn with_transport(mut self, transport: Arc<TransportClient>) -> Self {
+    pub fn with_transport(mut self, transport: Arc<TransportClient<B>>) -> Self {
         self.transport = Some(Arc::from(transport));
         self
     }
@@ -181,7 +187,6 @@ impl ClientExternalReceiver {
             match &**transport {
                 #[cfg(feature = "zmq_network")]
                 TransportClient::Sync(sync_tr) => {
-                    // Start model listening using sync transport
                     sync_tr.listen_for_model(&self.server_address, self.tx_to_router.clone());
                 }
                 #[cfg(feature = "grpc_network")]
@@ -190,12 +195,9 @@ impl ClientExternalReceiver {
                 }
             }
         }
-        // Receiver itself does nothing else; model updates come through tx_to_router
-        // Waiting forever
+
         std::future::pending::<()>().await;
     }
-
-    async fn _start_listen_task(&self) {}
 }
 
 type PriorityRank = i64;
@@ -227,17 +229,17 @@ impl Ord for SenderQueueEntry {
 }
 
 /// Receives trajectories from ActorEntity and creates send_traj tasks to send to a training server
-pub(crate) struct ClientExternalSender {
+pub(crate) struct ClientExternalSender<B: Backend + BackendMatcher> {
     active: AtomicBool,
     rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
     actor_last_sent: DashMap<Uuid, i64>,
     traj_heap: Arc<Mutex<BinaryHeap<SenderQueueEntry>>>,
-    transport: Option<Arc<TransportClient>>,
+    transport: Option<Arc<TransportClient<B>>>,
     server_address: String,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl ClientExternalSender {
+impl<B: Backend + BackendMatcher> ClientExternalSender<B> {
     pub fn new(
         rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
         server_address: String,
@@ -253,7 +255,7 @@ impl ClientExternalSender {
         }
     }
 
-    pub fn with_transport(mut self, transport: Arc<TransportClient>) -> Self {
+    pub fn with_transport(mut self, transport: Arc<TransportClient<B>>) -> Self {
         self.transport = Some(Arc::from(transport));
         self
     }
@@ -381,7 +383,7 @@ impl ClientExternalSender {
                 #[cfg(feature = "grpc_network")]
                 TransportClient::Async(async_client) => {
                     let grpc_traj =
-                        async_client.convert_relayrl_to_proto_trajectory(&entry.traj_to_send);
+                        async_client.convert_encoded_relayrl_to_proto_encoded_trajectory(&entry.traj_to_send);
                     async_client
                         .send_traj_to_server(grpc_traj, &server_address)
                         .await;

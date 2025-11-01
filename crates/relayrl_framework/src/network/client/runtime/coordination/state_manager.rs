@@ -6,22 +6,27 @@ use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
+
+use relayrl_types::types::tensor::{BackendMatcher, DeviceType};
+
 use dashmap::DashMap;
 use std::sync::Arc;
 
+use burn_tensor::backend::Backend;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-type ActorInstance = Arc<dyn ActorEntity>;
+type ActorInstance<B: Backend + 'static, const O: usize, const M: usize> =
+    Arc<dyn ActorEntity<B, O, M>>;
 pub type ActorUuid = Uuid;
 
 /// In-memory actor state management and global channel transport
-pub(crate) struct StateManager {
+pub(crate) struct StateManager<B: Backend + BackendMatcher> {
     shared_config: Arc<RwLock<ClientConfigLoader>>,
-    default_model: Option<HotReloadableModel>,
+    default_model: Option<HotReloadableModel<B>>,
     pub(crate) global_bus_tx: Sender<RoutedMessage>,
     tx_to_sender: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
@@ -29,10 +34,10 @@ pub(crate) struct StateManager {
     actor_router_addresses: DashMap<ActorUuid, RouterUuid>,
 }
 
-impl StateManager {
+impl<B: Backend + BackendMatcher> StateManager<B> {
     pub(crate) fn new(
         shared_config: Arc<RwLock<ClientConfigLoader>>,
-        shared_default_model: Option<HotReloadableModel>,
+        shared_default_model: Option<HotReloadableModel<B>>,
     ) -> (Self, Receiver<RoutedMessage>, Receiver<RoutedMessage>) {
         let (global_bus_tx, global_bus_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_sender, rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
@@ -54,9 +59,9 @@ impl StateManager {
     pub(crate) async fn __new_actor(
         &mut self,
         id: Uuid,
-        device: Device,
-        default_model: Option<HotReloadableModel>,
-        transport: Arc<TransportClient>,
+        device: DeviceType,
+        default_model: Option<HotReloadableModel<B>>,
+        transport: Arc<TransportClient<B>>,
     ) {
         if self.actor_handles.contains_key(&id) {
             eprintln!("[StateManager] Actor ID already exists, replacing existing actor...");
@@ -180,7 +185,7 @@ impl StateManager {
     }
 
     pub(crate) fn spawn_shutdown_watcher(
-        shared_state: Arc<RwLock<StateManager>>,
+        shared_state: Arc<RwLock<StateManager<B>>>,
         lifecycle: LifeCycleManager,
     ) {
         tokio::spawn(async move {
@@ -211,16 +216,16 @@ impl StateManager {
     }
 
     pub(crate) fn __set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
-        let current_id_handle = match self.get_actor_handle(current_id) {
+        let current_id_handle = match StateManager::<B>::get_actor_handle(self, current_id) {
             Some(handle) => handle.clone(),
             None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
         };
-        let current_id_inbox = match self.get_actor_inbox(current_id) {
+        let current_id_inbox = match StateManager::<B>::get_actor_inbox(self, current_id) {
             Some(inbox) => inbox.clone(),
             None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
         };
 
-        if self.get_actor_handle(new_id).is_some() || self.get_actor_inbox(new_id).is_some() {
+        if StateManager::<B>::get_actor_handle(self, new_id).is_some() || StateManager::<B>::get_actor_inbox(self, new_id).is_some() {
             return Err(format!("[StateManager] Actor ID {} already taken", new_id));
         }
 
@@ -237,7 +242,7 @@ impl StateManager {
             return;
         }
 
-        let actor_ids = self.get_actor_id_list();
+        let actor_ids = StateManager::<B>::get_actor_id_list(self);
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
             let router_id = router_ids[i % router_ids.len()];

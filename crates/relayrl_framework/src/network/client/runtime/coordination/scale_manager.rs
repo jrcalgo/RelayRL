@@ -6,6 +6,10 @@ use crate::network::client::runtime::router::{
 use crate::network::client::runtime::transport::TransportClient;
 use crate::network::random_uuid;
 use crate::utilities::configuration::ClientConfigLoader;
+
+use burn_tensor::backend::Backend;
+use relayrl_types::types::tensor::BackendMatcher;
+
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -33,23 +37,23 @@ pub(crate) struct RouterRuntimeParams {
 
 pub type RouterUuid = Uuid;
 
-pub(crate) struct ScaleManager {
-    shared_state: Arc<RwLock<StateManager>>,
+pub(crate) struct ScaleManager<B: Backend + BackendMatcher> {
+    shared_state: Arc<RwLock<StateManager<B>>>,
     shared_config: Arc<RwLock<ClientConfigLoader>>,
     pub(crate) shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
-    pub(crate) shared_transport: Arc<TransportClient>,
+    pub(crate) shared_transport: Arc<TransportClient<B>>,
     pub(crate) runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
     server_addresses: ServerAddresses,
     rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
     lifecycle: Option<LifeCycleManager>,
 }
 
-impl ScaleManager {
+impl<B: Backend + BackendMatcher> ScaleManager<B> {
     pub(crate) fn new(
-        shared_state: Arc<RwLock<StateManager>>,
+        shared_state: Arc<RwLock<StateManager<B>>>,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
         shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
-        transport: TransportClient,
+        transport: TransportClient<B>,
         rx_from_actor: Receiver<RoutedMessage>,
         agent_listener_address: String,
         training_server_address: String,
@@ -185,14 +189,10 @@ impl ScaleManager {
             .map(|router| *router.key())
             .collect();
 
-        let old_actor_mappings = self
-            .shared_state
-            .blocking_read()
-            .get_actor_router_mappings();
+            let old_actor_mappings = StateManager::<B>::get_actor_router_mappings(&self.shared_state.blocking_read());
 
-        self.shared_state
-            .blocking_write()
-            .distribute_actors(router_ids.clone());
+
+        StateManager::<B>::distribute_actors(&self.shared_state.blocking_write(), router_ids.clone());
 
         if let Err(e) = self._send_scaling_complete(ScalingOperation::ScaleUp).await {
             eprintln!("Failed to send scaling confirmation via transport: {}", e);
@@ -201,9 +201,7 @@ impl ScaleManager {
                 "Rolling back: removing newly created routers and restoring actor mappings..."
             );
 
-            self.shared_state
-                .blocking_write()
-                .restore_actor_router_mappings(old_actor_mappings);
+            StateManager::<B>::restore_actor_router_mappings(&self.shared_state.blocking_write(), old_actor_mappings);
 
             self._rollback_routers(&new_router_ids).await;
 
@@ -243,10 +241,7 @@ impl ScaleManager {
                     return;
                 }
 
-                let old_actor_mappings = self
-                    .shared_state
-                    .blocking_read()
-                    .get_actor_router_mappings();
+                let old_actor_mappings = StateManager::<B>::get_actor_router_mappings(&self.shared_state.blocking_read());
 
                 let (router_ids, removed_routers, current_router_count) =
                     tokio::task::block_in_place(|| {
@@ -369,15 +364,15 @@ impl ScaleManager {
         }
     }
 
-    async fn _spawn_central_filter(mut router: ClientFilter) -> JoinHandle<()> {
+    async fn _spawn_central_filter(mut router: ClientFilter<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move { router.spawn_loop().await })
     }
 
-    async fn _spawn_external_receiver(receiver: ClientExternalReceiver) -> JoinHandle<()> {
+    async fn _spawn_external_receiver(receiver: ClientExternalReceiver<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move { receiver.spawn_loop().await })
     }
 
-    async fn _spawn_external_sender(sender: ClientExternalSender) -> JoinHandle<()> {
+    async fn _spawn_external_sender(sender: ClientExternalSender<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move { sender.spawn_loop().await })
     }
 }

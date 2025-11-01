@@ -50,7 +50,7 @@ impl MetricsManager {
             )
             .unwrap();
 
-            if let Ok(mut registry) = registry_arc.lock() {
+            if let Ok(registry) = registry_arc.lock() {
                 if registry.register(Box::new(prom_counter.clone())).is_ok() {
                     prom_counter.inc_by(value as f64);
                 }
@@ -81,7 +81,7 @@ impl MetricsManager {
             )
             .unwrap();
 
-            if let Ok(mut registry) = registry_arc.lock() {
+            if let Ok(registry) = registry_arc.lock() {
                 if registry.register(Box::new(prom_histogram.clone())).is_ok() {
                     prom_histogram.observe(value);
                 }

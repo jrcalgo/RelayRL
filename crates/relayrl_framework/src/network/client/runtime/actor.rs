@@ -1,38 +1,44 @@
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+use crate::network::HotReloadableModel;
+use crate::network::client::runtime::router::{
+    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+};
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::TransportClient;
-use crate::network::{HotReloadableModel, validate_model};
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
-use crate::utilities::orchestration::tonic_utils::deserialize_model;
 
+use relayrl_types::types::model::{ModelError, ModelModule, deserialize_model, validate_model};
 use relayrl_types::types::action::RelayRLAction;
+use relayrl_types::types::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::types::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tch::{CModule, Device, TchError};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use uuid::Uuid;
 
-pub trait ActorEntity: Send + Sync + 'static {
+use burn_tensor::{Tensor, backend::Backend};
+
+pub trait ActorEntity<B: Backend + BackendMatcher, const O: usize, const M: usize>:
+    Send + Sync + 'static
+{
     async fn new(
         id: Uuid,
-        device: Device,
-        model: Option<HotReloadableModel>,
+        device: DeviceType,
+        model: Option<HotReloadableModel<B>>,
         model_path: PathBuf,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
         rx_from_router: Receiver<RoutedMessage>,
         tx_to_sender: Sender<RoutedMessage>,
-        transport: Arc<TransportClient>,
+        transport: Arc<TransportClient<B>>,
     ) -> (Self, bool)
     where
         Self: Sized;
     async fn spawn_loop(&mut self);
     async fn _initial_model_handshake(&mut self, msg: RoutedMessage);
-    fn __request_for_action(&mut self, msg: RoutedMessage);
+    fn __request_action(&mut self, msg: RoutedMessage);
     fn __flag_last_action(&mut self, msg: RoutedMessage);
     fn __get_model_version(&self, msg: RoutedMessage);
     async fn _refresh_model(&self, msg: RoutedMessage);
@@ -40,30 +46,32 @@ pub trait ActorEntity: Send + Sync + 'static {
     async fn _handle_shutdown(&self, _msg: RoutedMessage);
 }
 
-/// Responsible for performing inference with an in-memory TorchScript model
-pub(crate) struct Actor {
+/// Responsible for performing inference with an in-memory model
+pub(crate) struct Actor<B: Backend + BackendMatcher> {
     id: Uuid,
-    model: Option<HotReloadableModel>,
+    model: Option<HotReloadableModel<B>>,
     model_path: PathBuf,
     model_latest_version: i64,
-    model_device: Device,
+    model_device: DeviceType,
     current_traj: RelayRLTrajectory,
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_sender: Sender<RoutedMessage>,
-    transport: Option<Arc<TransportClient>>,
+    transport: Option<Arc<TransportClient<B>>>,
     shared_config: Arc<RwLock<ClientConfigLoader>>,
 }
 
-impl ActorEntity for Actor {
+impl<B: Backend + BackendMatcher, const O: usize, const M: usize> ActorEntity<B, O, M>
+    for Actor<B>
+{
     async fn new(
         id: Uuid,
-        device: Device,
-        model: Option<HotReloadableModel>,
+        device: DeviceType,
+        model: Option<HotReloadableModel<B>>,
         model_path: PathBuf,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
         rx_from_router: Receiver<RoutedMessage>,
         shared_tx_to_sender: Sender<RoutedMessage>,
-        transport: Arc<TransportClient>,
+        transport: Arc<TransportClient<B>>,
     ) -> (Self, bool)
     where
         Self: Sized,
@@ -76,7 +84,7 @@ impl ActorEntity for Actor {
             model_path,
             model_latest_version: 0,
             model_device: device,
-            current_traj: RelayRLTrajectory::new(max_length),
+            current_traj: RelayRLTrajectory::new(max_length as usize),
             rx_from_router,
             shared_tx_to_sender,
             transport: Some(transport),
@@ -102,14 +110,26 @@ impl ActorEntity for Actor {
     async fn spawn_loop(&mut self) {
         while let Some(msg) = self.rx_from_router.recv().await {
             match msg.protocol {
-                RoutingProtocol::ModelHandshake => self._initial_model_handshake(msg).await,
-                RoutingProtocol::RequestInference => self.__request_for_action(msg),
-                RoutingProtocol::FlagLastInference => self.__flag_last_action(msg),
-                RoutingProtocol::ModelVersion => self.__get_model_version(msg),
-                RoutingProtocol::ModelUpdate => self._refresh_model(msg).await,
-                RoutingProtocol::ActorStatistics => self.__get_actor_statistics(msg),
+                RoutingProtocol::ModelHandshake => {
+                    <Actor<B> as ActorEntity<B, O, M>>::_initial_model_handshake(self, msg).await
+                }
+                RoutingProtocol::RequestInference => {
+                    <Actor<B> as ActorEntity<B, O, M>>::__request_action(self, msg)
+                }
+                RoutingProtocol::FlagLastInference => {
+                    <Actor<B> as ActorEntity<B, O, M>>::__flag_last_action(self, msg)
+                }
+                RoutingProtocol::ModelVersion => {
+                    <Actor<B> as ActorEntity<B, O, M>>::__get_model_version(self, msg)
+                }
+                RoutingProtocol::ModelUpdate => {
+                    <Actor<B> as ActorEntity<B, O, M>>::_refresh_model(self, msg).await
+                }
+                RoutingProtocol::ActorStatistics => {
+                    <Actor<B> as ActorEntity<B, O, M>>::__get_actor_statistics(self, msg)
+                }
                 RoutingProtocol::Shutdown => {
-                    self._handle_shutdown(msg).await;
+                    <Actor<B> as ActorEntity<B, O, M>>::_handle_shutdown(self, msg).await;
                     break;
                 }
                 _ => {}
@@ -176,7 +196,7 @@ impl ActorEntity for Actor {
                                     }
                                     None => {
                                         self.model = Some(
-                                            HotReloadableModel::new_from_model(
+                                            HotReloadableModel::<B>::new_from_module(
                                                 model,
                                                 self.model_device,
                                             )
@@ -245,16 +265,11 @@ impl ActorEntity for Actor {
                                         }
                                     }
                                     None => {
-                                        self.model = Some(
-                                            HotReloadableModel::new_from_model(
-                                                model,
+                                        self.model =
+                                            Some(HotReloadableModel::<B>::new_from_module(
+                                                module,
                                                 self.model_device,
-                                            )
-                                            .await
-                                            .expect(
-                                                "[ActorEntity] New model could not be created...",
-                                            ),
-                                        );
+                                            ));
                                     }
                                 }
                             } else {
@@ -280,19 +295,29 @@ impl ActorEntity for Actor {
         }
     }
 
-    fn __request_for_action(&mut self, msg: RoutedMessage) {
+    fn __request_action(&mut self, msg: RoutedMessage) {
         if let Some(model) = &self.model {
-            if let RoutedPayload::RequestInference {
-                observation,
-                mask,
-                reward,
-                reply_to,
-            } = msg.payload
-            {
+            if let RoutedPayload::RequestInference(inference_request) = msg.payload {
+                let InferenceRequest {
+                    observation,
+                    mask,
+                    reward,
+                    reply_to,
+                } = *inference_request; // Dereference the Box to get the inner value
+
+                let observation_tensor: Tensor<B, O> =
+                    *observation.downcast::<Tensor<B, O>>().unwrap();
+                let mask_tensor: Tensor<B, M> = *mask.downcast::<Tensor<B, M>>().unwrap();
+
+                let actor_id = self.id;
                 let rt = get_or_init_tokio_runtime();
-                match rt.block_on(async { model.forward(observation, mask, reward).await }) {
+                match rt.block_on(async {
+                    model
+                        .forward::<O, M>(observation_tensor, mask_tensor, reward, actor_id)
+                        .await
+                }) {
                     Ok(r4sa) => {
-                        self.current_traj.add_action(&r4sa);
+                        self.current_traj.add_action(r4sa.clone());
                         reply_to
                             .send(Arc::new(r4sa))
                             .expect("Failed to send inference... ");
@@ -310,10 +335,11 @@ impl ActorEntity for Actor {
 
     fn __flag_last_action(&mut self, msg: RoutedMessage) {
         if let RoutedPayload::FlagLastInference { reward } = msg.payload {
+            let actor_id = self.id;
             let mut last_action: RelayRLAction =
-                RelayRLAction::new(None, None, None, reward, None, true);
+                RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
             last_action.update_reward(reward);
-            self.current_traj.add_action(&last_action);
+            self.current_traj.add_action(last_action);
 
             let send_traj_msg = {
                 let traj_clone = self.current_traj.clone();
@@ -370,18 +396,24 @@ impl ActorEntity for Actor {
             version,
         } = msg.payload
         {
-            let model: Result<CModule, TchError> = deserialize_model(model_bytes);
+            // TODO: Minimize creation of model module in memory
+            let model: Result<ModelModule<B>, ModelError> =
+                deserialize_model::<B>(model_bytes, self.model_device);
             let model_path: PathBuf = self.model_path.clone();
             if model.is_ok() {
-                let ok_model: CModule = model.expect("[ActorEntity] Failed model acquisition...");
-                validate_model(&ok_model);
+                let ok_model: ModelModule<B> =
+                    model.expect("[ActorEntity] Failed model deserialization...");
+
+                const INPUT_DIM: usize = ok_model.input_dim;
+                const OUTPUT_DIM: usize = ok_model.output_dim;
+                validate_model::<B>(&ok_model, input_dim, output_dim)?;
                 ok_model
-                    .save(&model_path)
+                    .save::<B>(&model_path)
                     .expect("[ActorEntity] Failed model save...");
-            }
+            } 
 
             match &self.model {
-                Some(model) => match model.reload(model_path, version).await {
+                Some(model) => match model.reload_from_module(ok_model, version).await {
                     Ok(_) => (),
                     Err(e) => {
                         eprintln!("[ActorEntity {:?}] Failed reload, {:?}", self.id, e);

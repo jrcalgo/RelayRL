@@ -1,17 +1,17 @@
 #[cfg(feature = "grpc_network")]
+use crate::model::ModelModule;
+#[cfg(feature = "grpc_network")]
+use crate::model::{deserialize_model, validate_model};
+#[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 #[cfg(feature = "grpc_network")]
-use crate::network::validate_model;
-#[cfg(feature = "grpc_network")]
 use crate::utilities::configuration::ClientConfigLoader;
-#[cfg(feature = "grpc_network")]
-use crate::utilities::orchestration::tonic_utils::deserialize_model;
 #[cfg(feature = "grpc_network")]
 use async_trait::async_trait;
 #[cfg(feature = "grpc_network")]
-use relayrl_types::types::trajectory::RelayRLTrajectory;
+use relayrl_types::types::trajectory::{EncodedTrajectory, RelayRLTrajectory};
 #[cfg(feature = "grpc_network")]
 use std::collections::HashMap;
 #[cfg(feature = "grpc_network")]
@@ -34,9 +34,13 @@ pub mod rl_service {
 
 #[cfg(feature = "grpc_network")]
 use rl_service::{
-    Action, GetModelRequest, InitRequest, ModelResponse, ParameterValue, SendTrajectoriesRequest,
-    SendTrajectoriesResponse, Trajectory, rl_service_client::RlServiceClient,
+    EncodedAction as GrpcEncodedAction, EncodedTrajectory as GrpcEncodedTrajectory,
+    GetModelRequest, InitRequest, ModelResponse, ParameterValue, SendTrajectoriesRequest,
+    SendTrajectoriesResponse, rl_service_client::RlServiceClient,
 };
+
+use burn_tensor::backend::Backend;
+use relayrl_types::types::tensor::BackendMatcher;
 
 #[cfg(feature = "grpc_network")]
 pub struct TonicClient {
@@ -130,7 +134,7 @@ impl TonicClient {
                 let mut data = HashMap::new();
 
                 // Convert additional data if present using proper serialization
-                if let Some(action_data) = &action.data {
+                if let Some(action_data) = action.get_data() {
                     for (key, value) in action_data {
                         if let Ok(serialized) = serde_json::to_vec(value) {
                             data.insert(key.clone(), serialized);
@@ -140,20 +144,17 @@ impl TonicClient {
 
                 Action {
                     obs: action
-                        .obs
-                        .as_ref()
+                        .get_obs()
                         .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
                     action: action
-                        .act
-                        .as_ref()
+                        .get_act()
                         .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
                     mask: action
-                        .mask
-                        .as_ref()
+                        .get_mask()
                         .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    reward: action.rew,
+                    reward: action.get_rew(),
                     data,
-                    done: action.done,
+                    done: action.get_done(),
                 }
             })
             .collect();
@@ -192,8 +193,6 @@ impl TonicClient {
 
         let request = Request::new(InitRequest {
             client_id: self.client_id.clone(),
-            algorithm_name,
-
             algorithm_parameters,
         });
 
@@ -266,12 +265,12 @@ impl TonicClient {
 
 #[cfg(feature = "grpc_network")]
 #[async_trait]
-impl AsyncClientTransport for TonicClient {
+impl<B: Backend + BackendMatcher> AsyncClientTransport<B> for TonicClient {
     /// Helper method to perform initial handshake and return whether a model was received
     async fn initial_model_handshake(
         &self,
         training_server_address: &str,
-    ) -> Result<Option<CModule>, String> {
+    ) -> Result<Option<ModelModule<B>>, String> {
         let mut client = Self::new(&self.config);
 
         // Initialize algorithm first
@@ -299,12 +298,13 @@ impl AsyncClientTransport for TonicClient {
 
                     // Validate and deserialize the model if available
                     if !model_response.model_state.is_empty() {
-                        match deserialize_model(model_response.model_state) {
+                        match deserialize_model::<B>(model_response.model_state, device) {
                             Ok(model) => {
+                                let input_dim: usize = model_response.input_dim;
+                                let output_dim: usize = model_response.output_dim;
                                 // Validate the model
-                                validate_model(&model);
+                                validate_model::<B>(&model, input_dim, output_dim);
                                 println!("[TonicClient] Model validated and ready for use");
-
                                 Ok(Some(model))
                             }
                             Err(e) => Err(format!("Failed to deserialize model: {}", e)),
@@ -435,7 +435,11 @@ impl AsyncClientTransport for TonicClient {
         }
     }
 
-    fn convert_relayrl_to_proto_trajectory(&self, traj: &RelayRLTrajectory) -> Trajectory {
+    fn convert_encoded_relayrl_to_proto_encoded_trajectory(
+        &self,
+        traj: &EncodedTrajectory,
+    ) -> GrpcEncodedTrajectory {
+        // TODO: Rewrite for encoded trajectories
         // Delegate to the existing implementation method
         let actions: Vec<Action> = traj
             .actions
@@ -444,7 +448,7 @@ impl AsyncClientTransport for TonicClient {
                 let mut data = std::collections::HashMap::new();
 
                 // Convert additional data if present using proper serialization
-                if let Some(action_data) = &action.data {
+                if let Some(action_data) = action.get_data() {
                     for (key, value) in action_data {
                         if let Ok(serialized) = serde_json::to_vec(value) {
                             data.insert(key.clone(), serialized);
@@ -454,20 +458,17 @@ impl AsyncClientTransport for TonicClient {
 
                 Action {
                     obs: action
-                        .obs
-                        .as_ref()
+                        .get_obs()
                         .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
                     action: action
-                        .act
-                        .as_ref()
+                        .get_act()
                         .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
                     mask: action
-                        .mask
-                        .as_ref()
+                        .get_mask()
                         .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    reward: action.rew,
+                    reward: action.get_rew(),
                     data,
-                    done: action.done,
+                    done: action.get_done(),
                 }
             })
             .collect();
