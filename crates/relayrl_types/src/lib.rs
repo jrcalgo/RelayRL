@@ -1,62 +1,45 @@
 use dashmap::DashMap;
 
 pub mod types {
-    pub mod action;
-    pub mod tensor;
-    pub mod trajectory;
+    pub mod data;
+    pub mod model;
 }
 
-pub mod utilities {
-    #[cfg(feature = "compression")]
-    pub mod compress;
-
-    #[cfg(feature = "integrity")]
-    pub mod integrity;
-
-    #[cfg(feature = "encryption")]
-    pub mod encrypt;
-
-    #[cfg(feature = "metadata")]
-    pub mod metadata;
-
-    #[cfg(feature = "quantization")]
-    pub mod quantize;
-
-    #[cfg(feature = "integrity")]
-    pub mod chunking;
-}
-
-pub mod prelude {
-    pub use crate::types::action::{
+pub mod data_prelude {
+    pub use crate::types::data::action::{
         ActionError, CodecConfig, EncodedAction, RelayRLAction, RelayRLData,
     };
 
-    pub use crate::types::tensor::{
+    pub use crate::types::data::tensor::{
         BackendMatcher, BoolTensor, DType, DeviceType, FloatTensor, IntTensor,
         SupportedTensorBackend, TensorData, TensorError,
     };
 
-    pub use crate::types::trajectory::{
+    pub use crate::types::data::trajectory::{
         EncodedTrajectory, RelayRLTrajectory, RelayRLTrajectoryTrait, TrajectoryError,
     };
 
     #[cfg(feature = "compression")]
-    pub use crate::utilities::compress::{CompressedData, CompressionScheme};
+    pub use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
 
     #[cfg(feature = "integrity")]
-    pub use crate::utilities::integrity::{VerifiedData, compute_checksum};
+    pub use crate::types::data::utilities::integrity::{VerifiedData, compute_checksum};
 
     #[cfg(feature = "encryption")]
-    pub use crate::utilities::encrypt::{EncryptedData, EncryptionKey};
+    pub use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 
     #[cfg(feature = "metadata")]
-    pub use crate::utilities::metadata::TensorMetadata;
+    pub use crate::types::data::utilities::metadata::TensorMetadata;
 
     #[cfg(feature = "quantization")]
-    pub use crate::utilities::quantize::{QuantizationScheme, QuantizedData};
+    pub use crate::types::data::utilities::quantize::{QuantizationScheme, QuantizedData};
 
     #[cfg(feature = "integrity")]
-    pub use crate::utilities::chunking::{ChunkedTensor, TensorChunk};
+    pub use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
+}
+
+pub mod model_prelude {
+
 }
 
 /// Hyperparams enum represents hyperparameter inputs

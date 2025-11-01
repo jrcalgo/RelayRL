@@ -34,6 +34,7 @@ use super::tensor::{
 /// Additional data types that can be attached to actions via the `data` parameter
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RelayRLData {
+    DType(DType),
     Tensor(TensorData),
     U8(u8),
     I16(i16),

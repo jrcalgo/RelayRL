@@ -3,24 +3,24 @@
 //! Trajectories are sequences of actions that form episodes in reinforcement learning.
 //! Supports batching, compression, and network transmission optimizations.
 
-use crate::types::action::{ActionError, RelayRLAction};
+use crate::types::data::action::{ActionError, RelayRLAction};
 use bincode::config;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(feature = "metadata")]
-use crate::types::action::CodecConfig;
+use crate::types::data::action::CodecConfig;
 
 #[cfg(feature = "integrity")]
-use crate::utilities::chunking::{ChunkedTensor, TensorChunk};
+use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
 #[cfg(feature = "compression")]
-use crate::utilities::compress::{CompressedData, CompressionScheme};
+use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
 #[cfg(feature = "encryption")]
-use crate::utilities::encrypt::{EncryptedData, EncryptionKey};
+use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 #[cfg(feature = "integrity")]
-use crate::utilities::integrity::Checksum;
+use crate::types::data::utilities::integrity::{Checksum, compute_checksum};
 #[cfg(feature = "metadata")]
-use crate::utilities::metadata::TensorMetadata;
+use crate::types::data::utilities::metadata::TensorMetadata;
 
 /// Get current Unix timestamp
 fn current_timestamp() -> u64 {
@@ -267,7 +267,7 @@ impl RelayRLTrajectory {
 
         #[cfg(feature = "integrity")]
         let checksum = if config.verify_integrity {
-            Some(crate::utilities::integrity::compute_checksum(&data))
+            Some(compute_checksum(&data))
         } else {
             None
         };
