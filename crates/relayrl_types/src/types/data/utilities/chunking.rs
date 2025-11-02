@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "integrity")]
-use crate::utilities::integrity::Checksum;
+use crate::types::data::utilities::integrity::{Checksum, compute_checksum};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorChunk {
@@ -33,7 +33,7 @@ impl ChunkedTensor {
                 total_chunks: total_chunks as u32,
                 data: chunk_data.to_vec(),
                 #[cfg(feature = "integrity")]
-                checksum: crate::utilities::integrity::compute_checksum(chunk_data),
+                checksum: compute_checksum(chunk_data),
                 offset: i * chunk_size,
             };
             chunks.push(chunk);
@@ -69,7 +69,7 @@ impl ChunkedTensor {
             }
             #[cfg(feature = "integrity")]
             {
-                let computed = crate::utilities::integrity::compute_checksum(&chunk.data);
+                let computed = compute_checksum(&chunk.data);
                 if computed != chunk.checksum {
                     return Err(ChunkError::CorruptedChunk(chunk.chunk_id));
                 }

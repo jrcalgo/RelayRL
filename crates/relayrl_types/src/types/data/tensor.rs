@@ -245,7 +245,7 @@ impl TensorData {
         self.data.len()
     }
 
-    fn get_backend_from_dtype(dtype: &DType) -> SupportedTensorBackend {
+    pub fn get_backend_from_dtype(dtype: &DType) -> SupportedTensorBackend {
         match dtype {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(_) => SupportedTensorBackend::NdArray,

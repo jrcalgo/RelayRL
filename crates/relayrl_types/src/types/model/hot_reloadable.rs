@@ -9,15 +9,15 @@ use uuid::Uuid;
 use burn_tensor::Tensor;
 use burn_tensor::backend::Backend;
 
-use crate::types::model::utils::validate_model;
-use crate::types::model::{ModelError, ModelModule};
 use crate::types::data::action::{RelayRLAction, RelayRLData};
 use crate::types::data::tensor::{BackendMatcher, ConversionTensor, TensorData};
 use crate::types::data::tensor::{DType, NdArrayDType, TchDType};
+use crate::types::model::utils::validate_module;
+use crate::types::model::{ModelError, ModelModule};
 
 /// Wrapper that lets us swap the underlying model at runtime and run inference
 /// in an async-safe way.
-pub struct HotReloadableModel<B: Backend + BackendMatcher> {
+pub struct HotReloadableModel<B: Backend + BackendMatcher<Backend = B>> {
     inner: RwLock<Arc<ModelModule<B>>>,
     version: Arc<AtomicI64>,
     default_device: DeviceType,
@@ -25,7 +25,7 @@ pub struct HotReloadableModel<B: Backend + BackendMatcher> {
     output_dim: usize,
 }
 
-impl<B: Backend + BackendMatcher> Clone for HotReloadableModel<B> {
+impl<B: Backend + BackendMatcher<Backend = B>> Clone for HotReloadableModel<B> {
     fn clone(&self) -> Self {
         Self {
             inner: RwLock::new(self.inner.blocking_read().clone()),
@@ -37,20 +37,20 @@ impl<B: Backend + BackendMatcher> Clone for HotReloadableModel<B> {
     }
 }
 
-impl<B: Backend + BackendMatcher> HotReloadableModel<B> {
+impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
     pub async fn new_from_path<P: AsRef<Path>>(
         path: P,
         device: DeviceType,
     ) -> Result<Self, ModelError> {
         let module: ModelModule<B> = ModelModule::<B>::load_from_path(path.as_ref().to_path_buf())?;
-        validate_model::<B>(&module, module.input_dim, module.output_dim)?;
+        validate_module::<B>(&module)?;
 
         Ok(Self {
             inner: RwLock::new(Arc::new(module.to_owned())),
             version: Arc::new(AtomicI64::new(0)),
             default_device: device,
-            input_dim: module.input_dim,
-            output_dim: module.output_dim,
+            input_dim: module.metadata.input_shape.len(),
+            output_dim: module.metadata.output_shape.len(),
         })
     }
 
@@ -58,14 +58,14 @@ impl<B: Backend + BackendMatcher> HotReloadableModel<B> {
         module: ModelModule<B>,
         device: DeviceType,
     ) -> Result<Self, ModelError> {
-        validate_model::<B>(&module, module.input_dim, module.output_dim)?;
+        validate_module::<B>(&module)?;
 
         Ok(Self {
             inner: RwLock::new(Arc::new(module.to_owned())),
             version: Arc::new(AtomicI64::new(0)),
             default_device: device,
-            input_dim: module.input_dim,
-            output_dim: module.output_dim,
+            input_dim: module.metadata.input_shape.len(),
+            output_dim: module.metadata.output_shape.len(),
         })
     }
 
@@ -80,7 +80,11 @@ impl<B: Backend + BackendMatcher> HotReloadableModel<B> {
         Ok(version)
     }
 
-    pub async fn reload_from_module(&self, module: ModelModule<B>, version: i64) -> Result<i64, ModelError> {
+    pub async fn reload_from_module(
+        &self,
+        module: ModelModule<B>,
+        version: i64,
+    ) -> Result<i64, ModelError> {
         {
             let mut guard = self.inner.write().await;
             *guard = Arc::new(module);
@@ -97,49 +101,77 @@ impl<B: Backend + BackendMatcher> HotReloadableModel<B> {
     pub async fn forward<const I: usize, const O: usize>(
         &self,
         observation: Tensor<B, I>,
-        mask: Tensor<B, O>,
+        mask: Option<Tensor<B, O>>,
         reward: f32,
         actor_id: Uuid,
-    ) -> Result<RelayRLAction, String> {
-        let guard = self.inner.read().await;
-        let (action, aux) = guard.step(observation.clone(), mask.clone());
+    ) -> Result<RelayRLAction, ModelError> {
+        let model_module = self.inner.read().await;
+        let (action, aux) = model_module.step(observation.clone(), mask.clone());
 
-        let tensor_dtype = aux
-            .get("dtype")
+        let obs_dtype = aux
+            .get("observation_dtype")
             .and_then(|d| match d {
-                RelayRLData::DType(dtype) => Some(dtype),
+                RelayRLData::DType(dtype) => Some(dtype.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| &DType::NdArray(NdArrayDType::F32));
+            .unwrap_or_else(default_dtype);
+
+        let act_dtype = aux
+            .get("action_dtype")
+            .and_then(|d| match d {
+                RelayRLData::DType(dtype) => Some(dtype.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(default_dtype);
 
         // Build RelayRLAction by converting tensors → TensorData
         let obs_td = TensorData::try_from(ConversionTensor {
             tensor: observation.clone(),
-            conversion_dtype: tensor_dtype.clone(),
+            conversion_dtype: obs_dtype.clone(),
         })
-        .map_err(|e| format!("Tensor conversion failed: {e}"))?;
+        .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?;
 
-        let mask_td = TensorData::try_from(ConversionTensor {
-            tensor: mask,
-            conversion_dtype: tensor_dtype.clone(),
-        })
-        .map_err(|e| format!("Tensor conversion failed: {e}"))?;
+        let mask_td = match mask {
+            Some(mask) => Some(TensorData::try_from(ConversionTensor {
+                tensor: mask,
+                conversion_dtype: act_dtype.clone(),
+            })
+            .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?),
+            None => None,
+        };
 
         let act_td = TensorData::try_from(ConversionTensor {
             tensor: action.clone(),
-            conversion_dtype: tensor_dtype.clone(),
+            conversion_dtype: act_dtype.clone(),
         })
-        .map_err(|e| format!("Tensor conversion failed: {e}"))?;
+        .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?;
 
         let r4sa = RelayRLAction::new(
             Some(obs_td),
             Some(act_td),
-            Some(mask_td),
+            mask_td,
             reward,
             false,
             Some(aux),
             Some(actor_id),
         );
         Ok(r4sa)
+    }
+}
+
+fn default_dtype() -> DType {
+    #[cfg(feature = "tch-backend")]
+    {
+        return DType::Tch(TchDType::F32);
+    }
+
+    #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
+    {
+        return DType::NdArray(NdArrayDType::F32);
+    }
+
+    #[cfg(all(not(feature = "tch-backend"), not(feature = "ndarray-backend")))]
+    {
+        panic!("No tensor backend enabled for RelayRL");
     }
 }

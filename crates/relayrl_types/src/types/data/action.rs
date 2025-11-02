@@ -16,15 +16,15 @@ use burn_tch::LibTorch as Tch;
 use burn_tensor::{Bool, Float, Int, Tensor, backend::Backend};
 
 #[cfg(feature = "integrity")]
-use crate::utilities::chunking::{ChunkedTensor, TensorChunk};
+use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
 #[cfg(feature = "compression")]
-use crate::utilities::compress::{CompressedData, CompressionScheme};
+use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
 #[cfg(feature = "encryption")]
-use crate::utilities::encrypt::{EncryptedData, EncryptionKey};
+use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 #[cfg(feature = "integrity")]
-use crate::utilities::integrity::Checksum;
+use crate::types::data::utilities::integrity::{Checksum, compute_checksum};
 #[cfg(feature = "metadata")]
-use crate::utilities::metadata::TensorMetadata;
+use crate::types::data::utilities::metadata::TensorMetadata;
 
 use super::tensor::{
     BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
@@ -376,7 +376,7 @@ impl RelayRLAction {
 
         #[cfg(feature = "integrity")]
         let checksum = if config.verify_integrity {
-            Some(crate::utilities::integrity::compute_checksum(&data))
+            Some(compute_checksum(&data))
         } else {
             None
         };
@@ -406,7 +406,7 @@ impl RelayRLAction {
 
         #[cfg(feature = "integrity")]
         if config.verify_integrity && encoded.checksum.is_some() {
-            let computed = crate::utilities::integrity::compute_checksum(&data);
+            let computed = compute_checksum(&data);
             if computed != encoded.checksum.unwrap() {
                 return Err(ActionError::IntegrityError("Checksum mismatch".to_string()));
             }

@@ -1,21 +1,24 @@
 [package]
 name = "relayrl_types"
-version = "0.2.11"
+version = "0.3.0"
 authors = ["jrcalgo <jacksonr1212@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
 repository = "https://github.com/jrcalgo/relayrl"
 documentation = "https://docs.rs/crate/relayrl_types"
 readme = "README.md"
-keywords = ['networking', 'learning', 'tensors', 'data-types', 'serialization']
+keywords = ['networking', 'learning', 'tensors', 'types', 'serialization']
 categories = ['science', 'data-structures', 'encoding']
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend", "network-full"]
+default = ["ndarray-backend", "codec-full", "tch-model", "onnx-model"]
  
 ndarray-backend = ["burn-ndarray"]
 tch-backend = ["burn-tch"]
+
+tch-model = ["tch", "tokio", "tempfile"]
+onnx-model = ["ort", "tokio", "tempfile", "ndarray"]
 
 encryption = ["chacha20poly1305"]
 compression = ["lz4_flex", "zstd"]
@@ -24,12 +27,13 @@ quantization = ["half"]
 metadata = ["bincode"]
 zerocopy = ["bytes"]
 
-network-basic = ["compression", "integrity", "zerocopy"]
-network-secure = ["network-basic", "encryption"]
-network-full = ["network-secure", "metadata", "quantization"]
+codec-basic = ["compression", "integrity", "zerocopy"]
+codec-secure = ["codec-basic", "encryption"]
+codec-full = ["codec-secure", "metadata", "quantization"]
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"]}
+serde = { version = "1.0.228", features = ["derive"]}
+serde_json = "1.0.145"
 
 bytemuck = "1.20.0"
 dashmap = "6.1.0"
@@ -37,11 +41,20 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
 # TODO: Add support for these dependencies and remove tch entirely from relayrl_types
 burn-tensor = "0.18.0"
-burn-ndarray = {version = "0.18.0", optional = true}
-burn-tch = {version = "0.18.0", optional = true}
+burn-ndarray = { version = "0.18.0", optional = true}
+burn-tch = { version = "0.18.0", optional = true}
 # burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.3.0)
 # burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda (probably 0.3.0)
 # burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu (probably 0.3.0)
+
+tch = { version = "0.19.0", features = ["download-libtorch"], default-features = false, optional = true }
+ort = { version = "1.16.3", features = ["load-dynamic"], default-features = false, optional = true }
+tokio = { version = "1.35.1", features = ["full"], optional = true }
+tempfile = { version = "3.9.0", optional = true }
+ndarray = { version = "0.15.6", optional = true }
+
+[patch.crates-io]
+torch-sys = "=0.19.0"
 
 [dependencies.blake3]
 version = "1.8.2"

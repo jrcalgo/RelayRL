@@ -301,7 +301,7 @@ impl RelayRLTrajectory {
 
         #[cfg(feature = "integrity")]
         if config.verify_integrity && encoded.checksum.is_some() {
-            let computed = crate::utilities::integrity::compute_checksum(&data);
+            let computed = compute_checksum(&data);
             if computed != encoded.checksum.unwrap() {
                 return Err(TrajectoryError::IntegrityError(
                     "Checksum mismatch".to_string(),

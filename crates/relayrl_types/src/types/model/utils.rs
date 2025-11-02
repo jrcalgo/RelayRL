@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::io::Write;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
-use burn_tensor::{Shape, Tensor, backend::Backend};
 use crate::types::data::action::RelayRLData;
 use crate::types::data::tensor::{BackendMatcher, DeviceType};
+use burn_tensor::{Shape, Tensor, backend::Backend};
 
 use crate::types::model::{ModelError, ModelModule};
 
@@ -29,110 +30,116 @@ pub fn convert_generic_dict(
 
 /// Validates a Burn model by checking that it can perform a forward pass with dummy tensors.
 ///
-/// This function creates dummy input tensors (observation and mask) of the specified dimensions,
-/// runs a forward pass through the model, and verifies that:
-/// 1. The model returns a valid action tensor
-/// 2. The output shape matches expectations
-///
-/// # Arguments
-///
-/// * `model` - A reference to the ModelModule to be validated.
-/// * `input_dim` - The dimensionality of the input observation vector.
-/// * `output_dim` - The dimensionality of the expected output action vector.
-///
-/// # Panics
-///
-/// This function will panic if:
-/// - The input or output dimensions are invalid
-/// - The model fails to process the dummy tensors
-/// - The output shape doesn't match expectations
-pub fn validate_model<B: Backend + BackendMatcher + 'static>(
-    model: &ModelModule<B>,
-    input_dim: usize,
-    output_dim: usize,
+/// This function creates dummy tensors whose shapes match the metadata, runs a forward pass, and
+/// verifies that the produced action tensor matches the expected shape. Supports input and output
+/// ranks from 1 to 8 (independently).
+pub fn validate_module<B: Backend + BackendMatcher<Backend = B> + 'static>(
+    module: &ModelModule<B>,
 ) -> Result<(), ModelError> {
-    let device: <<B as BackendMatcher>::Backend as Backend>::Device =
-        <B as BackendMatcher>::get_device(&DeviceType::default()).expect("Failed to get device");
+    let device = module.resolve_device();
 
-    // Shapes: prefer full shapes if present; else assume batch-first vectors
-    let in_shape_vec = if model.input_shape.dims.is_empty() {
-        vec![1, model.input_dim]
-    } else {
-        model.input_shape.dims.clone()
-    };
-    let out_shape_vec = if model.output_shape.dims.is_empty() {
-        vec![1, model.output_dim]
-    } else {
-        model.output_shape.dims.clone()
-    };
+    let input_shape = &module.metadata.input_shape;
+    let output_shape = &module.metadata.output_shape;
 
-    let 
+    if !(1..=8).contains(&input_shape.len()) || !(1..=8).contains(&output_shape.len()) {
+        return Err(ModelError::UnsupportedRank(format!(
+            "Unsupported ranks: input {} output {}",
+            input_shape.len(),
+            output_shape.len()
+        )));
+    }
 
-    match (in_shape_vec.len(), out_shape_vec.len()) {
-        (1, 1) => {
-            let in_arr: [usize; 1] = in_shape_vec.as_slice().try_into().unwrap();
-            let out_arr: [usize; 1] = out_shape_vec.as_slice().try_into().unwrap();
-            validate_with_ranks::<B, 1, 1>(model, &device, in_arr, out_arr)
-        }
-        (2, 2) => {
-            let in_arr: [usize; 2] = in_shape_vec.as_slice().try_into().unwrap();
-            let out_arr: [usize; 2] = out_shape_vec.as_slice().try_into().unwrap();
-            validate_with_ranks::<B, 2, 2>(model, &device, in_arr, out_arr)
-        }
-        (3, 3) => {
-            let in_arr: [usize; 3] = in_shape_vec.as_slice().try_into().unwrap();
-            let out_arr: [usize; 3] = out_shape_vec.as_slice().try_into().unwrap();
-            validate_with_ranks::<B, 3, 3>(model, &device, in_arr, out_arr)
-        }
-        (4, 4) => {
-            let in_arr: [usize; 4] = in_shape_vec.as_slice().try_into().unwrap();
-            let out_arr: [usize; 4] = out_shape_vec.as_slice().try_into().unwrap();
-            validate_with_ranks::<B, 4, 4>(model, &device, in_arr, out_arr)
-        }
+    match input_shape.len() {
+        1 => validate_with_input::<B, 1>(module, &device, input_shape, output_shape),
+        2 => validate_with_input::<B, 2>(module, &device, input_shape, output_shape),
+        3 => validate_with_input::<B, 3>(module, &device, input_shape, output_shape),
+        4 => validate_with_input::<B, 4>(module, &device, input_shape, output_shape),
+        5 => validate_with_input::<B, 5>(module, &device, input_shape, output_shape),
+        6 => validate_with_input::<B, 6>(module, &device, input_shape, output_shape),
+        7 => validate_with_input::<B, 7>(module, &device, input_shape, output_shape),
+        8 => validate_with_input::<B, 8>(module, &device, input_shape, output_shape),
+        _ => unreachable!(),
+    }
+}
+
+fn validate_with_input<B: Backend + BackendMatcher<Backend = B> + 'static, const D_IN: usize>(
+    module: &ModelModule<B>,
+    device: &<B as Backend>::Device,
+    input_shape: &[usize],
+    output_shape: &[usize],
+) -> Result<(), ModelError> {
+    match output_shape.len() {
+        1 => call_validate::<B, D_IN, 1>(module, device, input_shape, output_shape),
+        2 => call_validate::<B, D_IN, 2>(module, device, input_shape, output_shape),
+        3 => call_validate::<B, D_IN, 3>(module, device, input_shape, output_shape),
+        4 => call_validate::<B, D_IN, 4>(module, device, input_shape, output_shape),
+        5 => call_validate::<B, D_IN, 5>(module, device, input_shape, output_shape),
+        6 => call_validate::<B, D_IN, 6>(module, device, input_shape, output_shape),
+        7 => call_validate::<B, D_IN, 7>(module, device, input_shape, output_shape),
+        8 => call_validate::<B, D_IN, 8>(module, device, input_shape, output_shape),
         _ => Err(ModelError::UnsupportedRank(format!(
             "Unsupported ranks: input {} output {}",
-            in_shape_vec.len(),
-            out_shape_vec.len()
+            input_shape.len(),
+            output_shape.len()
         ))),
     }
 }
 
-fn validate_model_shapes<B: Backend + BackendMatcher + 'static, const D_IN: usize, const D_OUT: usize>(
-    model: &ModelModule<B>,
-    device: <<B as BackendMatcher>::Backend as Backend>::Device,
-    input_shape: [usize; D_IN],
-    output_shape: [usize; D_OUT],
+fn call_validate<
+    B: Backend + BackendMatcher<Backend = B> + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+>(
+    module: &ModelModule<B>,
+    device: &<B as Backend>::Device,
+    input_shape: &[usize],
+    output_shape: &[usize],
 ) -> Result<(), ModelError> {
-    let obs: Tensor<<B as BackendMatcher>::Backend, D_IN> = Tensor::zeros(Shape::from(input_shape), &device);
-    let mask: Tensor<<B as BackendMatcher>::Backend, D_OUT> = Tensor::zeros(Shape::from(output_shape), &device);
+    let input_array = slice_to_array::<D_IN>(input_shape)?;
+    let output_array = slice_to_array::<D_OUT>(output_shape)?;
 
-    let (action_tensor, _) = model.step::<D_IN, D_OUT>(obs, mask);
-
-    let action_shape = action_tensor.shape();
-    
-    assert_eq!(
-        action_shape.dims, output_shape.dims,
-        ModelError::InvalidOutputDimension(format!(
-            "Model output shape mismatch: expected {:?}, got {:?}",
-            output_shape.dims, action_shape.dims
-        ))
-    );
-
-    Ok(())
+    validate_model_shapes::<B, D_IN, D_OUT>(
+        module,
+        device,
+        Shape::from(input_array),
+        Shape::from(output_array),
+    )
 }
 
-/// Validates a Burn model with a simple sanity check using the model's path.
-///
-/// This is a lightweight validation that checks if the model file exists and can be loaded.
-/// For more thorough validation, use `validate_model` with actual dimensions.
-///
-/// # Arguments
-///
-/// * `model` - A reference to the ModelModule to be validated.
-pub fn validate_model_simple<B: Backend + BackendMatcher>(model: &ModelModule<B>) {
-    // For now, just check that the model has a valid path
-    // In the future, this could try to load and inspect the model structure
-    // TODO: Implement actual model structure validation once burn-import API is fully integrated
+fn slice_to_array<const N: usize>(shape: &[usize]) -> Result<[usize; N], ModelError> {
+    shape.try_into().map_err(|_| {
+        ModelError::InvalidMetadata(format!(
+            "Expected dimension of length {N}, but got {}",
+            shape.len()
+        ))
+    })
+}
+
+fn validate_model_shapes<
+    B: Backend + BackendMatcher<Backend = B> + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+>(
+    module: &ModelModule<B>,
+    device: &<B as Backend>::Device,
+    input_shape: Shape,
+    output_shape: Shape,
+) -> Result<(), ModelError> {
+    let obs: Tensor<B, D_IN> = Tensor::zeros(input_shape.clone(), device);
+    let mask: Tensor<B, D_OUT> = Tensor::zeros(output_shape.clone(), device);
+
+    let (action_tensor, _) = module.step::<D_IN, D_OUT>(obs, Some(mask));
+
+    let action_shape = action_tensor.shape();
+
+    if action_shape.dims != output_shape.dims {
+        Err(ModelError::InvalidOutputDimension(format!(
+            "Model output shape mismatch: expected {:?}, got {:?}",
+            output_shape.dims, action_shape.dims
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 /// Serializes a model (`ModelModule`) into a vector of bytes.
@@ -146,7 +153,7 @@ pub fn validate_model_simple<B: Backend + BackendMatcher>(model: &ModelModule<B>
 /// # Returns
 ///
 /// A vector of bytes representing the serialized model.
-pub fn serialize_model<B: Backend + BackendMatcher>(
+pub fn serialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
     model: &ModelModule<B>,
     dir: PathBuf,
 ) -> Vec<u8> {
@@ -157,8 +164,7 @@ pub fn serialize_model<B: Backend + BackendMatcher>(
         .expect("Failed to create temp file");
     let temp_path = temp_file.path();
 
-    model.save::<B>(temp_path).expect("Failed to save model");
-
+    ModelModule::<B>::save(model, temp_path).expect("Failed to save model");
     std::fs::read(temp_path).expect("Failed to read model bytes")
 }
 
@@ -174,9 +180,9 @@ pub fn serialize_model<B: Backend + BackendMatcher>(
 /// # Returns
 ///
 /// A [`ModelModule`] representing the deserialized model.
-pub fn deserialize_model<B: Backend + BackendMatcher>(
+pub fn deserialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
     model_bytes: Vec<u8>,
-    device: DeviceType,
+    _device: DeviceType,
 ) -> Result<ModelModule<B>, ModelError> {
     let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
     temp_file
