@@ -196,20 +196,259 @@ impl std::fmt::Display for NdArrayDType {
     }
 }
 
+/// Wraps dtype-wrapped BurnTensor objects defined in this namespace for easy storage, conversion, and retrieval
+#[derive(Debug, Clone)]
+pub enum AnyBurnTensor<B: Backend + 'static, const D: usize> {
+    Float(FloatBurnTensor<B::Backend, D>),
+    Int(IntBurnTensor<B::Backend, D>),
+    Bool(BoolBurnTensor<B::Backend, D>),
+}
+
+impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
+    /// Helper function to extract tensor and determine backend from dtype for Float conversions
+    fn extract_tensor_and_backend_float(
+        self,
+    ) -> (Tensor<B::Backend, D, Float>, SupportedTensorBackend) {
+        match self {
+            AnyBurnTensor::Float(wrapper) => {
+                let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor, supported_backend)
+            }
+            AnyBurnTensor::Int(wrapper) => {
+                let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor.float(), supported_backend)
+            }
+            AnyBurnTensor::Bool(wrapper) => {
+                let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor.float(), supported_backend)
+            }
+        }
+    }
+
+    /// Helper function to extract tensor and determine backend from dtype for Int conversions
+    fn extract_tensor_and_backend_int(
+        self,
+    ) -> (Tensor<B::Backend, D, Int>, SupportedTensorBackend) {
+        match self {
+            AnyBurnTensor::Float(wrapper) => {
+                let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor.int(), supported_backend)
+            }
+            AnyBurnTensor::Int(wrapper) => {
+                let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor, supported_backend)
+            }
+            AnyBurnTensor::Bool(wrapper) => {
+                let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor.int(), supported_backend)
+            }
+        }
+    }
+
+    /// Helper function to extract tensor and determine backend from dtype for Bool conversions
+    fn extract_tensor_and_backend_bool(
+        self,
+    ) -> (Tensor<B::Backend, D, Bool>, SupportedTensorBackend) {
+        match self {
+            AnyBurnTensor::Float(wrapper) => {
+                let backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor.bool(), backend)
+            }
+            AnyBurnTensor::Int(wrapper) => {
+                let backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor.bool(), backend)
+            }
+            AnyBurnTensor::Bool(wrapper) => {
+                let backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
+                (wrapper.tensor, backend)
+            }
+        }
+    }
+
+    pub fn into_f16_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_float();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F16),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::F16),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_bf16_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_float();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::Bf16),
+            _ => {
+                return Err(TensorError::DTypeError(
+                    "Bf16 is only supported for Tch backend".to_string(),
+                ));
+            }
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_f32_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_float();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_f64_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_float();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F64),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::F64),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_i8_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_int();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::I8),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::I8),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_i16_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_int();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::I16),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::I16),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_i32_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_int();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::I32),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::I32),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_i64_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_int();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::I64),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::I64),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_u8_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_int();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::U8),
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => {
+                return Err(TensorError::DTypeError(
+                    "U8 is only supported for Tch backend".to_string(),
+                ));
+            }
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+
+    pub fn into_bool_data(self) -> Result<TensorData, TensorError> {
+        let (tensor, backend) = self.extract_tensor_and_backend_bool();
+        let conversion_dtype = match backend {
+            #[cfg(feature = "ndarray-backend")]
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::Bool),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::Bool),
+            _ => return Err(TensorError::BackendError("Unsupported backend".to_string())),
+        };
+        let conversion_tensor = ConversionBurnTensor {
+            inner: tensor,
+            conversion_dtype,
+        };
+        TensorData::try_from(conversion_tensor)
+    }
+}
+
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
-pub struct FloatTensor<B: Backend + 'static, const D: usize> {
+#[derive(Debug, Clone)]
+pub struct FloatBurnTensor<B: Backend + 'static, const D: usize> {
     pub tensor: Tensor<B, D, Float>,
     pub dtype: DType,
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
-pub struct IntTensor<B: Backend + 'static, const D: usize> {
+#[derive(Debug, Clone)]
+pub struct IntBurnTensor<B: Backend + 'static, const D: usize> {
     pub tensor: Tensor<B, D, Int>,
     pub dtype: DType,
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
-pub struct BoolTensor<B: Backend + 'static, const D: usize> {
+#[derive(Debug, Clone)]
+pub struct BoolBurnTensor<B: Backend + 'static, const D: usize> {
     pub tensor: Tensor<B, D, Bool>,
     pub dtype: DType,
 }
@@ -261,7 +500,7 @@ impl TensorData {
     pub fn to_float_tensor<B: BackendMatcher + 'static, const D: usize>(
         &self,
         device: &DeviceType,
-    ) -> Result<FloatTensor<B::Backend, D>, TensorError> {
+    ) -> Result<FloatBurnTensor<B::Backend, D>, TensorError> {
         let device: <<B as BackendMatcher>::Backend as Backend>::Device = B::get_device(device)?;
 
         let shape: Shape = Shape::from(self.shape.as_slice());
@@ -276,7 +515,7 @@ impl TensorData {
                         // Convert f16 to f32 for processing
                         let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
                         let data = BurnTensorData::new(f32_values, shape);
-                        Ok(FloatTensor {
+                        Ok(FloatBurnTensor {
                             tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
                             dtype: DType::NdArray(NdArrayDType::F16),
                         })
@@ -284,7 +523,7 @@ impl TensorData {
                     NdArrayDType::F32 => {
                         let values: &[f32] = bytemuck::cast_slice(&self.data);
                         let data = BurnTensorData::new(values.to_vec(), shape);
-                        Ok(FloatTensor {
+                        Ok(FloatBurnTensor {
                             tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
                             dtype: DType::NdArray(NdArrayDType::F32),
                         })
@@ -292,7 +531,7 @@ impl TensorData {
                     NdArrayDType::F64 => {
                         let values: &[f64] = bytemuck::cast_slice(&self.data);
                         let data = BurnTensorData::new(values.to_vec(), shape);
-                        Ok(FloatTensor {
+                        Ok(FloatBurnTensor {
                             tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
                             dtype: DType::NdArray(NdArrayDType::F64),
                         })
@@ -309,7 +548,7 @@ impl TensorData {
                     let values: &[f16] = bytemuck::cast_slice(&self.data);
                     let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
                     let data = BurnTensorData::new(f32_values, shape);
-                    Ok(FloatTensor {
+                    Ok(FloatBurnTensor {
                         tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::F16),
                     })
@@ -318,7 +557,7 @@ impl TensorData {
                     let values: &[bf16] = bytemuck::cast_slice(&self.data);
                     let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
                     let data = BurnTensorData::new(f32_values, shape);
-                    Ok(FloatTensor {
+                    Ok(FloatBurnTensor {
                         tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::Bf16),
                     })
@@ -326,7 +565,7 @@ impl TensorData {
                 TchDType::F32 => {
                     let values: &[f32] = bytemuck::cast_slice(&self.data);
                     let data = BurnTensorData::new(values.to_vec(), shape);
-                    Ok(FloatTensor {
+                    Ok(FloatBurnTensor {
                         tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::F32),
                     })
@@ -334,7 +573,7 @@ impl TensorData {
                 TchDType::F64 => {
                     let values: &[f64] = bytemuck::cast_slice(&self.data);
                     let data = BurnTensorData::new(values.to_vec(), shape);
-                    Ok(FloatTensor {
+                    Ok(FloatBurnTensor {
                         tensor: Tensor::<B::Backend, D, Float>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::F64),
                     })
@@ -352,7 +591,7 @@ impl TensorData {
     pub fn to_int_tensor<B: BackendMatcher + 'static, const D: usize>(
         &self,
         device: &DeviceType,
-    ) -> Result<IntTensor<B::Backend, D>, TensorError> {
+    ) -> Result<IntBurnTensor<B::Backend, D>, TensorError> {
         let device: <<B as BackendMatcher>::Backend as Backend>::Device = B::get_device(device)?;
 
         let shape: Shape = Shape::from(self.shape.as_slice());
@@ -363,7 +602,7 @@ impl TensorData {
                     let values: &[i8] = bytemuck::cast_slice(&self.data);
                     let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
                     let data = BurnTensorData::new(i32_values, shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::NdArray(NdArrayDType::I8),
                     })
@@ -372,7 +611,7 @@ impl TensorData {
                     let values: &[i16] = bytemuck::cast_slice(&self.data);
                     let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
                     let data = BurnTensorData::new(i32_values, shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::NdArray(NdArrayDType::I16),
                     })
@@ -380,7 +619,7 @@ impl TensorData {
                 NdArrayDType::I32 => {
                     let values: &[i32] = bytemuck::cast_slice(&self.data);
                     let data = BurnTensorData::new(values.to_vec(), shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::NdArray(NdArrayDType::I32),
                     })
@@ -388,7 +627,7 @@ impl TensorData {
                 NdArrayDType::I64 => {
                     let values: &[i64] = bytemuck::cast_slice(&self.data);
                     let data = BurnTensorData::new(values.to_vec(), shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::NdArray(NdArrayDType::I64),
                     })
@@ -404,7 +643,7 @@ impl TensorData {
                     let values: &[u8] = bytemuck::cast_slice(&self.data);
                     let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
                     let data = BurnTensorData::new(i32_values, shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::U8),
                     })
@@ -413,7 +652,7 @@ impl TensorData {
                     let values: &[i8] = bytemuck::cast_slice(&self.data);
                     let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
                     let data = BurnTensorData::new(i32_values, shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::I8),
                     })
@@ -422,7 +661,7 @@ impl TensorData {
                     let values: &[i16] = bytemuck::cast_slice(&self.data);
                     let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
                     let data = BurnTensorData::new(i32_values, shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::I16),
                     })
@@ -430,7 +669,7 @@ impl TensorData {
                 TchDType::I32 => {
                     let values: &[i32] = bytemuck::cast_slice(&self.data);
                     let data = BurnTensorData::new(values.to_vec(), shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::I32),
                     })
@@ -438,7 +677,7 @@ impl TensorData {
                 TchDType::I64 => {
                     let values: &[i64] = bytemuck::cast_slice(&self.data);
                     let data = BurnTensorData::new(values.to_vec(), shape);
-                    Ok(IntTensor {
+                    Ok(IntBurnTensor {
                         tensor: Tensor::<B::Backend, D, Int>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::I64),
                     })
@@ -456,7 +695,7 @@ impl TensorData {
     pub fn to_bool_tensor<B: BackendMatcher + 'static, const D: usize>(
         &self,
         device: &DeviceType,
-    ) -> Result<BoolTensor<B::Backend, D>, TensorError> {
+    ) -> Result<BoolBurnTensor<B::Backend, D>, TensorError> {
         let device: <<B as BackendMatcher>::Backend as Backend>::Device = B::get_device(device)?;
 
         let shape: Shape = Shape::from(self.shape.as_slice());
@@ -467,7 +706,7 @@ impl TensorData {
                     let values: &[u8] = bytemuck::cast_slice(&self.data);
                     let bool_values: Vec<bool> = values.iter().map(|&v| v != 0).collect();
                     let data = BurnTensorData::new(bool_values, shape);
-                    Ok(BoolTensor {
+                    Ok(BoolBurnTensor {
                         tensor: Tensor::<B::Backend, D, Bool>::from_data(data, &device),
                         dtype: DType::NdArray(NdArrayDType::Bool),
                     })
@@ -483,7 +722,7 @@ impl TensorData {
                     let values: &[u8] = bytemuck::cast_slice(&self.data);
                     let bool_values: Vec<bool> = values.iter().map(|&v| v != 0).collect();
                     let data = BurnTensorData::new(bool_values, shape);
-                    Ok(BoolTensor {
+                    Ok(BoolBurnTensor {
                         tensor: Tensor::<B::Backend, D, Bool>::from_data(data, &device),
                         dtype: DType::Tch(TchDType::Bool),
                     })
@@ -497,20 +736,20 @@ impl TensorData {
     }
 }
 
-/// Converts a burn-tensor tensor to a RelayRL tensor data structure
+/// Converts a BurnTensor to a RelayRL TensorData structure
 #[derive(Debug, Clone)]
-pub struct ConversionTensor<B: Backend + 'static, const D: usize, K: TensorKind<B>> {
-    pub tensor: Tensor<B, D, K>,
+pub struct ConversionBurnTensor<B: Backend + 'static, const D: usize, K: TensorKind<B>> {
+    pub inner: Tensor<B, D, K>,
     pub conversion_dtype: DType,
 }
 
 impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>>
-    TryFrom<ConversionTensor<B, D, K>> for TensorData
+    TryFrom<ConversionBurnTensor<B, D, K>> for TensorData
 {
     type Error = TensorError;
 
-    fn try_from(t: ConversionTensor<B, D, K>) -> Result<Self, Self::Error> {
-        let data = t.tensor.to_data();
+    fn try_from(t: ConversionBurnTensor<B, D, K>) -> Result<Self, Self::Error> {
+        let data = t.inner.to_data();
         let shape = data.shape.clone();
 
         fn pack_bytes<E: burn_tensor::Element>(
