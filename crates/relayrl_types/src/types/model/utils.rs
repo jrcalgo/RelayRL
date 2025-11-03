@@ -58,6 +58,7 @@ pub fn validate_module<B: Backend + BackendMatcher<Backend = B> + 'static>(
         6 => validate_with_input::<B, 6>(module, &device, input_shape, output_shape),
         7 => validate_with_input::<B, 7>(module, &device, input_shape, output_shape),
         8 => validate_with_input::<B, 8>(module, &device, input_shape, output_shape),
+        9 => validate_with_input::<B, 9>(module, &device, input_shape, output_shape),
         _ => unreachable!(),
     }
 }
@@ -77,6 +78,7 @@ fn validate_with_input<B: Backend + BackendMatcher<Backend = B> + 'static, const
         6 => call_validate::<B, D_IN, 6>(module, device, input_shape, output_shape),
         7 => call_validate::<B, D_IN, 7>(module, device, input_shape, output_shape),
         8 => call_validate::<B, D_IN, 8>(module, device, input_shape, output_shape),
+        9 => call_validate::<B, D_IN, 9>(module, device, input_shape, output_shape),
         _ => Err(ModelError::UnsupportedRank(format!(
             "Unsupported ranks: input {} output {}",
             input_shape.len(),

@@ -10,7 +10,7 @@ use burn_tensor::Tensor;
 use burn_tensor::backend::Backend;
 
 use crate::types::data::action::{RelayRLAction, RelayRLData};
-use crate::types::data::tensor::{BackendMatcher, ConversionTensor, TensorData};
+use crate::types::data::tensor::{BackendMatcher, ConversionBurnTensor, TensorData};
 use crate::types::data::tensor::{DType, NdArrayDType, TchDType};
 use crate::types::model::utils::validate_module;
 use crate::types::model::{ModelError, ModelModule};
@@ -125,23 +125,25 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
             .unwrap_or_else(default_dtype);
 
         // Build RelayRLAction by converting tensors → TensorData
-        let obs_td = TensorData::try_from(ConversionTensor {
-            tensor: observation.clone(),
+        let obs_td = TensorData::try_from(ConversionBurnTensor {
+            inner: observation.clone(),
             conversion_dtype: obs_dtype.clone(),
         })
         .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?;
 
         let mask_td = match mask {
-            Some(mask) => Some(TensorData::try_from(ConversionTensor {
-                tensor: mask,
-                conversion_dtype: act_dtype.clone(),
-            })
-            .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?),
+            Some(mask) => Some(
+                TensorData::try_from(ConversionBurnTensor {
+                    inner: mask,
+                    conversion_dtype: act_dtype.clone(),
+                })
+                .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?,
+            ),
             None => None,
         };
 
-        let act_td = TensorData::try_from(ConversionTensor {
-            tensor: action.clone(),
+        let act_td = TensorData::try_from(ConversionBurnTensor {
+            inner: action.clone(),
             conversion_dtype: act_dtype.clone(),
         })
         .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?;
