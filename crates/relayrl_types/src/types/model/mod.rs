@@ -8,11 +8,13 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use burn_tensor::{Tensor, TensorData, TensorKind, backend::Backend};
+use burn_tensor::{Tensor, TensorData as BurnTensorData, TensorKind, backend::Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::types::data::action::RelayRLData;
-use crate::types::data::tensor::{BackendMatcher, DType, DeviceType, NdArrayDType, TchDType};
+use crate::types::data::tensor::{
+    AnyBurnTensor, BackendMatcher, DType, DeviceType, NdArrayDType, TchDType,
+};
 use half::{bf16, f16};
 
 #[cfg(feature = "tch-model")]
@@ -226,42 +228,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
 }
 
 #[derive(Clone)]
-pub enum AnyTensor<B: Backend + 'static, const D: usize> {
-    Float(Tensor<B, D, burn_tensor::Float>),
-    Int(Tensor<B, D, burn_tensor::Int>),
-    Bool(Tensor<B, D, burn_tensor::Bool>),
-}
-
-impl<B: Backend + 'static, const D: usize> AnyTensor<B, D> {
-    /// Convert to Float tensor (will cast if needed)
-    pub fn into_float(self) -> Tensor<B, D, burn_tensor::Float> {
-        match self {
-            AnyTensor::Float(t) => t,
-            AnyTensor::Int(t) => t.float(),
-            AnyTensor::Bool(t) => t.float(),
-        }
-    }
-    
-    /// Convert to Int tensor (will cast if needed)
-    pub fn into_int(self) -> Tensor<B, D, burn_tensor::Int> {
-        match self {
-            AnyTensor::Float(t) => t.int(),
-            AnyTensor::Int(t) => t,
-            AnyTensor::Bool(t) => t.int(),
-        }
-    }
-    
-    /// Convert to Bool tensor (will cast if needed)  
-    pub fn into_bool(self) -> Tensor<B, D, burn_tensor::Bool> {
-        match self {
-            AnyTensor::Float(t) => t.bool(),
-            AnyTensor::Int(t) => t.bool(),
-            AnyTensor::Bool(t) => t,
-        }
-    }
-}
-
-#[derive(Clone)]
+#[cfg(
+    any(feature = "tch-model", feature = "onnx-model"),
+    any(feature = "ndarray-backend", feature = "tch-backend")
+)]
 pub struct ModelModule<B: Backend + BackendMatcher<Backend = B>> {
     pub model: Model<B>,
     pub metadata: ModelMetadata,
@@ -310,11 +280,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
     }
 
     /// Generic forward; dispatches to ONNX or LibTorch paths based on metadata.
+    #[cfg(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    )]
     pub fn step<const D_IN: usize, const D_OUT: usize>(
         &self,
-        observation: AnyTensor<B, D_IN>,
-        mask: Option<AnyTensor<B, D_OUT>>,
-    ) -> (AnyTensor<B, D_OUT>, HashMap<String, RelayRLData>) {
+        observation: AnyBurnTensor<B, D_IN>,
+        mask: Option<AnyBurnTensor<B, D_OUT>>,
+    ) -> (AnyBurnTensor<B, D_OUT>, HashMap<String, RelayRLData>) {
         let base_action = self
             .run_inference::<D_IN, D_OUT>(observation)
             .unwrap_or_else(|| self.zeros_action::<D_OUT>());
@@ -324,7 +298,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 // Convert both to float for multiplication, then convert back based on output dtype
                 let base_float = base_action.clone().into_float();
                 let mask_float = mask_tensor.into_float();
-                AnyTensor::Float(base_float * mask_float)
+                AnyBurnTensor::Float(base_float * mask_float)
             }
             None => base_action,
         };
@@ -339,43 +313,45 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             .expect("Failed to resolve backend device")
     }
 
-    fn zeros_action<const D_OUT: usize>(&self) -> AnyTensor<B, D_OUT> {
+    fn zeros_action<const D_OUT: usize>(&self) -> AnyBurnTensor<B, D_OUT> {
         let device = self.resolve_device();
         let shape = Shape::from(self.metadata.output_shape.clone());
-        
+
         // Create zeros tensor based on output dtype
         match &self.metadata.output_dtype {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
-                    AnyTensor::Float(Tensor::<B, D_OUT, Float>::zeros(shape, &device))
-                }
+                NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => AnyBurnTensor::Float(
+                    Tensor::<B, D_OUT, burn_tensor::Float>::zeros(shape, &device),
+                ),
                 NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
-                    AnyTensor::Int(Tensor::<B, D_OUT, Int>::zeros(shape, &device))
+                    AnyBurnTensor::Int(Tensor::<B, D_OUT, burn_tensor::Int>::zeros(shape, &device))
                 }
-                NdArrayDType::Bool => {
-                    AnyTensor::Bool(Tensor::<B, D_OUT, Bool>::zeros(shape, &device))
-                }
+                NdArrayDType::Bool => AnyBurnTensor::Bool(
+                    Tensor::<B, D_OUT, burn_tensor::Bool>::zeros(shape, &device),
+                ),
             },
             #[cfg(feature = "tch-backend")]
             DType::Tch(dtype) => match dtype {
                 TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
-                    AnyTensor::Float(Tensor::<B, D_OUT, Float>::zeros(shape, &device))
+                    AnyBurnTensor::Float(Tensor::<B, D_OUT, burn_tensor::Float>::zeros(
+                        shape, &device,
+                    ))
                 }
                 TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
-                    AnyTensor::Int(Tensor::<B, D_OUT, Int>::zeros(shape, &device))
+                    AnyBurnTensor::Int(Tensor::<B, D_OUT, burn_tensor::Int>::zeros(shape, &device))
                 }
-                TchDType::Bool => {
-                    AnyTensor::Bool(Tensor::<B, D_OUT, Bool>::zeros(shape, &device))
-                }
+                TchDType::Bool => AnyBurnTensor::Bool(
+                    Tensor::<B, D_OUT, burn_tensor::Bool>::zeros(shape, &device),
+                ),
             },
         }
     }
 
     fn run_inference<const D_IN: usize, const D_OUT: usize>(
         &self,
-        observation: AnyTensor<B, D_IN>,
-    ) -> Option<AnyTensor<B, D_OUT>> {
+        observation: AnyBurnTensor<B, D_IN>,
+    ) -> Option<AnyBurnTensor<B, D_OUT>> {
         match self.model.inference() {
             #[cfg(feature = "tch-model")]
             InferenceModel::Pt(module) => {
@@ -389,195 +365,65 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         }
     }
 
-    #[cfg(feature = "tch-model")]
     fn run_libtorch_step<const D_IN: usize, const D_OUT: usize>(
         &self,
         module: &Arc<CModule>,
-        observation: AnyTensor<B, D_IN>,
-    ) -> Option<AnyTensor<B, D_OUT>> {
-        use crate::types::data::tensor::{ConversionTensor, TensorData};
-        
-        // Step 1: Convert observation to the appropriate tensor kind for conversion
-        let obs_tensor_converted = match &self.metadata.input_dtype {
+        observation: AnyBurnTensor<B, D_IN>,
+    ) -> Option<AnyBurnTensor<B, D_OUT>> {
+        use crate::types::data::tensor::{ConversionBurnTensor, TensorData};
+
+        // Step 1: Convert AnyBurnTensor to inner Tensor<B, D_IN, K> to metadata dtype using ConversionBurnTensor enum
+        // Step 2: Convert RelayRL TensorData to TchTensor
+        // Step 3: Run CModule forward pass inference
+        // Step 4: Convert TchTensor to bytes
+        // Step 5: Convert bytes to RelayRL TensorData
+        // Step 6: Convert RelayRL TensorData to BurnTensor
+        // Step 7: Wrap BurnTensor in AnyBurnTensor
+        // Step 8: Return Result AnyBurnTensor/Error
+
+        // Step 1
+        let obs_tensor_data: TensorData = match self.metadata.input_dtype {
             #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
-                    observation.into_float()
-                }
-                NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
-                    observation.into_int()
-                }
-                NdArrayDType::Bool => observation.into_bool(),
+            DType::NdArray(nd) => match nd {
+                NdArrayDType::F16 => observation.into_f16_data().ok()?,
+                NdArrayDType::F32 => observation.into_f32_data().ok()?,
+                NdArrayDType::F64 => observation.into_f64_data().ok()?,
+                NdArrayDType::I8 => observation.into_i8_data().ok()?,
+                NdArrayDType::I16 => observation.into_i16_data().ok()?,
+                NdArrayDType::I32 => observation.into_i32_data().ok()?,
+                NdArrayDType::I64 => observation.into_i64_data().ok()?,
+                NdArrayDType::Bool => observation.into_bool_data().ok()?,
             },
             #[cfg(feature = "tch-backend")]
-            DType::Tch(dtype) => match dtype {
-                TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
-                    observation.into_float()
-                }
-                TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
-                    observation.into_int()
-                }
-                TchDType::Bool => observation.into_bool(),
+            DType::Tch(tch) => match tch {
+                TchDType::F16 => observation.into_f16_data().ok()?,
+                TchDType::Bf16 => observation.into_bf16_data().ok()?,
+                TchDType::F32 => observation.into_f32_data().ok()?,
+                TchDType::F64 => observation.into_f64_data().ok()?,
+                TchDType::I8 => observation.into_i8_data().ok()?,
+                TchDType::I16 => observation.into_i16_data().ok()?,
+                TchDType::I32 => observation.into_i32_data().ok()?,
+                TchDType::I64 => observation.into_i64_data().ok()?,
+                TchDType::U8 => observation.into_u8_data().ok()?,
+                TchDType::Bool => observation.into_bool_data().ok()?,
             },
         };
-        
-        // Step 2: Convert to TensorData (need to handle each kind separately)
-        let obs_tensor_data: TensorData = {
-            match &self.metadata.input_dtype {
-                #[cfg(feature = "ndarray-backend")]
-                DType::NdArray(dtype) => match dtype {
-                    NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
-                        ConversionTensor {
-                            tensor: obs_tensor_converted,
-                            conversion_dtype: self.metadata.input_dtype.clone(),
-                        }
-                        .try_into()
-                        .ok()?
-                    }
-                    NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
-                        ConversionTensor {
-                            tensor: obs_tensor_converted,
-                            conversion_dtype: self.metadata.input_dtype.clone(),
-                        }
-                        .try_into()
-                        .ok()?
-                    }
-                    NdArrayDType::Bool => {
-                        ConversionTensor {
-                            tensor: obs_tensor_converted,
-                            conversion_dtype: self.metadata.input_dtype.clone(),
-                        }
-                        .try_into()
-                        .ok()?
-                    }
-                },
-                #[cfg(feature = "tch-backend")]
-                DType::Tch(dtype) => match dtype {
-                    TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
-                        ConversionTensor {
-                            tensor: obs_tensor_converted,
-                            conversion_dtype: self.metadata.input_dtype.clone(),
-                        }
-                        .try_into()
-                        .ok()?
-                    }
-                    TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
-                        ConversionTensor {
-                            tensor: obs_tensor_converted,
-                            conversion_dtype: self.metadata.input_dtype.clone(),
-                        }
-                        .try_into()
-                        .ok()?
-                    }
-                    TchDType::Bool => {
-                        ConversionTensor {
-                            tensor: obs_tensor_converted,
-                            conversion_dtype: self.metadata.input_dtype.clone(),
-                        }
-                        .try_into()
-                        .ok()?
-                    }
-                },
-            }
-        };
-        
-        // Step 3-5: Create torch tensor, run inference (same as before)
-        let obs_shape_i64: Vec<i64> = obs_tensor_data
-            .shape
-            .iter()
-            .map(|&d| d as i64)
-            .collect();
-        
-        let obs_tensor: TchTensor = match &obs_tensor_data.dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 => {
-                    let values: &[f16] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                NdArrayDType::F32 => {
-                    let values: &[f32] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                NdArrayDType::F64 => {
-                    let values: &[f64] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                NdArrayDType::I8 => {
-                    let values: &[i8] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                NdArrayDType::I16 => {
-                    let values: &[i16] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                NdArrayDType::I32 => {
-                    let values: &[i32] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                NdArrayDType::I64 => {
-                    let values: &[i64] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                NdArrayDType::Bool => {
-                    let values: &[u8] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    let bool_values: Vec<bool> = values.iter().map(|&v| v != 0).collect();
-                    TchTensor::from_slice(&bool_values).reshape(obs_shape_i64.as_slice())
-                }
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(dtype) => match dtype {
-                TchDType::F16 => {
-                    let values: &[f16] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::Bf16 => {
-                    let values: &[bf16] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::F32 => {
-                    let values: &[f32] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::F64 => {
-                    let values: &[f64] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::I8 => {
-                    let values: &[i8] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::I16 => {
-                    let values: &[i16] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::I32 => {
-                    let values: &[i32] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::I64 => {
-                    let values: &[i64] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::U8 => {
-                    let values: &[u8] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    TchTensor::from_slice(values).reshape(obs_shape_i64.as_slice())
-                }
-                TchDType::Bool => {
-                    let values: &[u8] = bytemuck::cast_slice(&obs_tensor_data.data);
-                    let bool_values: Vec<bool> = values.iter().map(|&v| v != 0).collect();
-                    TchTensor::from_slice(&bool_values).reshape(obs_shape_i64.as_slice())
-                }
-            },
-        };
-        
+
+        // Step 2
+        let obs_shape_i64: Vec<i64> = obs_tensor_data.shape.iter().map(|&d| d as i64).collect();
+        let obs_tensor: TchTensor =
+            TchTensor::from_slice(bytemuck::cast_slice(&obs_tensor_data.data))
+                .reshape(obs_shape_i64.as_slice());
+
+        // Step 3
         let act_tensor: TchTensor = no_grad(|| module.forward_ts(&[&obs_tensor]))
             .ok()?
             .to_kind(Kind::Float);
-        
+
+        // Step 4
         let flattened_act: TchTensor = act_tensor.flatten(0, -1);
-        
-        // Steps 5-6: Convert back to bytes and TensorData (same as before)
+
+        // Steps 5
         let act_bytes: Vec<u8> = match &self.metadata.output_dtype {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
@@ -658,57 +504,72 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 }
             },
         };
-        
+
+        // Step 6
         let act_tensor_data = TensorData::new(
             self.metadata.output_shape.clone(),
             self.metadata.output_dtype.clone(),
             act_bytes,
             TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
         );
-        
-        // Step 7: Convert TensorData back to the appropriate AnyTensor variant
+
+        // Step 7
         let device_type = self.metadata.default_device.clone().unwrap_or_default();
-        
         match &self.metadata.output_dtype {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
-                    let float_tensor = act_tensor_data.to_float_tensor::<B, D_OUT>(&device_type).ok()?;
-                    Some(AnyTensor::Float(float_tensor.tensor))
+                    let float_tensor = act_tensor_data
+                        .to_float_tensor::<B, D_OUT>(&device_type)
+                        .ok()?;
+                    Some(AnyBurnTensor::Float(float_tensor.tensor))
                 }
                 NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
-                    let int_tensor = act_tensor_data.to_int_tensor::<B, D_OUT>(&device_type).ok()?;
-                    Some(AnyTensor::Int(int_tensor.tensor))
+                    let int_tensor = act_tensor_data
+                        .to_int_tensor::<B, D_OUT>(&device_type)
+                        .ok()?;
+                    Some(AnyBurnTensor::Int(int_tensor.tensor))
                 }
                 NdArrayDType::Bool => {
-                    let bool_tensor = act_tensor_data.to_bool_tensor::<B, D_OUT>(&device_type).ok()?;
-                    Some(AnyTensor::Bool(bool_tensor.tensor))
+                    let bool_tensor = act_tensor_data
+                        .to_bool_tensor::<B, D_OUT>(&device_type)
+                        .ok()?;
+                    Some(AnyBurnTensor::Bool(bool_tensor.tensor))
                 }
             },
             #[cfg(feature = "tch-backend")]
             DType::Tch(dtype) => match dtype {
                 TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
-                    let float_tensor = act_tensor_data.to_float_tensor::<B, D_OUT>(&device_type).ok()?;
-                    Some(AnyTensor::Float(float_tensor.tensor))
+                    let float_tensor = act_tensor_data
+                        .to_float_tensor::<B, D_OUT>(&device_type)
+                        .ok()?;
+                    Some(AnyBurnTensor::Float(float_tensor.tensor))
                 }
                 TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
-                    let int_tensor = act_tensor_data.to_int_tensor::<B, D_OUT>(&device_type).ok()?;
-                    Some(AnyTensor::Int(int_tensor.tensor))
+                    let int_tensor = act_tensor_data
+                        .to_int_tensor::<B, D_OUT>(&device_type)
+                        .ok()?;
+                    Some(AnyBurnTensor::Int(int_tensor.tensor))
                 }
                 TchDType::Bool => {
-                    let bool_tensor = act_tensor_data.to_bool_tensor::<B, D_OUT>(&device_type).ok()?;
-                    Some(AnyTensor::Bool(bool_tensor.tensor))
+                    let bool_tensor = act_tensor_data
+                        .to_bool_tensor::<B, D_OUT>(&device_type)
+                        .ok()?;
+                    Some(AnyBurnTensor::Bool(bool_tensor.tensor))
                 }
             },
         }
     }
 
-    #[cfg(feature = "onnx-model")]
+    #[cfg(
+        feature = "onnx-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    )]
     fn run_onnx_step<const D_IN: usize, const D_OUT: usize>(
         &self,
         session: &Arc<Session>,
-        observation: AnyTensor<B, D_IN>,
-    ) -> Option<AnyTensor<B, D_OUT>> {
+        observation: AnyBurnTensor<B, D_IN>,
+    ) -> Option<AnyBurnTensor<B, D_OUT>> {
         let obs_data = observation.into_float().to_data().convert::<f32>();
         let obs_vec = obs_data.into_vec::<f32>().ok()?;
 
@@ -726,39 +587,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
         let device = self.resolve_device();
         let tensor_data = TensorData::new(y_vec, self.metadata.output_shape.clone());
-        
-        // Convert back to the appropriate AnyTensor variant based on output dtype
-        match &self.metadata.output_dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
-                    let float_tensor = tensor_data.to_float_tensor::<B, D_OUT>(&device).ok()?;
-                    Some(AnyTensor::Float(float_tensor.tensor))
-                }
-                NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
-                    let int_tensor = tensor_data.to_int_tensor::<B, D_OUT>(&device).ok()?;
-                    Some(AnyTensor::Int(int_tensor.tensor))
-                }
-                NdArrayDType::Bool => {
-                    let bool_tensor = tensor_data.to_bool_tensor::<B, D_OUT>(&device).ok()?;
-                    Some(AnyTensor::Bool(bool_tensor.tensor))
-                }
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(dtype) => match dtype {
-                TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
-                    let float_tensor = tensor_data.to_float_tensor::<B, D_OUT>(&device).ok()?;
-                    Some(AnyTensor::Float(float_tensor.tensor))
-                }
-                TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
-                    let int_tensor = tensor_data.to_int_tensor::<B, D_OUT>(&device).ok()?;
-                    Some(AnyTensor::Int(int_tensor.tensor))
-                }
-                TchDType::Bool => {
-                    let bool_tensor = tensor_data.to_bool_tensor::<B, D_OUT>(&device).ok()?;
-                    Some(AnyTensor::Bool(bool_tensor.tensor))
-                }
-            },
-        }
+        Some(Tensor::<B, D_OUT>::from_data(tensor_data, &device))
     }
 }
