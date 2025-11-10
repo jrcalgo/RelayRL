@@ -197,18 +197,26 @@ impl std::fmt::Display for NdArrayDType {
 }
 
 /// Wraps dtype-wrapped BurnTensor objects defined in this namespace for easy storage, conversion, and retrieval
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum AnyBurnTensor<B: Backend + 'static, const D: usize> {
-    Float(FloatBurnTensor<B::Backend, D>),
-    Int(IntBurnTensor<B::Backend, D>),
-    Bool(BoolBurnTensor<B::Backend, D>),
+    Float(FloatBurnTensor<B, D>),
+    Int(IntBurnTensor<B, D>),
+    Bool(BoolBurnTensor<B, D>),
+}
+
+impl<B: Backend + 'static, const D: usize> Clone for AnyBurnTensor<B, D> {
+    fn clone(&self) -> Self {
+        match self {
+            AnyBurnTensor::Float(wrapper) => AnyBurnTensor::Float(wrapper.clone()),
+            AnyBurnTensor::Int(wrapper) => AnyBurnTensor::Int(wrapper.clone()),
+            AnyBurnTensor::Bool(wrapper) => AnyBurnTensor::Bool(wrapper.clone()),
+        }
+    }
 }
 
 impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     /// Helper function to extract tensor and determine backend from dtype for Float conversions
-    fn extract_tensor_and_backend_float(
-        self,
-    ) -> (Tensor<B::Backend, D, Float>, SupportedTensorBackend) {
+    fn extract_tensor_and_backend_float(self) -> (Tensor<B, D, Float>, SupportedTensorBackend) {
         match self {
             AnyBurnTensor::Float(wrapper) => {
                 let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
@@ -226,9 +234,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     }
 
     /// Helper function to extract tensor and determine backend from dtype for Int conversions
-    fn extract_tensor_and_backend_int(
-        self,
-    ) -> (Tensor<B::Backend, D, Int>, SupportedTensorBackend) {
+    fn extract_tensor_and_backend_int(self) -> (Tensor<B, D, Int>, SupportedTensorBackend) {
         match self {
             AnyBurnTensor::Float(wrapper) => {
                 let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
@@ -246,9 +252,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     }
 
     /// Helper function to extract tensor and determine backend from dtype for Bool conversions
-    fn extract_tensor_and_backend_bool(
-        self,
-    ) -> (Tensor<B::Backend, D, Bool>, SupportedTensorBackend) {
+    fn extract_tensor_and_backend_bool(self) -> (Tensor<B, D, Bool>, SupportedTensorBackend) {
         match self {
             AnyBurnTensor::Float(wrapper) => {
                 let backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
@@ -262,6 +266,14 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
                 let backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
                 (wrapper.tensor, backend)
             }
+        }
+    }
+
+    pub fn get_tensor_type(self) -> (String, DType) {
+        match self {
+            AnyBurnTensor::Float(wrapper) => (String::from("float"), wrapper.dtype),
+            AnyBurnTensor::Int(wrapper) => (String::from("int"), wrapper.dtype),
+            AnyBurnTensor::Bool(wrapper) => (String::from("bool"), wrapper.dtype),
         }
     }
 
@@ -439,6 +451,16 @@ pub struct FloatBurnTensor<B: Backend + 'static, const D: usize> {
     pub dtype: DType,
 }
 
+impl<B: Backend + 'static, const D: usize> FloatBurnTensor<B, D> {
+    pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
+        let tensor = Tensor::<B, D, Float>::empty(shape.clone(), &device);
+        Self {
+            tensor,
+            dtype: dtype.clone(),
+        }
+    }
+}
+
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Debug, Clone)]
 pub struct IntBurnTensor<B: Backend + 'static, const D: usize> {
@@ -446,11 +468,31 @@ pub struct IntBurnTensor<B: Backend + 'static, const D: usize> {
     pub dtype: DType,
 }
 
+impl<B: Backend + 'static, const D: usize> IntBurnTensor<B, D> {
+    pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
+        let tensor = Tensor::<B, D, Int>::empty(shape.clone(), &device);
+        Self {
+            tensor,
+            dtype: dtype.clone(),
+        }
+    }
+}
+
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Debug, Clone)]
 pub struct BoolBurnTensor<B: Backend + 'static, const D: usize> {
     pub tensor: Tensor<B, D, Bool>,
     pub dtype: DType,
+}
+
+impl<B: Backend + 'static, const D: usize> BoolBurnTensor<B, D> {
+    pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
+        let tensor = Tensor::<B, D, Bool>::empty(shape.clone(), &device);
+        Self {
+            tensor,
+            dtype: dtype.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
