@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2025-11-10
+
+### Added
+- **Model Module** - Complete `ModelModule<B>` implementation with full ONNX and LibTorch inference support
+  - `step()` method for running inference with optional masking
+  - `zeros_action()` method for creating zero-initialized action tensors
+  - `run_libtorch_step()` for PyTorch/LibTorch model inference
+  - `run_onnx_step()` for ONNX Runtime model inference
+  - Support for all tensor dtypes (F16, F32, F64, I8, I16, I32, I64, U8, Bool, BF16)
+- **Hot-Reloadable Models** - `HotReloadableModel` for dynamic model reloading without service interruption
+- **ONNX Runtime Integration** - Full ONNX model support with type-safe tensor conversions
+  - `convert_obs_to_act()` helper for observation to action conversion
+  - `match_obs_to_act()` helper for runtime dtype dispatching
+  - Proper lifetime management for `OrtValue` and array handling
+- **LibTorch Integration** - Complete PyTorch/LibTorch model support
+  - Seamless conversion between Burn tensors and Tch tensors
+  - Support for all numeric types and half-precision floats
+- **AnyBurnTensor Enhancements** - Improved generic tensor wrapper
+  - `into_f16_data()`, `into_bf16_data()`, `into_f32_data()`, `into_f64_data()` conversion methods
+  - `into_i8_data()`, `into_i16_data()`, `into_i32_data()`, `into_i64_data()` conversion methods
+  - `into_u8_data()`, `into_bool_data()` conversion methods
+  - Better error handling for type conversions
+- **Model Utilities** - Enhanced helper functions in `model/utils.rs`
+- **Public API Reorganization** - Unified prelude for easier imports
+  - Renamed `data_prelude` to `prelude`
+  - Added model types to prelude: `ModelModule`, `ModelError`, `HotReloadableModel`
+  - Exported `AnyBurnTensor`, `BoolBurnTensor`, `FloatBurnTensor`, `IntBurnTensor`
+
+### Changed
+- **Prelude Module** - Consolidated and renamed for better discoverability
+  - `data_prelude` → `prelude`
+  - Removed empty `model_prelude` module
+  - Added comprehensive model type exports
+- **Tensor Type Exports** - Added burn tensor wrapper types to public API
+- **Model Inference** - Improved error handling and type safety across inference paths
+- **Tensor Conversions** - Enhanced type-safe conversions between different tensor representations
+
+### Fixed
+- **ONNX Lifetime Issues** - Resolved lifetime management for `OrtValue::from_array()` calls
+- **Type Conversion Stability** - Fixed type casting between different tensor backends
+- **Generic Constraints** - Improved trait bounds for tensor element types
+- **F16/BF16 Handling** - Proper conversion to F32 for ONNX models (ONNX doesn't support half-precision)
+
+### Breaking
+- Model inference API expanded - if using models directly, review new `ModelModule` API
+- Tensor wrapper types now part of public API - may affect type resolution in some contexts
+
 ## [0.2.11] - 2025-10-26
 
 ### Changed
