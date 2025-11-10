@@ -12,7 +12,7 @@ categories = ['science', 'data-structures', 'encoding']
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend", "codec-full",]
+default = ["ndarray-backend", "codec-full"]
  
 ndarray-backend = ["burn-ndarray"]
 tch-backend = ["burn-tch"]

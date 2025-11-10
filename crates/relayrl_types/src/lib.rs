@@ -2,6 +2,7 @@ use dashmap::DashMap;
 
 pub mod types {
     pub mod data;
+    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
     pub mod model;
 }
 
@@ -19,6 +20,7 @@ pub mod prelude {
         EncodedTrajectory, RelayRLTrajectory, RelayRLTrajectoryTrait, TrajectoryError,
     };
 
+    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
     pub use crate::types::model::{
         ModelModule, ModelError, HotReloadableModel
     };
