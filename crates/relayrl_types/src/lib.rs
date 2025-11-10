@@ -11,12 +11,16 @@ pub mod data_prelude {
     };
 
     pub use crate::types::data::tensor::{
-        BackendMatcher, BoolTensor, DType, DeviceType, FloatTensor, IntTensor,
-        SupportedTensorBackend, TensorData, TensorError,
+        AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
+        IntBurnTensor, SupportedTensorBackend, TensorData, TensorError
     };
 
     pub use crate::types::data::trajectory::{
         EncodedTrajectory, RelayRLTrajectory, RelayRLTrajectoryTrait, TrajectoryError,
+    };
+
+    pub use crate::types::model::{
+        ModelModule, ModelError, HotReloadableModel
     };
 
     #[cfg(feature = "compression")]
