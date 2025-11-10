@@ -18,8 +18,12 @@ Core data types and encoding/decoding utilities for the RelayRL framework.
 ```toml
 # Backend selection (choose one)
 default = ["ndarray-backend"]
-ndarray-backend = ["burn-ndarray"]  # CPU backend
+
 tch-backend = ["burn-tch"]          # GPU backend
+ndarray-backend = ["burn-ndarray"]  # CPU backend
+
+tch-model = ["tch", "tokio", "tempfile"]  # LibTorch Inference
+onnx-model = ["ort", "tokio", "tempfile", "ndarray"]  # ONNX Inference
 
 # Network transport utilities
 compression = ["lz4_flex", "zstd"]  # LZ4/Zstd compression
@@ -31,9 +35,9 @@ zerocopy = ["bytes"]                # Zerocopy data conversions
 
 
 # Convenience bundles
-network-basic = ["compression", "integrity", "zerocopy"]
-network-secure = ["network-basic", "encryption"]
-network-full = ["network-secure", "metadata", "quantization"]
+codec-basic = ["compression", "integrity", "zerocopy"]
+codec-secure = ["codec-basic", "encryption"]
+codec-full = ["codec-secure", "metadata", "quantization"]
 ```
 
 ## Quick Start
