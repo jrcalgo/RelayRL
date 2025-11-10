@@ -509,7 +509,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                     ))
                 }
                 TchDType::I16 => {
-                    let data: &[i16] = vec![0_i16; shape.dims.iter().product()].as_slice();
+                    let data_vec = vec![0_i16; shape.dims.iter().product()];
+                    let data: &[i16] = data_vec.as_slice();
                     let u8_data = bytemuck::cast_slice::<i16, u8>(&data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
@@ -824,17 +825,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                     })?;
                     let obs_shape_i64: Vec<i64> =
                         obs_tensor_data.shape.iter().map(|&d| d as i64).collect();
-                    TchTensor::from_slice::<bool>(bytemuck::cast_slice(&obs_tensor_data.data))
+                    TchTensor::from_slice::<u8>(bytemuck::cast_slice(&obs_tensor_data.data))
                         .reshape(obs_shape_i64.as_slice())
                 }
-                .into_bool_data()
-                .map_err(|e| {
-                    ModelError::BackendError(format!(
-                        "Failed to convert observation to bool: {}",
-                        e
-                    ))
-                })?,
-            },
+            }
         };
 
         // Step 3
@@ -1180,7 +1174,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::Bf16 => {
                     // ONNX doesn't support bf16, so convert to f32
@@ -1190,7 +1184,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::F32 => {
                     let obs_tensor_data = observation.clone().into_f32_data().map_err(|e| {
@@ -1199,7 +1193,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::F64 => {
                     let obs_tensor_data = observation.clone().into_f64_data().map_err(|e| {
@@ -1208,7 +1202,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f64>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<f64>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::I8 => {
                     let obs_tensor_data = observation.clone().into_i8_data().map_err(|e| {
@@ -1217,7 +1211,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i8>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<i8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::I16 => {
                     let obs_tensor_data = observation.clone().into_i16_data().map_err(|e| {
@@ -1226,7 +1220,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i16>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<i16>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::I32 => {
                     let obs_tensor_data = observation.clone().into_i32_data().map_err(|e| {
@@ -1235,7 +1229,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i32>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<i32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::I64 => {
                     let obs_tensor_data = observation.clone().into_i64_data().map_err(|e| {
@@ -1244,7 +1238,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i64>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<i64>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::U8 => {
                     let obs_tensor_data = observation.clone().into_u8_data().map_err(|e| {
@@ -1253,7 +1247,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<u8>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<u8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
                 TchDType::Bool => {
                     let obs_tensor_data = observation.clone().into_bool_data().map_err(|e| {
@@ -1262,7 +1256,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<u8>(obs_tensor_data, self.metadata.output_dtype, session)?
+                    match_obs_to_act::<u8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
                 }
             },
         };
