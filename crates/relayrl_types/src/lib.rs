@@ -5,7 +5,7 @@ pub mod types {
     pub mod model;
 }
 
-pub mod data_prelude {
+pub mod prelude {
     pub use crate::types::data::action::{
         ActionError, CodecConfig, EncodedAction, RelayRLAction, RelayRLData,
     };
@@ -41,8 +41,6 @@ pub mod data_prelude {
     #[cfg(feature = "integrity")]
     pub use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
 }
-
-pub mod model_prelude {}
 
 /// Hyperparams enum represents hyperparameter inputs
 #[derive(Clone, Debug)]

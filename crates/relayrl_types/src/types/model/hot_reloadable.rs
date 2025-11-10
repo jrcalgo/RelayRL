@@ -1,4 +1,5 @@
 use crate::types::data::tensor::DeviceType;
+use std::arch::is_aarch64_feature_detected;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,8 +11,12 @@ use burn_tensor::Tensor;
 use burn_tensor::backend::Backend;
 
 use crate::types::data::action::{RelayRLAction, RelayRLData};
-use crate::types::data::tensor::{BackendMatcher, ConversionBurnTensor, TensorData};
-use crate::types::data::tensor::{DType, NdArrayDType, TchDType};
+use crate::types::data::tensor::{
+    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData, TensorError,
+};
+use crate::types::data::tensor::{
+    BoolBurnTensor, DType, FloatBurnTensor, IntBurnTensor, NdArrayDType, TchDType,
+};
 use crate::types::model::utils::validate_module;
 use crate::types::model::{ModelError, ModelModule};
 
@@ -98,15 +103,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
     }
 
     /// Generic forward that works for any backend / rank.
-    pub async fn forward<const I: usize, const O: usize>(
+    pub fn forward<const I: usize, const O: usize>(
         &self,
-        observation: Tensor<B, I>,
-        mask: Option<Tensor<B, O>>,
+        observation: AnyBurnTensor<B, I>,
+        mask: Option<AnyBurnTensor<B, O>>,
         reward: f32,
         actor_id: Uuid,
     ) -> Result<RelayRLAction, ModelError> {
-        let model_module = self.inner.read().await;
-        let (action, aux) = model_module.step(observation.clone(), mask.clone());
+        let model_module = self.inner.blocking_read();
+        let (act_td, aux) = model_module.step(observation.clone(), mask.clone());
 
         let obs_dtype = aux
             .get("observation_dtype")
@@ -125,28 +130,116 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
             .unwrap_or_else(default_dtype);
 
         // Build RelayRLAction by converting tensors → TensorData
-        let obs_td = TensorData::try_from(ConversionBurnTensor {
-            inner: observation.clone(),
-            conversion_dtype: obs_dtype.clone(),
-        })
+        let obs_td = match observation.clone() {
+            AnyBurnTensor::Float(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                inner: wrapper.tensor,
+                conversion_dtype: obs_dtype.clone(),
+            }),
+            AnyBurnTensor::Int(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                inner: wrapper.tensor.float(),
+                conversion_dtype: obs_dtype.clone(),
+            }),
+            AnyBurnTensor::Bool(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                inner: wrapper.tensor.float(),
+                conversion_dtype: obs_dtype.clone(),
+            }),
+        }
         .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?;
 
-        let mask_td = match mask {
-            Some(mask) => Some(
-                TensorData::try_from(ConversionBurnTensor {
-                    inner: mask,
-                    conversion_dtype: act_dtype.clone(),
-                })
-                .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?,
-            ),
+        let mask_td: Option<TensorData> = match mask {
+            Some(mask) => {
+                let (tensor_kind, dtype) = mask.clone().get_tensor_type();
+                let result: Result<TensorData, TensorError> = match tensor_kind.as_str() {
+                    "float" => match dtype {
+                        #[cfg(feature = "ndarray-backend")]
+                        DType::NdArray(dtype) => match dtype {
+                            NdArrayDType::F16 => mask.into_f16_data(),
+                            NdArrayDType::F32 => mask.into_f32_data(),
+                            NdArrayDType::F64 => mask.into_f64_data(),
+                            _ => Err(TensorError::DTypeError(format!(
+                                "Unsupported mask dtype: {}",
+                                dtype
+                            ))),
+                        },
+                        #[cfg(feature = "tch-backend")]
+                        DType::Tch(dtype) => match dtype {
+                            TchDType::F16 => mask.into_f16_data(),
+                            TchDType::Bf16 => mask.into_bf16_data(),
+                            TchDType::F32 => mask.into_f32_data(),
+                            TchDType::F64 => mask.into_f64_data(),
+                            _ => Err(TensorError::DTypeError(format!(
+                                "Unsupported mask dtype: {}",
+                                dtype
+                            ))),
+                        },
+                        _ => Err(TensorError::DTypeError(format!(
+                            "Unsupported mask dtype: {:?}",
+                            dtype
+                        ))),
+                    },
+                    "int" => match dtype {
+                        #[cfg(feature = "ndarray-backend")]
+                        DType::NdArray(dtype) => match dtype {
+                            NdArrayDType::I8 => mask.into_i8_data(),
+                            NdArrayDType::I16 => mask.into_i16_data(),
+                            NdArrayDType::I32 => mask.into_i32_data(),
+                            NdArrayDType::I64 => mask.into_i64_data(),
+                            _ => Err(TensorError::DTypeError(format!(
+                                "Unsupported mask dtype: {}",
+                                dtype
+                            ))),
+                        },
+                        #[cfg(feature = "tch-backend")]
+                        DType::Tch(dtype) => match dtype {
+                            TchDType::I8 => mask.into_i8_data(),
+                            TchDType::I16 => mask.into_i16_data(),
+                            TchDType::I32 => mask.into_i32_data(),
+                            TchDType::I64 => mask.into_i64_data(),
+                            TchDType::U8 => mask.into_u8_data(),
+                            _ => Err(TensorError::DTypeError(format!(
+                                "Unsupported mask dtype: {}",
+                                dtype
+                            ))),
+                        },
+                        _ => Err(TensorError::DTypeError(format!(
+                            "Unsupported mask dtype: {:?}",
+                            dtype
+                        ))),
+                    },
+                    "bool" => match dtype {
+                        #[cfg(feature = "ndarray-backend")]
+                        DType::NdArray(dtype) => match dtype {
+                            NdArrayDType::Bool => mask.into_bool_data(),
+                            _ => Err(TensorError::DTypeError(format!(
+                                "Unsupported mask dtype: {}",
+                                dtype
+                            ))),
+                        },
+                        #[cfg(feature = "tch-backend")]
+                        DType::Tch(dtype) => match dtype {
+                            TchDType::Bool => mask.into_bool_data(),
+                            _ => Err(TensorError::DTypeError(format!(
+                                "Unsupported mask dtype: {}",
+                                dtype
+                            ))),
+                        },
+                        _ => Err(TensorError::DTypeError(format!(
+                            "Unsupported mask dtype: {:?}",
+                            dtype
+                        ))),
+                    },
+                    _ => Err(TensorError::DTypeError(format!(
+                        "Unsupported tensor kind: {}",
+                        tensor_kind
+                    ))),
+                };
+
+                Some(result.map_err(|e| {
+                    ModelError::BackendError(format!("Mask conversion failed: {e}"))
+                })?)
+            }
             None => None,
         };
-
-        let act_td = TensorData::try_from(ConversionBurnTensor {
-            inner: action.clone(),
-            conversion_dtype: act_dtype.clone(),
-        })
-        .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?;
 
         let r4sa = RelayRLAction::new(
             Some(obs_td),

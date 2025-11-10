@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
 use crate::types::data::action::RelayRLData;
-use crate::types::data::tensor::{BackendMatcher, DeviceType};
+use crate::types::data::tensor::{
+    AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
+    IntBurnTensor, NdArrayDType, TchDType,
+};
 use burn_tensor::{Shape, Tensor, backend::Backend};
 
 use crate::types::model::{ModelError, ModelModule};
@@ -97,15 +100,12 @@ fn call_validate<
     input_shape: &[usize],
     output_shape: &[usize],
 ) -> Result<(), ModelError> {
-    let input_array = slice_to_array::<D_IN>(input_shape)?;
-    let output_array = slice_to_array::<D_OUT>(output_shape)?;
+    let input_array: [usize; D_IN] = slice_to_array::<D_IN>(input_shape)?;
+    let output_array: [usize; D_OUT] = slice_to_array::<D_OUT>(output_shape)?;
+    let input_shape = Shape::from(input_array);
+    let output_shape = Shape::from(output_array);
 
-    validate_model_shapes::<B, D_IN, D_OUT>(
-        module,
-        device,
-        Shape::from(input_array),
-        Shape::from(output_array),
-    )
+    validate_model_shapes::<B, D_IN, D_OUT>(module, device, &input_shape, &output_shape)
 }
 
 fn slice_to_array<const N: usize>(shape: &[usize]) -> Result<[usize; N], ModelError> {
@@ -124,24 +124,101 @@ fn validate_model_shapes<
 >(
     module: &ModelModule<B>,
     device: &<B as Backend>::Device,
-    input_shape: Shape,
-    output_shape: Shape,
+    input_shape: &Shape,
+    output_shape: &Shape,
 ) -> Result<(), ModelError> {
-    let obs: Tensor<B, D_IN> = Tensor::zeros(input_shape.clone(), device);
-    let mask: Tensor<B, D_OUT> = Tensor::zeros(output_shape.clone(), device);
+    let obs: AnyBurnTensor<B, D_IN> = match &module.metadata.input_dtype {
+        #[cfg(feature = "ndarray-backend")]
+        DType::NdArray(nd) => match nd {
+            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => AnyBurnTensor::Float(
+                FloatBurnTensor::empty(input_shape, &DType::NdArray(nd.clone()), device),
+            ),
+            NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
+                AnyBurnTensor::Int(IntBurnTensor::empty(
+                    input_shape,
+                    &DType::NdArray(nd.clone()),
+                    device,
+                ))
+            }
+            NdArrayDType::Bool => AnyBurnTensor::Bool(BoolBurnTensor::empty(
+                input_shape,
+                &DType::NdArray(nd.clone()),
+                device,
+            )),
+        },
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch) => match tch {
+            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => AnyBurnTensor::Float(
+                FloatBurnTensor::empty(input_shape, &DType::Tch(tch.clone()), device),
+            ),
+            TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
+                AnyBurnTensor::Int(IntBurnTensor::empty(
+                    input_shape,
+                    &DType::Tch(tch.clone()),
+                    device,
+                ))
+            }
+            TchDType::Bool => AnyBurnTensor::Bool(BoolBurnTensor::empty(
+                input_shape,
+                &DType::Tch(tch.clone()),
+                device,
+            )),
+        },
+    };
+
+    let mask: AnyBurnTensor<B, D_OUT> = match &module.metadata.output_dtype {
+        #[cfg(feature = "ndarray-backend")]
+        DType::NdArray(nd) => match nd {
+            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => AnyBurnTensor::Float(
+                FloatBurnTensor::empty(output_shape, &DType::NdArray(nd.clone()), device),
+            ),
+            NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
+                AnyBurnTensor::Int(IntBurnTensor::empty(
+                    output_shape,
+                    &DType::NdArray(nd.clone()),
+                    device,
+                ))
+            }
+            NdArrayDType::Bool => AnyBurnTensor::Bool(BoolBurnTensor::empty(
+                output_shape,
+                &DType::NdArray(nd.clone()),
+                device,
+            )),
+        },
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch) => match tch {
+            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => AnyBurnTensor::Float(
+                FloatBurnTensor::empty(output_shape, &DType::Tch(tch.clone()), device),
+            ),
+            TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
+                AnyBurnTensor::Int(IntBurnTensor::empty(
+                    output_shape,
+                    &DType::Tch(tch.clone()),
+                    device,
+                ))
+            }
+            TchDType::Bool => AnyBurnTensor::Bool(BoolBurnTensor::empty(
+                output_shape,
+                &DType::Tch(tch.clone()),
+                device,
+            )),
+        },
+    };
 
     let (action_tensor, _) = module.step::<D_IN, D_OUT>(obs, Some(mask));
 
-    let action_shape = action_tensor.shape();
+    let action_dims: &Vec<usize> = &action_tensor.shape;
+    let output_dims: &Vec<usize> = &output_shape.dims;
 
-    if action_shape.dims != output_shape.dims {
-        Err(ModelError::InvalidOutputDimension(format!(
-            "Model output shape mismatch: expected {:?}, got {:?}",
-            output_shape.dims, action_shape.dims
-        )))
-    } else {
-        Ok(())
+    for (a, o) in action_dims.iter().zip(output_dims.iter()) {
+        if *a != *o {
+            return Err(ModelError::InvalidOutputDimension(format!(
+                "Model output shape mismatch: expected {:?}, got {:?}",
+                output_dims, action_dims
+            )));
+        }
     }
+    Ok(())
 }
 
 /// Serializes a model (`ModelModule`) into a vector of bytes.
