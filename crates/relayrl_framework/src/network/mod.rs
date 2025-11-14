@@ -1,6 +1,6 @@
 use relayrl_types::Hyperparams;
-use relayrl_types::types::action::{RelayRLAction, RelayRLData};
-use relayrl_types::types::tensor::TensorData;
+use relayrl_types::types::data::action::{RelayRLAction, RelayRLData};
+use relayrl_types::types::data::tensor::{TensorData, AnyBurnTensor};
 
 use rand::Rng;
 use std::collections::HashMap;
@@ -94,8 +94,8 @@ pub fn parse_args(hyperparams: &Option<Hyperparams>) -> HashMap<String, String> 
 
     match hyperparams {
         Some(Hyperparams::Map(map)) => {
-            for (key, value) in map {
-                hyperparams_map.insert(key.to_string(), value.to_string());
+            for entry in map.iter() {
+                hyperparams_map.insert(entry.key().to_string(), entry.value().to_string());
             }
         }
         Some(Hyperparams::Args(args)) => {

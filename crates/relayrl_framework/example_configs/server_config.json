@@ -86,7 +86,10 @@
             }
         },
         "grpc_idle_timeout": 30,
-        "local_model_path": "server_model.pt",
+        "local_model_module": {
+            "directory_name": "model_module",
+            "model_name": "server_model"
+        },
         "max_traj_length": 1000
     }
 }

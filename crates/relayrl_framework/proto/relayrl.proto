@@ -42,11 +42,8 @@ message ModelResponse {
   int32 version = 1;
   bool is_diff = 2;
   bytes model_state = 3;
-<<<<<<< HEAD
   bytes input_dim = 4;
   bytes output_dim = 5;
-=======
->>>>>>> 922f90d703cb71da95491e2fd0a483db19083b48
 }
 
 message Action {
@@ -58,7 +55,6 @@ message Action {
   bool done    = 6; // if this is the last action
 }
 
-<<<<<<< HEAD
 message GetActionResponse {
   EncodedAction action = 1;
 }
@@ -85,16 +81,6 @@ message EncodedTrajectory {
 message SendTrajectoriesRequest {
   string client_id = 1;
   repeated EncodedTrajectory trajectories = 3;
-=======
-message Trajectory {
-  repeated Action actions = 1;
-  int32 version           = 2;
-}
-
-message SendTrajectoriesRequest {
-  string client_id           = 1;
-  repeated Trajectory trajectories = 2;
->>>>>>> 922f90d703cb71da95491e2fd0a483db19083b48
 }
 
 message SendTrajectoriesResponse {

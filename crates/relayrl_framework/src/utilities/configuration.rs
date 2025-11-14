@@ -144,7 +144,10 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
             }
         },
         "grpc_idle_timeout": 30,
-        "local_model_path": "client_model.pt",
+        "local_model_module": {
+            "directory_name": "model_module",
+            "model_name": "client_model"
+        },
         "max_traj_length": 1000
     }
 }"#;
@@ -232,7 +235,10 @@ pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
             }
         },
         "grpc_idle_timeout": 30,
-        "local_model_path": "server_model.pt",
+        "local_model_module": {
+            "directory_name": "model_module",
+            "model_name": "server_model"
+        },
         "max_traj_length": 1000
     }
 }"#;

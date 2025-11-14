@@ -1,5 +1,3 @@
-
-use crate::network::HotReloadableModel;
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
 use crate::network::client::runtime::coordination::scale_manager::ScaleManager;
@@ -16,9 +14,9 @@ use crate::utilities::observability::metrics::MetricsManager;
 
 use burn_tensor::{Tensor, backend::Backend};
 use relayrl_types::prelude::DeviceType;
-use relayrl_types::types::action::RelayRLAction;
-use relayrl_types::types::model::ModelModule;
-use relayrl_types::types::tensor::{BackendMatcher, TensorData};
+use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
+use relayrl_types::types::model::{ModelModule, HotReloadableModel};
+use relayrl_types::types::data::tensor::{BackendMatcher, TensorData, AnyBurnTensor};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +29,7 @@ use uuid::Uuid;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
-pub trait ClientInterface<B: Backend + BackendMatcher> {
+pub trait ClientInterface<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
     fn new(transport_type: TransportType) -> Self;
     async fn _start(
         self,
@@ -40,6 +38,7 @@ pub trait ClientInterface<B: Backend + BackendMatcher> {
         default_model: Option<ModelModule<B>>,
         _algorithm_name: String,
         config_path: Option<PathBuf>,
+        codec: Option<CodecConfig>,
     );
     async fn _shutdown(&mut self);
     async fn _restart(
@@ -49,16 +48,17 @@ pub trait ClientInterface<B: Backend + BackendMatcher> {
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
         config_path: Option<PathBuf>,
+        codec: Option<CodecConfig>
     );
-    async fn _new_actor(&self, device: DeviceType, default_model: Option<HotReloadableModel<B>>);
+    async fn _new_actor(&self, device: DeviceType, default_model: Option<ModelModule<B>>);
     async fn _remove_actor(&mut self, id: Uuid);
     async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String>;
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String>;
-    async fn _request_action<const O: usize, const M: usize>(
+    async fn _request_action(
         &self,
         ids: Vec<Uuid>,
-        observation: Tensor<B, O>,
-        mask: Tensor<B, M>,
+        observation: AnyBurnTensor<B, D_IN>,
+        mask: AnyBurnTensor<B, D_OUT>,
         reward: f32,
     ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String>;
     async fn _flag_last_action(&self, ids: Vec<Uuid>, reward: Option<f32>);
@@ -67,20 +67,20 @@ pub trait ClientInterface<B: Backend + BackendMatcher> {
     async fn _scale_down(&mut self, router_remove: u32);
 }
 
-pub struct CoordinatorParams<B: Backend + BackendMatcher> {
+pub struct CoordinatorParams<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
     logger: LoggingBuilder,
     lifecycle: LifeCycleManager,
-    state: Arc<RwLock<StateManager<B>>>,
-    scaling: ScaleManager<B>,
+    state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+    scaling: ScaleManager<B, D_IN, D_OUT>,
     metrics: MetricsManager,
 }
 
-pub struct ClientCoordinator<B: Backend + BackendMatcher> {
+pub struct ClientCoordinator<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
     transport_type: TransportType,
-    runtime_params: Option<CoordinatorParams<B>>,
+    runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
 }
 
-impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT> {
     fn new(transport_type: TransportType) -> Self {
         Self {
             transport_type,
@@ -95,6 +95,7 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
         default_model: Option<ModelModule<B>>,
         _algorithm_name: String,
         config_path: Option<PathBuf>,
+        codec: Option<CodecConfig>,
     ) {
         let logger = LoggingBuilder::new();
 
@@ -121,17 +122,8 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
 
         let shared_state_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
 
-        let reloadable_default_model = match default_model {
-            Some(model) => Some(
-                HotReloadableModel::<B>::new_from_module(model, default_device)
-                    .await
-                    .expect("[Coordinator] Failed to create reloadable default model..."),
-            ),
-            None => None,
-        };
-
         let (state, global_bus_rx, rx_from_actor) =
-            StateManager::new(shared_state_config, reloadable_default_model.clone());
+            StateManager::new(shared_state_config, default_model.clone());
 
         let shared_scaling_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
 
@@ -198,13 +190,14 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
             rx_from_actor,
             agent_listener_address,
             training_server_address,
+            codec,
         )
         .with_lifecycle(lifecycle.clone());
         scaling.__scale_up(1).await;
 
         if actor_count > 0 {
             for _ in 0..actor_count {
-                Self::_new_actor(&self, default_device, reloadable_default_model.clone()).await;
+                Self::_new_actor(&self, default_device.clone(), default_model.clone()).await;
             }
         }
 
@@ -223,7 +216,7 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
         if let Some(mut runtime_params) = self.runtime_params.take() {
             runtime_params.lifecycle._shutdown();
 
-            StateManager::<B>::__shutdown_all_actors(&*runtime_params.state.read().await);
+            StateManager::<B, D_IN, D_OUT>::__shutdown_all_actors(&*runtime_params.state.read().await);
 
             let router_count: u32 = runtime_params
                 .scaling
@@ -244,6 +237,7 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
         config_path: Option<PathBuf>,
+        codec: Option<CodecConfig>
     ) {
         self._shutdown().await;
         self._start(
@@ -252,11 +246,12 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
             default_model,
             algorithm_name,
             config_path,
+            codec,
         )
         .await;
     }
 
-    async fn _new_actor(&self, device: DeviceType, default_model: Option<HotReloadableModel<B>>) {
+    async fn _new_actor(&self, device: DeviceType, default_model: Option<ModelModule<B>>) {
         match &self.runtime_params {
             Some(params) => {
                 let pid: u32 = std::process::id();
@@ -301,7 +296,9 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
 
     async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
         match &self.runtime_params {
-            Some(params) => Ok(StateManager::<B>::__get_actors(&*params.state.read().await)?),
+            Some(params) => Ok(StateManager::<B, D_IN, D_OUT>::__get_actors(
+                &*params.state.read().await,
+            )?),
             None => {
                 Err("[Coordinator] No runtime parameter instance to _get_actors...".to_string())
             }
@@ -310,16 +307,18 @@ impl<B: Backend + BackendMatcher> ClientInterface<B> for ClientCoordinator<B> {
 
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
         match &self.runtime_params {
-            Some(params) => StateManager::<B>::__set_actor_id(&*params.state.write().await, current_id, new_id),
+            Some(params) => {
+                StateManager::<B, D_IN, D_OUT>::__set_actor_id(&*params.state.write().await, current_id, new_id)
+            }
             None => Err("[Coordinator] No runtime instance to _shutdown...".to_string()),
         }
     }
 
-    async fn _request_action<const O: usize, const M: usize>(
+    async fn _request_action(
         &self,
         ids: Vec<Uuid>,
-        observation: Tensor<B, O>,
-        mask: Tensor<B, M>,
+        observation: AnyBurnTensor<B, D_IN>,
+        mask: AnyBurnTensor<B, D_OUT>,
         reward: f32,
     ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String> {
         match &self.runtime_params {

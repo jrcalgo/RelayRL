@@ -7,7 +7,7 @@
         "algorithm_name": "PPO;REINFORCE",
         "config_path": "client_config.json",
         "default_device": "cuda",
-        "default_model": ""
+        "default_model_dir": ""
     },
     "transport_config": {
         "addresses": {
@@ -34,7 +34,10 @@
             }
         },
         "grpc_idle_timeout": 30,
-        "local_model_path": "client_model.pt",
+        "local_model_module": {
+            "directory_name": "model_module",
+            "model_name": "client_model"
+        },
         "max_traj_length": 1000
     }
 }

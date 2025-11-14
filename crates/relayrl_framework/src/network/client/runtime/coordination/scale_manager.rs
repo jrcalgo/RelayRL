@@ -8,7 +8,8 @@ use crate::network::random_uuid;
 use crate::utilities::configuration::ClientConfigLoader;
 
 use burn_tensor::backend::Backend;
-use relayrl_types::types::tensor::BackendMatcher;
+use relayrl_types::types::data::action::CodecConfig;
+use relayrl_types::types::data::tensor::BackendMatcher;
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -37,8 +38,8 @@ pub(crate) struct RouterRuntimeParams {
 
 pub type RouterUuid = Uuid;
 
-pub(crate) struct ScaleManager<B: Backend + BackendMatcher> {
-    shared_state: Arc<RwLock<StateManager<B>>>,
+pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
+    shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shared_config: Arc<RwLock<ClientConfigLoader>>,
     pub(crate) shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
     pub(crate) shared_transport: Arc<TransportClient<B>>,
@@ -46,17 +47,19 @@ pub(crate) struct ScaleManager<B: Backend + BackendMatcher> {
     server_addresses: ServerAddresses,
     rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
     lifecycle: Option<LifeCycleManager>,
+    codec: CodecConfig,
 }
 
-impl<B: Backend + BackendMatcher> ScaleManager<B> {
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ScaleManager<B, D_IN, D_OUT> {
     pub(crate) fn new(
-        shared_state: Arc<RwLock<StateManager<B>>>,
+        shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
         shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
         transport: TransportClient<B>,
         rx_from_actor: Receiver<RoutedMessage>,
         agent_listener_address: String,
         training_server_address: String,
+        codec: Option<CodecConfig>,
     ) -> Self {
         Self {
             shared_state,
@@ -70,6 +73,7 @@ impl<B: Backend + BackendMatcher> ScaleManager<B> {
             },
             rx_from_actor: Arc::new(RwLock::new(rx_from_actor)),
             lifecycle: None,
+            codec: codec.unwrap_or_default()
         }
     }
 
@@ -123,6 +127,7 @@ impl<B: Backend + BackendMatcher> ScaleManager<B> {
             let sender = ClientExternalSender::new(
                 self.rx_from_actor.clone(),
                 self.server_addresses.training_server_address.clone(),
+                self.codec.clone()
             )
             .with_transport(self.shared_transport.clone());
             let sender = if let Some(lc) = &self.lifecycle {
@@ -189,10 +194,13 @@ impl<B: Backend + BackendMatcher> ScaleManager<B> {
             .map(|router| *router.key())
             .collect();
 
-            let old_actor_mappings = StateManager::<B>::get_actor_router_mappings(&self.shared_state.blocking_read());
+        let old_actor_mappings =
+            StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&self.shared_state.blocking_read());
 
-
-        StateManager::<B>::distribute_actors(&self.shared_state.blocking_write(), router_ids.clone());
+        StateManager::<B, D_IN, D_OUT>::distribute_actors(
+            &self.shared_state.blocking_write(),
+            router_ids.clone(),
+        );
 
         if let Err(e) = self._send_scaling_complete(ScalingOperation::ScaleUp).await {
             eprintln!("Failed to send scaling confirmation via transport: {}", e);
@@ -201,7 +209,10 @@ impl<B: Backend + BackendMatcher> ScaleManager<B> {
                 "Rolling back: removing newly created routers and restoring actor mappings..."
             );
 
-            StateManager::<B>::restore_actor_router_mappings(&self.shared_state.blocking_write(), old_actor_mappings);
+            StateManager::<B, D_IN, D_OUT>::restore_actor_router_mappings(
+                &self.shared_state.blocking_write(),
+                old_actor_mappings,
+            );
 
             self._rollback_routers(&new_router_ids).await;
 
@@ -241,7 +252,9 @@ impl<B: Backend + BackendMatcher> ScaleManager<B> {
                     return;
                 }
 
-                let old_actor_mappings = StateManager::<B>::get_actor_router_mappings(&self.shared_state.blocking_read());
+                let old_actor_mappings = StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(
+                    &self.shared_state.blocking_read(),
+                );
 
                 let (router_ids, removed_routers, current_router_count) =
                     tokio::task::block_in_place(|| {
@@ -364,7 +377,7 @@ impl<B: Backend + BackendMatcher> ScaleManager<B> {
         }
     }
 
-    async fn _spawn_central_filter(mut router: ClientFilter<B>) -> JoinHandle<()> {
+    async fn _spawn_central_filter(mut router: ClientFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
         tokio::task::spawn(async move { router.spawn_loop().await })
     }
 

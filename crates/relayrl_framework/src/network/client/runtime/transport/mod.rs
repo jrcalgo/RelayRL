@@ -1,11 +1,12 @@
-use crate::model::ModelModule;
+
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::ClientConfigLoader;
 
-use relayrl_types::types::tensor::BackendMatcher;
-use relayrl_types::types::trajectory::{EncodedTrajectory, RelayRLTrajectory};
+use relayrl_types::types::data::tensor::BackendMatcher;
+use relayrl_types::types::data::trajectory::EncodedTrajectory;
+use relayrl_types::types::model::ModelModule;
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;
@@ -17,10 +18,7 @@ use tokio::sync::mpsc::Sender;
 pub mod tonic;
 pub mod zmq;
 
-#[cfg(feature = "grpc_network")]
-use crate::network::client::runtime::transport::tonic::rl_service::EncodedTrajectory as GrpcEncodedTrajectory;
-
-pub enum TransportClient<B: Backend + BackendMatcher> {
+pub enum TransportClient<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(feature = "zmq_network")]
     Sync(Box<dyn SyncClientTransport<B> + Send + Sync>),
     #[cfg(feature = "grpc_network")]
@@ -29,34 +27,30 @@ pub enum TransportClient<B: Backend + BackendMatcher> {
 
 #[cfg(feature = "grpc_network")]
 #[async_trait]
-pub trait AsyncClientTransport<B: Backend + BackendMatcher>: Send + Sync {
+pub trait AsyncClientTransport<B: Backend + BackendMatcher<Backend = B>>: Send + Sync {
     async fn initial_model_handshake(
         &self,
         model_server_address: &str,
     ) -> Result<Option<ModelModule<B>>, String>;
     async fn send_traj_to_server(
         &self,
-        trajectory: RelayRLTrajectory,
+        encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
     );
     async fn listen_for_model(&self, model_server_address: &str);
-    fn convert_encoded_relayrl_to_proto_encoded_trajectory(
-        &self,
-        traj: &EncodedTrajectory,
-    ) -> GrpcEncodedTrajectory;
     async fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String>;
     async fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String>;
 }
 
 #[cfg(feature = "zmq_network")]
-pub trait SyncClientTransport<B: Backend + BackendMatcher>: Send + Sync {
+pub trait SyncClientTransport<B: Backend + BackendMatcher<Backend = B>>: Send + Sync {
     fn initial_model_handshake(
         &self,
         model_server_address: &str,
     ) -> Result<Option<ModelModule<B>>, String>;
     fn send_traj_to_server(
         &self,
-        trajectory: RelayRLTrajectory,
+        encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
     ) -> Result<(), String>;
     fn listen_for_model(&self, model_server_address: &str, tx_to_router: Sender<RoutedMessage>);
@@ -64,7 +58,7 @@ pub trait SyncClientTransport<B: Backend + BackendMatcher>: Send + Sync {
     fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String>;
 }
 
-pub fn client_transport_factory<B: Backend + BackendMatcher>(
+pub fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
     transport_type: TransportType,
     config: &ClientConfigLoader,
 ) -> TransportClient<B> {

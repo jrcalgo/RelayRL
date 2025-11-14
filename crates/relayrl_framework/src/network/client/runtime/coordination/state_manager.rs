@@ -1,4 +1,3 @@
-use crate::network::HotReloadableModel;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
@@ -7,7 +6,8 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 
-use relayrl_types::types::tensor::{BackendMatcher, DeviceType};
+use relayrl_types::types::data::tensor::{BackendMatcher, DeviceType, AnyBurnTensor};
+use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -19,14 +19,14 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-type ActorInstance<B: Backend + 'static, const O: usize, const M: usize> =
-    Arc<dyn ActorEntity<B, O, M>>;
+type ActorInstance<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> =
+    Arc<dyn ActorEntity<B>>;
 pub type ActorUuid = Uuid;
 
 /// In-memory actor state management and global channel transport
-pub(crate) struct StateManager<B: Backend + BackendMatcher> {
+pub(crate) struct StateManager<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
     shared_config: Arc<RwLock<ClientConfigLoader>>,
-    default_model: Option<HotReloadableModel<B>>,
+    default_model: Option<ModelModule<B>>,
     pub(crate) global_bus_tx: Sender<RoutedMessage>,
     tx_to_sender: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
@@ -34,17 +34,17 @@ pub(crate) struct StateManager<B: Backend + BackendMatcher> {
     actor_router_addresses: DashMap<ActorUuid, RouterUuid>,
 }
 
-impl<B: Backend + BackendMatcher> StateManager<B> {
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> StateManager<B, D_IN, D_OUT> {
     pub(crate) fn new(
         shared_config: Arc<RwLock<ClientConfigLoader>>,
-        shared_default_model: Option<HotReloadableModel<B>>,
+        default_model: Option<ModelModule<B>>,
     ) -> (Self, Receiver<RoutedMessage>, Receiver<RoutedMessage>) {
         let (global_bus_tx, global_bus_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_sender, rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         (
             Self {
                 shared_config,
-                default_model: shared_default_model,
+                default_model,
                 global_bus_tx,
                 tx_to_sender,
                 actor_inboxes: DashMap::new(),
@@ -60,7 +60,7 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
         &mut self,
         id: Uuid,
         device: DeviceType,
-        default_model: Option<HotReloadableModel<B>>,
+        default_model: Option<ModelModule<B>>,
         transport: Arc<TransportClient<B>>,
     ) {
         if self.actor_handles.contains_key(&id) {
@@ -68,10 +68,12 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
             self.__remove_actor(id);
         }
 
-        let default_model = if let Some(model) = default_model {
-            Some(model)
+        // check fn param
+        let reloadable_model: Option<HotReloadableModel<B>> = if let Some(model) = default_model {
+            Some(HotReloadableModel::<B>::new_from_module(model, device.clone()).await.expect("[StateManager] Failed to create reloadable default model..."))
+        // check if current struct default_model is Some
         } else if let Some(model) = { self.default_model.clone() } {
-            Some(model)
+            Some(HotReloadableModel::<B>::new_from_module(model, device.clone()).await.expect("[StateManager] Failed to create reloadable default model..."))
         // try taking once from cached default_model
         } else {
             // lazily load from config if configured
@@ -87,15 +89,15 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
 
             if !default_model_path_str.is_empty() {
                 Some(
-                    HotReloadableModel::new_from_path(
+                    HotReloadableModel::<B>::new_from_path(
                         loader.read().await.client_config.default_model_path.clone(),
-                        device,
+                        device.clone(),
                     )
                     .await
                     .expect("[StateManager] Failed to load model from path"),
                 )
             } else {
-                let local_model_path_str = loader
+                let local_model_path_str: String = loader
                     .read()
                     .await
                     .transport_config
@@ -105,14 +107,14 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
                     .to_string();
                 if !local_model_path_str.is_empty() {
                     Some(
-                        HotReloadableModel::new_from_path(
+                        HotReloadableModel::<B>::new_from_path(
                             loader
                                 .read()
                                 .await
                                 .transport_config
                                 .local_model_path
                                 .clone(),
-                            device,
+                            device.clone(),
                         )
                         .await
                         .expect("[StateManager] Failed to load model from path"),
@@ -138,10 +140,10 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
         let shared_config_cloned = shared_config.clone();
 
         let handle = Arc::new(tokio::spawn(async move {
-            let (mut actor, handshake_flag) = Actor::new(
+            let (mut actor, handshake_flag) = Actor::<B, D_IN, D_OUT>::new(
                 id,
-                device,
-                default_model,
+                device.clone(),
+                reloadable_model,
                 model_path,
                 shared_config_cloned,
                 rx_from_global,
@@ -185,7 +187,7 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
     }
 
     pub(crate) fn spawn_shutdown_watcher(
-        shared_state: Arc<RwLock<StateManager<B>>>,
+        shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         lifecycle: LifeCycleManager,
     ) {
         tokio::spawn(async move {
@@ -216,16 +218,18 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
     }
 
     pub(crate) fn __set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
-        let current_id_handle = match StateManager::<B>::get_actor_handle(self, current_id) {
+        let current_id_handle = match StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, current_id) {
             Some(handle) => handle.clone(),
             None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
         };
-        let current_id_inbox = match StateManager::<B>::get_actor_inbox(self, current_id) {
+        let current_id_inbox = match StateManager::<B, D_IN, D_OUT>::get_actor_inbox(self, current_id) {
             Some(inbox) => inbox.clone(),
             None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
         };
 
-        if StateManager::<B>::get_actor_handle(self, new_id).is_some() || StateManager::<B>::get_actor_inbox(self, new_id).is_some() {
+        if StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, new_id).is_some()
+            || StateManager::<B, D_IN, D_OUT>::get_actor_inbox(self, new_id).is_some()
+        {
             return Err(format!("[StateManager] Actor ID {} already taken", new_id));
         }
 
@@ -242,7 +246,7 @@ impl<B: Backend + BackendMatcher> StateManager<B> {
             return;
         }
 
-        let actor_ids = StateManager::<B>::get_actor_id_list(self);
+        let actor_ids: Vec<Uuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
             let router_id = router_ids[i % router_ids.len()];

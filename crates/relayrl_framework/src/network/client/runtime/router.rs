@@ -1,14 +1,15 @@
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
+use crate::utilities::orchestration::tonic_utils::relayrl_encoded_trajectory_to_grpc_encoded_trajectory;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::TransportClient;
-use burn_tensor::Tensor;
-use burn_tensor::backend::Backend;
-use dashmap::DashMap;
-use relayrl_types::types::action::RelayRLAction;
-use relayrl_types::types::tensor::{BackendMatcher, TensorData};
-use relayrl_types::types::trajectory::RelayRLTrajectory;
+
+use relayrl_types::types::data::action::CodecConfig;
+use relayrl_types::types::data::action::RelayRLAction;
+use relayrl_types::types::data::tensor::{BackendMatcher, TensorData, AnyBurnTensor};
+use relayrl_types::types::data::trajectory::RelayRLTrajectory;
+
 use std::any::Any;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
@@ -19,6 +20,10 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
+use burn_tensor::Tensor;
+use burn_tensor::backend::Backend;
+use dashmap::DashMap;
+
 
 pub(crate) struct RoutedMessage {
     pub actor_id: Uuid,
@@ -85,16 +90,16 @@ pub(crate) struct InferenceRequest {
 }
 
 /// Intermediary routing process/filter for routing received models to specified ActorEntity
-pub(crate) struct ClientFilter<B: Backend + BackendMatcher> {
+pub(crate) struct ClientFilter<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
     rx_from_receiver: Arc<RwLock<Receiver<RoutedMessage>>>,
-    shared_agent_state: Arc<RwLock<StateManager<B>>>,
+    shared_agent_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl<B: Backend + BackendMatcher> ClientFilter<B> {
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ClientFilter<B, D_IN, D_OUT> {
     pub(crate) fn new(
         rx_from_receiver: Arc<RwLock<Receiver<RoutedMessage>>>,
-        shared_agent_state: Arc<RwLock<StateManager<B>>>,
+        shared_agent_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     ) -> Self {
         Self {
             rx_from_receiver,
@@ -155,14 +160,14 @@ impl<B: Backend + BackendMatcher> ClientFilter<B> {
 //// Start of Packet Transportation/Receiver/Sender
 
 /// Listens & receives model bytes from a training server
-pub(crate) struct ClientExternalReceiver<B: Backend + BackendMatcher> {
+pub(crate) struct ClientExternalReceiver<B: Backend + BackendMatcher<Backend = B>> {
     tx_to_router: Sender<RoutedMessage>,
     transport: Option<Arc<TransportClient<B>>>,
     server_address: String,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl<B: Backend + BackendMatcher> ClientExternalReceiver<B> {
+impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalReceiver<B> {
     pub fn new(tx_to_router: Sender<RoutedMessage>, server_address: String) -> Self {
         Self {
             tx_to_router,
@@ -229,7 +234,7 @@ impl Ord for SenderQueueEntry {
 }
 
 /// Receives trajectories from ActorEntity and creates send_traj tasks to send to a training server
-pub(crate) struct ClientExternalSender<B: Backend + BackendMatcher> {
+pub(crate) struct ClientExternalSender<B: Backend + BackendMatcher<Backend = B>> {
     active: AtomicBool,
     rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
     actor_last_sent: DashMap<Uuid, i64>,
@@ -237,12 +242,14 @@ pub(crate) struct ClientExternalSender<B: Backend + BackendMatcher> {
     transport: Option<Arc<TransportClient<B>>>,
     server_address: String,
     shutdown: Option<broadcast::Receiver<()>>,
+    codec: CodecConfig,
 }
 
-impl<B: Backend + BackendMatcher> ClientExternalSender<B> {
+impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
     pub fn new(
         rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
         server_address: String,
+        codec: CodecConfig,
     ) -> Self {
         Self {
             active: AtomicBool::new(false),
@@ -252,6 +259,7 @@ impl<B: Backend + BackendMatcher> ClientExternalSender<B> {
             transport: None,
             server_address,
             shutdown: None,
+            codec,
         }
     }
 
@@ -365,7 +373,8 @@ impl<B: Backend + BackendMatcher> ClientExternalSender<B> {
             match &**transport {
                 #[cfg(feature = "zmq_network")]
                 TransportClient::Sync(sync_client) => {
-                    match sync_client.send_traj_to_server(entry.traj_to_send, &server_address) {
+                    let encoded_traj = entry.traj_to_send.encode(&self.codec).map_err(|e| format!("Failed to encode trajectory: {:?}", e)).unwrap();
+                    match sync_client.send_traj_to_server(encoded_traj, &server_address) {
                         Ok(_) => {
                             println!(
                                 "[ClientExternalSender] Successfully sent trajectory for actor {}",
@@ -382,10 +391,10 @@ impl<B: Backend + BackendMatcher> ClientExternalSender<B> {
                 }
                 #[cfg(feature = "grpc_network")]
                 TransportClient::Async(async_client) => {
-                    let grpc_traj =
-                        async_client.convert_encoded_relayrl_to_proto_encoded_trajectory(&entry.traj_to_send);
+                    let encoded_traj = entry.traj_to_send.encode(&self.codec).map_err(|e| format!("Failed to encode trajectory: {:?}", e)).unwrap();
+
                     async_client
-                        .send_traj_to_server(grpc_traj, &server_address)
+                        .send_traj_to_server(encoded_traj, &server_address)
                         .await;
                     println!(
                         "[ClientExternalSender] Successfully sent trajectory for actor {}",

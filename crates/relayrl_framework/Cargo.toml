@@ -1,7 +1,7 @@
 [package]
 name = "relayrl_framework"
 version = "0.5.0"
-authors = ["jrcalgo <jacksonr1212@outlook.com>"]
+authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "A system-oriented reinforcement learning framework using a Rust backend with Python interfaces."
 readme = "README.md"
@@ -19,14 +19,14 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = ["networks", "logging", "metrics"]       # Enables default and necessary features for operation in Rust.
 networks = ["grpc_network", "zmq_network"]         # Enables networking modules with their accompanying python IPC.
-grpc_network = ["tonic", "prost", "tonic-build"]        # Enables gRPC messaging support between agents and training server.
+grpc_network = ["tonic", "prost", "tonic-build", "bincode"]        # Enables gRPC messaging support between agents and training server.
 zmq_network = ["zmq"]           # Enables ZeroMQ messaging support between agents and training server.
 logging = ["log4rs"]       # Enables logging support.
 metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]       # Enables metrics support.
 profile = ["flamegraph", "console-subscriber"]       # Enables runtime profiling support via flamegraph.
 
 [dependencies]
-relayrl_types = "0.2.12"
+relayrl_types = { version = "0.3.11", features = ["ndarray-backend", "codec-full", "tch-model", "onnx-model"] }
 
 zmq = { version = "0.10.0", optional = true }                               # ZeroMQ messaging library.
 tonic = { version = "0.12.3", optional = true }                             # gRPC library for Rust.
@@ -45,6 +45,7 @@ serde = { version = "1.0.195", features = ["derive"] }  # Serialization framewor
 serde_json = "1.0.111"          # JSON serialization.
 serde-pickle = "1.1.1"                        # Serialization using the pickle format.
 bytemuck = "1.14.1"               # Safe zero-copy conversion between data representations.
+bincode = { version = "2.0.1", optional = true}
 
 rand = "0.8.5"                      # Random number generation library.
 dashmap = "5.5.3"
@@ -59,7 +60,6 @@ burn-tensor = "0.18.0"
 burn-import = "0.18.0"
 burn-ndarray = "0.18.0"
 burn-tch = "0.18.0"
-safetensors = "0.4"
 # TODO: Add Redis support for training data storagen & querying
 # redis = 0.32.7
 

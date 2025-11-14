@@ -1,7 +1,7 @@
 #[cfg(feature = "grpc_network")]
-use crate::model::ModelModule;
+use relayrl_types::types::model::{ModelModule, HotReloadableModel};
 #[cfg(feature = "grpc_network")]
-use crate::model::{deserialize_model, validate_model};
+use relayrl_types::types::model::utils::{serialize_model_module, deserialize_model_module, validate_module};
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 #[cfg(feature = "grpc_network")]
@@ -9,9 +9,11 @@ use crate::network::client::runtime::transport::AsyncClientTransport;
 #[cfg(feature = "grpc_network")]
 use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "grpc_network")]
+use crate::utilities::orchestration::tonic_utils::relayrl_encoded_trajectory_to_grpc_encoded_trajectory;
+#[cfg(feature = "grpc_network")]
 use async_trait::async_trait;
 #[cfg(feature = "grpc_network")]
-use relayrl_types::types::trajectory::{EncodedTrajectory, RelayRLTrajectory};
+use relayrl_types::types::data::trajectory::EncodedTrajectory;
 #[cfg(feature = "grpc_network")]
 use std::collections::HashMap;
 #[cfg(feature = "grpc_network")]
@@ -40,7 +42,7 @@ use rl_service::{
 };
 
 use burn_tensor::backend::Backend;
-use relayrl_types::types::tensor::BackendMatcher;
+use relayrl_types::types::data::tensor::BackendMatcher;
 
 #[cfg(feature = "grpc_network")]
 pub struct TonicClient {
@@ -108,7 +110,7 @@ impl TonicClient {
     async fn send_trajectories_with_timeout(
         &mut self,
         server_address: &str,
-        trajectories: Vec<Trajectory>,
+        trajectories: Vec<GrpcEncodedTrajectory>,
     ) -> Result<SendTrajectoriesResponse, Box<dyn std::error::Error + Send + Sync>> {
         self.ensure_client(server_address).await?;
 
@@ -124,45 +126,6 @@ impl TonicClient {
         .await??;
 
         Ok(response.into_inner())
-    }
-
-    fn convert_relayrl_to_proto_trajectory(&self, traj: &RelayRLTrajectory) -> Trajectory {
-        let actions: Vec<Action> = traj
-            .actions
-            .iter()
-            .map(|action| {
-                let mut data = HashMap::new();
-
-                // Convert additional data if present using proper serialization
-                if let Some(action_data) = action.get_data() {
-                    for (key, value) in action_data {
-                        if let Ok(serialized) = serde_json::to_vec(value) {
-                            data.insert(key.clone(), serialized);
-                        }
-                    }
-                }
-
-                Action {
-                    obs: action
-                        .get_obs()
-                        .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    action: action
-                        .get_act()
-                        .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    mask: action
-                        .get_mask()
-                        .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    reward: action.get_rew(),
-                    data,
-                    done: action.get_done(),
-                }
-            })
-            .collect();
-
-        Trajectory {
-            actions,
-            version: self.current_version.load(Ordering::SeqCst) as i32,
-        }
     }
 
     async fn initialize_algorithm_if_needed(
@@ -193,6 +156,7 @@ impl TonicClient {
 
         let request = Request::new(InitRequest {
             client_id: self.client_id.clone(),
+            algorithm_name,
             algorithm_parameters,
         });
 
@@ -221,7 +185,7 @@ impl TonicClient {
     /// Helper method to send an RelayRLTrajectory directly (for compatibility with internal usage)
     pub async fn send_relayrl_trajectory(
         &self,
-        trajectory: RelayRLTrajectory,
+        encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
     ) -> Result<(), String> {
         let mut client = Self::new(&self.config);
@@ -234,7 +198,7 @@ impl TonicClient {
             return Err(format!("Failed to initialize algorithm: {}", e));
         }
 
-        let proto_trajectory = client.convert_relayrl_to_proto_trajectory(&trajectory);
+        let proto_trajectory = relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
 
         match client
             .send_trajectories_with_timeout(training_server_address, vec![proto_trajectory])
@@ -265,7 +229,7 @@ impl TonicClient {
 
 #[cfg(feature = "grpc_network")]
 #[async_trait]
-impl<B: Backend + BackendMatcher> AsyncClientTransport<B> for TonicClient {
+impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for TonicClient {
     /// Helper method to perform initial handshake and return whether a model was received
     async fn initial_model_handshake(
         &self,
@@ -298,16 +262,18 @@ impl<B: Backend + BackendMatcher> AsyncClientTransport<B> for TonicClient {
 
                     // Validate and deserialize the model if available
                     if !model_response.model_state.is_empty() {
-                        match deserialize_model::<B>(model_response.model_state, device) {
+                        // Device parameter is not used in deserialize_model_module (prefixed with _)
+                        let device = relayrl_types::types::data::tensor::DeviceType::Cpu;
+                        match deserialize_model_module::<B>(model_response.model_state, device) {
                             Ok(model) => {
-                                let input_dim: usize = model_response.input_dim;
-                                let output_dim: usize = model_response.output_dim;
-                                // Validate the model
-                                validate_model::<B>(&model, input_dim, output_dim);
+                                // Validate the model - it gets dimensions from the model itself
+                                if let Err(e) = validate_module::<B>(&model) {
+                                    return Err(format!("Failed to validate model: {:?}", e));
+                                }
                                 println!("[TonicClient] Model validated and ready for use");
                                 Ok(Some(model))
                             }
-                            Err(e) => Err(format!("Failed to deserialize model: {}", e)),
+                            Err(e) => Err(format!("Failed to deserialize model: {:?}", e)),
                         }
                     } else {
                         println!("[TonicClient] No model data available yet");
@@ -324,7 +290,7 @@ impl<B: Backend + BackendMatcher> AsyncClientTransport<B> for TonicClient {
 
     async fn send_traj_to_server(
         &self,
-        trajectory: rl_service::Trajectory,
+        encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
     ) {
         let mut client = Self::new(&self.config);
@@ -342,21 +308,7 @@ impl<B: Backend + BackendMatcher> AsyncClientTransport<B> for TonicClient {
         }
 
         // Convert from the old proto format to new format
-        let proto_trajectory = rl_service::Trajectory {
-            actions: trajectory
-                .actions
-                .into_iter()
-                .map(|action| Action {
-                    obs: action.obs,
-                    action: action.action,
-                    mask: action.mask,
-                    reward: action.reward,
-                    data: action.data,
-                    done: action.done,
-                })
-                .collect(),
-            version: client.current_version.load(Ordering::SeqCst) as i32,
-        };
+        let proto_trajectory = relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
 
         match client
             .send_trajectories_with_timeout(training_server_address, vec![proto_trajectory])
@@ -435,51 +387,51 @@ impl<B: Backend + BackendMatcher> AsyncClientTransport<B> for TonicClient {
         }
     }
 
-    fn convert_encoded_relayrl_to_proto_encoded_trajectory(
-        &self,
-        traj: &EncodedTrajectory,
-    ) -> GrpcEncodedTrajectory {
-        // TODO: Rewrite for encoded trajectories
-        // Delegate to the existing implementation method
-        let actions: Vec<Action> = traj
-            .actions
-            .iter()
-            .map(|action| {
-                let mut data = std::collections::HashMap::new();
+    // fn convert_encoded_relayrl_to_proto_encoded_trajectory(
+    //     &self,
+    //     traj: &EncodedTrajectory,
+    // ) -> GrpcEncodedTrajectory {
+    //     // TODO: Rewrite for encoded trajectories
+    //     // Delegate to the existing implementation method
+    //     let actions: Vec<Action> = traj
+    //         .actions
+    //         .iter()
+    //         .map(|action| {
+    //             let mut data = std::collections::HashMap::new();
 
-                // Convert additional data if present using proper serialization
-                if let Some(action_data) = action.get_data() {
-                    for (key, value) in action_data {
-                        if let Ok(serialized) = serde_json::to_vec(value) {
-                            data.insert(key.clone(), serialized);
-                        }
-                    }
-                }
+    //             // Convert additional data if present using proper serialization
+    //             if let Some(action_data) = action.get_data() {
+    //                 for (key, value) in action_data {
+    //                     if let Ok(serialized) = serde_json::to_vec(value) {
+    //                         data.insert(key.clone(), serialized);
+    //                     }
+    //                 }
+    //             }
 
-                Action {
-                    obs: action
-                        .get_obs()
-                        .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    action: action
-                        .get_act()
-                        .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    mask: action
-                        .get_mask()
-                        .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-                    reward: action.get_rew(),
-                    data,
-                    done: action.get_done(),
-                }
-            })
-            .collect();
+    //             Action {
+    //                 obs: action
+    //                     .get_obs()
+    //                     .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
+    //                 action: action
+    //                     .get_act()
+    //                     .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
+    //                 mask: action
+    //                     .get_mask()
+    //                     .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
+    //                 reward: action.get_rew(),
+    //                 data,
+    //                 done: action.get_done(),
+    //             }
+    //         })
+    //         .collect();
 
-        Trajectory {
-            actions,
-            version: self
-                .current_version
-                .load(std::sync::atomic::Ordering::SeqCst) as i32,
-        }
-    }
+    //     Trajectory {
+    //         actions,
+    //         version: self
+    //             .current_version
+    //             .load(std::sync::atomic::Ordering::SeqCst) as i32,
+    //     }
+    // }
 
     async fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String> {
         // TODO: implement

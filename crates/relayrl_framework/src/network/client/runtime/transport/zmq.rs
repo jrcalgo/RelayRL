@@ -1,13 +1,12 @@
-use crate::model::ModelModule;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::SyncClientTransport;
-use crate::network::client::runtime::transport::serialize_trajectory;
 use crate::utilities::configuration::ClientConfigLoader;
 
-use relayrl_types::types::model::utils::validate_model;
-use relayrl_types::types::tensor::BackendMatcher;
-use relayrl_types::types::trajectory::RelayRLTrajectory;
+use relayrl_types::types::model::utils::validate_module;
+use relayrl_types::types::data::tensor::BackendMatcher;
+use relayrl_types::types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
+use relayrl_types::types::model::{ModelModule, HotReloadableModel};
 
 use burn_tensor::backend::Backend;
 use std::io::Write;
@@ -93,7 +92,7 @@ impl ZmqClient {
     }
 }
 
-impl<B: Backend + BackendMatcher> SyncClientTransport<B> for ZmqClient {
+impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqClient {
     fn initial_model_handshake(
         &self,
         _model_server_address: &str,
@@ -151,12 +150,15 @@ impl<B: Backend + BackendMatcher> SyncClientTransport<B> for ZmqClient {
 
                         match ModelModule::<B>::load_from_path(temp_file.path()) {
                             Ok(model) => {
-                                validate_model::<B>(&model, model.input_dim, model.output_dim);
+                                if let Err(e) = validate_module::<B>(&model) {
+                                    eprintln!("[ZmqClient] Failed to validate model: {:?}", e);
+                                    return Ok(None);
+                                }
                                 println!("[ZmqClient] Model loaded and validated successfully");
                                 Ok(Some(model))
                             }
                             Err(e) => {
-                                eprintln!("[ZmqClient] Failed to load model: {}", e);
+                                eprintln!("[ZmqClient] Failed to load model: {:?}", e);
                                 Ok(None)
                             }
                         }
@@ -176,7 +178,7 @@ impl<B: Backend + BackendMatcher> SyncClientTransport<B> for ZmqClient {
 
     fn send_traj_to_server(
         &self,
-        trajectory: RelayRLTrajectory,
+        encoded_trajectory: EncodedTrajectory,
         _training_server_address: &str,
     ) -> Result<(), String> {
         let context = Context::new();
@@ -187,12 +189,12 @@ impl<B: Backend + BackendMatcher> SyncClientTransport<B> for ZmqClient {
             .map_err(|e| format!("Failed to create trajectory socket: {}", e))?;
 
         // Serialize the trajectory
-        let serialized_traj = serialize_trajectory(&trajectory);
+        let serialized_traj: Vec<u8> = serde_json::to_vec(&encoded_trajectory).map_err(|e| format!("Failed to serialize trajectory: {}", e))?;
 
         println!(
             "[ZmqClient] Sending trajectory ({} bytes, {} actions)",
             serialized_traj.len(),
-            trajectory.actions.len()
+            encoded_trajectory.num_actions
         );
 
         // Send the trajectory
