@@ -61,6 +61,25 @@ pub enum ModelError {
     InvalidMetadata(String),
 }
 
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SerializationError(e) => write!(f, "[ModelError] Serialization error: {}", e),
+            Self::DeserializationError(e) => write!(f, "[ModelError] Deserialization error: {}", e),
+            Self::BackendError(e) => write!(f, "[ModelError] Backend error: {}", e),
+            Self::DTypeError(e) => write!(f, "[ModelError] DType error: {}", e),
+            Self::InvalidInputDimension(e) => write!(f, "[ModelError] Invalid input dimension: {}", e),
+            Self::InvalidOutputDimension(e) => write!(f, "[ModelError] Invalid output dimension: {}", e),
+            Self::UnsupportedRank(e) => write!(f, "[ModelError] Unsupported rank: {}", e),
+            Self::UnsupportedBackend(e) => write!(f, "[ModelError] Unsupported backend: {}", e),
+            Self::IoError(e) => write!(f, "[ModelError] IO error: {}", e),
+            Self::JsonError(e) => write!(f, "[ModelError] JSON error: {}", e),
+            Self::UnsupportedModelType(e) => write!(f, "[ModelError] Unsupported model type: {}", e),
+            Self::InvalidMetadata(e) => write!(f, "[ModelError] Invalid metadata: {}", e),
+        }
+    }
+}
+
 impl From<std::io::Error> for ModelError {
     fn from(e: std::io::Error) -> Self {
         ModelError::IoError(e.to_string())
@@ -296,7 +315,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         &self,
         observation: AnyBurnTensor<B, D_IN>,
         mask: Option<AnyBurnTensor<B, D_OUT>>,
-    ) -> (TensorData, HashMap<String, RelayRLData>) {
+    ) -> (TensorData, Option<TensorData>, HashMap<String, RelayRLData>) {
         let base_action = self
             .run_inference::<D_IN, D_OUT>(observation)
             .unwrap_or_else(|_| {
@@ -304,29 +323,30 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                     .expect("Failed to create zeros action")
             });
 
-        let action: TensorData = match mask {
+        let mask_td: Option<TensorData> = match mask {
             Some(mask_tensor) => {
-                // Convert both to float for multiplication, then convert back based on output dtype
-                let mask_td: TensorData = match mask_tensor {
-                    AnyBurnTensor::Float(wrapper) => TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor,
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    }),
-                    AnyBurnTensor::Int(wrapper) => TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor,
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    }),
-                    AnyBurnTensor::Bool(wrapper) => TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor,
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    }),
-                }
-                .expect("Failed to convert mask tensor to TensorData");
+                Some(AnyBurnTensor::Float(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                    inner: wrapper.tensor,
+                    conversion_dtype: self.metadata.output_dtype.clone(),
+                })),
+                Some(AnyBurnTensor::Int(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                    inner: wrapper.tensor,
+                    conversion_dtype: self.metadata.output_dtype.clone(),
+                })),
+                Some(AnyBurnTensor::Bool(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                    inner: wrapper.tensor,
+                    conversion_dtype: self.metadata.output_dtype.clone(),
+                })),
+            },
+            None => None,
+        };
 
+        let act_td: TensorData = match mask_td {
+            Some(mask) => {
                 let action_data: Vec<u8> = base_action
                     .data
                     .iter()
-                    .zip(mask_td.data.iter())
+                    .zip(mask.data.iter())
                     .map(|(a, m)| a * m)
                     .collect();
                 TensorData {
@@ -339,7 +359,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             None => base_action,
         };
 
-        (action, HashMap::new())
+        (act_td, mask_td, HashMap::new())
     }
 
     fn resolve_device(&self) -> <B as Backend>::Device {
