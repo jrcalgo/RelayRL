@@ -205,7 +205,7 @@ fn validate_model_shapes<
         },
     };
 
-    let (action_tensor, _) = module.step::<D_IN, D_OUT>(obs, Some(mask));
+    let (action_tensor, _, _) = module.step::<D_IN, D_OUT>(obs, Some(mask));
 
     let action_dims: &Vec<usize> = &action_tensor.shape;
     let output_dims: &Vec<usize> = &output_shape.dims;

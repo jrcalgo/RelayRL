@@ -324,25 +324,25 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             });
 
         let mask_td: Option<TensorData> = match mask {
-            Some(mask_tensor) => {
-                Some(AnyBurnTensor::Float(wrapper) => TensorData::try_from(ConversionBurnTensor {
+            Some(mask_tensor) => match mask_tensor {
+                AnyBurnTensor::Float(wrapper) => Some(TensorData::try_from(ConversionBurnTensor {
                     inner: wrapper.tensor,
                     conversion_dtype: self.metadata.output_dtype.clone(),
-                })),
-                Some(AnyBurnTensor::Int(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                }).expect("Failed to convert mask tensor to TensorData")),
+                AnyBurnTensor::Int(wrapper) => Some(TensorData::try_from(ConversionBurnTensor {
                     inner: wrapper.tensor,
                     conversion_dtype: self.metadata.output_dtype.clone(),
-                })),
-                Some(AnyBurnTensor::Bool(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                }).expect("Failed to convert mask tensor to TensorData")),
+                AnyBurnTensor::Bool(wrapper) => Some(TensorData::try_from(ConversionBurnTensor {
                     inner: wrapper.tensor,
                     conversion_dtype: self.metadata.output_dtype.clone(),
-                })),
+                }).expect("Failed to convert mask tensor to TensorData")),
             },
             None => None,
         };
 
         let act_td: TensorData = match mask_td {
-            Some(mask) => {
+            Some(ref mask) => {
                 let action_data: Vec<u8> = base_action
                     .data
                     .iter()
