@@ -3,7 +3,7 @@ relayrl_types
 
 Core data types and encoding/decoding utilities for the RelayRL framework.
 
-[![Changelog](https://img.shields.io/badge/Changelog-0.3.0-blue.svg)](CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/Changelog-0.3.1-blue.svg)](CHANGELOG.md)
 
 ## Features
 
@@ -17,7 +17,7 @@ Core data types and encoding/decoding utilities for the RelayRL framework.
 
 ```toml
 # Backend selection (choose one)
-default = ["ndarray-backend"]
+default = ["ndarray-backend", "codec-full"]
 
 tch-backend = ["burn-tch"]          # GPU backend
 ndarray-backend = ["burn-ndarray"]  # CPU backend

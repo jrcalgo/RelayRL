@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2025-11-10
+
+### Added
+- **HotReloadableModel Getters** - Added convenience getter methods for better API ergonomics
+  - `default_device()` - Access the default device configuration
+  - `version()` - Get the current model version atomically
+  - `input_dim()` - Get the input dimension
+  - `output_dim()` - Get the output dimension
+- **ModelError Display** - Implemented `std::fmt::Display` for `ModelError` for better error messages and logging
+
+### Changed
+- **Default Features** - Removed `tch-model` and `onnx-model` from default features to reduce default dependency footprint
+  - Model inference features are now opt-in via `tch-model` or `onnx-model` feature flags
+- **Model Module Feature Gating** - Model module is now conditionally compiled based on feature flags
+  - Only available when `tch-model` or `onnx-model` features are enabled
+  - Model types in prelude are also feature-gated
+- **Step Method Simplification** - Simplified `ModelModule::step()` return signature
+  - Now returns `(TensorData, Option<TensorData>, HashMap<String, RelayRLData>)`
+  - Mask tensor is now returned directly as `Option<TensorData>` instead of complex runtime conversion logic
+  - Simplified mask handling in `HotReloadableModel::forward()`
+- **README Updates** - Clarified feature flag documentation and organization
+
+### Fixed
+- **LibTorch Bool Tensor Handling** - Fixed bool tensor conversion in LibTorch inference path
+  - Corrected bool tensor serialization to use `u8` instead of direct bool casting
+  - Fixed tensor shape handling for bool observations
+- **Tensor Conversion Stability** - Improved tensor conversion reliability in ONNX inference paths
+  - Fixed dtype cloning issues in `match_obs_to_act()` calls
+  - Better error handling for tensor type mismatches
+- **Tch Backend Fixes** - Various fixes for tch-backend tensor operations
+  - Improved memory handling for zero-initialized tensors
+  - Fixed tensor data lifetime issues
+
 ## [0.3.0] - 2025-11-10
 
 ### Added
