@@ -27,10 +27,10 @@ jobs:
     - uses: actions/checkout@v4
     - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
     - name: Build type system
-      run: cargo build -p relayrl_types --verbose
+      run: cargo build -p relayrl_types --release --verbose
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Build framework
-      run: cargo build -p relayrl_framework --verbose
+      run: cargo build -p relayrl_framework --release --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --release --verbose
