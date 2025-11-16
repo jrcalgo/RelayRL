@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.11] - 2025-11-15
+
+### Fixed
+- **Model Step Mask Handling** - Fixed mask tensor conversion in `ModelModule::step()`
+  - Corrected match statement syntax for `AnyBurnTensor` pattern matching
+  - Fixed mask reference to use `ref` to avoid moving the mask value
+  - Added proper error handling with `.expect()` for mask tensor conversion failures
+- **Model Validation** - Updated `validate_model_shapes()` to use the new 3-tuple return signature from `step()`
+  - Now correctly destructures `(TensorData, Option<TensorData>, HashMap)` return value
+
+### Changed
+- **Default Features** - Restored `codec-full` to default features for better out-of-the-box functionality
+- **Package Metadata** - Updated author email address
+
 ## [0.3.1] - 2025-11-15
 
 ### Added
