@@ -56,17 +56,21 @@ pub mod utilities {
     pub(crate) mod orchestration;
 }
 
-/// **Protocol Buffers (Protobuf) for gRPC Communication**
-///
-/// This module contains Rust code generated from `.proto` files using `tonic::include_proto!`,
-/// enabling structured message exchange between RelayRL components.
-#[cfg(feature = "grpc_network")]
-mod proto {
-    tonic::include_proto!("relayrl");
-}
-
 pub mod prelude {
-    pub use crate::network::client::agent::RelayRLAgent;
-    // pub use crate::network::server::inference_server::InferenceServer;
-    // pub use crate::network::server::training_server::TrainingServer;
+    pub mod config {
+        pub use crate::utilities::configuration::{
+            ClientConfigBuilder, ClientConfigLoader, ClientConfigParams, ServerConfigBuilder,
+            ServerConfigLoader, ServerConfigParams, TransportConfigBuilder, TransportConfigParams,
+        };
+    }
+    pub mod network {
+        pub use crate::network::client::agent::RelayRLAgent;
+        // pub use crate::network::server::inference_server::InferenceServer;
+        // pub use crate::network::server::training_server::TrainingServer;
+    }
+    pub mod templates {
+        pub use crate::templates::environment_template::{
+            EnvironmentTestingTrait, EnvironmentTrainingTrait,
+        };
+    }
 }
