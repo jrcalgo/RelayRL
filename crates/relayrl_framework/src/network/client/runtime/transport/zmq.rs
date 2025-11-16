@@ -3,10 +3,10 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 use crate::network::client::runtime::transport::SyncClientTransport;
 use crate::utilities::configuration::ClientConfigLoader;
 
-use relayrl_types::types::model::utils::validate_module;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use relayrl_types::types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
-use relayrl_types::types::model::{ModelModule, HotReloadableModel};
+use relayrl_types::types::model::utils::validate_module;
+use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 
 use burn_tensor::backend::Backend;
 use std::io::Write;
@@ -45,9 +45,9 @@ impl ZmqClient {
         );
 
         let pid: u32 = std::process::id();
-        let pid_bytes = pid.to_be_bytes();
+        let pid_bytes: [u8; _] = pid.to_be_bytes();
 
-        let mut pid_buf = [0u8; 16];
+        let mut pid_buf: [u8; 16] = [0u8; 16];
         pid_buf[..4].copy_from_slice(&pid_bytes);
 
         // Generate a unique client identity
@@ -96,7 +96,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
     fn initial_model_handshake(
         &self,
         _model_server_address: &str,
-    ) -> Result<Option<ModelModule<B>>, String> {
+    ) -> Result<Option<ModelModule<B>>, TransportError> {
         let context = Context::new();
 
         // Use agent_listener_address for handshake
@@ -104,7 +104,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             Ok(socket) => socket,
             Err(e) => {
                 eprintln!("[ZmqClient] Failed to create handshake socket: {}", e);
-                return Ok(None);
+                return Err(TransportError::ModelHandshakeError(format!(
+                    "Failed to create handshake socket: {}",
+                    e
+                )));
             }
         };
 
@@ -118,7 +121,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             Ok(_) => println!("[ZmqClient] Sent GET_MODEL request"),
             Err(e) => {
                 eprintln!("[ZmqClient] Failed to send GET_MODEL: {}", e);
-                return Ok(None);
+                return Err(TransportError::ModelHandshakeError(format!(
+                    "Failed to send GET_MODEL: {}",
+                    e
+                )));
             }
         }
 
@@ -131,10 +137,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
                     eprintln!("[ZmqClient] Malformed handshake response");
-                    return Ok(None);
+                    return Err(TransportError::ModelHandshakeError(format!(
+                        "Malformed handshake response"
+                    )));
                 }
 
-                let model_bytes = &message_parts[1];
+                let model_bytes: &Vec<u8> = &message_parts[1];
                 println!(
                     "[ZmqClient] Received initial model ({} bytes)",
                     model_bytes.len()
@@ -145,33 +153,48 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                     Ok(mut temp_file) => {
                         if let Err(e) = temp_file.write_all(model_bytes) {
                             eprintln!("[ZmqClient] Failed to write model to temp file: {}", e);
-                            return Ok(None);
+                            return Err(TransportError::ModelHandshakeError(format!(
+                                "Failed to write model to temp file: {}",
+                                e
+                            )));
                         }
 
                         match ModelModule::<B>::load_from_path(temp_file.path()) {
                             Ok(model) => {
                                 if let Err(e) = validate_module::<B>(&model) {
                                     eprintln!("[ZmqClient] Failed to validate model: {:?}", e);
-                                    return Ok(None);
+                                    return Err(TransportError::ModelHandshakeError(format!(
+                                        "Failed to validate model: {:?}",
+                                        e
+                                    )));
                                 }
                                 println!("[ZmqClient] Model loaded and validated successfully");
                                 Ok(Some(model))
                             }
                             Err(e) => {
                                 eprintln!("[ZmqClient] Failed to load model: {:?}", e);
-                                Ok(None)
+                                return Err(TransportError::ModelHandshakeError(format!(
+                                    "Failed to load model: {:?}",
+                                    e
+                                )));
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("[ZmqClient] Failed to create temp file: {}", e);
-                        Ok(None)
+                        return Err(TransportError::ModelHandshakeError(format!(
+                            "Failed to create temp file: {}",
+                            e
+                        )));
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[ZmqClient] Failed to receive model: {}", e);
-                Ok(None)
+                return Err(TransportError::ModelHandshakeError(format!(
+                    "Failed to receive model: {}",
+                    e
+                )));
             }
         }
     }
@@ -180,16 +203,20 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
         &self,
         encoded_trajectory: EncodedTrajectory,
         _training_server_address: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportError> {
         let context = Context::new();
 
         // Use trajectory_server_address for sending trajectories
         let socket = self
             .create_push_socket(&context, &self.trajectory_server_address)
-            .map_err(|e| format!("Failed to create trajectory socket: {}", e))?;
+            .map_err(|e| {
+                TransportError::SendTrajError(format!("Failed to create trajectory socket: {}", e))
+            })?;
 
         // Serialize the trajectory
-        let serialized_traj: Vec<u8> = serde_json::to_vec(&encoded_trajectory).map_err(|e| format!("Failed to serialize trajectory: {}", e))?;
+        let serialized_traj: Vec<u8> = serde_json::to_vec(&encoded_trajectory).map_err(|e| {
+            TransportError::SendTrajError(format!("Failed to serialize trajectory: {}", e))
+        })?;
 
         println!(
             "[ZmqClient] Sending trajectory ({} bytes, {} actions)",
@@ -204,9 +231,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                 Ok(())
             }
             Err(e) => {
-                let error_msg = format!("Failed to send trajectory: {}", e);
-                eprintln!("[ZmqClient] {}", error_msg);
-                Err(error_msg)
+                eprintln!("[ZmqClient] Failed to send trajectory: {}", e);
+                return Err(TransportError::SendTrajError(format!(
+                    "Failed to send trajectory: {}",
+                    e
+                )));
             }
         }
     }
@@ -215,7 +244,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
         &self,
         _model_server_address: &str,
         tx_to_router: tokio::sync::mpsc::Sender<RoutedMessage>,
-    ) {
+    ) -> Result<(), TransportError> {
         let sub_address = self.training_server_address.clone();
 
         task::spawn_blocking(move || {
@@ -226,7 +255,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             socket.set_subscribe(b"").expect("SUB subscribe failed");
             if let Err(e) = socket.connect(&sub_address) {
                 eprintln!("[ZmqClient] Failed to connect SUB socket: {}", e);
-                return;
+                return Err(TransportError::ListenForModelError(format!(
+                    "Failed to connect SUB socket: {}",
+                    e
+                )));
             }
             println!("[ZmqClient] Listening for model updates at {}", sub_address);
             loop {
@@ -244,19 +276,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                     }
                     Err(e) => {
                         eprintln!("[ZmqClient] SUB socket recv error: {}", e);
-                        break;
+                        return Err(TransportError::ListenForModelError(format!(
+                            "SUB socket recv error: {}",
+                            e
+                        )));
                     }
                 }
             }
         });
     }
 
-    fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String> {
+    fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), TransportError> {
         // TODO: implement
         Ok(())
     }
 
-    fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String> {
+    fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), TransportError> {
         // TODO: implement
         Ok(())
     }

@@ -6,7 +6,7 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 
-use relayrl_types::types::data::tensor::{BackendMatcher, DeviceType, AnyBurnTensor};
+use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 
 use dashmap::DashMap;
@@ -19,12 +19,52 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-type ActorInstance<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> =
-    Arc<dyn ActorEntity<B>>;
+#[derive(Debug, Error)]
+pub enum StateManagerError {
+    FailedToCreateReloadableModelError(String),
+    ActorHandleNotFoundError(String),
+    ActorInboxNotFoundError(String),
+    ActorAlreadyTakenError(String),
+    SubscribeShutdownError(String),
+}
+
+impl std::fmt::Display for StateManagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FailedToCreateReloadableModelError(e) => write!(
+                f,
+                "[StateManagerError] Failed to create reloadable model error: {}",
+                e
+            ),
+            Self::ActorHandleNotFoundError(e) => {
+                write!(f, "[StateManagerError] Actor handle not found error: {}", e)
+            }
+            Self::ActorInboxNotFoundError(e) => {
+                write!(f, "[StateManagerError] Actor inbox not found error: {}", e)
+            }
+            Self::ActorAlreadyTakenError(e) => {
+                write!(f, "[StateManagerError] Actor already taken error: {}", e)
+            }
+            Self::SubscribeShutdownError(e) => {
+                write!(f, "[StateManagerError] Subscribe shutdown error: {}", e)
+            }
+        }
+    }
+}
+
+type ActorInstance<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> = Arc<dyn ActorEntity<B>>;
 pub type ActorUuid = Uuid;
 
 /// In-memory actor state management and global channel transport
-pub(crate) struct StateManager<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
+pub(crate) struct StateManager<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
     shared_config: Arc<RwLock<ClientConfigLoader>>,
     default_model: Option<ModelModule<B>>,
     pub(crate) global_bus_tx: Sender<RoutedMessage>,
@@ -34,7 +74,9 @@ pub(crate) struct StateManager<B: Backend + BackendMatcher<Backend = B>, const D
     actor_router_addresses: DashMap<ActorUuid, RouterUuid>,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> StateManager<B, D_IN, D_OUT> {
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    StateManager<B, D_IN, D_OUT>
+{
     pub(crate) fn new(
         shared_config: Arc<RwLock<ClientConfigLoader>>,
         default_model: Option<ModelModule<B>>,
@@ -62,29 +104,44 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         transport: Arc<TransportClient<B>>,
-    ) {
+    ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&id) {
-            eprintln!("[StateManager] Actor ID already exists, replacing existing actor...");
-            self.__remove_actor(id);
+            println!(
+                "[StateManager] Actor ID {} already exists, replacing existing actor...",
+                id
+            );
+            self.__remove_actor(id)?
         }
 
         // check fn param
         let reloadable_model: Option<HotReloadableModel<B>> = if let Some(model) = default_model {
-            Some(HotReloadableModel::<B>::new_from_module(model, device.clone()).await.expect("[StateManager] Failed to create reloadable default model..."))
+            Some(
+                HotReloadableModel::<B>::new_from_module(model, device.clone())
+                    .await
+                    .map_err(|_| {
+                        StateManagerError::FailedToCreateReloadableModelError(format!("[StateManager] Failed to create reloadable default model from ModelModule argument..."))
+                    })?,
+            )
         // check if current struct default_model is Some
         } else if let Some(model) = { self.default_model.clone() } {
-            Some(HotReloadableModel::<B>::new_from_module(model, device.clone()).await.expect("[StateManager] Failed to create reloadable default model..."))
+            Some(
+                HotReloadableModel::<B>::new_from_module(model, device.clone())
+                    .await
+                    .map_err(|_| {
+                        StateManagerError::FailedToCreateReloadableModelError(format!("[StateManager] Failed to create reloadable default model from cached default_model..."))
+                    })?,
+            )
         // try taking once from cached default_model
         } else {
             // lazily load from config if configured
-            let loader = self.shared_config.clone();
-            let default_model_path_str = loader
+            let loader: Arc<RwLock<ClientConfigLoader>> = self.shared_config.clone();
+            let default_model_path_str: String = loader
                 .read()
                 .await
                 .client_config
                 .default_model_path
                 .to_str()
-                .expect("[StateManager] Failed to convert path to string")
+                .unwrap_or_default()
                 .to_string();
 
             if !default_model_path_str.is_empty() {
@@ -94,7 +151,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         device.clone(),
                     )
                     .await
-                    .expect("[StateManager] Failed to load model from path"),
+                    .map_err(|_| {
+                        StateManagerError::FailedToCreateReloadableModelError(format!(
+                            "[StateManager] Failed to load model from path"
+                        ))
+                    })?,
                 )
             } else {
                 let local_model_path_str: String = loader
@@ -103,8 +164,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .transport_config
                     .local_model_path
                     .to_str()
-                    .expect("[StateManager] Failed to convert path to string")
+                    .unwrap_or_default()
                     .to_string();
+
                 if !local_model_path_str.is_empty() {
                     Some(
                         HotReloadableModel::<B>::new_from_path(
@@ -117,7 +179,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             device.clone(),
                         )
                         .await
-                        .expect("[StateManager] Failed to load model from path"),
+                        .map_err(|_| {
+                            StateManagerError::FailedToCreateReloadableModelError(format!(
+                                "[StateManager] Failed to load model from path"
+                            ))
+                        })?,
                     )
                 } else {
                     None
@@ -164,9 +230,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             actor.spawn_loop().await
         }));
         self.actor_handles.insert(id, handle);
+        Ok(())
     }
 
-    pub(crate) async fn __shutdown_all_actors(&self) {
+    pub(crate) async fn __shutdown_all_actors(&self) -> Result<(), StateManagerError> {
         // Send Shutdown message to every actor inbox; actors will flush and exit
         for entry in self.actor_inboxes.iter() {
             let actor_id = *entry.key();
@@ -178,59 +245,103 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             };
             let _ = tx.send(shutdown_msg).await;
 
-            let handle = self
-                .actor_handles
-                .get(&actor_id)
-                .expect("[StateManager] Actor handle not found");
-            handle.abort();
+            let handle = self.actor_handles.get(&actor_id).ok_or(
+                StateManagerError::ActorHandleNotFoundError(format!(
+                    "[StateManager] Actor handle not found"
+                )),
+            );
+            if let Ok(handle) = handle {
+                handle.abort();
+            } else {
+                return Err(StateManagerError::ActorHandleNotFoundError(format!(
+                    "[StateManager] Actor handle not found"
+                )));
+            }
         }
+        Ok(())
     }
 
     pub(crate) fn spawn_shutdown_watcher(
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         lifecycle: LifeCycleManager,
-    ) {
+    ) -> Result<(), StateManagerError> {
         tokio::spawn(async move {
-            let mut rx = lifecycle.subscribe_shutdown();
-
+            let mut rx = lifecycle
+                .subscribe_shutdown()
+                .map_err(|e| StateManagerError::SubscribeShutdownError(e.to_string()))?;
             let _ = rx.recv().await;
-            shared_state.read().await.__shutdown_all_actors().await;
+            shared_state
+                .read()
+                .await
+                .__shutdown_all_actors()
+                .await
+                .map_err(|e| {
+                    StateManagerError::ShutdownAllActorsError(format!(
+                        "Failed to shutdown all actors: {}",
+                        e
+                    ))
+                });
         });
     }
 
-    pub(crate) fn __remove_actor(&mut self, id: Uuid) {
+    pub(crate) fn __remove_actor(&mut self, id: Uuid) -> Result<(), StateManagerError> {
         if let Some((_, handle)) = self.actor_handles.remove(&id) {
             handle.abort();
         }
 
         self.actor_inboxes.remove(&id);
+        Ok(())
     }
 
     pub(crate) fn __get_actors(
         &self,
-    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
-        let actor_ids = self.get_actor_id_list();
-        let actor_handles = actor_ids
+    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), StateManagerError> {
+        let actor_ids: Vec<Uuid> = self.get_actor_id_list();
+        let actor_handles: Vec<Arc<JoinHandle<()>>> = actor_ids
             .iter()
-            .map(|id| self.get_actor_handle(*id).unwrap())
-            .collect();
+            .map(|id| {
+                self.get_actor_handle(*id)
+                    .ok_or(StateManagerError::ActorHandleNotFoundError(
+                        "[StateManager] Actor handle not found".to_string(),
+                    ))
+            })
+            .collect::<Result<Vec<Arc<JoinHandle<()>>>, StateManagerError>>()?;
         Ok((actor_ids, actor_handles))
     }
 
-    pub(crate) fn __set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
-        let current_id_handle = match StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, current_id) {
-            Some(handle) => handle.clone(),
-            None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
-        };
-        let current_id_inbox = match StateManager::<B, D_IN, D_OUT>::get_actor_inbox(self, current_id) {
-            Some(inbox) => inbox.clone(),
-            None => return Err(format!("[StateManager] Actor ID {} not found", current_id)),
-        };
+    pub(crate) fn __set_actor_id(
+        &self,
+        current_id: Uuid,
+        new_id: Uuid,
+    ) -> Result<(), StateManagerError> {
+        let current_id_handle =
+            match StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, current_id) {
+                Some(handle) => handle.clone(),
+                None => {
+                    return Err(StateManagerError::ActorHandleNotFoundError(format!(
+                        "[StateManager] Actor ID {} not found",
+                        current_id
+                    )));
+                }
+            };
+        let current_id_inbox =
+            match StateManager::<B, D_IN, D_OUT>::get_actor_inbox(self, current_id) {
+                Some(inbox) => inbox.clone(),
+                None => {
+                    return Err(StateManagerError::ActorInboxNotFoundError(format!(
+                        "[StateManager] Actor ID {} not found",
+                        current_id
+                    )));
+                }
+            };
 
         if StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, new_id).is_some()
             || StateManager::<B, D_IN, D_OUT>::get_actor_inbox(self, new_id).is_some()
         {
-            return Err(format!("[StateManager] Actor ID {} already taken", new_id));
+            return Err(StateManagerError::ActorAlreadyTakenError(format!(
+                "[StateManager] Actor ID {} already taken",
+                new_id
+            )));
         }
 
         self.actor_handles.insert(new_id, current_id_handle);

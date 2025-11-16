@@ -15,8 +15,8 @@ use crate::utilities::observability::metrics::MetricsManager;
 use burn_tensor::{Tensor, backend::Backend};
 use relayrl_types::prelude::DeviceType;
 use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
-use relayrl_types::types::model::{ModelModule, HotReloadableModel};
-use relayrl_types::types::data::tensor::{BackendMatcher, TensorData, AnyBurnTensor};
+use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
+use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +29,41 @@ use uuid::Uuid;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
-pub trait ClientInterface<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
+#[derive(Debug, Error)]
+pub enum CoordinatorError {
+    ScaleManagerError(ScaleManagerError),
+    StateManagerError(StateManagerError),
+    LifeCycleManagerError(LifeCycleManagerError),
+    LoggingError(LoggingError),
+    MetricsError(MetricsError),
+    ConfigError(String),
+}
+
+impl std::fmt::Display for CoordinatorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ScaleManagerError(e) => {
+                write!(f, "[CoordinatorError] Scale manager error: {}", e)
+            }
+            Self::StateManagerError(e) => {
+                write!(f, "[CoordinatorError] State manager error: {}", e)
+            }
+            Self::LifeCycleManagerError(e) => {
+                write!(f, "[CoordinatorError] Life cycle manager error: {}", e)
+            }
+            Self::LoggingError(e) => write!(f, "[CoordinatorError] Logging error: {}", e),
+            Self::MetricsError(e) => write!(f, "[CoordinatorError] Metrics error: {}", e),
+            Self::ConfigError(e) => write!(f, "[CoordinatorError] Config error: {}", e),
+        }
+    }
+}
+
+pub trait ClientInterface<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+>
+{
     fn new(transport_type: TransportType) -> Self;
     async fn _start(
         self,
@@ -39,8 +73,8 @@ pub trait ClientInterface<B: Backend + BackendMatcher<Backend = B>, const D_IN: 
         _algorithm_name: String,
         config_path: Option<PathBuf>,
         codec: Option<CodecConfig>,
-    );
-    async fn _shutdown(&mut self);
+    ) -> Result<(), CoordinatorError>;
+    async fn _shutdown(&mut self) -> Result<(), CoordinatorError>;
     async fn _restart(
         self,
         actor_count: i64,
@@ -48,26 +82,43 @@ pub trait ClientInterface<B: Backend + BackendMatcher<Backend = B>, const D_IN: 
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
         config_path: Option<PathBuf>,
-        codec: Option<CodecConfig>
-    );
-    async fn _new_actor(&self, device: DeviceType, default_model: Option<ModelModule<B>>);
-    async fn _remove_actor(&mut self, id: Uuid);
-    async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String>;
-    async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String>;
+        codec: Option<CodecConfig>,
+    ) -> Result<(), CoordinatorError>;
+    async fn _new_actor(
+        &self,
+        device: DeviceType,
+        default_model: Option<ModelModule<B>>,
+    ) -> Result<(), CoordinatorError>;
+    async fn _remove_actor(&mut self, id: Uuid) -> Result<(), CoordinatorError>;
+    async fn _get_actors(
+        &self,
+    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError>;
+    async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), CoordinatorError>;
     async fn _request_action(
         &self,
         ids: Vec<Uuid>,
         observation: AnyBurnTensor<B, D_IN>,
         mask: AnyBurnTensor<B, D_OUT>,
         reward: f32,
-    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String>;
-    async fn _flag_last_action(&self, ids: Vec<Uuid>, reward: Option<f32>);
-    async fn _get_model_version(&self, ids: Vec<Uuid>) -> Result<Vec<(Uuid, i64)>, String>;
-    async fn _scale_up(&mut self, router_add: u32);
-    async fn _scale_down(&mut self, router_remove: u32);
+    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, CoordinatorError>;
+    async fn _flag_last_action(
+        &self,
+        ids: Vec<Uuid>,
+        reward: Option<f32>,
+    ) -> Result<(), CoordinatorError>;
+    async fn _get_model_version(
+        &self,
+        ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, i64)>, CoordinatorError>;
+    async fn _scale_up(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
+    async fn _scale_down(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
 }
 
-pub struct CoordinatorParams<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
+pub struct CoordinatorParams<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
     logger: LoggingBuilder,
     lifecycle: LifeCycleManager,
     state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
@@ -75,12 +126,18 @@ pub struct CoordinatorParams<B: Backend + BackendMatcher<Backend = B>, const D_I
     metrics: MetricsManager,
 }
 
-pub struct ClientCoordinator<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
+pub struct ClientCoordinator<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
     transport_type: TransportType,
     runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT> {
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
+{
     fn new(transport_type: TransportType) -> Self {
         Self {
             transport_type,
@@ -96,19 +153,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         _algorithm_name: String,
         config_path: Option<PathBuf>,
         codec: Option<CodecConfig>,
-    ) {
+    ) -> Result<(), CoordinatorError> {
         let logger = LoggingBuilder::new();
 
         let config_path: PathBuf = match config_path {
             Some(path) => path,
             None => match DEFAULT_CLIENT_CONFIG_PATH.clone() {
                 Some(path) => path,
-                None => {
-                    eprintln!(
-                        "[Coordinator] No config path provided and default config path not found..."
-                    );
-                    std::process::exit(1);
-                }
+                None => return Err(CoordinatorError::ConfigError(
+                    "[Coordinator] No config path provided and default config path not found..."
+                        .to_string(),
+                )),
             },
         };
 
@@ -178,8 +233,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ),
         };
 
-        let shared_global_bus_rx = Arc::new(RwLock::new(global_bus_rx));
-        let shared_state = Arc::from(RwLock::new(state));
+        let shared_global_bus_rx: Arc<RwLock<tokio::sync::mpsc::Receiver<RoutedMessage>>> =
+            Arc::new(RwLock::new(global_bus_rx));
+        let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
         // Subscribe to lifecycle shutdown and propagate to all actors
         StateManager::spawn_shutdown_watcher(shared_state.clone(), lifecycle.clone());
         let mut scaling = ScaleManager::new(
@@ -193,11 +249,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             codec,
         )
         .with_lifecycle(lifecycle.clone());
-        scaling.__scale_up(1).await;
+        if let Err(e) = scaling.__scale_up(1).await {
+            return Err(CoordinatorError::ScaleManagerError(e));
+        }
 
         if actor_count > 0 {
             for _ in 0..actor_count {
-                Self::_new_actor(&self, default_device.clone(), default_model.clone()).await;
+                Self::_new_actor(&self, default_device.clone(), default_model.clone()).await?;
             }
         }
 
@@ -210,13 +268,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             scaling,
             metrics,
         });
+        Ok(())
     }
 
-    async fn _shutdown(&mut self) {
+    async fn _shutdown(&mut self) -> Result<(), CoordinatorError> {
         if let Some(mut runtime_params) = self.runtime_params.take() {
             runtime_params.lifecycle._shutdown();
 
-            StateManager::<B, D_IN, D_OUT>::__shutdown_all_actors(&*runtime_params.state.read().await);
+            StateManager::<B, D_IN, D_OUT>::__shutdown_all_actors(
+                &*runtime_params.state.read().await,
+            );
 
             let router_count: u32 = runtime_params
                 .scaling
@@ -225,9 +286,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .map(|m| m.len() as u32)
                 .unwrap_or(0);
             if router_count > 0 {
-                runtime_params.scaling.__scale_down(router_count).await;
+                if let Err(e) = runtime_params.scaling.__scale_down(router_count).await {
+                    return Err(CoordinatorError::ScaleManagerError(e));
+                }
             }
         }
+        Ok(())
     }
 
     async fn _restart(
@@ -237,9 +301,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
         config_path: Option<PathBuf>,
-        codec: Option<CodecConfig>
-    ) {
-        self._shutdown().await;
+        codec: Option<CodecConfig>,
+    ) -> Result<(), CoordinatorError> {
+        self._shutdown().await?;
         self._start(
             actor_count,
             default_device,
@@ -248,10 +312,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             config_path,
             codec,
         )
-        .await;
+        .await?;
+        Ok(())
     }
 
-    async fn _new_actor(&self, device: DeviceType, default_model: Option<ModelModule<B>>) {
+    async fn _new_actor(
+        &self,
+        device: DeviceType,
+        default_model: Option<ModelModule<B>>,
+    ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 let pid: u32 = std::process::id();
@@ -274,43 +343,58 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         default_model,
                         params.scaling.shared_transport.clone(),
                     )
-                    .await;
+                    .await?;
+                Ok(())
             }
-            None => {
-                eprintln!("[Coordinator] No runtime instance to _new_actor...");
-            }
+            None => Err("[Coordinator] No runtime instance to _new_actor...".to_string()),
         }
     }
 
-    async fn _remove_actor(&mut self, id: Uuid) {
+    async fn _remove_actor(&mut self, id: Uuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 params.metrics.record_counter("actors_removed", 1, &[]);
-                params.state.write().await.__remove_actor(id);
+                params
+                    .state
+                    .write()
+                    .await
+                    .__remove_actor(id)
+                    .map_err(|e| CoordinatorError::StateManagerError(e))?;
+                Ok(())
             }
-            None => {
-                eprintln!("[Coordinator] No runtime instance to _remove_actor...");
-            }
+            None => Err("[Coordinator] No runtime instance to _remove_actor...".to_string()),
         }
     }
 
-    async fn _get_actors(&self) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), String> {
+    async fn _get_actors(
+        &self,
+    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => Ok(StateManager::<B, D_IN, D_OUT>::__get_actors(
                 &*params.state.read().await,
-            )?),
-            None => {
-                Err("[Coordinator] No runtime parameter instance to _get_actors...".to_string())
-            }
+            ))
+            .map_err(|e| CoordinatorError::StateManagerError(e))?,
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::GetActorsError(
+                    "[Coordinator] No runtime parameter instance to _get_actors...".to_string(),
+                ),
+            )),
         }
     }
 
-    async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), String> {
+    async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => {
-                StateManager::<B, D_IN, D_OUT>::__set_actor_id(&*params.state.write().await, current_id, new_id)
-            }
-            None => Err("[Coordinator] No runtime instance to _shutdown...".to_string()),
+            Some(params) => StateManager::<B, D_IN, D_OUT>::__set_actor_id(
+                &*params.state.write().await,
+                current_id,
+                new_id,
+            )
+            .map_err(|e| CoordinatorError::StateManagerError(e))?,
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::SetActorIdError(
+                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                ),
+            )),
         }
     }
 
@@ -320,7 +404,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         observation: AnyBurnTensor<B, D_IN>,
         mask: AnyBurnTensor<B, D_OUT>,
         reward: f32,
-    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, String> {
+    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 let start_time = Instant::now();
@@ -330,11 +414,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let router_runtime_params = self
                     .runtime_params
                     .as_ref()
-                    .expect("No runtime params")
+                    .ok_or(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::GetRouterRuntimeParamsError(
+                            "[Coordinator] No runtime params".to_string(),
+                        ),
+                    ))?
                     .scaling
                     .runtime_params
                     .as_ref()
-                    .expect("No scaling runtime params");
+                    .ok_or(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::GetRouterRuntimeParamsError(
+                            "[Coordinator] No scaling runtime params".to_string(),
+                        ),
+                    ))?;
 
                 for id in ids {
                     if !router_runtime_params.contains_key(&id) {
@@ -356,14 +448,31 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     let sender = router_runtime_params
                         .get(&id)
-                        .expect("No router runtime params")
+                        .ok_or(CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::GetRouterRuntimeParamsError(
+                                "[Coordinator] No router runtime params".to_string(),
+                            ),
+                        ))?
                         .tx_to_router
                         .clone();
-                    let _ = sender.send(action_request_message).await;
+
+                    if let Err(e) = sender
+                        .send(action_request_message)
+                        .await
+                        .map_err(|e| e.to_string())
+                    {
+                        return Err(CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::SendActionRequestError(e),
+                        ));
+                    }
 
                     match resp_rx.await.map_err(|e| e.to_string()) {
                         Ok(action) => actions.push((id, action)),
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            return Err(CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::ReceiveActionResponseError(e),
+                            ));
+                        }
                     }
                 }
 
@@ -377,23 +486,40 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 Ok(actions)
             }
-            None => Err("[Coordinator] No runtime instance to _shutdown..."
-                .parse()
-                .unwrap()),
+            None => Err(CoordinatorError::ScaleManagerError(
+                ScaleManagerError::GetRouterRuntimeParamsError(
+                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                ),
+            )),
         }
     }
 
-    async fn _flag_last_action(&self, ids: Vec<Uuid>, reward: Option<f32>) {
+    async fn _flag_last_action(
+        &self,
+        ids: Vec<Uuid>,
+        reward: Option<f32>,
+    ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(_) => {
-                let router_runtime_params = self
+                let router_runtime_params: &dashmap::DashMap<
+                    Uuid,
+                    super::scale_manager::RouterRuntimeParams,
+                > = self
                     .runtime_params
                     .as_ref()
-                    .expect("No runtime params")
+                    .ok_or(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::GetRouterRuntimeParamsError(
+                            "[Coordinator] No runtime params".to_string(),
+                        ),
+                    ))?
                     .scaling
                     .runtime_params
                     .as_ref()
-                    .expect("No scaling runtime params");
+                    .ok_or(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::GetRouterRuntimeParamsError(
+                            "[Coordinator] No scaling runtime params".to_string(),
+                        ),
+                    ))?;
 
                 for id in ids {
                     if !router_runtime_params.contains_key(&id) {
@@ -409,30 +535,56 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     let sender = router_runtime_params
                         .get(&id)
-                        .expect("No router runtime params")
+                        .ok_or(CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::GetRouterRuntimeParamsError(
+                                "[Coordinator] No router runtime params".to_string(),
+                            ),
+                        ))?
                         .tx_to_router
                         .clone();
-                    let _ = sender.send(flag_last_action_message).await;
+                    if let Err(e) = sender
+                        .send(flag_last_action_message)
+                        .await
+                        .map_err(|e| e.to_string())
+                    {
+                        return Err(CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::SendFlagLastActionMessageError(e),
+                        ));
+                    }
                 }
+                Ok(())
             }
-            None => {
-                eprintln!("[Coordinator] No runtime instance to _shutdown...");
-            }
+            None => Err(CoordinatorError::ScaleManagerError(
+                ScaleManagerError::GetRouterRuntimeParamsError(
+                    "[Coordinator] No runtime instance to _flag_last_action...".to_string(),
+                ),
+            )),
         }
     }
 
-    async fn _get_model_version(&self, ids: Vec<Uuid>) -> Result<Vec<(Uuid, i64)>, String> {
+    async fn _get_model_version(
+        &self,
+        ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, i64)>, CoordinatorError> {
         match &self.runtime_params {
             Some(_) => {
                 let mut versions = Vec::with_capacity(ids.len());
                 let router_runtime_params = self
                     .runtime_params
                     .as_ref()
-                    .expect("No runtime params")
+                    .ok_or(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::GetRouterRuntimeParamsError(
+                            "[Coordinator] No runtime params".to_string(),
+                        ),
+                    ))?
                     .scaling
                     .runtime_params
                     .as_ref()
-                    .expect("No scaling runtime params");
+                    .ok_or(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::GetRouterRuntimeParamsError(
+                            "[Coordinator] No scaling runtime params".to_string(),
+                        ),
+                    ))?;
 
                 for id in ids {
                     if !router_runtime_params.contains_key(&id) {
@@ -449,41 +601,69 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     let sender = router_runtime_params
                         .get(&id)
-                        .expect("No router runtime params")
+                        .ok_or(CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::GetRouterRuntimeParamsError(
+                                "[Coordinator] No router runtime params".to_string(),
+                            ),
+                        ))?
                         .tx_to_router
                         .clone();
-                    let _ = sender.send(model_version_message).await;
+                    if let Err(e) = sender
+                        .send(model_version_message)
+                        .await
+                        .map_err(|e| e.to_string())
+                    {
+                        return Err(CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::SendModelVersionMessageError(e),
+                        ));
+                    }
 
                     match resp_rx.await.map_err(|e| e.to_string()) {
                         Ok(model_version) => versions.push((id, model_version)),
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            return Err(CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::ReceiveModelVersionResponseError(e),
+                            ));
+                        }
                     }
                 }
                 Ok(versions)
             }
-            None => Err("[Coordinator] No runtime instance to _shutdown...".to_string()),
+            None => Err(CoordinatorError::ScaleManagerError(
+                ScaleManagerError::GetRouterRuntimeParamsError(
+                    "[Coordinator] No runtime instance to _get_model_version...".to_string(),
+                ),
+            )),
         }
     }
 
-    async fn _scale_up(&mut self, router_add: u32) {
+    async fn _scale_up(&mut self, router_add: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
-                params.scaling.__scale_up(router_add).await;
+                return params
+                    .scaling
+                    .__scale_up(router_add)
+                    .await
+                    .map_err(|e| CoordinatorError::ScaleManagerError(e));
             }
-            None => {
-                eprintln!("[Coordinator] No runtime instance to _shutdown...");
-            }
+            None => Err(CoordinatorError::ScaleManagerError(
+                ScaleManagerError::GetRouterRuntimeParamsError(
+                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                ),
+            )),
         }
     }
 
-    async fn _scale_down(&mut self, router_remove: u32) {
+    async fn _scale_down(&mut self, router_remove: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
-                params.scaling.__scale_down(router_remove).await;
+                return params.scaling.__scale_down(router_remove).await;
             }
-            None => {
-                eprintln!("[Coordinator] No runtime instance to _shutdown...");
-            }
+            None => Err(CoordinatorError::ScaleManagerError(
+                ScaleManagerError::GetRouterRuntimeParamsError(
+                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                ),
+            )),
         }
     }
 }

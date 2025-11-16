@@ -1,6 +1,6 @@
 use relayrl_types::Hyperparams;
 use relayrl_types::types::data::action::{RelayRLAction, RelayRLData};
-use relayrl_types::types::data::tensor::{TensorData, AnyBurnTensor};
+use relayrl_types::types::data::tensor::{AnyBurnTensor, TensorData};
 
 use rand::Rng;
 use std::collections::HashMap;

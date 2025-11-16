@@ -19,6 +19,45 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+#[derive(Debug, Error)]
+pub enum ScaleManagerError {
+    SendScalingWarningError(TransportError),
+    SendScalingCompleteError(TransportError),
+    SubscribeShutdownError(LifeCycleManagerError),
+    SpawnCentralFilterError(String),
+    SpawnExternalReceiverError(ExternalReceiverError),
+    SpawnExternalSenderError(ExternalSenderError),
+}
+
+impl std::fmt::Display for ScaleManagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SendScalingWarningError(e) => {
+                write!(f, "[ScaleManagerError] Send scaling warning error: {}", e)
+            }
+            Self::SendScalingCompleteError(e) => {
+                write!(f, "[ScaleManagerError] Send scaling complete error: {}", e)
+            }
+            Self::SubscribeShutdownError(e) => {
+                write!(f, "[ScaleManagerError] Subscribe shutdown error: {}", e)
+            }
+            Self::SpawnCentralFilterError(e) => {
+                write!(f, "[ScaleManagerError] Spawn central filter error: {}", e)
+            }
+            Self::SpawnExternalReceiverError(e) => {
+                write!(
+                    f,
+                    "[ScaleManagerError] Spawn external receiver error: {}",
+                    e
+                )
+            }
+            Self::SpawnExternalSenderError(e) => {
+                write!(f, "[ScaleManagerError] Spawn external sender error: {}", e)
+            }
+        }
+    }
+}
+
 pub(crate) struct ServerAddresses {
     agent_listener_address: String,
     training_server_address: String,
@@ -38,7 +77,11 @@ pub(crate) struct RouterRuntimeParams {
 
 pub type RouterUuid = Uuid;
 
-pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
+pub(crate) struct ScaleManager<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shared_config: Arc<RwLock<ClientConfigLoader>>,
     pub(crate) shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
@@ -50,7 +93,9 @@ pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>, const D
     codec: CodecConfig,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ScaleManager<B, D_IN, D_OUT> {
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    ScaleManager<B, D_IN, D_OUT>
+{
     pub(crate) fn new(
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
@@ -73,7 +118,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             },
             rx_from_actor: Arc::new(RwLock::new(rx_from_actor)),
             lifecycle: None,
-            codec: codec.unwrap_or_default()
+            codec: codec.unwrap_or_default(),
         }
     }
 
@@ -82,11 +127,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self
     }
 
-    pub(crate) async fn __scale_up(&mut self, router_add: u32) {
+    pub(crate) async fn __scale_up(&mut self, router_add: u32) -> Result<(), ScaleManagerError> {
         if let Err(e) = self._send_scaling_warning(ScalingOperation::ScaleUp).await {
-            eprintln!("Failed to send scaling warning via transport: {}", e);
-            eprintln!("Aborting scale up operation...");
-            return;
+            return Err(ScaleManagerError::SendScalingWarningError(e));
         }
 
         if self.runtime_params.is_none() {
@@ -109,7 +152,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .with_transport(self.shared_transport.clone());
 
             let receiver = if let Some(lc) = &self.lifecycle {
-                receiver.with_shutdown(lc.subscribe_shutdown())
+                receiver.with_shutdown(
+                    lc.subscribe_shutdown()
+                        .map_err(|e| ScaleManagerError::SubscribeShutdownError(e))?,
+                )
             } else {
                 receiver
             };
@@ -118,7 +164,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let filter_rx = self.shared_global_bus_rx.clone();
             let filter = ClientFilter::new(filter_rx, shared_filter_state);
             let filter = if let Some(lc) = &self.lifecycle {
-                filter.with_shutdown(lc.subscribe_shutdown())
+                filter.with_shutdown(
+                    lc.subscribe_shutdown()
+                        .map_err(|e| ScaleManagerError::SubscribeShutdownError(e))?,
+                )
             } else {
                 filter
             };
@@ -127,11 +176,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let sender = ClientExternalSender::new(
                 self.rx_from_actor.clone(),
                 self.server_addresses.training_server_address.clone(),
-                self.codec.clone()
+                self.codec.clone(),
             )
             .with_transport(self.shared_transport.clone());
             let sender = if let Some(lc) = &self.lifecycle {
-                sender.with_shutdown(lc.subscribe_shutdown())
+                sender.with_shutdown(
+                    lc.subscribe_shutdown()
+                        .map_err(|e| ScaleManagerError::SubscribeShutdownError(e.to_string()))?,
+                )
             } else {
                 sender
             };
@@ -182,20 +234,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             eprintln!("Rolling back newly created routers...");
             self._rollback_routers(&new_router_ids).await;
 
-            let _ = self._send_scaling_complete(ScalingOperation::ScaleUp).await;
-            return;
+            return self._send_scaling_complete(ScalingOperation::ScaleUp).await;
         }
 
         let router_ids: Vec<RouterUuid> = self
             .runtime_params
             .as_ref()
-            .expect("Runtime params should be initialized")
+            .ok_or("[ScaleManager] Runtime params should be initialized".to_string())?
             .iter()
             .map(|router| *router.key())
             .collect();
 
-        let old_actor_mappings =
-            StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&self.shared_state.blocking_read());
+        let old_actor_mappings = StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(
+            &self.shared_state.blocking_read(),
+        );
 
         StateManager::<B, D_IN, D_OUT>::distribute_actors(
             &self.shared_state.blocking_write(),
@@ -203,8 +255,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         );
 
         if let Err(e) = self._send_scaling_complete(ScalingOperation::ScaleUp).await {
-            eprintln!("Failed to send scaling confirmation via transport: {}", e);
-            eprintln!("Server was not notified of scaling completion.");
             eprintln!(
                 "Rolling back: removing newly created routers and restoring actor mappings..."
             );
@@ -216,24 +266,33 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             self._rollback_routers(&new_router_ids).await;
 
-            eprintln!("Rollback complete. System restored to pre-scaling state.");
-            return;
+            eprintln!(
+                "[ScaleManager] Failed to send scaling confirmation via transport: {}.
+            \nServer was not notified of scaling completion.
+            \n\n Rollback complete. System restored to pre-scaling router state.",
+                e
+            );
+
+            return Err(e);
         }
 
-        eprintln!(
+        println!(
             "Scale up successful: {} new router(s) added, total routers: {}",
             router_add, current_router_count
         );
+
+        Ok(())
     }
 
-    pub(crate) async fn __scale_down(&mut self, router_remove: u32) {
+    pub(crate) async fn __scale_down(
+        &mut self,
+        router_remove: u32,
+    ) -> Result<(), ScaleManagerError> {
         if let Err(e) = self
             ._send_scaling_warning(ScalingOperation::ScaleDown)
             .await
         {
-            eprintln!("Failed to send scaling warning via transport: {}", e);
-            eprintln!("Aborting scale down operation...");
-            return;
+            return Err(ScaleManagerError::SendScalingWarningError(e));
         }
 
         match self.runtime_params {
@@ -246,15 +305,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         router_remove, initial_router_count
                     );
 
-                    let _ = self
+                    let result: Result<(), ScaleManagerError> = self
                         ._send_scaling_complete(ScalingOperation::ScaleDown)
                         .await;
-                    return;
+
+                    return result;
                 }
 
-                let old_actor_mappings = StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(
-                    &self.shared_state.blocking_read(),
-                );
+                let old_actor_mappings: Vec<(Uuid, Uuid)> =
+                    StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(
+                        &self.shared_state.blocking_read(),
+                    );
 
                 let (router_ids, removed_routers, current_router_count) =
                     tokio::task::block_in_place(|| {
@@ -289,10 +350,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         params.insert(router_id, router_params);
                     }
 
-                    let _ = self
+                    let result: Result<(), ScaleManagerError> = self
                         ._send_scaling_complete(ScalingOperation::ScaleDown)
                         .await;
-                    return;
+
+                    return result;
                 }
 
                 for (router_id, router_params) in &removed_routers {
@@ -310,30 +372,36 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ._send_scaling_complete(ScalingOperation::ScaleDown)
                     .await
                 {
-                    eprintln!("Failed to send scaling confirmation via transport: {}", e);
-                    eprintln!("Server was not notified of scaling completion.");
-                    eprintln!("WARNING: Routers have been removed and cannot be restored.");
                     eprintln!("Restoring actor mappings to best-effort state...");
-
                     self.shared_state
                         .blocking_write()
                         .restore_actor_router_mappings(old_actor_mappings);
 
-                    eprintln!("Partial rollback complete. Manual intervention may be required.");
-                    return;
+                    eprintln!(
+                        "[ScaleManager] Failed to send scaling confirmation via transport: {}.
+                        \nServer was not notified of scaling completion.
+                        \n\nWARNING: Routers have been removed and cannot be restored.
+                        \n\nPartial rollback complete. Manual intervention may be required.",
+                        e
+                    );
+
+                    return Err(e);
                 }
 
-                eprintln!(
+                println!(
                     "Scale down successful: {} router(s) removed, total routers: {}",
                     router_remove, current_router_count
                 );
+                Ok(())
             }
             None => {
-                eprintln!("No routers to scale down.");
+                println!("No routers to scale down.");
 
-                let _ = self
+                let result = self
                     ._send_scaling_complete(ScalingOperation::ScaleDown)
                     .await;
+
+                return result;
             }
         }
     }
@@ -351,41 +419,72 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String> {
+    async fn _send_scaling_warning(
+        &self,
+        operation: ScalingOperation,
+    ) -> Result<(), ScaleManagerError> {
         match &*self.shared_transport {
             #[cfg(feature = "grpc_network")]
-            TransportClient::Async(async_transport) => {
-                async_transport.send_scaling_warning(operation).await
-            }
+            TransportClient::Async(async_transport) => async_transport
+                .send_scaling_warning(operation)
+                .await
+                .map_err(|e| ScaleManagerError::SendScalingWarningError(e)),
             #[cfg(feature = "zmq_network")]
             TransportClient::Sync(sync_transport) => {
                 tokio::task::block_in_place(|| sync_transport.send_scaling_warning(operation))
+                    .map_err(|e| ScaleManagerError::SendScalingWarningError(e))
             }
         }
     }
 
-    async fn _send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String> {
+    async fn _send_scaling_complete(
+        &self,
+        operation: ScalingOperation,
+    ) -> Result<(), ScaleManagerError> {
         match &*self.shared_transport {
             #[cfg(feature = "grpc_network")]
-            TransportClient::Async(async_transport) => {
-                async_transport.send_scaling_complete(operation).await
-            }
+            TransportClient::Async(async_transport) => async_transport
+                .send_scaling_complete(operation)
+                .await
+                .map_err(|e| ScaleManagerError::SendScalingCompleteError(e)),
             #[cfg(feature = "zmq_network")]
             TransportClient::Sync(sync_transport) => {
                 tokio::task::block_in_place(|| sync_transport.send_scaling_complete(operation))
+                    .map_err(|e| ScaleManagerError::SendScalingCompleteError(e))
             }
         }
     }
 
-    async fn _spawn_central_filter(mut router: ClientFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
-        tokio::task::spawn(async move { router.spawn_loop().await })
+    async fn _spawn_central_filter(
+        mut router: ClientFilter<B, D_IN, D_OUT>,
+    ) -> JoinHandle<Result<(), ScaleManagerError>> {
+        tokio::task::spawn(async move {
+            router
+                .spawn_loop()
+                .await
+                .map_err(|e| ScaleManagerError::SpawnCentralFilterError(e))
+        })
     }
 
-    async fn _spawn_external_receiver(receiver: ClientExternalReceiver<B>) -> JoinHandle<()> {
-        tokio::task::spawn(async move { receiver.spawn_loop().await })
+    async fn _spawn_external_receiver(
+        receiver: ClientExternalReceiver<B>,
+    ) -> JoinHandle<Result<(), ScaleManagerError>> {
+        tokio::task::spawn(async move {
+            receiver
+                .spawn_loop()
+                .await
+                .map_err(|e| ScaleManagerError::SpawnExternalReceiverError(e))
+        })
     }
 
-    async fn _spawn_external_sender(sender: ClientExternalSender<B>) -> JoinHandle<()> {
-        tokio::task::spawn(async move { sender.spawn_loop().await })
+    async fn _spawn_external_sender(
+        sender: ClientExternalSender<B>,
+    ) -> JoinHandle<Result<(), ScaleManagerError>> {
+        tokio::task::spawn(async move {
+            sender
+                .spawn_loop()
+                .await
+                .map_err(|e| ScaleManagerError::SpawnExternalSenderError(e))
+        })
     }
 }

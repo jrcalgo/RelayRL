@@ -6,12 +6,12 @@ use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
 
+use relayrl_types::prelude::AnyBurnTensor;
 use relayrl_types::types::data::action::RelayRLAction;
-use relayrl_types::types::model::{ModelError, ModelModule, HotReloadableModel};
-use relayrl_types::types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::types::data::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
-use relayrl_types::prelude::AnyBurnTensor;
+use relayrl_types::types::model::utils::{deserialize_model_module, validate_module};
+use relayrl_types::types::model::{HotReloadableModel, ModelError, ModelModule};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,9 +22,7 @@ use uuid::Uuid;
 
 use burn_tensor::{Tensor, backend::Backend};
 
-pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>:
-    Send + Sync + 'static
-{
+pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + 'static {
     async fn new(
         id: Uuid,
         device: DeviceType,
@@ -48,7 +46,11 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>:
 }
 
 /// Responsible for performing inference with an in-memory model
-pub(crate) struct Actor<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> {
+pub(crate) struct Actor<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
     id: Uuid,
     model: Option<HotReloadableModel<B>>,
     model_path: PathBuf,
@@ -78,7 +80,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     {
         let max_length = shared_config.read().await.transport_config.max_traj_length;
 
-        let mut actor = Self {
+        let mut actor: Actor<B, D_IN, D_OUT> = Self {
             id,
             model: None,
             model_path,
@@ -110,7 +112,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         while let Some(msg) = self.rx_from_router.recv().await {
             match msg.protocol {
                 RoutingProtocol::ModelHandshake => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::_initial_model_handshake(self, msg).await
+                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::_initial_model_handshake(self, msg)
+                        .await
                 }
                 RoutingProtocol::RequestInference => {
                     <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::__request_action(self, msg)
@@ -175,14 +178,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                                 // Save model to configured path
                                 if let Err(e) = model.save(&self.model_path) {
-                                    eprintln!("[Actor {:?}] Failed to save model: {:?}", self.id, e);
+                                    eprintln!(
+                                        "[Actor {:?}] Failed to save model: {:?}",
+                                        self.id, e
+                                    );
                                 }
 
                                 match &self.model {
                                     Some(model) => {
                                         let model_version = {
                                             let version = model.version() + 1;
-                                            model.reload_from_path(self.model_path.clone(), version).await
+                                            model
+                                                .reload_from_path(self.model_path.clone(), version)
+                                                .await
                                         };
 
                                         match model_version {
@@ -247,14 +255,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                                 // Save model to configured path
                                 if let Err(e) = model.save(&self.model_path) {
-                                    eprintln!("[Actor {:?}] Failed to save model: {:?}", self.id, e);
+                                    eprintln!(
+                                        "[Actor {:?}] Failed to save model: {:?}",
+                                        self.id, e
+                                    );
                                 }
-                                let version = self.model.as_ref().expect("[Actor] Model is None").version() + 1;
+                                let version = self
+                                    .model
+                                    .as_ref()
+                                    .expect("[Actor] Model is None")
+                                    .version()
+                                    + 1;
 
                                 match &self.model {
                                     Some(model) => {
-                                        let model_version =
-                                            model.reload_from_path(self.model_path.clone(), version).await;
+                                        let model_version = model
+                                            .reload_from_path(self.model_path.clone(), version)
+                                            .await;
                                         match model_version {
                                             Ok(_) => (),
                                             Err(e) => {
@@ -266,8 +283,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         }
                                     }
                                     None => {
-                                        self.model =
-                                            Some(HotReloadableModel::<B>::new_from_module(
+                                        self.model = Some(
+                                            HotReloadableModel::<B>::new_from_module(
                                                 model,
                                                 self.model_device.clone(),
                                             )
@@ -319,12 +336,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let actor_id = self.id;
                 let rt = get_or_init_tokio_runtime();
                 match rt.block_on(async {
-                    model
-                        .forward::<D_IN, D_OUT>(observation_tensor, mask_tensor, reward, actor_id)
+                    model.forward::<D_IN, D_OUT>(observation_tensor, mask_tensor, reward, actor_id)
                 }) {
                     Ok(r4sa) => {
                         self.current_traj.add_action(r4sa.clone());
-                        reply_to.send(Arc::new(r4sa)).expect("Failed to send inference... ");
+                        reply_to
+                            .send(Arc::new(r4sa))
+                            .expect("Failed to send inference... ");
                     }
                     Err(e) => {
                         eprintln!(
@@ -400,24 +418,35 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             version,
         } = msg.payload
         {
-            // TODO: Minimize creation of model module in memory
             let model: Result<ModelModule<B>, ModelError> =
                 deserialize_model_module::<B>(model_bytes, self.model_device.clone());
             let model_path: PathBuf = self.model_path.clone();
             if let Ok(ok_model) = model {
                 // Validate the model - it gets dimensions from the model itself
-                validate_module::<B>(&ok_model).map_err(|e| ModelError::UnsupportedModelType(e.to_string()));
-                ok_model
+                if let Err(e) = validate_module::<B>(&ok_model)
+                    .map_err(|e| ModelError::UnsupportedModelType(e.to_string()))
+                {
+                    eprintln!(
+                        "[ActorEntity {:?}] Failed to validate model: {:?}",
+                        self.id, e
+                    );
+                }
+                if let Err(e) = ok_model
                     .save(&model_path)
-                    .map_err(|e| ModelError::IoError(e.to_string()));
+                    .map_err(|e| ModelError::IoError(e.to_string()))
+                {
+                    eprintln!("[ActorEntity {:?}] Failed to save model: {:?}", self.id, e);
+                }
 
                 match &self.model {
-                    Some(model) => match model.reload_from_module(ok_model.clone(), version).await {
-                        Ok(_) => (),
-                        Err(e) => {
-                            eprintln!("[ActorEntity {:?}] Failed reload, {:?}", self.id, e);
+                    Some(model) => {
+                        match model.reload_from_module(ok_model.clone(), version).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                eprintln!("[ActorEntity {:?}] Failed reload, {:?}", self.id, e);
+                            }
                         }
-                    },
+                    }
                     None => {
                         eprintln!(
                             "[ActorEntity] Model does not exist, no model handshake necessary..."

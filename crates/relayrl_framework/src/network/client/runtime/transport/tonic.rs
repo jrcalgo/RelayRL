@@ -1,8 +1,4 @@
 #[cfg(feature = "grpc_network")]
-use relayrl_types::types::model::{ModelModule, HotReloadableModel};
-#[cfg(feature = "grpc_network")]
-use relayrl_types::types::model::utils::{serialize_model_module, deserialize_model_module, validate_module};
-#[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
@@ -14,6 +10,12 @@ use crate::utilities::orchestration::tonic_utils::relayrl_encoded_trajectory_to_
 use async_trait::async_trait;
 #[cfg(feature = "grpc_network")]
 use relayrl_types::types::data::trajectory::EncodedTrajectory;
+#[cfg(feature = "grpc_network")]
+use relayrl_types::types::model::utils::{
+    deserialize_model_module, serialize_model_module, validate_module,
+};
+#[cfg(feature = "grpc_network")]
+use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 #[cfg(feature = "grpc_network")]
 use std::collections::HashMap;
 #[cfg(feature = "grpc_network")]
@@ -198,7 +200,8 @@ impl TonicClient {
             return Err(format!("Failed to initialize algorithm: {}", e));
         }
 
-        let proto_trajectory = relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
+        let proto_trajectory =
+            relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
 
         match client
             .send_trajectories_with_timeout(training_server_address, vec![proto_trajectory])
@@ -234,7 +237,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
     async fn initial_model_handshake(
         &self,
         training_server_address: &str,
-    ) -> Result<Option<ModelModule<B>>, String> {
+    ) -> Result<Option<ModelModule<B>>, TransportError> {
         let mut client = Self::new(&self.config);
 
         // Initialize algorithm first
@@ -242,7 +245,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
             .initialize_algorithm_if_needed(training_server_address)
             .await
         {
-            return Err(format!("Failed to initialize algorithm: {}", e));
+            return Err(TransportError::ModelHandshakeError(format!(
+                "Failed to initialize algorithm: {}",
+                e
+            )));
         }
 
         match client
@@ -268,12 +274,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                             Ok(model) => {
                                 // Validate the model - it gets dimensions from the model itself
                                 if let Err(e) = validate_module::<B>(&model) {
-                                    return Err(format!("Failed to validate model: {:?}", e));
+                                    return Err(TransportError::ModelHandshakeError(format!(
+                                        "Failed to validate model: {:?}",
+                                        e
+                                    )));
                                 }
                                 println!("[TonicClient] Model validated and ready for use");
                                 Ok(Some(model))
                             }
-                            Err(e) => Err(format!("Failed to deserialize model: {:?}", e)),
+                            Err(e) => Err(TransportError::ModelHandshakeError(format!(
+                                "Failed to deserialize model: {:?}",
+                                e
+                            ))),
                         }
                     } else {
                         println!("[TonicClient] No model data available yet");
@@ -284,7 +296,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                     Ok(None)
                 }
             }
-            Err(e) => Err(format!("Model handshake failed: {}", e)),
+            Err(e) => Err(TransportError::ModelHandshakeError(format!(
+                "Model handshake failed: {}",
+                e
+            ))),
         }
     }
 
@@ -292,7 +307,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
         &self,
         encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
-    ) {
+    ) -> Result<(), TransportError> {
         let mut client = Self::new(&self.config);
 
         // Ensure algorithm is initialized
@@ -304,11 +319,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                 "[TonicClient] Failed to initialize algorithm before sending trajectory: {}",
                 e
             );
-            return;
+            return Err(TransportError::SendTrajError(format!(
+                "Failed to initialize algorithm before sending trajectory: {}",
+                e
+            )));
         }
 
         // Convert from the old proto format to new format
-        let proto_trajectory = relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
+        let proto_trajectory =
+            relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
 
         match client
             .send_trajectories_with_timeout(training_server_address, vec![proto_trajectory])
@@ -329,11 +348,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
             }
             Err(e) => {
                 eprintln!("[TonicClient] Failed to send trajectory: {}", e);
+                return Err(TransportError::SendTrajError(format!(
+                    "Failed to send trajectory: {}",
+                    e
+                )));
             }
         }
     }
 
-    async fn listen_for_model(&self, model_server_address: &str) {
+    async fn listen_for_model(&self, model_server_address: &str) -> Result<(), TransportError> {
         let mut client = Self::new(&self.config);
         let mut polling_interval = tokio::time::interval(Duration::from_secs(5));
 
@@ -346,7 +369,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                 "[TonicClient] Failed to initialize algorithm before listening: {}",
                 e
             );
-            return;
+            return Err(TransportError::ListenForModelError(format!(
+                "Failed to initialize algorithm before listening: {}",
+                e
+            )));
         }
 
         loop {
@@ -433,12 +459,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
     //     }
     // }
 
-    async fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), String> {
+    async fn send_scaling_warning(
+        &self,
+        operation: ScalingOperation,
+    ) -> Result<(), TransportError> {
         // TODO: implement
         Ok(())
     }
 
-    async fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), String> {
+    async fn send_scaling_complete(
+        &self,
+        operation: ScalingOperation,
+    ) -> Result<(), TransportError> {
         // TODO: implement
         Ok(())
     }
