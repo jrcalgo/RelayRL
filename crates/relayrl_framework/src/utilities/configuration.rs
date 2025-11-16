@@ -1116,7 +1116,7 @@ impl TransportConfigParams {
     }
 }
 
-trait TransportConfigBuildParams {
+pub trait TransportConfigBuildParams {
     fn set_agent_listener_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_training_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_trajectory_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
