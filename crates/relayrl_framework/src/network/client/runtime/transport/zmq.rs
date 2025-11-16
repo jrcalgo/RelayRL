@@ -1,6 +1,6 @@
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
-use crate::network::client::runtime::transport::SyncClientTransport;
+use crate::network::client::runtime::transport::{SyncClientTransport, TransportError};
 use crate::utilities::configuration::ClientConfigLoader;
 
 use relayrl_types::types::data::tensor::BackendMatcher;
@@ -255,10 +255,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             socket.set_subscribe(b"").expect("SUB subscribe failed");
             if let Err(e) = socket.connect(&sub_address) {
                 eprintln!("[ZmqClient] Failed to connect SUB socket: {}", e);
-                return Err(TransportError::ListenForModelError(format!(
-                    "Failed to connect SUB socket: {}",
-                    e
-                )));
+                return;
             }
             println!("[ZmqClient] Listening for model updates at {}", sub_address);
             loop {
@@ -276,14 +273,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                     }
                     Err(e) => {
                         eprintln!("[ZmqClient] SUB socket recv error: {}", e);
-                        return Err(TransportError::ListenForModelError(format!(
-                            "SUB socket recv error: {}",
-                            e
-                        )));
+                        return;
                     }
                 }
             }
         });
+        Ok(())
     }
 
     fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), TransportError> {

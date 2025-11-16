@@ -1,8 +1,14 @@
 use crate::network::TransportType;
-use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
-use crate::network::client::runtime::coordination::scale_manager::ScaleManager;
+use crate::network::client::runtime::coordination::lifecycle_manager::{
+    LifeCycleManager, LifeCycleManagerError,
+};
+use crate::network::client::runtime::coordination::scale_manager::{
+    ScaleManager, ScaleManagerError,
+};
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-use crate::network::client::runtime::coordination::state_manager::StateManager;
+use crate::network::client::runtime::coordination::state_manager::{
+    StateManager, StateManagerError,
+};
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
@@ -11,6 +17,8 @@ use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_
 use crate::utilities::observability;
 use crate::utilities::observability::logging::builder::LoggingBuilder;
 use crate::utilities::observability::metrics::MetricsManager;
+
+use thiserror::Error;
 
 use burn_tensor::{Tensor, backend::Backend};
 use relayrl_types::prelude::DeviceType;
@@ -29,33 +37,55 @@ use uuid::Uuid;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
+/// Logging subsystem errors
 #[derive(Debug, Error)]
-pub enum CoordinatorError {
-    ScaleManagerError(ScaleManagerError),
-    StateManagerError(StateManagerError),
-    LifeCycleManagerError(LifeCycleManagerError),
-    LoggingError(LoggingError),
-    MetricsError(MetricsError),
-    ConfigError(String),
+pub enum LoggingError {
+    #[error("Failed to initialize logging: {0}")]
+    InitializationError(String),
+    #[error("Failed to configure logger: {0}")]
+    ConfigurationError(String),
 }
 
-impl std::fmt::Display for CoordinatorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ScaleManagerError(e) => {
-                write!(f, "[CoordinatorError] Scale manager error: {}", e)
-            }
-            Self::StateManagerError(e) => {
-                write!(f, "[CoordinatorError] State manager error: {}", e)
-            }
-            Self::LifeCycleManagerError(e) => {
-                write!(f, "[CoordinatorError] Life cycle manager error: {}", e)
-            }
-            Self::LoggingError(e) => write!(f, "[CoordinatorError] Logging error: {}", e),
-            Self::MetricsError(e) => write!(f, "[CoordinatorError] Metrics error: {}", e),
-            Self::ConfigError(e) => write!(f, "[CoordinatorError] Config error: {}", e),
-        }
+/// Metrics subsystem errors
+#[derive(Debug, Error)]
+pub enum MetricsError {
+    #[error("Failed to initialize metrics: {0}")]
+    InitializationError(String),
+    #[error("Failed to record metric: {0}")]
+    RecordError(String),
+}
+
+/// Client configuration errors
+#[derive(Debug, Error)]
+pub enum ClientConfigError {
+    #[error("Config file not found: {0}")]
+    NotFound(String),
+    #[error("Failed to parse config: {0}")]
+    ParseError(String),
+    #[error("Invalid config value: {0}")]
+    InvalidValue(String),
+}
+
+impl From<String> for ClientConfigError {
+    fn from(e: String) -> Self {
+        ClientConfigError::InvalidValue(e)
     }
+}
+
+#[derive(Debug, Error)]
+pub enum CoordinatorError {
+    #[error(transparent)]
+    ScaleManagerError(#[from] ScaleManagerError),
+    #[error(transparent)]
+    StateManagerError(#[from] StateManagerError),
+    #[error(transparent)]
+    LifeCycleManagerError(#[from] LifeCycleManagerError),
+    #[error(transparent)]
+    LoggingError(#[from] LoggingError),
+    #[error(transparent)]
+    MetricsError(#[from] MetricsError),
+    #[error(transparent)]
+    ConfigError(#[from] ClientConfigError),
 }
 
 pub trait ClientInterface<
@@ -160,10 +190,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             Some(path) => path,
             None => match DEFAULT_CLIENT_CONFIG_PATH.clone() {
                 Some(path) => path,
-                None => return Err(CoordinatorError::ConfigError(
+                None => return Err(CoordinatorError::ConfigError(ClientConfigError::NotFound(
                     "[Coordinator] No config path provided and default config path not found..."
                         .to_string(),
-                )),
+                ))),
             },
         };
 
@@ -273,7 +303,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _shutdown(&mut self) -> Result<(), CoordinatorError> {
         if let Some(mut runtime_params) = self.runtime_params.take() {
-            runtime_params.lifecycle._shutdown();
+            if let Err(e) = runtime_params.lifecycle._shutdown() {
+                return Err(CoordinatorError::LifeCycleManagerError(e));
+            }
 
             StateManager::<B, D_IN, D_OUT>::__shutdown_all_actors(
                 &*runtime_params.state.read().await,
@@ -346,7 +378,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await?;
                 Ok(())
             }
-            None => Err("[Coordinator] No runtime instance to _new_actor...".to_string()),
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::NewActorError(
+                    "[Coordinator] No runtime instance to _new_actor...".to_string(),
+                ),
+            )),
         }
     }
 
@@ -359,10 +395,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .write()
                     .await
                     .__remove_actor(id)
-                    .map_err(|e| CoordinatorError::StateManagerError(e))?;
+                    .map_err(CoordinatorError::from)?;
                 Ok(())
             }
-            None => Err("[Coordinator] No runtime instance to _remove_actor...".to_string()),
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::RemoveActorError(
+                    "[Coordinator] No runtime instance to _remove_actor...".to_string(),
+                ),
+            )),
         }
     }
 
@@ -370,10 +410,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &self,
     ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => Ok(StateManager::<B, D_IN, D_OUT>::__get_actors(
-                &*params.state.read().await,
-            ))
-            .map_err(|e| CoordinatorError::StateManagerError(e))?,
+            Some(params) => {
+                let actors = StateManager::<B, D_IN, D_OUT>::__get_actors(
+                    &*params.state.read().await,
+                )?;
+                Ok(actors)
+            }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::GetActorsError(
                     "[Coordinator] No runtime parameter instance to _get_actors...".to_string(),
@@ -384,12 +426,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => StateManager::<B, D_IN, D_OUT>::__set_actor_id(
-                &*params.state.write().await,
-                current_id,
-                new_id,
-            )
-            .map_err(|e| CoordinatorError::StateManagerError(e))?,
+            Some(params) => {
+                StateManager::<B, D_IN, D_OUT>::__set_actor_id(
+                    &*params.state.write().await,
+                    current_id,
+                    new_id,
+                )?;
+                Ok(())
+            }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::SetActorIdError(
                     "[Coordinator] No runtime instance to _shutdown...".to_string(),
@@ -657,7 +701,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _scale_down(&mut self, router_remove: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
-                return params.scaling.__scale_down(router_remove).await;
+                params.scaling.__scale_down(router_remove).await?;
+                Ok(())
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(

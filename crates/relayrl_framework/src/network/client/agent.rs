@@ -1,7 +1,9 @@
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
-    ClientCoordinator, ClientInterface,
+    ClientCoordinator, ClientInterface, CoordinatorError,
 };
+
+use thiserror::Error;
 
 use burn_tensor::{Tensor, backend::Backend};
 use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
@@ -19,24 +21,12 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
-    CoordinatorError(CoordinatorError),
+    #[error(transparent)]
+    CoordinatorError(#[from] CoordinatorError),
+    #[error("Backend mismatch: {0}")]
     BackendMismatchError(String),
+    #[error("Noop router scale: {0}")]
     NoopRouterScale(String),
-}
-
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CoordinatorError(e) => write!(f, "[ClientError] Client error: {}", e),
-            Self::BackendMismatchError(e) => write!(f, "[ClientError] Backend mismatch: {}", e),
-        }
-    }
-}
-
-impl From<CoordinatorError> for ClientError {
-    fn from(e: CoordinatorError) -> Self {
-        ClientError::CoordinatorError(e)
-    }
 }
 
 pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
@@ -187,7 +177,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 codec,
             )
             .await
-            .map_err(ClientError::from)
+            .map_err(Into::into)
     }
 
     /// Scale the agent's actor throughput by adding or removing routers
@@ -202,18 +192,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub async fn scale_throughput(&mut self, routers: i32) -> Result<(), ClientError> {
         match routers {
             add if routers > 0 => {
-                return self
-                    .coordinator
-                    ._scale_up(add as u32)
-                    .await
-                    .map_err(ClientError::from);
+                self.coordinator._scale_up(add as u32).await?;
+                Ok(())
             }
             remove if routers < 0 => {
-                return self
-                    .coordinator
+                self.coordinator
                     ._scale_down(remove.abs() as u32)
-                    .await
-                    .map_err(ClientError::from);
+                    .await?;
+                Ok(())
             }
             _ => Err(ClientError::NoopRouterScale(
                 "Noop router scale".to_string(),
@@ -225,7 +211,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ///
     /// This disables all of the Agent's coordinator managers and actor instances
     pub async fn shutdown(&mut self) -> Result<(), ClientError> {
-        self.coordinator._shutdown().await?
+        self.coordinator._shutdown().await?;
+        Ok(())
     }
 
     /// Request actions from the specified actor IDs (if they exist)
@@ -239,11 +226,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         reward: f32,
     ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, ClientError> {
         match B::matches_backend(&self.supported_backend) {
-            true => self
-                .coordinator
-                ._request_action(ids, observation, mask, reward)
-                .await
-                .map_err(ClientError::from),
+            true => {
+                let result = self
+                    .coordinator
+                    ._request_action(ids, observation, mask, reward)
+                    .await?;
+                Ok(result)
+            }
             false => Err(ClientError::BackendMismatchError(
                 "Backend mismatch".to_string(),
             )),
@@ -258,12 +247,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         ids: Vec<Uuid>,
         reward: Option<f32>,
     ) -> Result<(), ClientError> {
-        self.coordinator._flag_last_action(ids, reward).await?
+        self.coordinator._flag_last_action(ids, reward).await?;
+        Ok(())
     }
 
     /// Retrieves the model version for each actor ID listed (if instance IDs exist)
     pub async fn get_model_version(&self, ids: Vec<Uuid>) -> Result<Vec<(Uuid, i64)>, ClientError> {
-        self.coordinator._get_model_version(ids).await?
+        let versions = self.coordinator._get_model_version(ids).await?;
+        Ok(versions)
     }
 
     /// Collect runtime statistics
@@ -315,10 +306,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         default_model: Option<ModelModule<B>>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator
-                ._new_actor(device, default_model)
-                .await
-                .map_err(ClientError::from)
+            self.coordinator._new_actor(device, default_model).await?;
+            Ok(())
         })
     }
 
@@ -328,10 +317,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator
-                ._remove_actor(id)
-                .await
-                .map_err(ClientError::from)
+            self.coordinator._remove_actor(id).await?;
+            Ok(())
         })
     }
 
@@ -346,10 +333,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         >,
     > {
         Box::pin(async move {
-            self.coordinator
-                ._get_actors()
-                .await
-                .map_err(ClientError::from)
+            let actors = self.coordinator._get_actors().await?;
+            Ok(actors)
         })
     }
 
@@ -362,10 +347,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         new_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator
-                ._set_actor_id(current_id, new_id)
-                .await
-                .map_err(ClientError::from)
+            self.coordinator._set_actor_id(current_id, new_id).await?;
+            Ok(())
         })
     }
 }

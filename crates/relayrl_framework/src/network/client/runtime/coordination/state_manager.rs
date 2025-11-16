@@ -1,10 +1,14 @@
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
+use crate::network::client::runtime::coordination::lifecycle_manager::{
+    LifeCycleManager, LifeCycleManagerError,
+};
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
+
+use thiserror::Error;
 
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
@@ -21,35 +25,26 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
+    #[error("Failed to create reloadable model: {0}")]
     FailedToCreateReloadableModelError(String),
+    #[error("Actor handle not found: {0}")]
     ActorHandleNotFoundError(String),
+    #[error("Actor inbox not found: {0}")]
     ActorInboxNotFoundError(String),
+    #[error("Actor already taken: {0}")]
     ActorAlreadyTakenError(String),
-    SubscribeShutdownError(String),
-}
-
-impl std::fmt::Display for StateManagerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::FailedToCreateReloadableModelError(e) => write!(
-                f,
-                "[StateManagerError] Failed to create reloadable model error: {}",
-                e
-            ),
-            Self::ActorHandleNotFoundError(e) => {
-                write!(f, "[StateManagerError] Actor handle not found error: {}", e)
-            }
-            Self::ActorInboxNotFoundError(e) => {
-                write!(f, "[StateManagerError] Actor inbox not found error: {}", e)
-            }
-            Self::ActorAlreadyTakenError(e) => {
-                write!(f, "[StateManagerError] Actor already taken error: {}", e)
-            }
-            Self::SubscribeShutdownError(e) => {
-                write!(f, "[StateManagerError] Subscribe shutdown error: {}", e)
-            }
-        }
-    }
+    #[error("Subscribe shutdown failed: {0}")]
+    SubscribeShutdownError(#[from] LifeCycleManagerError),
+    #[error("Shutdown all actors failed: {0}")]
+    ShutdownAllActorsError(String),
+    #[error("Set actor ID failed: {0}")]
+    SetActorIdError(String),
+    #[error("Get actors failed: {0}")]
+    GetActorsError(String),
+    #[error("New actor failed: {0}")]
+    NewActorError(String),
+    #[error("Remove actor failed: {0}")]
+    RemoveActorError(String),
 }
 
 type ActorInstance<
@@ -253,9 +248,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             if let Ok(handle) = handle {
                 handle.abort();
             } else {
-                return Err(StateManagerError::ActorHandleNotFoundError(format!(
-                    "[StateManager] Actor handle not found"
-                )));
+                continue;
             }
         }
         Ok(())
@@ -264,23 +257,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) fn spawn_shutdown_watcher(
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         lifecycle: LifeCycleManager,
-    ) -> Result<(), StateManagerError> {
+    ) {
         tokio::spawn(async move {
-            let mut rx = lifecycle
-                .subscribe_shutdown()
-                .map_err(|e| StateManagerError::SubscribeShutdownError(e.to_string()))?;
-            let _ = rx.recv().await;
-            shared_state
-                .read()
-                .await
-                .__shutdown_all_actors()
-                .await
-                .map_err(|e| {
-                    StateManagerError::ShutdownAllActorsError(format!(
-                        "Failed to shutdown all actors: {}",
-                        e
-                    ))
-                });
+            match lifecycle.subscribe_shutdown() {
+                Ok(mut rx) => {
+                    let _ = rx.recv().await;
+                    if let Err(e) = shared_state.read().await.__shutdown_all_actors().await {
+                        eprintln!("[StateManager] Failed to shutdown all actors: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[StateManager] Failed to subscribe to shutdown signal: {}", e);
+                }
+            }
         });
     }
 

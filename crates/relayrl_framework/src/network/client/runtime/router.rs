@@ -3,12 +3,15 @@ use crate::network::client::runtime::coordination::state_manager::StateManager;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::TransportClient;
+use crate::network::client::runtime::transport::TransportError;
+
+use thiserror::Error;
 use crate::utilities::orchestration::tonic_utils::relayrl_encoded_trajectory_to_grpc_encoded_trajectory;
 
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
-use relayrl_types::types::data::trajectory::RelayRLTrajectory;
+use relayrl_types::types::data::trajectory::{RelayRLTrajectory, TrajectoryError};
 
 use burn_tensor::Tensor;
 use burn_tensor::backend::Backend;
@@ -118,7 +121,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self
     }
 
-    pub(crate) async fn spawn_loop(&mut self) {
+    pub(crate) async fn spawn_loop(&mut self) -> Result<(), RouterError> {
         let mut shutdown = self.shutdown.take();
         let mut rx_guard = self.rx_from_receiver.write().await;
         loop {
@@ -128,11 +131,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         Some(msg) => {
                             if let RoutingProtocol::Shutdown = msg.protocol {
                                 self.route(msg).await;
-                                break;
+                                break Ok(());
                             }
                             self.route(msg).await;
                         }
-                        None => break,
+                        None => break Ok(()),
                     }
                 }
                 _ = async {
@@ -141,7 +144,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         None => std::future::pending::<()>().await,
                     }
                 } => {
-                    break;
+                    break Ok(());
                 }
             }
         }
@@ -172,32 +175,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 //// Start of Packet Transportation/Receiver/Sender
 
 #[derive(Debug, Error)]
-pub enum RouterError {
-    ExternalReceiverError(ExternalReceiverError),
-    ExternalSenderError(ExternalSenderError),
+pub enum ClientFilterError {
+    #[error("Filter routing error: {0}")]
+    RoutingError(String),
 }
 
-impl std::fmt::Display for RouterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ExternalReceiverError(e) => {
-                write!(f, "[RouterError] External receiver error: {}", e)
-            }
-            Self::ExternalSenderError(e) => write!(f, "[RouterError] External sender error: {}", e),
-        }
-    }
+#[derive(Debug, Error)]
+pub enum RouterError {
+    #[error(transparent)]
+    CentralFilterError(#[from] ClientFilterError),
+    #[error(transparent)]
+    ExternalReceiverError(#[from] ExternalReceiverError),
+    #[error(transparent)]
+    ExternalSenderError(#[from] ExternalSenderError),
 }
+
 #[derive(Debug, Error)]
 pub enum ExternalReceiverError {
-    TransportError(TransportError),
-}
-
-impl std::fmt::Display for ExternalReceiverError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TransportError(e) => write!(f, "[ExternalReceiverError] Transport error: {}", e),
-        }
-    }
+    #[error("Transport error: {0}")]
+    TransportError(#[from] TransportError),
 }
 
 /// Listens & receives model bytes from a training server
@@ -290,7 +286,10 @@ impl Ord for SenderQueueEntry {
 
 #[derive(Debug, Error)]
 pub enum ExternalSenderError {
-    TransportError(TransportError),
+    #[error("Transport error: {0}")]
+    TransportError(#[from] TransportError),
+    #[error("Failed to encode trajectory: {0}")]
+    EncodeTrajectoryError(#[from] TrajectoryError),
 }
 
 /// Receives trajectories from ActorEntity and creates send_traj tasks to send to a training server
@@ -333,7 +332,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
         self
     }
 
-    pub(crate) async fn spawn_loop(mut self) {
+    pub(crate) async fn spawn_loop(mut self) -> Result<(), RouterError> {
         self.active.store(true, Ordering::SeqCst);
 
         let (_tx_dummy, rx_dummy) = tokio::sync::mpsc::channel(1);
@@ -361,7 +360,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                 }
                 _ = tick.tick() => {
                     let job_option = { let mut heap = self.traj_heap.lock().await; heap.pop() };
-                    if let Some(job) = job_option { self._send_trajectory(job, self.server_address.clone()).await; }
+                    if let Some(job) = job_option { if let Err(e) = self._send_trajectory(job, self.server_address.clone()).await { eprintln!("[ClientExternalSender] Failed to send trajectory: {}", e); break;} }
                 }
                 _ = async {
                     match &mut shutdown {
@@ -376,6 +375,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
         }
 
         self.active.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     pub fn enqueue_traj_set_priority(
@@ -440,28 +440,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                     let encoded_traj = entry
                         .traj_to_send
                         .encode(&self.codec)
-                        .map_err(|e| format!("Failed to encode trajectory: {:?}", e)).map_err(|e| {
-                            eprintln!("[ClientExternalSender] Failed to encode trajectory for actor {}: {}", entry.actor_id, e);
-                            Err(e)
-                        })?;
+                        .map_err(|e| RouterError::ExternalSenderError(ExternalSenderError::EncodeTrajectoryError(e)))?;
 
                     if let Err(e) = sync_client.send_traj_to_server(encoded_traj, &server_address) {
                         return Err(RouterError::ExternalSenderError(
                             ExternalSenderError::TransportError(e),
                         ));
                     }
-                    Ok(());
+                    Ok(())
                 }
                 #[cfg(feature = "grpc_network")]
                 TransportClient::Async(async_client) => {
                     let encoded_traj = entry
                         .traj_to_send
                         .encode(&self.codec)
-                        .map_err(|e| format!("Failed to encode trajectory: {:?}", e))
-                        .map_err(|e| {
-                            eprintln!("[ClientExternalSender] Failed to encode trajectory for actor {}: {}", entry.actor_id, e);
-                            Err(e)
-                        })?;
+                        .map_err(|e| RouterError::ExternalSenderError(ExternalSenderError::EncodeTrajectoryError(e)))?;
 
                     if let Err(e) = async_client
                         .send_traj_to_server(encoded_traj, &server_address)

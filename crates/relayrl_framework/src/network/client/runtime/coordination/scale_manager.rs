@@ -1,11 +1,16 @@
-use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
+use crate::network::client::runtime::coordination::lifecycle_manager::{
+    LifeCycleManager, LifeCycleManagerError,
+};
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::{
-    ClientExternalReceiver, ClientExternalSender, ClientFilter, RoutedMessage,
+    ClientExternalReceiver, ClientExternalSender, ClientFilter, ExternalReceiverError,
+    ExternalSenderError, RoutedMessage,
 };
-use crate::network::client::runtime::transport::TransportClient;
+use crate::network::client::runtime::transport::{TransportClient, TransportError};
 use crate::network::random_uuid;
 use crate::utilities::configuration::ClientConfigLoader;
+
+use thiserror::Error;
 
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::action::CodecConfig;
@@ -21,41 +26,30 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ScaleManagerError {
-    SendScalingWarningError(TransportError),
+    #[error("Failed to send scaling warning: {0}")]
+    SendScalingWarningError(#[from] TransportError),
+    #[error("Failed to send scaling complete: {0}")]
     SendScalingCompleteError(TransportError),
-    SubscribeShutdownError(LifeCycleManagerError),
+    #[error("Failed to subscribe to shutdown: {0}")]
+    SubscribeShutdownError(#[source] LifeCycleManagerError),
+    #[error("Failed to spawn central filter: {0}")]
     SpawnCentralFilterError(String),
-    SpawnExternalReceiverError(ExternalReceiverError),
-    SpawnExternalSenderError(ExternalSenderError),
-}
-
-impl std::fmt::Display for ScaleManagerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SendScalingWarningError(e) => {
-                write!(f, "[ScaleManagerError] Send scaling warning error: {}", e)
-            }
-            Self::SendScalingCompleteError(e) => {
-                write!(f, "[ScaleManagerError] Send scaling complete error: {}", e)
-            }
-            Self::SubscribeShutdownError(e) => {
-                write!(f, "[ScaleManagerError] Subscribe shutdown error: {}", e)
-            }
-            Self::SpawnCentralFilterError(e) => {
-                write!(f, "[ScaleManagerError] Spawn central filter error: {}", e)
-            }
-            Self::SpawnExternalReceiverError(e) => {
-                write!(
-                    f,
-                    "[ScaleManagerError] Spawn external receiver error: {}",
-                    e
-                )
-            }
-            Self::SpawnExternalSenderError(e) => {
-                write!(f, "[ScaleManagerError] Spawn external sender error: {}", e)
-            }
-        }
-    }
+    #[error("Failed to spawn external receiver: {0}")]
+    SpawnExternalReceiverError(#[source] ExternalReceiverError),
+    #[error("Failed to spawn external sender: {0}")]
+    SpawnExternalSenderError(#[source] ExternalSenderError),
+    #[error("Router runtime params not found: {0}")]
+    GetRouterRuntimeParamsError(String),
+    #[error("Failed to send action request: {0}")]
+    SendActionRequestError(String),
+    #[error("Failed to receive action response: {0}")]
+    ReceiveActionResponseError(String),
+    #[error("Failed to send flag last action message: {0}")]
+    SendFlagLastActionMessageError(String),
+    #[error("Failed to send model version message: {0}")]
+    SendModelVersionMessageError(String),
+    #[error("Failed to receive model version response: {0}")]
+    ReceiveModelVersionResponseError(String),
 }
 
 pub(crate) struct ServerAddresses {
@@ -128,9 +122,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) async fn __scale_up(&mut self, router_add: u32) -> Result<(), ScaleManagerError> {
-        if let Err(e) = self._send_scaling_warning(ScalingOperation::ScaleUp).await {
-            return Err(ScaleManagerError::SendScalingWarningError(e));
-        }
+        self._send_scaling_warning(ScalingOperation::ScaleUp).await?;
 
         if self.runtime_params.is_none() {
             self.runtime_params = Some(DashMap::new());
@@ -182,7 +174,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let sender = if let Some(lc) = &self.lifecycle {
                 sender.with_shutdown(
                     lc.subscribe_shutdown()
-                        .map_err(|e| ScaleManagerError::SubscribeShutdownError(e.to_string()))?,
+                        .map_err(|e| ScaleManagerError::SubscribeShutdownError(e))?,
                 )
             } else {
                 sender
@@ -191,7 +183,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let receiver_loop: JoinHandle<()> = Self::_spawn_external_receiver(receiver).await;
             let filter_loop: JoinHandle<()> = Self::_spawn_central_filter(filter).await;
             let sender_loop: JoinHandle<()> = Self::_spawn_external_sender(sender).await;
-
+            
             let runtime_params = RouterRuntimeParams {
                 receiver_loop,
                 filter_loop,
@@ -240,7 +232,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let router_ids: Vec<RouterUuid> = self
             .runtime_params
             .as_ref()
-            .ok_or("[ScaleManager] Runtime params should be initialized".to_string())?
+            .ok_or(ScaleManagerError::GetRouterRuntimeParamsError(
+                "[ScaleManager] Runtime params should be initialized".to_string(),
+            ))?
             .iter()
             .map(|router| *router.key())
             .collect();
@@ -292,7 +286,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ._send_scaling_warning(ScalingOperation::ScaleDown)
             .await
         {
-            return Err(ScaleManagerError::SendScalingWarningError(e));
+            return Err(e);
         }
 
         match self.runtime_params {
@@ -455,36 +449,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _spawn_central_filter(
-        mut router: ClientFilter<B, D_IN, D_OUT>,
-    ) -> JoinHandle<Result<(), ScaleManagerError>> {
+    async fn _spawn_central_filter(mut filter: ClientFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            router
-                .spawn_loop()
-                .await
-                .map_err(|e| ScaleManagerError::SpawnCentralFilterError(e))
+            if let Err(e) = filter.spawn_loop().await { eprintln!("[ScaleManager] Failed to spawn central filter: {}", e); }
         })
     }
 
-    async fn _spawn_external_receiver(
-        receiver: ClientExternalReceiver<B>,
-    ) -> JoinHandle<Result<(), ScaleManagerError>> {
+    async fn _spawn_external_receiver(receiver: ClientExternalReceiver<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            receiver
-                .spawn_loop()
-                .await
-                .map_err(|e| ScaleManagerError::SpawnExternalReceiverError(e))
+            if let Err(e) = receiver.spawn_loop().await { eprintln!("[ScaleManager] Failed to spawn external receiver: {}", e); }
         })
     }
 
-    async fn _spawn_external_sender(
-        sender: ClientExternalSender<B>,
-    ) -> JoinHandle<Result<(), ScaleManagerError>> {
+    async fn _spawn_external_sender(sender: ClientExternalSender<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            sender
-                .spawn_loop()
-                .await
-                .map_err(|e| ScaleManagerError::SpawnExternalSenderError(e))
+            if let Err(e) = sender.spawn_loop().await { eprintln!("[ScaleManager] Failed to spawn external sender: {}", e); }
         })
     }
 }

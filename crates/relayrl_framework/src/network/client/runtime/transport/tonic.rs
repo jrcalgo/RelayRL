@@ -43,6 +43,7 @@ use rl_service::{
     SendTrajectoriesResponse, rl_service_client::RlServiceClient,
 };
 
+use crate::network::client::runtime::transport::TransportError;
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::tensor::BackendMatcher;
 
@@ -354,6 +355,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                 )));
             }
         }
+        Ok(())
     }
 
     async fn listen_for_model(&self, model_server_address: &str) -> Result<(), TransportError> {
@@ -412,52 +414,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
             }
         }
     }
-
-    // fn convert_encoded_relayrl_to_proto_encoded_trajectory(
-    //     &self,
-    //     traj: &EncodedTrajectory,
-    // ) -> GrpcEncodedTrajectory {
-    //     // TODO: Rewrite for encoded trajectories
-    //     // Delegate to the existing implementation method
-    //     let actions: Vec<Action> = traj
-    //         .actions
-    //         .iter()
-    //         .map(|action| {
-    //             let mut data = std::collections::HashMap::new();
-
-    //             // Convert additional data if present using proper serialization
-    //             if let Some(action_data) = action.get_data() {
-    //                 for (key, value) in action_data {
-    //                     if let Ok(serialized) = serde_json::to_vec(value) {
-    //                         data.insert(key.clone(), serialized);
-    //                     }
-    //                 }
-    //             }
-
-    //             Action {
-    //                 obs: action
-    //                     .get_obs()
-    //                     .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-    //                 action: action
-    //                     .get_act()
-    //                     .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-    //                 mask: action
-    //                     .get_mask()
-    //                     .map_or_else(Vec::new, |tensor_data| tensor_data.data.clone()),
-    //                 reward: action.get_rew(),
-    //                 data,
-    //                 done: action.get_done(),
-    //             }
-    //         })
-    //         .collect();
-
-    //     Trajectory {
-    //         actions,
-    //         version: self
-    //             .current_version
-    //             .load(std::sync::atomic::Ordering::SeqCst) as i32,
-    //     }
-    // }
 
     async fn send_scaling_warning(
         &self,

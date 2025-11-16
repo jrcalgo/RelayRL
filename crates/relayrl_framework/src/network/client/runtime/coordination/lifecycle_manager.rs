@@ -5,35 +5,20 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{RwLock, broadcast};
 
+use thiserror::Error;
+
 #[derive(Debug, Error)]
 pub enum LifeCycleManagerError {
+    #[error("File metadata error: {0}")]
     FileMetadataError(String),
+    #[error("System time error: {0}")]
     SystemTimeError(String),
+    #[error("Subscribe shutdown error: {0}")]
     SubscribeShutdownError(String),
+    #[error("Send shutdown signal error: {0}")]
     SendShutdownSignalError(String),
+    #[error("Config error: {0}")]
     ConfigError(String),
-}
-
-impl std::fmt::Display for LifeCycleManagerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::FileMetadataError(e) => {
-                write!(f, "[LifeCycleManagerError] File metadata error: {}", e)
-            }
-            Self::SystemTimeError(e) => {
-                write!(f, "[LifeCycleManagerError] System time error: {}", e)
-            }
-            Self::SubscribeShutdownError(e) => {
-                write!(f, "[LifeCycleManagerError] Subscribe shutdown error: {}", e)
-            }
-            Self::SendShutdownSignalError(e) => write!(
-                f,
-                "[LifeCycleManagerError] Send shutdown signal error: {}",
-                e
-            ),
-            Self::ConfigError(e) => write!(f, "[LifeCycleManagerError] Config error: {}", e),
-        }
-    }
 }
 
 /// Orchestrates startup/shutdown signals (SIGINT, config-changes)
@@ -51,15 +36,17 @@ impl LifeCycleManager {
     pub fn new(config: ClientConfigLoader) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1000);
         let config_path: PathBuf = config.get_config_path().clone();
-        let metadata: fs::Metadata = fs::metadata(&config_path).map_err(|e| {
-            LifeCycleManagerError::FileMetadataError(format!(
-                "Failed to read config metadata: {}",
-                e
-            ))
-        })?;
-        let last_modified: SystemTime = metadata
-            .modified()
-            .expect("Failed to get last modified time");
+        
+        // Get file metadata with fallback to current time
+        let last_modified: SystemTime = fs::metadata(&config_path)
+            .and_then(|m| m.modified())
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "[LifeCycleManager] Failed to read config metadata: {}, using current time",
+                    e
+                );
+                SystemTime::now()
+            });
 
         Self {
             config: Arc::new(RwLock::new(config)),
@@ -73,7 +60,7 @@ impl LifeCycleManager {
     pub fn spawn_loop(&self) {
         let self_clone: LifeCycleManager = self.clone();
         tokio::spawn(async move {
-            self_clone._watch().await;
+            if let Err(e) = self_clone._watch().await { eprintln!("[LifeCycleManager] Failed to spawn loop: {}", e); }
         });
     }
 
@@ -86,18 +73,8 @@ impl LifeCycleManager {
         config: ClientConfigLoader,
     ) -> Result<(), LifeCycleManagerError> {
         let mut config_guard = self.config.write().await;
-        match *config_guard {
-            Ok(mut config) => {
-                *config = config;
-                Ok(())
-            }
-            Err(e) => {
-                return Err(LifeCycleManagerError::ConfigError(format!(
-                    "Failed to write config: {}",
-                    e
-                )));
-            }
-        }
+        *config_guard = config;
+        Ok(())
     }
 
     pub fn _shutdown(&self) -> Result<(), LifeCycleManagerError> {
@@ -110,7 +87,7 @@ impl LifeCycleManager {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     self._handle_shutdown_signal()?;
-                    break;
+                    break Ok(());
                 }
                 _ = interval.tick() => {
                     if let Ok(metadata) = fs::metadata(&*self.config_path) {
@@ -143,11 +120,6 @@ impl LifeCycleManager {
     }
 
     pub fn subscribe_shutdown(&self) -> Result<broadcast::Receiver<()>, LifeCycleManagerError> {
-        self.shutdown_tx.subscribe().map_err(|e| {
-            LifeCycleManagerError::SubscribeShutdownError(format!(
-                "Failed to subscribe to shutdown signal: {}",
-                e
-            ))
-        })?
+        Ok(self.shutdown_tx.subscribe())
     }
 }

@@ -12,44 +12,33 @@ use burn_tensor::backend::Backend;
 use serde::Serialize;
 use serde_pickle as pickle;
 use std::io::Cursor;
+use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 
 pub mod tonic;
 pub mod zmq;
+
+#[derive(Debug, Error)]
+pub enum TransportError {
+    #[error("No transport configured: {0}")]
+    NoTransportConfiguredError(String),
+    #[error("Model handshake failed: {0}")]
+    ModelHandshakeError(String),
+    #[error("Send trajectory failed: {0}")]
+    SendTrajError(String),
+    #[error("Listen for model failed: {0}")]
+    ListenForModelError(String),
+    #[error("Send scaling warning failed: {0}")]
+    SendScalingWarningError(String),
+    #[error("Send scaling complete failed: {0}")]
+    SendScalingCompleteError(String),
+}
 
 pub enum TransportClient<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(feature = "zmq_network")]
     Sync(Box<dyn SyncClientTransport<B> + Send + Sync>),
     #[cfg(feature = "grpc_network")]
     Async(Box<dyn AsyncClientTransport<B> + Send + Sync>),
-}
-
-pub enum TransportError {
-    ModelHandshakeError(String),
-    SendTrajError(String),
-    ListenForModelError(String),
-    SendScalingWarningError(String),
-    SendScalingCompleteError(String),
-}
-
-impl std::fmt::Display for TransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ModelHandshakeError(e) => {
-                write!(f, "[TransportError] Model handshake error: {}", e)
-            }
-            Self::SendTrajError(e) => write!(f, "[TransportError] Send trajectory error: {}", e),
-            Self::ListenForModelError(e) => {
-                write!(f, "[TransportError] Listen for model error: {}", e)
-            }
-            Self::SendScalingWarningError(e) => {
-                write!(f, "[TransportError] Send scaling warning error: {}", e)
-            }
-            Self::SendScalingCompleteError(e) => {
-                write!(f, "[TransportError] Send scaling complete error: {}", e)
-            }
-        }
-    }
 }
 
 #[cfg(feature = "grpc_network")]
