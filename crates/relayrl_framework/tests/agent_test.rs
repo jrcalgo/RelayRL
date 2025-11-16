@@ -3,14 +3,12 @@
 //! This test module validates the core functionality of the RelayRL Agent,
 //! including agent lifecycle, actor management, and API interactions.
 
+use burn_ndarray::NdArray;
 use relayrl_framework::network::TransportType;
-use relayrl_framework::network::client::agent::{
-    RelayRLAgent, RelayRLAgentActors, RelayRLAgentBuilder,
-};
-use relayrl_framework::types::action::RelayRLAction;
+use relayrl_framework::network::client::agent::{RelayRLAgent, RelayRLAgentBuilder};
+use relayrl_types::prelude::RelayRLAction;
+use relayrl_types::types::data::tensor::DeviceType;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tch::{Device, Tensor};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -64,12 +62,15 @@ mod agent_builder_tests {
     #[tokio::test]
     async fn test_agent_builder_basic() {
         // Test basic agent builder construction
-        let builder = RelayRLAgentBuilder::builder(TransportType::ZMQ);
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
+        let builder: RelayRLAgentBuilder<NdArray, D_IN, D_OUT> =
+            RelayRLAgentBuilder::builder(TransportType::ZMQ);
 
         // Verify builder can be configured
         let builder = builder
             .actor_count(2)
-            .default_device(Device::Cpu)
+            .default_device(DeviceType::Cpu)
             .algorithm_name("TEST_ALGORITHM".to_string());
 
         assert!(true, "Builder creation successful");
@@ -77,25 +78,31 @@ mod agent_builder_tests {
 
     #[tokio::test]
     async fn test_agent_builder_with_all_parameters() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_config(&temp_dir);
 
         // Test builder with all parameters
-        let builder = RelayRLAgentBuilder::builder(TransportType::ZMQ)
-            .actor_count(4)
-            .default_device(Device::Cpu)
-            .algorithm_name("TEST_ALGORITHM".to_string())
-            .config_path(config_path.clone());
+        let builder: RelayRLAgentBuilder<NdArray, D_IN, D_OUT> =
+            RelayRLAgentBuilder::builder(TransportType::ZMQ)
+                .actor_count(4)
+                .default_device(DeviceType::Cpu)
+                .algorithm_name("TEST_ALGORITHM".to_string())
+                .config_path(config_path.clone());
 
         assert!(true, "Builder with all parameters successful");
     }
 
     #[tokio::test]
     async fn test_agent_builder_missing_algorithm_name() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         // Test that building without algorithm_name fails
-        let builder = RelayRLAgentBuilder::builder(TransportType::ZMQ)
-            .actor_count(1)
-            .default_device(Device::Cpu);
+        let builder: RelayRLAgentBuilder<NdArray, D_IN, D_OUT> =
+            RelayRLAgentBuilder::builder(TransportType::ZMQ)
+                .actor_count(1)
+                .default_device(DeviceType::Cpu);
 
         let result = builder.build().await;
 
@@ -111,14 +118,17 @@ mod agent_builder_tests {
 
     #[tokio::test]
     async fn test_agent_builder_build_success() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_config(&temp_dir);
 
-        let builder = RelayRLAgentBuilder::builder(TransportType::ZMQ)
-            .actor_count(2)
-            .default_device(Device::Cpu)
-            .algorithm_name("TEST_ALGORITHM".to_string())
-            .config_path(config_path);
+        let builder: RelayRLAgentBuilder<NdArray, D_IN, D_OUT> =
+            RelayRLAgentBuilder::builder(TransportType::ZMQ)
+                .actor_count(2)
+                .default_device(DeviceType::Cpu)
+                .algorithm_name("TEST_ALGORITHM".to_string())
+                .config_path(config_path);
 
         let result = builder.build().await;
 
@@ -134,13 +144,16 @@ mod agent_builder_tests {
 
     #[tokio::test]
     async fn test_agent_builder_default_values() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_config(&temp_dir);
 
         // Test that defaults are applied correctly
-        let builder = RelayRLAgentBuilder::builder(TransportType::GRPC)
-            .algorithm_name("TEST_ALGORITHM".to_string())
-            .config_path(config_path);
+        let builder: RelayRLAgentBuilder<NdArray, D_IN, D_OUT> =
+            RelayRLAgentBuilder::builder(TransportType::GRPC)
+                .algorithm_name("TEST_ALGORITHM".to_string())
+                .config_path(config_path);
 
         let result = builder.build().await;
         assert!(result.is_ok(), "Builder should apply default values");
@@ -153,15 +166,19 @@ mod agent_lifecycle_tests {
 
     #[tokio::test]
     async fn test_agent_creation() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         // Test basic agent creation
-        let agent = RelayRLAgent::new(TransportType::ZMQ);
+        let agent: RelayRLAgent<NdArray, D_IN, D_OUT> = RelayRLAgent::new(TransportType::ZMQ);
         assert!(true, "Agent created successfully");
     }
 
     #[tokio::test]
     async fn test_agent_creation_with_grpc() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         // Test agent creation with GRPC transport
-        let agent = RelayRLAgent::new(TransportType::GRPC);
+        let agent: RelayRLAgent<NdArray, D_IN, D_OUT> = RelayRLAgent::new(TransportType::GRPC);
         assert!(true, "Agent created successfully with GRPC");
     }
 
@@ -199,36 +216,16 @@ mod agent_api_tests {
 
     #[test]
     fn test_relay_rl_action_creation() {
-        // Test creating RelayRLAction from tensors
-        let obs_tensor = Tensor::randn(&[1, 4], tch::kind::FLOAT_CPU);
-        let action_tensor = Tensor::randn(&[1, 2], tch::kind::FLOAT_CPU);
-        let mask_tensor = Tensor::ones(&[1, 2], tch::kind::FLOAT_CPU);
+        // Test creating RelayRLAction using minimal constructor
+        let action = RelayRLAction::minimal(0.5, false);
 
-        let action = RelayRLAction::from_tensors(
-            Some(&obs_tensor),
-            Some(&action_tensor),
-            Some(&mask_tensor),
-            0.5,
-            None,
-            false,
-        );
-
-        assert!(action.is_ok(), "Action creation should succeed");
-
-        let action = action.unwrap();
         assert_eq!(action.get_rew(), 0.5, "Reward should be 0.5");
         assert_eq!(action.get_done(), false, "Done should be false");
-        assert!(action.get_obs().is_some(), "Observation should be present");
-        assert!(action.get_act().is_some(), "Action should be present");
-        assert!(action.get_mask().is_some(), "Mask should be present");
     }
 
     #[test]
     fn test_relay_rl_action_reward_update() {
-        let obs_tensor = Tensor::randn(&[1, 4], tch::kind::FLOAT_CPU);
-
-        let mut action =
-            RelayRLAction::from_tensors(Some(&obs_tensor), None, None, 0.0, None, false).unwrap();
+        let mut action = RelayRLAction::minimal(0.0, false);
 
         assert_eq!(action.get_rew(), 0.0, "Initial reward should be 0.0");
 
@@ -238,17 +235,7 @@ mod agent_api_tests {
 
     #[test]
     fn test_relay_rl_action_with_done_flag() {
-        let action_tensor = Tensor::randn(&[1, 2], tch::kind::FLOAT_CPU);
-
-        let action = RelayRLAction::from_tensors(
-            None,
-            Some(&action_tensor),
-            None,
-            1.0,
-            None,
-            true, // Terminal action
-        )
-        .unwrap();
+        let action = RelayRLAction::minimal(1.0, true); // Terminal action
 
         assert_eq!(action.get_done(), true, "Done flag should be true");
     }
@@ -479,12 +466,16 @@ mod integration_tests {
 
     #[test]
     fn test_tensor_operations() {
-        // Test basic tensor operations used in the agent
-        let obs = Tensor::randn(&[1, 4], tch::kind::FLOAT_CPU);
-        let mask = Tensor::ones(&[1, 2], tch::kind::FLOAT_CPU);
+        // Test basic tensor operations - using burn tensors
+        use burn_ndarray::NdArray;
+        use burn_tensor::Tensor;
 
-        assert_eq!(obs.size(), vec![1, 4], "Observation tensor shape correct");
-        assert_eq!(mask.size(), vec![1, 2], "Mask tensor shape correct");
+        let device = burn_tensor::Device::<NdArray>::Cpu;
+        let obs = Tensor::<NdArray, 2>::zeros([1, 4], &device);
+        let mask = Tensor::<NdArray, 2>::ones([1, 2], &device);
+
+        assert_eq!(obs.shape().dims, [1, 4], "Observation tensor shape correct");
+        assert_eq!(mask.shape().dims, [1, 2], "Mask tensor shape correct");
     }
 
     #[test]
@@ -498,9 +489,11 @@ mod integration_tests {
 
     #[test]
     fn test_transport_type_variants() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         // Test that both transport types can be created
-        let zmq_agent = RelayRLAgent::new(TransportType::ZMQ);
-        let grpc_agent = RelayRLAgent::new(TransportType::GRPC);
+        let zmq_agent: RelayRLAgent<NdArray, D_IN, D_OUT> = RelayRLAgent::new(TransportType::ZMQ);
+        let grpc_agent: RelayRLAgent<NdArray, D_IN, D_OUT> = RelayRLAgent::new(TransportType::GRPC);
 
         assert!(true, "Both transport types can be instantiated");
     }
@@ -508,11 +501,11 @@ mod integration_tests {
     #[test]
     fn test_device_types() {
         // Test different device configurations
-        let cpu_device = Device::Cpu;
+        let cpu_device = DeviceType::Cpu;
 
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "tch-backend")]
         {
-            let cuda_device = Device::Cuda(0);
+            let cuda_device = DeviceType::Cuda(0);
         }
 
         assert!(true, "Device types can be instantiated");
@@ -525,28 +518,31 @@ mod error_handling_tests {
 
     #[test]
     fn test_invalid_tensor_conversion() {
-        // Test error handling with invalid tensor data
-        let empty_action = RelayRLAction::from_tensors(None, None, None, 0.0, None, false);
+        // Test error handling with empty action
+        let empty_action = RelayRLAction::minimal(0.0, false);
 
-        assert!(empty_action.is_ok(), "Empty action should be valid");
-
-        let action = empty_action.unwrap();
         assert!(
-            action.get_obs().is_none(),
+            empty_action.get_obs().is_none(),
             "No observation should be present"
         );
-        assert!(action.get_act().is_none(), "No action should be present");
+        assert!(
+            empty_action.get_act().is_none(),
+            "No action should be present"
+        );
     }
 
     #[tokio::test]
     async fn test_builder_validation() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         // Test builder validation with invalid inputs
-        let result = RelayRLAgentBuilder::builder(TransportType::ZMQ)
-            .actor_count(0) // Edge case: 0 actors
-            .default_device(Device::Cpu)
-            .algorithm_name("TEST".to_string())
-            .build()
-            .await;
+        let result: Result<_, _> =
+            RelayRLAgentBuilder::<NdArray, D_IN, D_OUT>::builder(TransportType::ZMQ)
+                .actor_count(0) // Edge case: 0 actors
+                .default_device(DeviceType::Cpu)
+                .algorithm_name("TEST".to_string())
+                .build()
+                .await;
 
         // Should still succeed - 0 actors is valid (can add later)
         assert!(result.is_ok(), "Builder should handle 0 actors");
@@ -554,15 +550,18 @@ mod error_handling_tests {
 
     #[tokio::test]
     async fn test_negative_actor_count() {
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_config(&temp_dir);
 
         // Test that negative actor count is handled
-        let builder = RelayRLAgentBuilder::builder(TransportType::ZMQ)
-            .actor_count(-5) // Invalid negative count
-            .default_device(Device::Cpu)
-            .algorithm_name("TEST".to_string())
-            .config_path(config_path);
+        let builder: RelayRLAgentBuilder<NdArray, D_IN, D_OUT> =
+            RelayRLAgentBuilder::builder(TransportType::ZMQ)
+                .actor_count(-5) // Invalid negative count
+                .default_device(DeviceType::Cpu)
+                .algorithm_name("TEST".to_string())
+                .config_path(config_path);
 
         let result = builder.build().await;
 
@@ -585,11 +584,14 @@ mod documentation_tests {
         let config_path = create_test_config(&temp_dir);
 
         // 1. Build the agent using the builder pattern
-        let builder = RelayRLAgentBuilder::builder(TransportType::ZMQ)
-            .actor_count(2)
-            .default_device(Device::Cpu)
-            .algorithm_name("TEST_ALGORITHM".to_string())
-            .config_path(config_path.clone());
+        const D_IN: usize = 4;
+        const D_OUT: usize = 2;
+        let builder: RelayRLAgentBuilder<NdArray, D_IN, D_OUT> =
+            RelayRLAgentBuilder::builder(TransportType::ZMQ)
+                .actor_count(2)
+                .default_device(DeviceType::Cpu)
+                .algorithm_name("TEST_ALGORITHM".to_string())
+                .config_path(config_path.clone());
 
         let result = builder.build().await;
         assert!(result.is_ok(), "Agent should be built successfully");
