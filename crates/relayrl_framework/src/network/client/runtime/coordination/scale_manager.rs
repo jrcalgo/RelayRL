@@ -193,16 +193,30 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             };
 
             let mut router_id: RouterUuid = random_uuid(i);
+            let mut retry_count = 0;
+            const MAX_UUID_RETRIES: usize = 100;
+            
             while let Some(existing_id) = self
                 .runtime_params
                 .as_ref()
                 .and_then(|map| map.get(&router_id))
             {
+                retry_count += 1;
+                if retry_count >= MAX_UUID_RETRIES {
+                    eprintln!(
+                        "[ScaleManager] Failed to generate unique router ID after {} attempts",
+                        MAX_UUID_RETRIES
+                    );
+                    return Err(ScaleManagerError::GetRouterRuntimeParamsError(
+                        format!("UUID collision: failed to generate unique router ID after {} retries", MAX_UUID_RETRIES)
+                    ));
+                }
+                
                 eprintln!(
-                    "Router ID {} already exists, generating a new one...",
-                    existing_id.key()
+                    "Router ID {} already exists, generating a new one... (attempt {}/{})",
+                    existing_id.key(), retry_count, MAX_UUID_RETRIES
                 );
-                router_id = random_uuid(i);
+                router_id = random_uuid(i + retry_count as u32);
             }
 
             new_router_ids.push(router_id);
@@ -240,24 +254,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map(|router| *router.key())
             .collect();
 
-        let old_actor_mappings = StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(
-            &self.shared_state.blocking_read(),
-        );
+        let old_actor_mappings = {
+            let state = self.shared_state.read().await;
+            StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&state)
+        };
 
-        StateManager::<B, D_IN, D_OUT>::distribute_actors(
-            &self.shared_state.blocking_write(),
-            router_ids.clone(),
-        );
+        {
+            let state = self.shared_state.read().await;
+            StateManager::<B, D_IN, D_OUT>::distribute_actors(&state, router_ids.clone());
+        }
 
         if let Err(e) = self._send_scaling_complete(ScalingOperation::ScaleUp).await {
             eprintln!(
                 "Rolling back: removing newly created routers and restoring actor mappings..."
             );
 
-            StateManager::<B, D_IN, D_OUT>::restore_actor_router_mappings(
-                &self.shared_state.blocking_write(),
-                old_actor_mappings,
-            );
+            {
+                let state = self.shared_state.read().await;
+                StateManager::<B, D_IN, D_OUT>::restore_actor_router_mappings(&state, old_actor_mappings);
+            }
 
             self._rollback_routers(&new_router_ids).await;
 
@@ -307,10 +322,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     return result;
                 }
 
-                let old_actor_mappings: Vec<(Uuid, Uuid)> =
-                    StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(
-                        &self.shared_state.blocking_read(),
-                    );
+                let old_actor_mappings: Vec<(Uuid, Uuid)> = {
+                    let state = self.shared_state.read().await;
+                    StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&state)
+                };
 
                 let (router_ids, removed_routers, current_router_count) =
                     tokio::task::block_in_place(|| {
@@ -359,18 +374,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     eprintln!("Router with ID {} has been removed.", router_id);
                 }
 
-                self.shared_state
-                    .blocking_write()
-                    .distribute_actors(router_ids.clone());
+                {
+                    let state = self.shared_state.read().await;
+                    state.distribute_actors(router_ids.clone());
+                }
 
                 if let Err(e) = self
                     ._send_scaling_complete(ScalingOperation::ScaleDown)
                     .await
                 {
                     eprintln!("Restoring actor mappings to best-effort state...");
-                    self.shared_state
-                        .blocking_write()
-                        .restore_actor_router_mappings(old_actor_mappings);
+                    {
+                        let state = self.shared_state.read().await;
+                        state.restore_actor_router_mappings(old_actor_mappings);
+                    }
 
                     eprintln!(
                         "[ScaleManager] Failed to send scaling confirmation via transport: {}.
