@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.13] - 2025-11-17
+
+### Changed
+- **ModelError Cleanup** - Removed redundant manual `std::fmt::Display` implementation for `ModelError`
+  - The `thiserror` derive added in 0.3.12 automatically provides `Display` implementation via `#[error(...)]` attributes
+  - Removes duplicate code and ensures consistent error formatting through `thiserror`
+
 ## [0.3.12] - 2025-11-17
 
 ### Changed
