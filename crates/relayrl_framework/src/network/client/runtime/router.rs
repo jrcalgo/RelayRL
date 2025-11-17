@@ -335,8 +335,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
     pub(crate) async fn spawn_loop(mut self) -> Result<(), RouterError> {
         self.active.store(true, Ordering::SeqCst);
 
-        let (_tx_dummy, rx_dummy) = tokio::sync::mpsc::channel(1);
-        let rx = std::mem::replace(&mut self.rx_from_actor, Arc::new(RwLock::new(rx_dummy)));
+        // Take ownership of the receiver instead of using mem::replace
+        let rx = Arc::clone(&self.rx_from_actor);
         let mut rx_guard = rx.write().await;
         let mut shutdown = self.shutdown.take();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -348,11 +348,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                         if let RoutedPayload::SendTrajectory { timestamp, trajectory } = msg.payload {
                             let priority: i64 = Self::_compute_priority(&self.actor_last_sent, &msg.actor_id, timestamp);
                             let queue_entry = SenderQueueEntry { priority, actor_id: msg.actor_id, traj_to_send: trajectory };
-                            let heap_arc2 = self.traj_heap.clone();
-                            tokio::spawn(async move {
-                                let mut traj_heap = heap_arc2.lock().await;
-                                traj_heap.push(queue_entry);
-                            });
+                            // Inline heap operation - no need to spawn a task for this simple operation
+                            let mut traj_heap = self.traj_heap.lock().await;
+                            traj_heap.push(queue_entry);
                         }
                     } else {
                         break;
@@ -378,7 +376,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
         Ok(())
     }
 
-    pub fn enqueue_traj_set_priority(
+    /// Enqueue a trajectory with a specific priority
+    /// 
+    /// Note: This method should be called from an async context
+    pub async fn enqueue_traj_set_priority(
         &self,
         id: Uuid,
         priority_rank: i64,
@@ -390,11 +391,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
             traj_to_send: trajectory,
         };
 
-        let heap_arc: Arc<Mutex<BinaryHeap<SenderQueueEntry>>> = Arc::clone(&self.traj_heap);
-        tokio::spawn(async move {
-            let mut traj_heap = heap_arc.lock().await;
-            traj_heap.push(queue_entry);
-        });
+        let mut traj_heap = self.traj_heap.lock().await;
+        traj_heap.push(queue_entry);
     }
 
     /// Round robin priority computation
