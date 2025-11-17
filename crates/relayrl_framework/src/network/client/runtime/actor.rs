@@ -220,15 +220,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         })?;
                                     }
                                     None => {
-                                        self.model =
-                                            Some(
-                                                HotReloadableModel::<B>::new_from_module(
-                                                    model,
-                                                    self.model_device.clone(),
-                                                )
-                                                .await
-                                                .map_err(ActorError::from)?,
-                                            );
+                                        self.model = Some(
+                                            HotReloadableModel::<B>::new_from_module(
+                                                model,
+                                                self.model_device.clone(),
+                                            )
+                                            .await
+                                            .map_err(ActorError::from)?,
+                                        );
                                     }
                                 }
                             } else {
@@ -291,15 +290,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         })?;
                                     }
                                     None => {
-                                        self.model =
-                                            Some(
-                                                HotReloadableModel::<B>::new_from_module(
-                                                    model,
-                                                    self.model_device.clone(),
-                                                )
-                                                .await
-                                                .map_err(ActorError::from)?,
-                                            );
+                                        self.model = Some(
+                                            HotReloadableModel::<B>::new_from_module(
+                                                model,
+                                                self.model_device.clone(),
+                                            )
+                                            .await
+                                            .map_err(ActorError::from)?,
+                                        );
                                     }
                                 }
                             } else {
@@ -449,10 +447,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             if let Ok(ok_model) = model {
                 // Validate the model - it gets dimensions from the model itself
                 if let Err(e) = validate_module::<B>(&ok_model).map_err(ActorError::from) {
-                    eprintln!("[ActorEntity {:?}] Failed to validate model: {:?}", self.id, e);
+                    eprintln!(
+                        "[ActorEntity {:?}] Failed to validate model: {:?}",
+                        self.id, e
+                    );
                     return Err(e);
                 };
-                    
+
                 if let Err(e) = ok_model.save(&model_path).map_err(ActorError::from) {
                     eprintln!("[ActorEntity {:?}] Failed to save model: {:?}", self.id, e);
                     return Err(e);
@@ -470,7 +471,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             "[ActorEntity {:?}] Model does not exist, no model refresh possible...",
                             self.id
                         );
-                        return Err(ActorError::ModelError(ModelError::IoError("Model does not exist in actor instance".to_string())));
+                        return Err(ActorError::ModelError(ModelError::IoError(
+                            "Model does not exist in actor instance".to_string(),
+                        )));
                     }
                 }
             }

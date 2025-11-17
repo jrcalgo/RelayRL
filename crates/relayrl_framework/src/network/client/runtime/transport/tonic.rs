@@ -46,9 +46,36 @@ use rl_service::{
 use crate::network::client::runtime::transport::TransportError;
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::tensor::BackendMatcher;
+use thiserror::Error;
 
+#[derive(Debug, Error)]
 pub enum TonicClientError {
+    #[error("Client connection error: {0}")]
+    ClientConnectionError(String),
+    #[error("Client not initialized: {0}")]
+    ClientNotInitializedError(String),
+    #[error("Algorithm initialization error: {0}")]
+    AlgorithmInitializationError(String),
+    #[error("Send trajectory error: {0}")]
+    SendTrajectoryError(String),
+    #[error("Request timeout: {0}")]
+    TimeoutError(String),
+    #[error("gRPC error: {0}")]
+    GrpcError(String),
+}
 
+#[cfg(feature = "grpc_network")]
+impl From<tonic::Status> for TonicClientError {
+    fn from(status: tonic::Status) -> Self {
+        TonicClientError::GrpcError(status.to_string())
+    }
+}
+
+#[cfg(feature = "grpc_network")]
+impl From<tokio::time::error::Elapsed> for TonicClientError {
+    fn from(_: tokio::time::error::Elapsed) -> Self {
+        TonicClientError::TimeoutError("Request timed out".to_string())
+    }
 }
 
 #[cfg(feature = "grpc_network")]
@@ -78,14 +105,13 @@ impl TonicClient {
         }
     }
 
-    async fn ensure_client(
-        &mut self,
-        server_address: &str,
-    ) -> Result<(), TonicClientError> {
+    async fn ensure_client(&mut self, server_address: &str) -> Result<(), TonicClientError> {
         if self.client.is_none() {
-            let channel = Channel::from_shared(format!("http://{}", server_address))?
+            let channel = Channel::from_shared(format!("http://{}", server_address))
+                .map_err(|e| TonicClientError::ClientConnectionError(e.to_string()))?
                 .connect()
-                .await?;
+                .await
+                .map_err(|e| TonicClientError::ClientConnectionError(e.to_string()))?;
             self.client = Some(RlServiceClient::new(channel));
         }
         Ok(())
@@ -95,7 +121,7 @@ impl TonicClient {
         &mut self,
         server_address: &str,
         expected_version: i64,
-    ) -> Result<ModelResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ModelResponse, TonicClientError> {
         self.ensure_client(server_address).await?;
 
         let current_version = self.current_version.load(Ordering::SeqCst);
@@ -107,7 +133,14 @@ impl TonicClient {
 
         let response = timeout(
             Duration::from_secs(30),
-            self.client.as_mut().ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Client not initialized")))?.get_model(request),
+            self.client
+                .as_mut()
+                .ok_or_else(|| {
+                    TonicClientError::ClientNotInitializedError(
+                        "Client not initialized".to_string(),
+                    )
+                })?
+                .get_model(request),
         )
         .await??;
 
@@ -128,7 +161,14 @@ impl TonicClient {
 
         let response = timeout(
             Duration::from_secs(30),
-            self.client.as_mut().send_trajectories(request),
+            self.client
+                .as_mut()
+                .ok_or_else(|| {
+                    TonicClientError::ClientNotInitializedError(
+                        "Client not initialized".to_string(),
+                    )
+                })?
+                .send_trajectories(request),
         )
         .await??;
 
@@ -169,7 +209,14 @@ impl TonicClient {
 
         let response = timeout(
             Duration::from_secs(30),
-            self.client.as_mut().unwrap().init_algorithm(request),
+            self.client
+                .as_mut()
+                .ok_or_else(|| {
+                    TonicClientError::ClientNotInitializedError(
+                        "Client not initialized".to_string(),
+                    )
+                })?
+                .init_algorithm(request),
         )
         .await??;
 
@@ -181,9 +228,10 @@ impl TonicClient {
                 init_response.message
             );
         } else {
-            return Err(
-                format!("Failed to initialize algorithm: {}", init_response.message).into(),
-            );
+            return Err(TonicClientError::AlgorithmInitializationError(format!(
+                "Failed to initialize algorithm: {}",
+                init_response.message
+            )));
         }
 
         Ok(())
@@ -202,7 +250,10 @@ impl TonicClient {
             .initialize_algorithm_if_needed(training_server_address)
             .await
         {
-            return Err(format!("Failed to initialize algorithm: {}", e));
+            return Err(TonicClientError::AlgorithmInitializationError(format!(
+                "Failed to initialize algorithm: {}",
+                e
+            )));
         }
 
         let proto_trajectory =
@@ -226,11 +277,10 @@ impl TonicClient {
                 }
                 Ok(())
             }
-            Err(e) => {
-                let error_msg = format!("Failed to send trajectory: {}", e);
-                eprintln!("[TonicClient] {}", error_msg);
-                Err(error_msg)
-            }
+            Err(e) => Err(TonicClientError::SendTrajectoryError(format!(
+                "Failed to send trajectory: {}",
+                e
+            ))),
         }
     }
 }
@@ -352,10 +402,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                 }
             }
             Err(e) => {
-                eprintln!("[TonicClient] Failed to send trajectory: {}", e);
+                eprintln!(
+                    "[TonicClient] Failed to send trajectory: {:?}",
+                    e.to_string()
+                );
                 return Err(TransportError::SendTrajError(format!(
-                    "Failed to send trajectory: {}",
-                    e
+                    "Failed to send trajectory: {:?}",
+                    e.to_string()
                 )));
             }
         }
@@ -373,11 +426,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
         {
             eprintln!(
                 "[TonicClient] Failed to initialize algorithm before listening: {}",
-                e
+                e.to_string()
             );
             return Err(TransportError::ListenForModelError(format!(
                 "Failed to initialize algorithm before listening: {}",
-                e
+                e.to_string()
             )));
         }
 
@@ -411,7 +464,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                     }
                 }
                 Err(e) => {
-                    eprintln!("[TonicClient] Model polling failed: {}", e);
+                    eprintln!("[TonicClient] Model polling failed: {:?}", e.to_string());
                     // Back off on error
                     tokio::time::sleep(Duration::from_secs(10)).await;
                 }

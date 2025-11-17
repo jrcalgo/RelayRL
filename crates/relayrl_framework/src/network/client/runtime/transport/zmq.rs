@@ -16,6 +16,14 @@ use tokio::task;
 use uuid::Uuid;
 use zmq::{Context, Socket};
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ZmqClientError {
+    #[error(transparent)]
+    ZmqClientError(#[from] zmq::Error),
+}
+
 pub struct ZmqClient {
     agent_listener_address: String,
     trajectory_server_address: String,
@@ -62,7 +70,11 @@ impl ZmqClient {
         }
     }
 
-    fn create_dealer_socket(&self, context: &Context, address: &str) -> Result<Socket, zmq::Error> {
+    fn create_dealer_socket(
+        &self,
+        context: &Context,
+        address: &str,
+    ) -> Result<Socket, ZmqClientError> {
         let socket = context.socket(zmq::DEALER)?;
 
         // Set socket identity
@@ -79,7 +91,11 @@ impl ZmqClient {
         Ok(socket)
     }
 
-    fn create_push_socket(&self, context: &Context, address: &str) -> Result<Socket, zmq::Error> {
+    fn create_push_socket(
+        &self,
+        context: &Context,
+        address: &str,
+    ) -> Result<Socket, ZmqClientError> {
         let socket = context.socket(zmq::PUSH)?;
 
         // Set send timeout to non-blocking
@@ -129,8 +145,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
         }
 
         // Wait for model response with timeout
-        socket
-            .set_rcvtimeo(30000).map_err(|e| TransportError::ModelHandshakeError(format!("Failed to set receive timeout: {}", e)))?;
+        socket.set_rcvtimeo(30000).map_err(|e| {
+            TransportError::ModelHandshakeError(format!("Failed to set receive timeout: {}", e))
+        })?;
 
         match socket.recv_multipart(0) {
             Ok(message_parts) => {
@@ -209,12 +226,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
         let socket = self
             .create_push_socket(&context, &self.trajectory_server_address)
             .map_err(|e| {
-                TransportError::SendTrajError(format!("Failed to create trajectory socket: {}", e))
+                TransportError::SendTrajError(format!(
+                    "Failed to create trajectory socket: {}",
+                    e.to_string()
+                ))
             })?;
 
         // Serialize the trajectory
         let serialized_traj: Vec<u8> = serde_json::to_vec(&encoded_trajectory).map_err(|e| {
-            TransportError::SendTrajError(format!("Failed to serialize trajectory: {}", e))
+            TransportError::SendTrajError(format!(
+                "Failed to serialize trajectory: {}",
+                e.to_string()
+            ))
         })?;
 
         println!(
@@ -248,13 +271,24 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
 
         task::spawn_blocking(move || {
             let context = Context::new();
-            let socket = context
-                .socket(zmq::SUB)
-                .map_err(|e| TransportError::ListenForModelError(format!("Failed to create SUB socket: {}", e)))?;
-            socket.set_subscribe(b"").map_err(|e| TransportError::ListenForModelError(format!("SUB subscribe failed: {}", e)))?;
+            let socket = context.socket(zmq::SUB).map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to create SUB socket: {}",
+                    e.to_string()
+                ))
+            })?;
+            socket.set_subscribe(b"").map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "SUB subscribe failed: {}",
+                    e.to_string()
+                ))
+            })?;
             if let Err(e) = socket.connect(&sub_address) {
                 eprintln!("[ZmqClient] Failed to connect SUB socket: {}", e);
-                return Err::<(), TransportError>(TransportError::ListenForModelError(format!("Failed to connect SUB socket: {}", e)));
+                return Err::<(), TransportError>(TransportError::ListenForModelError(format!(
+                    "Failed to connect SUB socket: {}",
+                    e
+                )));
             }
             println!("[ZmqClient] Listening for model updates at {}", sub_address);
             loop {
@@ -272,7 +306,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                     }
                     Err(e) => {
                         eprintln!("[ZmqClient] SUB socket recv error: {}", e);
-                        return Err(TransportError::ListenForModelError(format!("SUB socket recv error: {}", e)));
+                        return Err(TransportError::ListenForModelError(format!(
+                            "SUB socket recv error: {}",
+                            e
+                        )));
                     }
                 }
             }
