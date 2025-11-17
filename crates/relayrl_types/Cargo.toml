@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_types"
-version = "0.3.12"
+version = "0.3.13"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
