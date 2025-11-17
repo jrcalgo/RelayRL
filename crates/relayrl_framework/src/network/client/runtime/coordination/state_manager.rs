@@ -95,6 +95,98 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         )
     }
 
+    /// Helper function to load a reloadable model from various sources
+    /// 
+    /// Priority order:
+    /// 1. Provided `default_model` parameter
+    /// 2. Cached `self.default_model`
+    /// 3. Config `default_model_path`
+    /// 4. Config `local_model_path`
+    /// 5. None
+    async fn load_reloadable_model(
+        &self,
+        default_model: Option<ModelModule<B>>,
+        device: DeviceType,
+    ) -> Result<Option<HotReloadableModel<B>>, StateManagerError> {
+        // Check fn param
+        if let Some(model) = default_model {
+            return Ok(Some(
+                HotReloadableModel::<B>::new_from_module(model, device)
+                    .await
+                    .map_err(|_| {
+                        StateManagerError::FailedToCreateReloadableModelError(
+                            "[StateManager] Failed to create reloadable model from parameter".to_string()
+                        )
+                    })?
+            ));
+        }
+        
+        // Check cached default_model
+        if let Some(model) = self.default_model.clone() {
+            return Ok(Some(
+                HotReloadableModel::<B>::new_from_module(model, device)
+                    .await
+                    .map_err(|_| {
+                        StateManagerError::FailedToCreateReloadableModelError(
+                            "[StateManager] Failed to create reloadable model from cache".to_string()
+                        )
+                    })?
+            ));
+        }
+        
+        // Try loading from config paths
+        let config = self.shared_config.read().await;
+        
+        // Try default_model_path
+        let default_model_path_str = config
+            .client_config
+            .default_model_path
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
+        
+        if !default_model_path_str.is_empty() {
+            return Ok(Some(
+                HotReloadableModel::<B>::new_from_path(
+                    config.client_config.default_model_path.clone(),
+                    device,
+                )
+                .await
+                .map_err(|_| {
+                    StateManagerError::FailedToCreateReloadableModelError(
+                        "[StateManager] Failed to load model from default_model_path".to_string()
+                    )
+                })?
+            ));
+        }
+        
+        // Try local_model_path
+        let local_model_path_str = config
+            .transport_config
+            .local_model_path
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
+        
+        if !local_model_path_str.is_empty() {
+            return Ok(Some(
+                HotReloadableModel::<B>::new_from_path(
+                    config.transport_config.local_model_path.clone(),
+                    device,
+                )
+                .await
+                .map_err(|_| {
+                    StateManagerError::FailedToCreateReloadableModelError(
+                        "[StateManager] Failed to load model from local_model_path".to_string()
+                    )
+                })?
+            ));
+        }
+        
+        // No model available
+        Ok(None)
+    }
+
     pub(crate) async fn __new_actor(
         &mut self,
         id: Uuid,
@@ -110,83 +202,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             self.__remove_actor(id)?
         }
 
-        // check fn param
-        let reloadable_model: Option<HotReloadableModel<B>> = if let Some(model) = default_model {
-            Some(
-                HotReloadableModel::<B>::new_from_module(model, device.clone())
-                    .await
-                    .map_err(|_| {
-                        StateManagerError::FailedToCreateReloadableModelError(format!("[StateManager] Failed to create reloadable default model from ModelModule argument..."))
-                    })?,
-            )
-        // check if current struct default_model is Some
-        } else if let Some(model) = { self.default_model.clone() } {
-            Some(
-                HotReloadableModel::<B>::new_from_module(model, device.clone())
-                    .await
-                    .map_err(|_| {
-                        StateManagerError::FailedToCreateReloadableModelError(format!("[StateManager] Failed to create reloadable default model from cached default_model..."))
-                    })?,
-            )
-        // try taking once from cached default_model
-        } else {
-            // lazily load from config if configured
-            let loader: Arc<RwLock<ClientConfigLoader>> = self.shared_config.clone();
-            let default_model_path_str: String = loader
-                .read()
-                .await
-                .client_config
-                .default_model_path
-                .to_str()
-                .unwrap_or_default()
-                .to_string();
-
-            if !default_model_path_str.is_empty() {
-                Some(
-                    HotReloadableModel::<B>::new_from_path(
-                        loader.read().await.client_config.default_model_path.clone(),
-                        device.clone(),
-                    )
-                    .await
-                    .map_err(|_| {
-                        StateManagerError::FailedToCreateReloadableModelError(format!(
-                            "[StateManager] Failed to load model from path"
-                        ))
-                    })?,
-                )
-            } else {
-                let local_model_path_str: String = loader
-                    .read()
-                    .await
-                    .transport_config
-                    .local_model_path
-                    .to_str()
-                    .unwrap_or_default()
-                    .to_string();
-
-                if !local_model_path_str.is_empty() {
-                    Some(
-                        HotReloadableModel::<B>::new_from_path(
-                            loader
-                                .read()
-                                .await
-                                .transport_config
-                                .local_model_path
-                                .clone(),
-                            device.clone(),
-                        )
-                        .await
-                        .map_err(|_| {
-                            StateManagerError::FailedToCreateReloadableModelError(format!(
-                                "[StateManager] Failed to load model from path"
-                            ))
-                        })?,
-                    )
-                } else {
-                    None
-                }
-            }
-        };
+        // Use helper function to load model from various sources
+        let reloadable_model = self.load_reloadable_model(default_model, device.clone()).await?;
 
         let shared_config: Arc<RwLock<ClientConfigLoader>> = self.shared_config.clone();
         let (tx_to_actor, rx_from_global) = mpsc::channel(CHANNEL_THROUGHPUT);
