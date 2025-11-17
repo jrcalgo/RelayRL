@@ -9,9 +9,6 @@ use relayrl_types::types::model::ModelModule;
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;
-use serde::Serialize;
-use serde_pickle as pickle;
-use std::io::Cursor;
 use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 
