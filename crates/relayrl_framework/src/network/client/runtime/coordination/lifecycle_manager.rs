@@ -36,7 +36,7 @@ impl LifeCycleManager {
     pub fn new(config: ClientConfigLoader) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1000);
         let config_path: PathBuf = config.get_config_path().clone();
-        
+
         // Get file metadata with fallback to current time
         let last_modified: SystemTime = fs::metadata(&config_path)
             .and_then(|m| m.modified())
@@ -60,7 +60,9 @@ impl LifeCycleManager {
     pub fn spawn_loop(&self) {
         let self_clone: LifeCycleManager = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = self_clone._watch().await { eprintln!("[LifeCycleManager] Failed to spawn loop: {}", e); }
+            if let Err(e) = self_clone._watch().await {
+                eprintln!("[LifeCycleManager] Failed to spawn loop: {}", e);
+            }
         });
     }
 

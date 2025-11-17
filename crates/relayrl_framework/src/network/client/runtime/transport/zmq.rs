@@ -130,8 +130,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
 
         // Wait for model response with timeout
         socket
-            .set_rcvtimeo(30000)
-            .expect("Failed to set receive timeout"); // 30 second timeout
+            .set_rcvtimeo(30000).map_err(|e| TransportError::ModelHandshakeError(format!("Failed to set receive timeout: {}", e)))?;
 
         match socket.recv_multipart(0) {
             Ok(message_parts) => {
@@ -251,11 +250,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             let context = Context::new();
             let socket = context
                 .socket(zmq::SUB)
-                .expect("Failed to create SUB socket");
-            socket.set_subscribe(b"").expect("SUB subscribe failed");
+                .map_err(|e| TransportError::ListenForModelError(format!("Failed to create SUB socket: {}", e)))?;
+            socket.set_subscribe(b"").map_err(|e| TransportError::ListenForModelError(format!("SUB subscribe failed: {}", e)))?;
             if let Err(e) = socket.connect(&sub_address) {
                 eprintln!("[ZmqClient] Failed to connect SUB socket: {}", e);
-                return;
+                return Err::<(), TransportError>(TransportError::ListenForModelError(format!("Failed to connect SUB socket: {}", e)));
             }
             println!("[ZmqClient] Listening for model updates at {}", sub_address);
             loop {
@@ -273,7 +272,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                     }
                     Err(e) => {
                         eprintln!("[ZmqClient] SUB socket recv error: {}", e);
-                        return;
+                        return Err(TransportError::ListenForModelError(format!("SUB socket recv error: {}", e)));
                     }
                 }
             }

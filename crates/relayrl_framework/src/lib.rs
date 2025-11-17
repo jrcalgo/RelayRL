@@ -69,8 +69,6 @@ pub mod prelude {
         // pub use crate::network::server::training_server::TrainingServer;
     }
     pub mod templates {
-        pub use crate::templates::environment_template::{
-            EnvironmentTestingTrait, EnvironmentTrainingTrait,
-        };
+        pub use crate::templates::{EnvironmentTestingTrait, EnvironmentTrainingTrait};
     }
 }

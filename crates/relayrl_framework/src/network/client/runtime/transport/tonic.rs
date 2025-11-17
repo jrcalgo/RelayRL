@@ -47,6 +47,10 @@ use crate::network::client::runtime::transport::TransportError;
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::tensor::BackendMatcher;
 
+pub enum TonicClientError {
+
+}
+
 #[cfg(feature = "grpc_network")]
 pub struct TonicClient {
     client: Option<RlServiceClient<Channel>>,
@@ -77,7 +81,7 @@ impl TonicClient {
     async fn ensure_client(
         &mut self,
         server_address: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), TonicClientError> {
         if self.client.is_none() {
             let channel = Channel::from_shared(format!("http://{}", server_address))?
                 .connect()
@@ -103,7 +107,7 @@ impl TonicClient {
 
         let response = timeout(
             Duration::from_secs(30),
-            self.client.as_mut().unwrap().get_model(request),
+            self.client.as_mut().ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Client not initialized")))?.get_model(request),
         )
         .await??;
 
@@ -114,7 +118,7 @@ impl TonicClient {
         &mut self,
         server_address: &str,
         trajectories: Vec<GrpcEncodedTrajectory>,
-    ) -> Result<SendTrajectoriesResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<SendTrajectoriesResponse, TonicClientError> {
         self.ensure_client(server_address).await?;
 
         let request = Request::new(SendTrajectoriesRequest {
@@ -124,7 +128,7 @@ impl TonicClient {
 
         let response = timeout(
             Duration::from_secs(30),
-            self.client.as_mut().unwrap().send_trajectories(request),
+            self.client.as_mut().send_trajectories(request),
         )
         .await??;
 
@@ -134,7 +138,7 @@ impl TonicClient {
     async fn initialize_algorithm_if_needed(
         &mut self,
         server_address: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), TonicClientError> {
         if self.algorithm_initialized.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -190,7 +194,7 @@ impl TonicClient {
         &self,
         encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), TonicClientError> {
         let mut client = Self::new(&self.config);
 
         // Ensure algorithm is initialized

@@ -35,6 +35,8 @@ pub enum StateManagerError {
     ActorAlreadyTakenError(String),
     #[error("Subscribe shutdown failed: {0}")]
     SubscribeShutdownError(#[from] LifeCycleManagerError),
+    #[error("Failed to receive shutdown signal: {0}")]
+    ReceiveShutdownSignalError(String),
     #[error("Shutdown all actors failed: {0}")]
     ShutdownAllActorsError(String),
     #[error("Set actor ID failed: {0}")]
@@ -222,7 +224,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let _ = tx_to_actor.send(model_handshake_ms).await;
             }
 
-            actor.spawn_loop().await
+            if let Err(e) = actor.spawn_loop().await {
+                eprintln!("[StateManager] Actor {:?} loop error: {}", id, e);
+            }
         }));
         self.actor_handles.insert(id, handle);
         Ok(())
@@ -257,20 +261,29 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) fn spawn_shutdown_watcher(
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         lifecycle: LifeCycleManager,
-    ) {
+    ) -> Result<(), StateManagerError> {
         tokio::spawn(async move {
-            match lifecycle.subscribe_shutdown() {
-                Ok(mut rx) => {
-                    let _ = rx.recv().await;
-                    if let Err(e) = shared_state.read().await.__shutdown_all_actors().await {
-                        eprintln!("[StateManager] Failed to shutdown all actors: {}", e);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[StateManager] Failed to subscribe to shutdown signal: {}", e);
-                }
-            }
+            let mut rx = lifecycle
+                .subscribe_shutdown()
+                .map_err(StateManagerError::from)?;
+            rx.recv()
+                .await
+                .map_err(|e| StateManagerError::ReceiveShutdownSignalError(e.to_string()))?;
+            shared_state
+                .read()
+                .await
+                .__shutdown_all_actors()
+                .await
+                .map_err(|e| {
+                    StateManagerError::ShutdownAllActorsError(format!(
+                        "Failed to shutdown all actors: {}",
+                        e
+                    ))
+                })?;
+
+            Ok::<(), StateManagerError>(())
         });
+        Ok(())
     }
 
     pub(crate) fn __remove_actor(&mut self, id: Uuid) -> Result<(), StateManagerError> {

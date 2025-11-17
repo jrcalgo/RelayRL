@@ -122,7 +122,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) async fn __scale_up(&mut self, router_add: u32) -> Result<(), ScaleManagerError> {
-        self._send_scaling_warning(ScalingOperation::ScaleUp).await?;
+        self._send_scaling_warning(ScalingOperation::ScaleUp)
+            .await?;
 
         if self.runtime_params.is_none() {
             self.runtime_params = Some(DashMap::new());
@@ -183,7 +184,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let receiver_loop: JoinHandle<()> = Self::_spawn_external_receiver(receiver).await;
             let filter_loop: JoinHandle<()> = Self::_spawn_central_filter(filter).await;
             let sender_loop: JoinHandle<()> = Self::_spawn_external_sender(sender).await;
-            
+
             let runtime_params = RouterRuntimeParams {
                 receiver_loop,
                 filter_loop,
@@ -451,19 +452,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _spawn_central_filter(mut filter: ClientFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            if let Err(e) = filter.spawn_loop().await { eprintln!("[ScaleManager] Failed to spawn central filter: {}", e); }
+            if let Err(e) = filter.spawn_loop().await {
+                eprintln!("[ScaleManager] Central filter error: {}", e);
+            }
         })
     }
 
     async fn _spawn_external_receiver(receiver: ClientExternalReceiver<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            if let Err(e) = receiver.spawn_loop().await { eprintln!("[ScaleManager] Failed to spawn external receiver: {}", e); }
+            if let Err(e) = receiver.spawn_loop().await {
+                eprintln!("[ScaleManager] External receiver error: {}", e);
+            }
         })
     }
 
     async fn _spawn_external_sender(sender: ClientExternalSender<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            if let Err(e) = sender.spawn_loop().await { eprintln!("[ScaleManager] Failed to spawn external sender: {}", e); }
+            if let Err(e) = sender.spawn_loop().await {
+                eprintln!("[ScaleManager] External sender error: {}", e);
+            }
         })
     }
 }

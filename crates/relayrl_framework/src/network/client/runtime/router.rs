@@ -5,8 +5,8 @@ use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::TransportClient;
 use crate::network::client::runtime::transport::TransportError;
 
-use thiserror::Error;
 use crate::utilities::orchestration::tonic_utils::relayrl_encoded_trajectory_to_grpc_encoded_trajectory;
+use thiserror::Error;
 
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::action::RelayRLAction;
@@ -440,13 +440,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                     let encoded_traj = entry
                         .traj_to_send
                         .encode(&self.codec)
-                        .map_err(|e| RouterError::ExternalSenderError(ExternalSenderError::EncodeTrajectoryError(e)))?;
+                        .map_err(|e| ExternalSenderError::EncodeTrajectoryError(e))?;
 
-                    if let Err(e) = sync_client.send_traj_to_server(encoded_traj, &server_address) {
-                        return Err(RouterError::ExternalSenderError(
-                            ExternalSenderError::TransportError(e),
-                        ));
-                    }
+                    sync_client
+                        .send_traj_to_server(encoded_traj, &server_address)
+                        .map_err(|e| ExternalSenderError::TransportError(e))?;
                     Ok(())
                 }
                 #[cfg(feature = "grpc_network")]
@@ -454,16 +452,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                     let encoded_traj = entry
                         .traj_to_send
                         .encode(&self.codec)
-                        .map_err(|e| RouterError::ExternalSenderError(ExternalSenderError::EncodeTrajectoryError(e)))?;
+                        .map_err(|e| ExternalSenderError::EncodeTrajectoryError(e))?;
 
-                    if let Err(e) = async_client
+                    async_client
                         .send_traj_to_server(encoded_traj, &server_address)
                         .await
-                    {
-                        return Err(RouterError::ExternalSenderError(
-                            ExternalSenderError::TransportError(e),
-                        ));
-                    }
+                        .map_err(|e| ExternalSenderError::TransportError(e))?;
                     Ok(())
                 }
             }

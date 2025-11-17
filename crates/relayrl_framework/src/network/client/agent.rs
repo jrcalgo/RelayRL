@@ -196,9 +196,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 Ok(())
             }
             remove if routers < 0 => {
-                self.coordinator
-                    ._scale_down(remove.abs() as u32)
-                    .await?;
+                self.coordinator._scale_down(remove.abs() as u32).await?;
                 Ok(())
             }
             _ => Err(ClientError::NoopRouterScale(

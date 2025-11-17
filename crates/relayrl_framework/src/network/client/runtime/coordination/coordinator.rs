@@ -411,9 +411,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                let actors = StateManager::<B, D_IN, D_OUT>::__get_actors(
-                    &*params.state.read().await,
-                )?;
+                let actors =
+                    StateManager::<B, D_IN, D_OUT>::__get_actors(&*params.state.read().await)?;
                 Ok(actors)
             }
             None => Err(CoordinatorError::StateManagerError(
