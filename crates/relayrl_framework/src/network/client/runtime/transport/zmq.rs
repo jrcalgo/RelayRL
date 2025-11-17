@@ -318,12 +318,32 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
     }
 
     fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), TransportError> {
-        // TODO: implement
+        let operation_type = match operation {
+            ScalingOperation::ScaleUp => "scale_up",
+            ScalingOperation::ScaleDown => "scale_down",
+        };
+        
+        println!("[ZmqClient] Scaling warning: {} operation initiated", operation_type);
+        
+        // TODO: In a full implementation, this would send a ZMQ message to the training server
+        // For now, we log the warning and return success
+        // The training server can use this to prepare for scaling operations
+        
         Ok(())
     }
 
     fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), TransportError> {
-        // TODO: implement
+        let operation_type = match operation {
+            ScalingOperation::ScaleUp => "scale_up",
+            ScalingOperation::ScaleDown => "scale_down",
+        };
+        
+        println!("[ZmqClient] Scaling complete: {} operation finished", operation_type);
+        
+        // TODO: In a full implementation, this would send a ZMQ message to the training server
+        // to signal that scaling has completed and normal operations can resume
+        // The server can acknowledge the completion and adjust its internal state
+        
         Ok(())
     }
 }
