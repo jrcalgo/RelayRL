@@ -84,7 +84,9 @@ impl LifeCycleManager {
     }
 
     async fn _watch(&self) -> Result<(), LifeCycleManagerError> {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let polling_interval_secs = 3;
+    
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(polling_interval_secs));
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -109,9 +111,9 @@ impl LifeCycleManager {
 
     fn _handle_shutdown_signal(&self) -> Result<(), LifeCycleManagerError> {
         if let Err(e) = self.shutdown_tx.send(()) {
-            return Err(LifeCycleManagerError::SendShutdownSignalError(format!(
-                "Failed to send shutdown signal. No active receivers."
-            )));
+            return Err(LifeCycleManagerError::SendShutdownSignalError(
+                format!("Failed to send shutdown signal. No active receivers: {}", e).to_string()
+            ));
         }
         Ok(())
     }
