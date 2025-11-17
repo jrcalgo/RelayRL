@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.12] - 2025-11-17
+
+### Changed
+- **ModelError Implementation** - Enhanced `ModelError` with `thiserror` derive for better error handling
+  - Added `thiserror` dependency (v2.0.17) to Cargo.toml
+  - Updated `ModelError` enum to derive from `thiserror::Error`
+  - Added `#[error(...)]` attributes to all error variants for improved error messages
+  - Provides better integration with error handling libraries and more consistent error formatting
+
 ## [0.3.11] - 2025-11-15
 
 ### Fixed

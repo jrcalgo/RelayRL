@@ -18,6 +18,8 @@ use burn_tensor::{Tensor, TensorData as BurnTensorData, TensorKind, backend::Bac
 use ort::tensor::IntoTensorElementDataType;
 use serde::{Deserialize, Serialize};
 
+use thiserror::Error;
+
 use crate::types::data::action::RelayRLData;
 use crate::types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, ConversionBurnTensor, DType, DeviceType,
@@ -45,19 +47,31 @@ use uuid::Uuid;
 pub use burn_tensor::Shape;
 pub use hot_reloadable::HotReloadableModel;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum ModelError {
+    #[error("Serialization error: {0}")]
     SerializationError(String),
+    #[error("Deserialization error: {0}")]
     DeserializationError(String),
+    #[error("Backend error: {0}")]
     BackendError(String),
+    #[error("DType error: {0}")]
     DTypeError(String),
+    #[error("Invalid input dimension: {0}")]
     InvalidInputDimension(String),
+    #[error("Invalid output dimension: {0}")]
     InvalidOutputDimension(String),
+    #[error("Unsupported rank: {0}")]
     UnsupportedRank(String),
+    #[error("Unsupported backend: {0}")]
     UnsupportedBackend(String),
+    #[error("IO error: {0}")]
     IoError(String),
+    #[error("JSON error: {0}")]
     JsonError(String),
+    #[error("Unsupported model type: {0}")]
     UnsupportedModelType(String),
+    #[error("Invalid metadata: {0}")]
     InvalidMetadata(String),
 }
 
