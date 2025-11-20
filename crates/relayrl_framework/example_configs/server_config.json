@@ -85,6 +85,7 @@
                 "port": "7778"
             }
         },
+        "config_update_polling": 10,
         "grpc_idle_timeout": 30,
         "local_model_module": {
             "directory_name": "model_module",
