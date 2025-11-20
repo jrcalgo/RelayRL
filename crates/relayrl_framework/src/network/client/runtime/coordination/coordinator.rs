@@ -97,7 +97,8 @@ pub trait ClientInterface<
     fn new(transport_type: TransportType) -> Self;
     async fn _start(
         self,
-        actor_count: i64,
+        actor_count: u32,
+        scale: u32,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         _algorithm_name: String,
@@ -107,7 +108,8 @@ pub trait ClientInterface<
     async fn _shutdown(&mut self) -> Result<(), CoordinatorError>;
     async fn _restart(
         self,
-        actor_count: i64,
+        actor_count: u32,
+        scale: u32,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
@@ -119,27 +121,27 @@ pub trait ClientInterface<
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
     ) -> Result<(), CoordinatorError>;
-    async fn _remove_actor(&mut self, id: Uuid) -> Result<(), CoordinatorError>;
+    async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError>;
     async fn _get_actors(
         &self,
     ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError>;
-    async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), CoordinatorError>;
+    async fn _set_actor_id(&self, current_id: ActorUuid, new_id: ActorUuid) -> Result<(), CoordinatorError>;
     async fn _request_action(
         &self,
-        ids: Vec<Uuid>,
+        ids: Vec<ActorUuid>,
         observation: AnyBurnTensor<B, D_IN>,
         mask: AnyBurnTensor<B, D_OUT>,
         reward: f32,
-    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, CoordinatorError>;
+    ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError>;
     async fn _flag_last_action(
         &self,
-        ids: Vec<Uuid>,
+        ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError>;
     async fn _get_model_version(
         &self,
-        ids: Vec<Uuid>,
-    ) -> Result<Vec<(Uuid, i64)>, CoordinatorError>;
+        ids: Vec<ActorUuid>,
+    ) -> Result<Vec<(ActorUuid, i64)>, CoordinatorError>;
     async fn _scale_up(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
     async fn _scale_down(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
 }
@@ -177,7 +179,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _start(
         mut self,
-        actor_count: i64,
+        actor_count: u32,
+        scale: u32,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         _algorithm_name: String,
@@ -207,7 +210,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let shared_state_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
 
-        let (state, global_bus_rx, rx_from_actor) =
+        let (state, global_dispatcher_rx) =
             StateManager::new(shared_state_config, default_model.clone());
 
         let shared_scaling_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
@@ -263,23 +266,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ),
         };
 
-        let shared_global_bus_rx: Arc<RwLock<tokio::sync::mpsc::Receiver<RoutedMessage>>> =
-            Arc::new(RwLock::new(global_bus_rx));
         let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
         // Subscribe to lifecycle shutdown and propagate to all actors
         StateManager::spawn_shutdown_watcher(shared_state.clone(), lifecycle.clone());
         let mut scaling = ScaleManager::new(
             shared_state.clone(),
             Arc::clone(&shared_scaling_config),
-            shared_global_bus_rx,
+            global_dispatcher_rx,
             transport,
-            rx_from_actor,
             agent_listener_address,
             training_server_address,
             codec,
-        )
-        .with_lifecycle(lifecycle.clone());
-        if let Err(e) = scaling.__scale_up(1).await {
+            Some(lifecycle.clone()),
+        );
+
+        if let Err(e) = scaling.__scale_up(scale).await {
             return Err(CoordinatorError::ScaleManagerError(e));
         }
 
@@ -289,7 +290,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
         }
 
-        let metrics = observability::init_observability();
+        let metrics: MetricsManager = observability::init_observability();
 
         self.runtime_params = Some(CoordinatorParams {
             logger,
@@ -328,7 +329,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _restart(
         mut self,
-        actor_count: i64,
+        actor_count: u32,
+        scale: u32,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
@@ -338,6 +340,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self._shutdown().await?;
         self._start(
             actor_count,
+            scale,
             default_device,
             default_model,
             algorithm_name,
@@ -365,15 +368,56 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 params.metrics.record_counter("actors_created", 1, &[]);
 
+                // Get router runtime params to assign actor to a router
+                let router_runtime_params = params
+                    .scaling
+                    .runtime_params
+                    .as_ref()
+                    .ok_or_else(|| {
+                        CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::GetRouterRuntimeParamsError(
+                                "[Coordinator] No routers available for actor assignment".to_string(),
+                            ),
+                        )
+                    })?;
+
+                // Round-robin assignment: pick a router based on current actor count
+                let router_ids: Vec<Uuid> = router_runtime_params.iter().map(|r| *r.key()).collect();
+                if router_ids.is_empty() {
+                    return Err(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::GetRouterRuntimeParamsError(
+                            "[Coordinator] No routers available".to_string(),
+                        ),
+                    ));
+                }
+
+                let actor_count = params.state.read().await.actor_inboxes.len();
+                let router_id = router_ids[actor_count % router_ids.len()];
+
+                // Get the router's sender_tx
+                let sender_tx = router_runtime_params
+                    .get(&router_id)
+                    .ok_or_else(|| {
+                        CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::GetRouterRuntimeParamsError(
+                                "[Coordinator] Router not found".to_string(),
+                            ),
+                        )
+                    })?
+                    .sender_tx
+                    .clone();
+
                 params
                     .state
                     .write()
                     .await
                     .__new_actor(
                         id,
+                        router_id,
                         device,
                         default_model,
                         params.scaling.shared_transport.clone(),
+                        sender_tx,
                     )
                     .await?;
                 Ok(())
@@ -386,7 +430,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _remove_actor(&mut self, id: Uuid) -> Result<(), CoordinatorError> {
+    async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 params.metrics.record_counter("actors_removed", 1, &[]);
@@ -423,7 +467,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _set_actor_id(&self, current_id: Uuid, new_id: Uuid) -> Result<(), CoordinatorError> {
+    async fn _set_actor_id(&self, current_id: ActorUuid, new_id: ActorUuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 StateManager::<B, D_IN, D_OUT>::__set_actor_id(
@@ -443,33 +487,42 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _request_action(
         &self,
-        ids: Vec<Uuid>,
+        ids: Vec<ActorUuid>,
         observation: AnyBurnTensor<B, D_IN>,
         mask: AnyBurnTensor<B, D_OUT>,
         reward: f32,
-    ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, CoordinatorError> {
+    ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 let start_time = Instant::now();
                 let num_ids = ids.len() as u64;
                 let mut actions = Vec::with_capacity(ids.len());
 
-                let router_runtime_params = self
-                    .runtime_params
-                    .as_ref()
-                    .ok_or(CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::GetRouterRuntimeParamsError(
-                            "[Coordinator] No runtime params".to_string(),
-                        ),
-                    ))?
-                    .scaling
-                    .runtime_params
-                    .as_ref()
-                    .ok_or(CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::GetRouterRuntimeParamsError(
-                            "[Coordinator] No scaling runtime params".to_string(),
-                        ),
-                    ))?;
+                // Extract router runtime params with clear error messages
+                let router_runtime_params = {
+                    let runtime_params = self.runtime_params.as_ref().ok_or_else(|| {
+                        CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::GetRouterRuntimeParamsError(
+                                "[Coordinator] No runtime params".to_string(),
+                            ),
+                        )
+                    })?;
+
+                    runtime_params
+                        .scaling
+                        .runtime_params
+                        .as_ref()
+                        .ok_or_else(|| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::GetRouterRuntimeParamsError(
+                                    "[Coordinator] No scaling runtime params".to_string(),
+                                ),
+                            )
+                        })?
+                };
+
+                // Get the global dispatcher sender
+                let global_dispatcher_tx = params.state.read().await.global_dispatcher_tx.clone();
 
                 for id in ids {
                     if !router_runtime_params.contains_key(&id) {
@@ -489,17 +542,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         })),
                     };
 
-                    let sender = router_runtime_params
-                        .get(&id)
-                        .ok_or(CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::GetRouterRuntimeParamsError(
-                                "[Coordinator] No router runtime params".to_string(),
-                            ),
-                        ))?
-                        .tx_to_router
-                        .clone();
-
-                    if let Err(e) = sender
+                    if let Err(e) = global_dispatcher_tx
                         .send(action_request_message)
                         .await
                         .map_err(|e| e.to_string())
@@ -519,7 +562,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
                 }
 
-                let duration = start_time.elapsed().as_secs_f64();
+                let duration: f64 = start_time.elapsed().as_secs_f64();
                 params
                     .metrics
                     .record_histogram("action_request_latency", duration, &[]);
@@ -539,36 +582,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _flag_last_action(
         &self,
-        ids: Vec<Uuid>,
+        ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
-            Some(_) => {
-                let router_runtime_params: &dashmap::DashMap<
-                    Uuid,
-                    super::scale_manager::RouterRuntimeParams,
-                > = self
-                    .runtime_params
-                    .as_ref()
-                    .ok_or(CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::GetRouterRuntimeParamsError(
-                            "[Coordinator] No runtime params".to_string(),
-                        ),
-                    ))?
-                    .scaling
-                    .runtime_params
-                    .as_ref()
-                    .ok_or(CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::GetRouterRuntimeParamsError(
-                            "[Coordinator] No scaling runtime params".to_string(),
-                        ),
-                    ))?;
+            Some(params) => {
+                let global_dispatcher_tx = params.state.read().await.global_dispatcher_tx.clone();
 
                 for id in ids {
-                    if !router_runtime_params.contains_key(&id) {
-                        continue;
-                    }
-
                     let reward: f32 = reward.unwrap_or(0.0);
                     let flag_last_action_message = RoutedMessage {
                         actor_id: id,
@@ -576,16 +597,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         payload: RoutedPayload::FlagLastInference { reward },
                     };
 
-                    let sender = router_runtime_params
-                        .get(&id)
-                        .ok_or(CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::GetRouterRuntimeParamsError(
-                                "[Coordinator] No router runtime params".to_string(),
-                            ),
-                        ))?
-                        .tx_to_router
-                        .clone();
-                    if let Err(e) = sender
+                    if let Err(e) = global_dispatcher_tx
                         .send(flag_last_action_message)
                         .await
                         .map_err(|e| e.to_string())
@@ -607,33 +619,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _get_model_version(
         &self,
-        ids: Vec<Uuid>,
+        ids: Vec<ActorUuid>,
     ) -> Result<Vec<(Uuid, i64)>, CoordinatorError> {
         match &self.runtime_params {
-            Some(_) => {
+            Some(params) => {
                 let mut versions = Vec::with_capacity(ids.len());
-                let router_runtime_params = self
-                    .runtime_params
-                    .as_ref()
-                    .ok_or(CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::GetRouterRuntimeParamsError(
-                            "[Coordinator] No runtime params".to_string(),
-                        ),
-                    ))?
-                    .scaling
-                    .runtime_params
-                    .as_ref()
-                    .ok_or(CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::GetRouterRuntimeParamsError(
-                            "[Coordinator] No scaling runtime params".to_string(),
-                        ),
-                    ))?;
+                let global_dispatcher_tx = params.state.read().await.global_dispatcher_tx.clone();
 
                 for id in ids {
-                    if !router_runtime_params.contains_key(&id) {
-                        continue;
-                    }
-
                     let (resp_tx, resp_rx) = oneshot::channel::<i64>();
 
                     let model_version_message = RoutedMessage {
@@ -642,16 +635,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         payload: RoutedPayload::ModelVersion { reply_to: resp_tx },
                     };
 
-                    let sender = router_runtime_params
-                        .get(&id)
-                        .ok_or(CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::GetRouterRuntimeParamsError(
-                                "[Coordinator] No router runtime params".to_string(),
-                            ),
-                        ))?
-                        .tx_to_router
-                        .clone();
-                    if let Err(e) = sender
+                    if let Err(e) = global_dispatcher_tx
                         .send(model_version_message)
                         .await
                         .map_err(|e| e.to_string())

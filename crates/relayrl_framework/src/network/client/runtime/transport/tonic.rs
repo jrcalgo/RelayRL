@@ -21,7 +21,7 @@ use std::collections::HashMap;
 #[cfg(feature = "grpc_network")]
 use std::sync::{
     Arc,
-    atomic::{AtomicI64, Ordering, AtomicBool},
+    atomic::{AtomicBool, AtomicI64, Ordering},
 };
 use tokio::sync::Mutex;
 #[cfg(feature = "grpc_network")]
@@ -108,7 +108,7 @@ impl TonicClient {
 
     async fn ensure_client(&self, server_address: &str) -> Result<(), TonicClientError> {
         let mut client_guard = self.client.lock().await;
-        
+
         if client_guard.is_none() {
             let channel = Channel::from_shared(format!("http://{}", server_address))
                 .map_err(|e| TonicClientError::ClientConnectionError(e.to_string()))?
@@ -276,8 +276,7 @@ impl TonicClient {
                         "[TonicClient] Trajectory sent successfully, model updated to version {}",
                         response.new_version
                     );
-                    self
-                        .current_version
+                    self.current_version
                         .store(response.new_version as i64, Ordering::SeqCst);
                 } else {
                     println!("[TonicClient] Trajectory sent successfully, no model update");
@@ -322,8 +321,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                         "[TonicClient] Model handshake successful, received version {}",
                         model_response.version
                     );
-                    self
-                        .current_version
+                    self.current_version
                         .store(model_response.version as i64, Ordering::SeqCst);
 
                     // Validate and deserialize the model if available
@@ -397,8 +395,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                         "[TonicClient] Trajectory sent successfully, model updated to version {}",
                         response.new_version
                     );
-                    self
-                        .current_version
+                    self.current_version
                         .store(response.new_version as i64, Ordering::SeqCst);
                 } else {
                     println!("[TonicClient] Trajectory sent successfully, no model update");
@@ -419,7 +416,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
     }
 
     async fn listen_for_model(&self, model_server_address: &str) -> Result<(), TransportError> {
-        let mut polling_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut polling_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Ensure algorithm is initialized before starting to listen
         if let Err(e) = self
@@ -450,8 +447,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
                             "[TonicClient] New model available, version {}",
                             model_response.version
                         );
-                        self
-                            .current_version
+                        self.current_version
                             .store(model_response.version as i64, Ordering::SeqCst);
 
                         // Log model update availability - the router integration would need
@@ -482,13 +478,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
             ScalingOperation::ScaleUp => "scale_up",
             ScalingOperation::ScaleDown => "scale_down",
         };
-        
-        println!("[TonicClient] Scaling warning: {} operation initiated", operation_type);
-        
+
+        println!(
+            "[TonicClient] Scaling warning: {} operation initiated",
+            operation_type
+        );
+
         // TODO: In a full implementation, this would send a gRPC message to the training server
         // For now, we log the warning and return success
         // The training server can use this to prepare for scaling operations
-        
+
         Ok(())
     }
 
@@ -500,13 +499,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
             ScalingOperation::ScaleUp => "scale_up",
             ScalingOperation::ScaleDown => "scale_down",
         };
-        
-        println!("[TonicClient] Scaling complete: {} operation finished", operation_type);
-        
+
+        println!(
+            "[TonicClient] Scaling complete: {} operation finished",
+            operation_type
+        );
+
         // TODO: In a full implementation, this would send a gRPC message to the training server
         // to signal that scaling has completed and normal operations can resume
         // The server can acknowledge the completion and adjust its internal state
-        
+
         Ok(())
     }
 }

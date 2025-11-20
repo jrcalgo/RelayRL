@@ -34,7 +34,7 @@ pub(crate) struct LifeCycleManager {
 
 impl LifeCycleManager {
     pub fn new(config: ClientConfigLoader) -> Self {
-        let (shutdown_tx, _) = broadcast::channel(1000);
+        let (shutdown_tx, _) = broadcast::channel(10_000);
         let config_path: PathBuf = config.get_config_path().clone();
 
         // Get file metadata with fallback to current time
@@ -85,8 +85,9 @@ impl LifeCycleManager {
 
     async fn _watch(&self) -> Result<(), LifeCycleManagerError> {
         let polling_interval_secs = 3;
-    
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(polling_interval_secs));
+
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(polling_interval_secs));
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -112,7 +113,7 @@ impl LifeCycleManager {
     fn _handle_shutdown_signal(&self) -> Result<(), LifeCycleManagerError> {
         if let Err(e) = self.shutdown_tx.send(()) {
             return Err(LifeCycleManagerError::SendShutdownSignalError(
-                format!("Failed to send shutdown signal. No active receivers: {}", e).to_string()
+                format!("Failed to send shutdown signal. No active receivers: {}", e).to_string(),
             ));
         }
         Ok(())

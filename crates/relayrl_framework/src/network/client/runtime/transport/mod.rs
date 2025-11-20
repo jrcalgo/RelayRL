@@ -73,7 +73,7 @@ pub trait SyncClientTransport<B: Backend + BackendMatcher<Backend = B>>: Send + 
     fn listen_for_model(
         &self,
         model_server_address: &str,
-        tx_to_router: Sender<RoutedMessage>,
+        global_dispatcher_tx: Sender<RoutedMessage>,
     ) -> Result<(), TransportError>;
     fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), TransportError>;
     fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), TransportError>;

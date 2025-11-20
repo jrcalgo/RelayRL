@@ -64,11 +64,10 @@ pub(crate) struct StateManager<
 > {
     shared_config: Arc<RwLock<ClientConfigLoader>>,
     default_model: Option<ModelModule<B>>,
-    pub(crate) global_bus_tx: Sender<RoutedMessage>,
-    tx_to_sender: Sender<RoutedMessage>,
+    pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
-    actor_router_addresses: DashMap<ActorUuid, RouterUuid>,
+    pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterUuid>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -77,26 +76,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) fn new(
         shared_config: Arc<RwLock<ClientConfigLoader>>,
         default_model: Option<ModelModule<B>>,
-    ) -> (Self, Receiver<RoutedMessage>, Receiver<RoutedMessage>) {
-        let (global_bus_tx, global_bus_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        let (tx_to_sender, rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+    ) -> (Self, Receiver<RoutedMessage>) {
+        let (global_dispatcher_tx, global_dispatcher_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT * 2);
         (
             Self {
                 shared_config,
                 default_model,
-                global_bus_tx,
-                tx_to_sender,
+                global_dispatcher_tx,
                 actor_inboxes: DashMap::new(),
                 actor_handles: DashMap::new(),
                 actor_router_addresses: DashMap::new(),
             },
-            global_bus_rx,
-            rx_from_actor,
+            global_dispatcher_rx,
         )
     }
 
     /// Helper function to load a reloadable model from various sources
-    /// 
+    ///
     /// Priority order:
     /// 1. Provided `default_model` parameter
     /// 2. Cached `self.default_model`
@@ -115,12 +111,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .map_err(|_| {
                         StateManagerError::FailedToCreateReloadableModelError(
-                            "[StateManager] Failed to create reloadable model from parameter".to_string()
+                            "[StateManager] Failed to create reloadable model from parameter"
+                                .to_string(),
                         )
-                    })?
+                    })?,
             ));
         }
-        
+
         // Check cached default_model
         if let Some(model) = self.default_model.clone() {
             return Ok(Some(
@@ -128,15 +125,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .map_err(|_| {
                         StateManagerError::FailedToCreateReloadableModelError(
-                            "[StateManager] Failed to create reloadable model from cache".to_string()
+                            "[StateManager] Failed to create reloadable model from cache"
+                                .to_string(),
                         )
-                    })?
+                    })?,
             ));
         }
-        
+
         // Try loading from config paths
         let config = self.shared_config.read().await;
-        
+
         // Try default_model_path
         let default_model_path_str = config
             .client_config
@@ -144,7 +142,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .to_str()
             .unwrap_or_default()
             .to_string();
-        
+
         if !default_model_path_str.is_empty() {
             return Ok(Some(
                 HotReloadableModel::<B>::new_from_path(
@@ -154,12 +152,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .await
                 .map_err(|_| {
                     StateManagerError::FailedToCreateReloadableModelError(
-                        "[StateManager] Failed to load model from default_model_path".to_string()
+                        "[StateManager] Failed to load model from default_model_path".to_string(),
                     )
-                })?
+                })?,
             ));
         }
-        
+
         // Try local_model_path
         let local_model_path_str = config
             .transport_config
@@ -167,7 +165,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .to_str()
             .unwrap_or_default()
             .to_string();
-        
+
         if !local_model_path_str.is_empty() {
             return Ok(Some(
                 HotReloadableModel::<B>::new_from_path(
@@ -177,12 +175,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .await
                 .map_err(|_| {
                     StateManagerError::FailedToCreateReloadableModelError(
-                        "[StateManager] Failed to load model from local_model_path".to_string()
+                        "[StateManager] Failed to load model from local_model_path".to_string(),
                     )
-                })?
+                })?,
             ));
         }
-        
+
         // No model available
         Ok(None)
     }
@@ -190,9 +188,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn __new_actor(
         &mut self,
         id: Uuid,
+        router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         transport: Arc<TransportClient<B>>,
+        tx_to_sender: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&id) {
             println!(
@@ -203,11 +203,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         // Use helper function to load model from various sources
-        let reloadable_model = self.load_reloadable_model(default_model, device.clone()).await?;
+        let reloadable_model = self
+            .load_reloadable_model(default_model, device.clone())
+            .await?;
 
         let shared_config: Arc<RwLock<ClientConfigLoader>> = self.shared_config.clone();
-        let (tx_to_actor, rx_from_global) = mpsc::channel(CHANNEL_THROUGHPUT);
+        
+        // Create actor inbox for receiving messages from the filter
+        let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         self.actor_inboxes.insert(id, tx_to_actor.clone());
+        
         let model_path = shared_config
             .read()
             .await
@@ -215,18 +220,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .local_model_path
             .clone();
 
-        let tx_to_sender = self.tx_to_sender.clone();
         let transport = transport.clone();
         let shared_config_cloned = shared_config.clone();
 
-        let handle = Arc::new(tokio::spawn(async move {
+        let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let (mut actor, handshake_flag) = Actor::<B, D_IN, D_OUT>::new(
                 id,
                 device.clone(),
                 reloadable_model,
                 model_path,
                 shared_config_cloned,
-                rx_from_global,
+                actor_inbox_rx,
                 tx_to_sender,
                 transport,
             )
@@ -245,7 +249,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 eprintln!("[StateManager] Actor {:?} loop error: {}", id, e);
             }
         }));
+
         self.actor_handles.insert(id, handle);
+        self.actor_router_addresses.insert(id, router_id);
         Ok(())
     }
 
@@ -261,7 +267,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             };
             let _ = tx.send(shutdown_msg).await;
 
-            let handle = self.actor_handles.get(&actor_id).ok_or(
+            let handle: Result<dashmap::mapref::one::Ref<'_, Uuid, Arc<JoinHandle<()>>>, StateManagerError> = self.actor_handles.get(&actor_id).ok_or(
                 StateManagerError::ActorHandleNotFoundError(format!(
                     "[StateManager] Actor handle not found"
                 )),
@@ -330,8 +336,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) fn __set_actor_id(
         &self,
-        current_id: Uuid,
-        new_id: Uuid,
+        current_id: ActorUuid,
+        new_id: ActorUuid,
     ) -> Result<(), StateManagerError> {
         let current_id_handle =
             match StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, current_id) {
@@ -376,19 +382,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             return;
         }
 
-        let actor_ids: Vec<Uuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
+        let actor_ids: Vec<ActorUuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
             let router_id = router_ids[i % router_ids.len()];
             self.actor_router_addresses.insert(*actor_id, router_id);
         }
-    }
-
-    pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterUuid)> {
-        self.actor_router_addresses
-            .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect()
     }
 
     pub(crate) fn restore_actor_router_mappings(&self, mappings: Vec<(ActorUuid, RouterUuid)>) {
@@ -397,6 +396,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         for (actor_id, router_id) in mappings {
             self.actor_router_addresses.insert(actor_id, router_id);
         }
+    }
+
+    pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterUuid)> {
+        self.actor_router_addresses
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect()
     }
 
     fn get_actor_id_list(&self) -> Vec<ActorUuid> {

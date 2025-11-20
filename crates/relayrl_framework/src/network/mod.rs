@@ -27,6 +27,7 @@ pub mod client {
             pub(crate) mod state_manager;
         }
         pub(crate) mod router;
+        pub(crate) mod router_dispatcher;
         #[cfg(feature = "networks")]
         pub(crate) mod transport;
     }

@@ -325,15 +325,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     /// Request action from the model
-    /// 
+    ///
     /// # Synchronous Context
-    /// 
-    /// This method is synchronous but needs to call async model operations. It uses `block_on()` to 
+    ///
+    /// This method is synchronous but needs to call async model operations. It uses `block_on()` to
     /// bridge the sync/async boundary. This is acceptable because:
     /// 1. This method is called from sync context within the actor's message loop
     /// 2. The model forward pass is the primary async operation that needs to complete
     /// 3. The actor's spawn_loop is async, so this doesn't block the async runtime
-    /// 
+    ///
     /// If deadlocks occur, consider making the entire ActorEntity trait async.
     fn __request_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let Some(model) = &self.model {
@@ -388,15 +388,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     /// Flag the last action and send trajectory
-    /// 
+    ///
     /// # Synchronous Context
-    /// 
-    /// This method is synchronous but needs to send messages via async channels. It uses `block_on()` 
+    ///
+    /// This method is synchronous but needs to send messages via async channels. It uses `block_on()`
     /// to bridge the sync/async boundary. This is acceptable because:
     /// 1. This method is called from sync context within the actor's message loop
     /// 2. The channel send operation needs async execution
     /// 3. The actor's spawn_loop is async, so this doesn't block the async runtime
-    /// 
+    ///
     /// If deadlocks occur, consider making the entire ActorEntity trait async.
     fn __flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::FlagLastInference { reward } = msg.payload {

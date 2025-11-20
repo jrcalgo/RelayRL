@@ -1,3 +1,4 @@
+use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
@@ -6,6 +7,7 @@ use crate::network::client::runtime::router::{
     ClientExternalReceiver, ClientExternalSender, ClientFilter, ExternalReceiverError,
     ExternalSenderError, RoutedMessage,
 };
+use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
 use crate::network::client::runtime::transport::{TransportClient, TransportError};
 use crate::network::random_uuid;
 use crate::utilities::configuration::ClientConfigLoader;
@@ -66,7 +68,8 @@ pub(crate) struct RouterRuntimeParams {
     pub(crate) receiver_loop: JoinHandle<()>,
     pub(crate) filter_loop: JoinHandle<()>,
     pub(crate) sender_loop: JoinHandle<()>,
-    pub(crate) tx_to_router: Sender<RoutedMessage>,
+    pub(crate) filter_tx: Sender<RoutedMessage>,
+    pub(crate) sender_tx: Sender<RoutedMessage>,
 }
 
 pub type RouterUuid = Uuid;
@@ -78,11 +81,11 @@ pub(crate) struct ScaleManager<
 > {
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shared_config: Arc<RwLock<ClientConfigLoader>>,
-    pub(crate) shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
     pub(crate) shared_transport: Arc<TransportClient<B>>,
+    pub(crate) router_dispatcher: Option<JoinHandle<()>>,
+    pub(crate) router_filter_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>>,
     pub(crate) runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
     server_addresses: ServerAddresses,
-    rx_from_actor: Arc<RwLock<Receiver<RoutedMessage>>>,
     lifecycle: Option<LifeCycleManager>,
     codec: CodecConfig,
 }
@@ -93,25 +96,51 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) fn new(
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
-        shared_global_bus_rx: Arc<RwLock<Receiver<RoutedMessage>>>,
+        global_dispatcher_rx: Receiver<RoutedMessage>,
         transport: TransportClient<B>,
-        rx_from_actor: Receiver<RoutedMessage>,
         agent_listener_address: String,
         training_server_address: String,
         codec: Option<CodecConfig>,
+        lifecycle: Option<LifeCycleManager>,
     ) -> Self {
+        // Spawn the RouterDispatcher
+        let router_filter_channels: Arc<DashMap<Uuid, Sender<RoutedMessage>>> = Arc::new(DashMap::new());
+        let dispatcher = RouterDispatcher::new(
+            global_dispatcher_rx,
+            router_filter_channels.clone(),
+            shared_state.clone(),
+        );
+        
+        let dispatcher: RouterDispatcher<B, D_IN, D_OUT> = if let Some(ref lc) = lifecycle {
+            match lc.subscribe_shutdown() {
+                Ok(rx) => dispatcher.with_shutdown(rx),
+                Err(e) => {
+                    eprintln!("[ScaleManager] Failed to subscribe dispatcher to shutdown: {}", e);
+                    dispatcher
+                },
+            }
+        } else {
+            dispatcher
+        };
+        
+        let router_dispatcher: Option<JoinHandle<()>> = Some(tokio::spawn(async move {
+            if let Err(e) = dispatcher.spawn_loop().await {
+                eprintln!("[ScaleManager] RouterDispatcher error: {}", e);
+            }
+        }));
+        
         Self {
             shared_state,
             shared_config,
-            shared_global_bus_rx,
             shared_transport: Arc::new(transport),
+            router_dispatcher,
+            router_filter_channels,
             runtime_params: None,
             server_addresses: ServerAddresses {
                 agent_listener_address,
                 training_server_address,
             },
-            rx_from_actor: Arc::new(RwLock::new(rx_from_actor)),
-            lifecycle: None,
+            lifecycle,
             codec: codec.unwrap_or_default(),
         }
     }
@@ -130,21 +159,61 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         let mut new_router_ids: Vec<RouterUuid> = Vec::new();
-        let initial_router_count = self
+        let initial_router_count: usize = self
             .runtime_params
             .as_ref()
             .map(|params| params.len())
             .unwrap_or(0);
 
         for i in 1..=router_add {
-            let shared_receiver_state = self.shared_state.clone();
+            let mut router_id: RouterUuid = random_uuid(i);
+            let mut retry_count = 0;
+            const MAX_UUID_RETRIES: usize = 100;
+
+            while let Some(existing_id) = self
+                .runtime_params
+                .as_ref()
+                .and_then(|map| map.get(&router_id))
+            {
+                retry_count += 1;
+                if retry_count >= MAX_UUID_RETRIES {
+                    eprintln!(
+                        "[ScaleManager] Failed to generate unique router ID after {} attempts",
+                        MAX_UUID_RETRIES
+                    );
+                    return Err(ScaleManagerError::GetRouterRuntimeParamsError(format!(
+                        "UUID collision: failed to generate unique router ID after {} retries",
+                        MAX_UUID_RETRIES
+                    )));
+                }
+
+                eprintln!(
+                    "Router ID {} already exists, generating a new one... (attempt {}/{})",
+                    existing_id.key(),
+                    retry_count,
+                    MAX_UUID_RETRIES
+                );
+                router_id = random_uuid(i + retry_count as u32);
+            }
+
+            // Create per-router channels
+            let (filter_tx, filter_rx) = tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            let (sender_tx, sender_rx) = tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            
+            // Store filter_tx so dispatcher can route to it
+            self.router_filter_channels.insert(router_id, filter_tx.clone());
+            
+            // Create ExternalReceiver - sends to global dispatcher
+            let shared_receiver_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
+                self.shared_state.clone();
             let receiver = ClientExternalReceiver::new(
-                shared_receiver_state.write().await.global_bus_tx.clone(),
+                router_id,
+                shared_receiver_state.write().await.global_dispatcher_tx.clone(),
                 self.server_addresses.agent_listener_address.clone(),
             )
             .with_transport(self.shared_transport.clone());
 
-            let receiver = if let Some(lc) = &self.lifecycle {
+            let receiver: ClientExternalReceiver<B> = if let Some(lc) = &self.lifecycle {
                 receiver.with_shutdown(
                     lc.subscribe_shutdown()
                         .map_err(|e| ScaleManagerError::SubscribeShutdownError(e))?,
@@ -153,10 +222,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 receiver
             };
 
-            let shared_filter_state = self.shared_state.clone();
-            let filter_rx = self.shared_global_bus_rx.clone();
-            let filter = ClientFilter::new(filter_rx, shared_filter_state);
-            let filter = if let Some(lc) = &self.lifecycle {
+            let shared_filter_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
+                self.shared_state.clone();
+            let filter: ClientFilter<B, D_IN, D_OUT> =
+                ClientFilter::new(router_id, filter_rx, shared_filter_state);
+            let filter: ClientFilter<B, D_IN, D_OUT> = if let Some(lc) = &self.lifecycle {
                 filter.with_shutdown(
                     lc.subscribe_shutdown()
                         .map_err(|e| ScaleManagerError::SubscribeShutdownError(e))?,
@@ -165,9 +235,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 filter
             };
 
-            let shared_sender_state = self.shared_state.clone();
-            let sender = ClientExternalSender::new(
-                self.rx_from_actor.clone(),
+            // Create Sender - receives from actors via sender_rx
+            let sender: ClientExternalSender<B> = ClientExternalSender::new(
+                router_id,
+                sender_rx,
                 self.server_addresses.training_server_address.clone(),
                 self.codec.clone(),
             )
@@ -189,35 +260,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 receiver_loop,
                 filter_loop,
                 sender_loop,
-                tx_to_router: shared_sender_state.write().await.global_bus_tx.clone(),
+                filter_tx,
+                sender_tx,
             };
-
-            let mut router_id: RouterUuid = random_uuid(i);
-            let mut retry_count = 0;
-            const MAX_UUID_RETRIES: usize = 100;
-            
-            while let Some(existing_id) = self
-                .runtime_params
-                .as_ref()
-                .and_then(|map| map.get(&router_id))
-            {
-                retry_count += 1;
-                if retry_count >= MAX_UUID_RETRIES {
-                    eprintln!(
-                        "[ScaleManager] Failed to generate unique router ID after {} attempts",
-                        MAX_UUID_RETRIES
-                    );
-                    return Err(ScaleManagerError::GetRouterRuntimeParamsError(
-                        format!("UUID collision: failed to generate unique router ID after {} retries", MAX_UUID_RETRIES)
-                    ));
-                }
-                
-                eprintln!(
-                    "Router ID {} already exists, generating a new one... (attempt {}/{})",
-                    existing_id.key(), retry_count, MAX_UUID_RETRIES
-                );
-                router_id = random_uuid(i + retry_count as u32);
-            }
 
             new_router_ids.push(router_id);
 
@@ -254,13 +299,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map(|router| *router.key())
             .collect();
 
-        let old_actor_mappings = {
+        let old_actor_mappings: Vec<(Uuid, Uuid)> = {
             let state = self.shared_state.read().await;
             StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&state)
         };
 
         {
-            let state = self.shared_state.read().await;
+            let state: tokio::sync::RwLockReadGuard<'_, StateManager<B, D_IN, D_OUT>> =
+                self.shared_state.read().await;
             StateManager::<B, D_IN, D_OUT>::distribute_actors(&state, router_ids.clone());
         }
 
@@ -271,7 +317,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             {
                 let state = self.shared_state.read().await;
-                StateManager::<B, D_IN, D_OUT>::restore_actor_router_mappings(&state, old_actor_mappings);
+                StateManager::<B, D_IN, D_OUT>::restore_actor_router_mappings(
+                    &state,
+                    old_actor_mappings,
+                );
             }
 
             self._rollback_routers(&new_router_ids).await;
@@ -467,7 +516,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _spawn_central_filter(mut filter: ClientFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
+    async fn _spawn_central_filter(filter: ClientFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = filter.spawn_loop().await {
                 eprintln!("[ScaleManager] Central filter error: {}", e);

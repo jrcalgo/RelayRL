@@ -160,7 +160,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// If `RelayRLAgentBuilder` was used to create the agent object, the returned `AgentStartParameters` can be used to start the runtime
     pub async fn start(
         self,
-        actor_count: i64,
+        actor_count: u32,
+        scale: u32,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
@@ -170,6 +171,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.coordinator
             ._start(
                 actor_count,
+                scale,
                 default_device,
                 default_model,
                 algorithm_name,
@@ -256,7 +258,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     /// Collect runtime statistics and save to a JSON file
-    /// 
+    ///
     /// Returns the path to the statistics file containing:
     /// - Actor count and IDs
     /// - Model versions per actor
@@ -266,7 +268,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         use std::fs::File;
         use std::io::Write;
         use std::time::SystemTime;
-        
+
         // Create statistics directory if it doesn't exist
         let stats_dir = std::path::Path::new("./runtime_stats");
         if !stats_dir.exists() {
@@ -280,7 +282,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 )
             })?;
         }
-        
+
         // Generate unique filename with timestamp
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -294,14 +296,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 )
             })?
             .as_secs();
-        
+
         let stats_path = stats_dir.join(format!("runtime_stats_{}.json", timestamp));
 
         let backend_name = match B::matches_backend(&self.supported_backend) {
             true => "ndarray",
             false => "tch",
         };
-        
+
         // Collect basic statistics (in a real implementation, this would be more comprehensive)
         let stats_json = serde_json::json!({
             "timestamp": timestamp,
@@ -309,7 +311,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             "input_dimensions": D_IN,
             "output_dimensions": D_OUT,
         });
-        
+
         // Write to file
         let mut file = File::create(&stats_path).map_err(|e| {
             ClientError::CoordinatorError(
@@ -320,7 +322,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 )
             )
         })?;
-        
+
         file.write_all(stats_json.to_string().as_bytes()).map_err(|e| {
             ClientError::CoordinatorError(
                 crate::network::client::runtime::coordination::coordinator::CoordinatorError::ConfigError(
@@ -330,7 +332,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 )
             )
         })?;
-        
+
         Ok(stats_path)
     }
 }
