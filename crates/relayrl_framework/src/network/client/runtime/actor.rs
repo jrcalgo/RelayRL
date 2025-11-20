@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use burn_tensor::{Tensor, backend::Backend};
@@ -362,24 +363,44 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 let actor_id = self.id;
                 let rt = get_or_init_tokio_runtime();
+                let timeout_secs = 30;
                 match rt.block_on(async {
-                    model.forward::<D_IN, D_OUT>(observation_tensor, mask_tensor, reward, actor_id)
+                    timeout(Duration::from_secs(timeout_secs), async {
+                        model.forward::<D_IN, D_OUT>(
+                            observation_tensor,
+                            mask_tensor,
+                            reward,
+                            actor_id,
+                        )
+                    })
+                    .await
+                    .map_err(|_| {
+                        ActorError::SystemError(format!(
+                            "Inference timeout after {} seconds",
+                            timeout_secs
+                        ))
+                    })
                 }) {
-                    Ok(r4sa) => {
-                        self.current_traj.add_action(r4sa.clone());
-                        reply_to.send(Arc::new(r4sa)).map_err(|e| {
-                            ActorError::MessageHandlingError(format!(
-                                "Failed to send inference: {:?}",
-                                e
-                            ))
-                        })?;
-                    }
+                    Ok(result) => match result {
+                        Ok(r4sa) => {
+                            self.current_traj.add_action(r4sa.clone());
+                            reply_to.send(Arc::new(r4sa)).map_err(|e| {
+                                ActorError::MessageHandlingError(format!(
+                                    "Failed to send inference: {:?}",
+                                    e
+                                ))
+                            })?;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[ActorEntity {:?}] Failed inference, no inference created or available... {:?}",
+                                self.id, e
+                            );
+                            return Err(ActorError::ActionRequestError(format!("{:?}", e)));
+                        }
+                    },
                     Err(e) => {
-                        eprintln!(
-                            "[ActorEntity {:?}] Failed inference, no inference created or available... {:?}",
-                            self.id, e
-                        );
-                        return Err(ActorError::ActionRequestError(format!("{:?}", e)));
+                        return Err(e);
                     }
                 }
             }
