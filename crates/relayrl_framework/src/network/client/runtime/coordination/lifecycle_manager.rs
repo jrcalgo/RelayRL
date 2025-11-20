@@ -84,11 +84,11 @@ impl LifeCycleManager {
     }
 
     async fn _watch(&self) -> Result<(), LifeCycleManagerError> {
-        let polling_interval_secs = 3;
-
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(polling_interval_secs));
         loop {
+            let config_update_polling = self.config.read().await.transport_config.config_update_polling as u64;
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(config_update_polling));
+                
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     self._handle_shutdown_signal()?;

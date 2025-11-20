@@ -143,6 +143,7 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
                 "port": "7777"
             }
         },
+        "config_update_polling": 10,
         "grpc_idle_timeout": 30,
         "local_model_module": {
             "directory_name": "model_module",
@@ -234,6 +235,7 @@ pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
                 "port": "7777"
             }
         },
+        "config_update_polling": 10,
         "grpc_idle_timeout": 30,
         "local_model_module": {
             "directory_name": "model_module",
@@ -643,6 +645,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
                 local_model_path: transport_config.local_model_path.clone(),
+                config_update_polling: transport_config.config_update_polling,
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -1065,6 +1068,7 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
                 grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
                 local_model_path: transport_config.local_model_path.clone(),
+                config_update_polling: transport_config.config_update_polling,
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -1100,6 +1104,7 @@ pub struct TransportConfigParams {
     pub grpc_idle_timeout: u32,
     pub max_traj_length: u128,
     pub local_model_path: PathBuf,
+    pub config_update_polling: u32,
 }
 
 impl TransportConfigParams {
@@ -1122,6 +1127,7 @@ pub trait TransportConfigBuildParams {
     fn set_trajectory_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_grpc_idle_timeout(&mut self, grpc_idle_timeout: u32) -> &mut Self;
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self;
+    fn set_config_update_polling(&mut self, config_update_polling: u32) -> &mut Self;
     fn set_local_model_path(&mut self, model_path: PathBuf) -> &mut Self;
     fn build(&self) -> TransportConfigParams;
     fn build_default() -> TransportConfigParams;
@@ -1133,6 +1139,7 @@ pub struct TransportConfigBuilder {
     trajectory_server_address: Option<NetworkParams>,
     grpc_idle_timeout: Option<u32>,
     max_traj_length: Option<u128>,
+    config_update_polling: Option<u32>,
     local_model_path: Option<PathBuf>,
 }
 
@@ -1171,6 +1178,11 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
 
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self {
         self.max_traj_length = Some(max_traj_length);
+        self
+    }
+
+    fn set_config_update_polling(&mut self, config_update_polling: u32) -> &mut Self {
+        self.config_update_polling = Some(config_update_polling);
         self
     }
 
@@ -1217,6 +1229,11 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             None => 1000,
         };
 
+        let config_update_polling: u32 = match &self.config_update_polling {
+            Some(polling) => *polling,
+            None => 10,
+        };
+
         let local_model_path: PathBuf = match &self.local_model_path {
             Some(path) => path.to_path_buf(),
             None => PathBuf::from(format!("{}_model.pt", std::process::id().to_string())),
@@ -1229,6 +1246,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             grpc_idle_timeout,
             max_traj_length,
             local_model_path,
+            config_update_polling,
         }
     }
 
@@ -1250,6 +1268,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 host: "127.0.0.1".to_string(),
                 port: "7776".to_string(),
             },
+            config_update_polling: 10,
             grpc_idle_timeout: 30,
             max_traj_length: 1000,
             local_model_path: PathBuf::from(format!("{}_model.pt", random_model_path_id)),
