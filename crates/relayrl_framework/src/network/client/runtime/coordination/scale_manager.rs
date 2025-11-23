@@ -11,6 +11,7 @@ use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
 use crate::network::client::runtime::transport::{TransportClient, TransportError};
 use crate::network::random_uuid;
 use crate::utilities::configuration::ClientConfigLoader;
+use crate::utilities::misc_utils::ServerAddresses;
 
 use thiserror::Error;
 
@@ -54,11 +55,6 @@ pub enum ScaleManagerError {
     ReceiveModelVersionResponseError(String),
 }
 
-pub(crate) struct ServerAddresses {
-    agent_listener_address: String,
-    training_server_address: String,
-}
-
 pub(crate) enum ScalingOperation {
     ScaleUp,
     ScaleDown,
@@ -80,12 +76,11 @@ pub(crate) struct ScaleManager<
     const D_OUT: usize,
 > {
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
-    shared_config: Arc<RwLock<ClientConfigLoader>>,
+    shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     pub(crate) shared_transport: Arc<TransportClient<B>>,
     pub(crate) router_dispatcher: Option<JoinHandle<()>>,
     pub(crate) router_filter_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>>,
     pub(crate) runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
-    server_addresses: ServerAddresses,
     lifecycle: Option<LifeCycleManager>,
     codec: CodecConfig,
 }
@@ -95,51 +90,49 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 {
     pub(crate) fn new(
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
-        shared_config: Arc<RwLock<ClientConfigLoader>>,
         global_dispatcher_rx: Receiver<RoutedMessage>,
         transport: TransportClient<B>,
-        agent_listener_address: String,
-        training_server_address: String,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         codec: Option<CodecConfig>,
         lifecycle: Option<LifeCycleManager>,
     ) -> Self {
         // Spawn the RouterDispatcher
-        let router_filter_channels: Arc<DashMap<Uuid, Sender<RoutedMessage>>> = Arc::new(DashMap::new());
+        let router_filter_channels: Arc<DashMap<Uuid, Sender<RoutedMessage>>> =
+            Arc::new(DashMap::new());
         let dispatcher = RouterDispatcher::new(
             global_dispatcher_rx,
             router_filter_channels.clone(),
             shared_state.clone(),
         );
-        
+
         let dispatcher: RouterDispatcher<B, D_IN, D_OUT> = if let Some(ref lc) = lifecycle {
             match lc.subscribe_shutdown() {
                 Ok(rx) => dispatcher.with_shutdown(rx),
                 Err(e) => {
-                    eprintln!("[ScaleManager] Failed to subscribe dispatcher to shutdown: {}", e);
+                    eprintln!(
+                        "[ScaleManager] Failed to subscribe dispatcher to shutdown: {}",
+                        e
+                    );
                     dispatcher
-                },
+                }
             }
         } else {
             dispatcher
         };
-        
+
         let router_dispatcher: Option<JoinHandle<()>> = Some(tokio::spawn(async move {
             if let Err(e) = dispatcher.spawn_loop().await {
                 eprintln!("[ScaleManager] RouterDispatcher error: {}", e);
             }
         }));
-        
+
         Self {
             shared_state,
-            shared_config,
             shared_transport: Arc::new(transport),
             router_dispatcher,
             router_filter_channels,
             runtime_params: None,
-            server_addresses: ServerAddresses {
-                agent_listener_address,
-                training_server_address,
-            },
+            shared_server_addresses,
             lifecycle,
             codec: codec.unwrap_or_default(),
         }
@@ -197,19 +190,26 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
 
             // Create per-router channels
-            let (filter_tx, filter_rx) = tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-            let (sender_tx, sender_rx) = tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-            
+            let (filter_tx, filter_rx) =
+                tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            let (sender_tx, sender_rx) =
+                tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+
             // Store filter_tx so dispatcher can route to it
-            self.router_filter_channels.insert(router_id, filter_tx.clone());
-            
+            self.router_filter_channels
+                .insert(router_id, filter_tx.clone());
+
             // Create ExternalReceiver - sends to global dispatcher
             let shared_receiver_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
                 self.shared_state.clone();
             let receiver = ClientExternalReceiver::new(
                 router_id,
-                shared_receiver_state.write().await.global_dispatcher_tx.clone(),
-                self.server_addresses.agent_listener_address.clone(),
+                shared_receiver_state
+                    .write()
+                    .await
+                    .global_dispatcher_tx
+                    .clone(),
+                self.shared_server_addresses.clone(),
             )
             .with_transport(self.shared_transport.clone());
 
@@ -239,7 +239,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let sender: ClientExternalSender<B> = ClientExternalSender::new(
                 router_id,
                 sender_rx,
-                self.server_addresses.training_server_address.clone(),
+                self.shared_server_addresses.clone(),
                 self.codec.clone(),
             )
             .with_transport(self.shared_transport.clone());

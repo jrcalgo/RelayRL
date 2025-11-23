@@ -1,6 +1,7 @@
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
-use crate::network::client::runtime::transport::{SyncClientTransport, TransportError};
+use crate::network::client::runtime::transport::{SyncClientTransport, TransportError, TransportUuid};
+use crate::network::random_uuid;
 use crate::utilities::configuration::ClientConfigLoader;
 
 use relayrl_types::types::data::tensor::BackendMatcher;
@@ -11,7 +12,10 @@ use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 use burn_tensor::backend::Backend;
 use std::io::Write;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use tempfile::NamedTempFile;
+use tokio::sync::RwLock;
 use tokio::task;
 use uuid::Uuid;
 use zmq::{Context, Socket};
@@ -25,48 +29,23 @@ pub enum ZmqClientError {
 }
 
 pub struct ZmqClient {
-    agent_listener_address: String,
-    trajectory_server_address: String,
-    training_server_address: String,
-    max_traj_length: u128,
-    client_identity: String,
+    transport_id: TransportUuid,
+    current_version: Arc<AtomicI64>,
+    algorithm_initialized: Arc<AtomicBool>,
 }
 
 impl ZmqClient {
-    pub fn new(config: &ClientConfigLoader) -> Self {
-        let agent_listener = config.transport_config.get_agent_listener_address();
-        let trajectory_server = config.transport_config.get_trajectory_server_address();
-        let training_server = config.transport_config.get_training_server_address();
-        let max_traj_length = config.transport_config.max_traj_length;
-
-        let agent_listener_address = format!(
-            "{}{}:{}",
-            agent_listener.prefix, agent_listener.host, agent_listener.port
-        );
-        let trajectory_server_address = format!(
-            "{}{}:{}",
-            trajectory_server.prefix, trajectory_server.host, trajectory_server.port
-        );
-        let training_server_address = format!(
-            "{}{}:{}",
-            training_server.prefix, training_server.host, training_server.port
-        );
-
+    pub fn new() -> Self {
         let pid: u32 = std::process::id();
         let pid_bytes: [u8; _] = pid.to_be_bytes();
 
         let mut pid_buf: [u8; 16] = [0u8; 16];
         pid_buf[..4].copy_from_slice(&pid_bytes);
 
-        // Generate a unique client identity
-        let client_identity = format!("RelayRLClient-{}", Uuid::new_v8(pid_buf));
-
         Self {
-            agent_listener_address,
-            trajectory_server_address,
-            training_server_address,
-            max_traj_length,
-            client_identity,
+            transport_id: random_uuid(pid_buf.into_iter().sum::<u8>() as u32),
+            current_version: Arc::new(AtomicI64::new(0)),
+            algorithm_initialized: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -78,7 +57,7 @@ impl ZmqClient {
         let socket = context.socket(zmq::DEALER)?;
 
         // Set socket identity
-        socket.set_identity(self.client_identity.as_bytes())?;
+        socket.set_identity(self.transport_id.to_string().as_bytes())?;
 
         // Set socket options for performance
         socket.set_sndhwm(1000)?;
@@ -111,12 +90,13 @@ impl ZmqClient {
 impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqClient {
     fn initial_model_handshake(
         &self,
-        _model_server_address: &str,
+        training_server_address: &str,
+        agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         let context = Context::new();
 
         // Use agent_listener_address for handshake
-        let socket = match self.create_dealer_socket(&context, &self.agent_listener_address) {
+        let socket = match self.create_dealer_socket(&context, agent_listener_address) {
             Ok(socket) => socket,
             Err(e) => {
                 eprintln!("[ZmqClient] Failed to create handshake socket: {}", e);
@@ -218,13 +198,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
     fn send_traj_to_server(
         &self,
         encoded_trajectory: EncodedTrajectory,
-        _training_server_address: &str,
+        training_server_address: &str,
+        trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
         let context = Context::new();
 
         // Use trajectory_server_address for sending trajectories
         let socket = self
-            .create_push_socket(&context, &self.trajectory_server_address)
+            .create_push_socket(&context, trajectory_server_address)
             .map_err(|e| {
                 TransportError::SendTrajError(format!(
                     "Failed to create trajectory socket: {}",
@@ -264,10 +245,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
 
     fn listen_for_model(
         &self,
-        _model_server_address: &str,
-        tx_to_router: tokio::sync::mpsc::Sender<RoutedMessage>,
+        training_server_address: &str,
+        global_dispatcher_tx: tokio::sync::mpsc::Sender<RoutedMessage>,
     ) -> Result<(), TransportError> {
-        let sub_address = self.training_server_address.clone();
+        let sub_address = training_server_address.to_string();
 
         task::spawn_blocking(move || {
             let context = Context::new();
@@ -302,7 +283,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                                 version: 0,
                             },
                         };
-                        let _ = tx_to_router.blocking_send(msg);
+                        let _ = global_dispatcher_tx.blocking_send(msg);
                     }
                     Err(e) => {
                         eprintln!("[ZmqClient] SUB socket recv error: {}", e);
@@ -350,6 +331,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
         // to signal that scaling has completed and normal operations can resume
         // The server can acknowledge the completion and adjust its internal state
 
+        Ok(())
+    }
+
+    fn shutdown(&self) -> Result<(), TransportError> {
+        // TODO: implement shutdown logic
         Ok(())
     }
 }

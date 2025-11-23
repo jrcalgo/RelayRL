@@ -5,6 +5,7 @@ use crate::network::client::runtime::router::{
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
+use crate::utilities::misc_utils::ServerAddresses;
 
 use relayrl_types::prelude::AnyBurnTensor;
 use relayrl_types::types::data::action::RelayRLAction;
@@ -47,6 +48,7 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
         model: Option<HotReloadableModel<B>>,
         model_path: PathBuf,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         rx_from_router: Receiver<RoutedMessage>,
         tx_to_sender: Sender<RoutedMessage>,
         transport: Arc<TransportClient<B>>,
@@ -78,6 +80,7 @@ pub(crate) struct Actor<
     shared_tx_to_sender: Sender<RoutedMessage>,
     transport: Option<Arc<TransportClient<B>>>,
     shared_config: Arc<RwLock<ClientConfigLoader>>,
+    shared_server_addresses: Arc<RwLock<ServerAddresses>>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ActorEntity<B>
@@ -89,6 +92,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         model: Option<HotReloadableModel<B>>,
         model_path: PathBuf,
         shared_config: Arc<RwLock<ClientConfigLoader>>,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         rx_from_router: Receiver<RoutedMessage>,
         shared_tx_to_sender: Sender<RoutedMessage>,
         transport: Arc<TransportClient<B>>,
@@ -108,6 +112,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             shared_tx_to_sender,
             transport: Some(transport),
             shared_config: shared_config.clone(),
+            shared_server_addresses: shared_server_addresses.clone(),
         };
 
         let mut model_init_flag: bool = false;
@@ -162,32 +167,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if let RoutedPayload::ModelHandshake = msg.payload {
             if self.model.is_none() {
                 if let Some(transport) = &self.transport {
+                    let model_server_address: String = self.shared_server_addresses.read().await.model_server_address.clone();
+                    let agent_listener_address: String = self.shared_server_addresses.read().await.agent_listener_address.clone();
+
                     match &**transport {
                         #[cfg(feature = "grpc_network")]
                         TransportClient::Async(async_tr) => {
                             // Use training server address for model handshake
-                            let training_server_address = format!(
-                                "{}:{}",
-                                self.shared_config
-                                    .read()
-                                    .await
-                                    .transport_config
-                                    .training_server_address
-                                    .host,
-                                self.shared_config
-                                    .read()
-                                    .await
-                                    .transport_config
-                                    .training_server_address
-                                    .port
-                            );
                             println!(
                                 "[Actor {:?}] Starting async model handshake with {}",
-                                self.id, training_server_address
+                                self.id, model_server_address
                             );
 
                             if let Ok(Some(model)) = async_tr
-                                .initial_model_handshake(&training_server_address)
+                                .initial_model_handshake(
+                                    &model_server_address,
+                                    &agent_listener_address,
+                                )
                                 .await
                             {
                                 println!(
@@ -240,29 +236,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         }
                         TransportClient::Sync(sync_tr) => {
                             // Use agent listener address for model handshake
-                            let model_server_address = format!(
-                                "{}:{}",
-                                self.shared_config
-                                    .read()
-                                    .await
-                                    .transport_config
-                                    .agent_listener_address
-                                    .host,
-                                self.shared_config
-                                    .read()
-                                    .await
-                                    .transport_config
-                                    .agent_listener_address
-                                    .port
-                            );
                             println!(
                                 "[Actor {:?}] Starting sync model handshake with {}",
                                 self.id, model_server_address
                             );
 
-                            if let Ok(Some(model)) =
-                                sync_tr.initial_model_handshake(&model_server_address)
-                            {
+                            if let Ok(Some(model)) = sync_tr.initial_model_handshake(
+                                &model_server_address,
+                                &agent_listener_address,
+                            ) {
                                 println!(
                                     "[Actor {:?}] Model handshake successful, received model data",
                                     self.id

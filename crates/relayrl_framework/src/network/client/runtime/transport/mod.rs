@@ -9,11 +9,18 @@ use relayrl_types::types::model::ModelModule;
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
+use uuid::Uuid;
 
 pub mod tonic;
 pub mod zmq;
+
+type TransportUuid = Uuid;
+
+static TRANSPORT_IDX: Vec<TransportUuid> = Vec::new();
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -44,19 +51,26 @@ pub trait AsyncClientTransport<B: Backend + BackendMatcher<Backend = B>>: Send +
     async fn initial_model_handshake(
         &self,
         model_server_address: &str,
+        agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     async fn send_traj_to_server(
         &self,
         encoded_trajectory: EncodedTrajectory,
-        training_server_address: &str,
+        model_server_address: &str,
+        trajectory_server_address: &str,
     ) -> Result<(), TransportError>;
-    async fn listen_for_model(&self, model_server_address: &str) -> Result<(), TransportError>;
+    async fn listen_for_model(
+        &self,
+        agent_listener_address: &str,
+        global_dispatcher_tx: Sender<RoutedMessage>,
+    ) -> Result<(), TransportError>;
     async fn send_scaling_warning(&self, operation: ScalingOperation)
     -> Result<(), TransportError>;
     async fn send_scaling_complete(
         &self,
         operation: ScalingOperation,
     ) -> Result<(), TransportError>;
+    async fn shutdown(&self) -> Result<(), TransportError>;
 }
 
 #[cfg(feature = "zmq_network")]
@@ -64,31 +78,31 @@ pub trait SyncClientTransport<B: Backend + BackendMatcher<Backend = B>>: Send + 
     fn initial_model_handshake(
         &self,
         model_server_address: &str,
+        agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     fn send_traj_to_server(
         &self,
         encoded_trajectory: EncodedTrajectory,
-        training_server_address: &str,
+        model_server_address: &str,
+        trajectory_server_address: &str,
     ) -> Result<(), TransportError>;
     fn listen_for_model(
         &self,
-        model_server_address: &str,
+        agent_listener_address: &str,
         global_dispatcher_tx: Sender<RoutedMessage>,
     ) -> Result<(), TransportError>;
     fn send_scaling_warning(&self, operation: ScalingOperation) -> Result<(), TransportError>;
     fn send_scaling_complete(&self, operation: ScalingOperation) -> Result<(), TransportError>;
+    fn shutdown(&self) -> Result<(), TransportError>;
 }
 
 pub fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
     transport_type: TransportType,
-    config: &ClientConfigLoader,
 ) -> TransportClient<B> {
     match transport_type {
         #[cfg(feature = "grpc_network")]
-        TransportType::GRPC => {
-            TransportClient::<B>::Async(Box::new(tonic::TonicClient::new(config)))
-        }
+        TransportType::GRPC => TransportClient::<B>::Async(Box::new(tonic::TonicClient::new())),
         #[cfg(feature = "zmq_network")]
-        TransportType::ZMQ => TransportClient::<B>::Sync(Box::new(zmq::ZmqClient::new(config))),
+        TransportType::ZMQ => TransportClient::<B>::Sync(Box::new(zmq::ZmqClient::new())),
     }
 }

@@ -12,7 +12,7 @@
     "transport_config": {
         "addresses": {
             "_comment": "gRPC uses only this address (prefix is unused).",
-            "training_server": {
+            "model_server": {
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "50051"
@@ -27,6 +27,7 @@
                 "host": "127.0.0.1",
                 "port": "7777"
             },
+            "_comment2": "Only used when client-side inference is disabled or when client-side inference is used as fallback.",
             "inference_server": {
                 "prefix": "tcp://",
                 "host": "127.0.0.1",

@@ -23,7 +23,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicI64, Ordering},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 #[cfg(feature = "grpc_network")]
 use tokio::time::{Duration, timeout};
 #[cfg(feature = "grpc_network")]
@@ -44,7 +44,11 @@ use rl_service::{
     SendTrajectoriesResponse, rl_service_client::RlServiceClient,
 };
 
-use crate::network::client::runtime::transport::TransportError;
+use crate::network::client::runtime::router::RoutedMessage;
+use crate::network::client::runtime::transport::{TransportError, TransportUuid};
+use crate::network::random_uuid;
+
+use tokio::sync::mpsc::Sender;
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use thiserror::Error;
@@ -82,26 +86,24 @@ impl From<tokio::time::error::Elapsed> for TonicClientError {
 #[cfg(feature = "grpc_network")]
 pub struct TonicClient {
     client: Mutex<Option<RlServiceClient<Channel>>>,
-    client_id: String,
+    transport_id: TransportUuid,
     current_version: Arc<AtomicI64>,
-    config: Arc<ClientConfigLoader>,
     algorithm_initialized: Arc<AtomicBool>,
 }
 
 #[cfg(feature = "grpc_network")]
 impl TonicClient {
-    pub fn new(config: &ClientConfigLoader) -> Self {
+    pub fn new() -> Self {
         let pid: u32 = std::process::id();
-        let pid_bytes = pid.to_be_bytes();
+        let pid_bytes: [u8; _] = pid.to_be_bytes();
 
-        let mut pid_buf = [0u8; 16];
+        let mut pid_buf: [u8; 16] = [0u8; 16];
         pid_buf[..4].copy_from_slice(&pid_bytes);
 
         Self {
             client: Mutex::new(None),
-            client_id: uuid::Uuid::new_v8(pid_buf).to_string(),
+            transport_id: random_uuid(pid_buf.into_iter().sum::<u8>() as u32),
             current_version: Arc::new(AtomicI64::new(0)),
-            config: Arc::new(config.clone()),
             algorithm_initialized: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -129,7 +131,7 @@ impl TonicClient {
 
         let current_version = self.current_version.load(Ordering::SeqCst);
         let request = Request::new(GetModelRequest {
-            client_id: self.client_id.clone(),
+            client_id: self.transport_id.to_string(),
             client_version: current_version as i32,
             expected_version: expected_version as i32,
         });
@@ -160,7 +162,7 @@ impl TonicClient {
         self.ensure_client(server_address).await?;
 
         let request = Request::new(SendTrajectoriesRequest {
-            client_id: self.client_id.clone(),
+            client_id: self.transport_id.to_string(),
             trajectories,
         });
 
@@ -185,15 +187,14 @@ impl TonicClient {
     async fn initialize_algorithm_if_needed(
         &self,
         server_address: &str,
+        algorithm_name: &str,
+        max_traj_length: &i32,
     ) -> Result<(), TonicClientError> {
         if self.algorithm_initialized.load(Ordering::SeqCst) {
             return Ok(());
         }
 
         self.ensure_client(server_address).await?;
-
-        // Get algorithm name from config
-        let algorithm_name = self.config.client_config.algorithm_name.clone();
 
         // Prepare algorithm parameters from config
         let mut algorithm_parameters = HashMap::new();
@@ -203,14 +204,14 @@ impl TonicClient {
             "max_traj_length".to_string(),
             ParameterValue {
                 value: Some(rl_service::parameter_value::Value::IntValue(
-                    self.config.transport_config.max_traj_length as i32,
+                    *max_traj_length,
                 )),
             },
         );
 
         let request = Request::new(InitRequest {
-            client_id: self.client_id.clone(),
-            algorithm_name,
+            client_id: self.transport_id.to_string(),
+            algorithm_name: algorithm_name.to_string(),
             algorithm_parameters,
         });
 
@@ -298,6 +299,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
     async fn initial_model_handshake(
         &self,
         training_server_address: &str,
+        agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         // Initialize algorithm first
         if let Err(e) = self
@@ -365,6 +367,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
         &self,
         encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
+        _trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
         // Ensure algorithm is initialized
         if let Err(e) = self
@@ -415,7 +418,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
         Ok(())
     }
 
-    async fn listen_for_model(&self, model_server_address: &str) -> Result<(), TransportError> {
+    async fn listen_for_model(
+        &self,
+        model_server_address: &str,
+        global_dispatcher_tx: Sender<RoutedMessage>,
+    ) -> Result<(), TransportError> {
         let mut polling_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Ensure algorithm is initialized before starting to listen
@@ -509,6 +516,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
         // to signal that scaling has completed and normal operations can resume
         // The server can acknowledge the completion and adjust its internal state
 
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), TransportError> {
+        // TODO: Implement shutdown logic
         Ok(())
     }
 }

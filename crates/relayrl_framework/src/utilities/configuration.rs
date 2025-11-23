@@ -127,7 +127,7 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
     "transport_config": {
         "addresses": {
             "_comment": "gRPC uses only this address (prefix is unused).",
-            "training_server": {
+            "model_server": {
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "50051"
@@ -141,6 +141,12 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7777"
+            },
+            "_comment2": "Only used when client-side inference is disabled or when client-side inference is used as fallback.",
+            "inference_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7778"
             }
         },
         "config_update_polling": 10,
@@ -218,8 +224,8 @@ pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
     },
     "transport_config": {
         "addresses": {
-            "_comment": "gRPC uses only this address (prefix is unused).",
-            "training_server": {
+            "_comment1": "gRPC uses only this address (prefix is unused).",
+            "model_server": {
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "50051"
@@ -233,6 +239,12 @@ pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7777"
+            },
+            "_comment2": "Only available when client-side inference is disabled or when client-side inference is used as fallback.",
+            "inference_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7778"
             }
         },
         "config_update_polling": 10,
@@ -640,7 +652,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
                 agent_listener_address: transport_config.agent_listener_address.clone(),
-                training_server_address: transport_config.training_server_address.clone(),
+                model_server_address: transport_config.model_server_address.clone(),
                 trajectory_server_address: transport_config.trajectory_server_address.clone(),
                 grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
@@ -1063,7 +1075,7 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
                 agent_listener_address: transport_config.agent_listener_address.clone(),
-                training_server_address: transport_config.training_server_address.clone(),
+                model_server_address: transport_config.model_server_address.clone(),
                 trajectory_server_address: transport_config.trajectory_server_address.clone(),
                 grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
@@ -1099,7 +1111,7 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransportConfigParams {
     pub agent_listener_address: NetworkParams,
-    pub training_server_address: NetworkParams,
+    pub model_server_address: NetworkParams,
     pub trajectory_server_address: NetworkParams,
     pub grpc_idle_timeout: u32,
     pub max_traj_length: u128,
@@ -1112,8 +1124,8 @@ impl TransportConfigParams {
         &self.agent_listener_address
     }
 
-    pub fn get_training_server_address(&self) -> &NetworkParams {
-        &self.training_server_address
+    pub fn get_model_server_address(&self) -> &NetworkParams {
+        &self.model_server_address
     }
 
     pub fn get_trajectory_server_address(&self) -> &NetworkParams {
@@ -1123,7 +1135,7 @@ impl TransportConfigParams {
 
 pub trait TransportConfigBuildParams {
     fn set_agent_listener_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
-    fn set_training_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
+    fn set_model_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_trajectory_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_grpc_idle_timeout(&mut self, grpc_idle_timeout: u32) -> &mut Self;
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self;
@@ -1135,7 +1147,7 @@ pub trait TransportConfigBuildParams {
 
 pub struct TransportConfigBuilder {
     agent_listener_address: Option<NetworkParams>,
-    training_server_address: Option<NetworkParams>,
+    model_server_address: Option<NetworkParams>,
     trajectory_server_address: Option<NetworkParams>,
     grpc_idle_timeout: Option<u32>,
     max_traj_length: Option<u128>,
@@ -1153,8 +1165,8 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         self
     }
 
-    fn set_training_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
-        self.training_server_address = Some(NetworkParams {
+    fn set_model_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
+        self.model_server_address = Some(NetworkParams {
             prefix: prefix.to_string(),
             host: host.to_string(),
             port: port.to_string(),
@@ -1201,7 +1213,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             },
         };
 
-        let training_server_address: NetworkParams = match &self.training_server_address {
+        let model_server_address: NetworkParams = match &self.model_server_address {
             Some(address) => address.clone(),
             None => NetworkParams {
                 prefix: "tcp://".to_string(),
@@ -1241,7 +1253,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
 
         TransportConfigParams {
             agent_listener_address,
-            training_server_address,
+            model_server_address,
             trajectory_server_address,
             grpc_idle_timeout,
             max_traj_length,
@@ -1258,7 +1270,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 host: "127.0.0.1".to_string(),
                 port: "7778".to_string(),
             },
-            training_server_address: NetworkParams {
+            model_server_address: NetworkParams {
                 prefix: "tcp://".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: "50051".to_string(),

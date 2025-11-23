@@ -1,6 +1,10 @@
 use std::any::TypeId;
 use std::mem::size_of;
 
+use crate::network::TransportType;
+use crate::prelude::config::TransportConfigParams;
+use crate::utilities::configuration::NetworkParams;
+
 pub(crate) fn round_to_8_decimals<N>(num: N) -> N
 where
     N: Copy + 'static,
@@ -22,5 +26,41 @@ where
         unsafe { *(&rounded as *const f64 as *const N) }
     } else {
         panic!("Unsupported type. Only f32 and f64 are allowed.");
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServerAddresses {
+    pub(crate) agent_listener_address: String,
+    pub(crate) model_server_address: String,
+    pub(crate) trajectory_server_address: String,
+}
+
+pub(crate) fn construct_server_addresses(
+    transport_config: &TransportConfigParams,
+    transport_type: &TransportType,
+) -> ServerAddresses {
+    fn construct_address(transport_type: &TransportType, network_params: &NetworkParams) -> String {
+        match *transport_type {
+            TransportType::GRPC => network_params.host.clone() + ":" + &network_params.port.clone(),
+            TransportType::ZMQ => {
+                network_params.prefix.clone() + &network_params.host.clone() + ":" + &network_params.port.clone()
+            }
+        }
+    }
+
+    ServerAddresses {
+        agent_listener_address: construct_address(
+            &transport_type,
+            &transport_config.agent_listener_address,
+        ),
+        model_server_address: construct_address(
+            &transport_type,
+            &transport_config.model_server_address,
+        ),
+        trajectory_server_address: construct_address(
+            &transport_type,
+            &transport_config.trajectory_server_address,
+        ),
     }
 }

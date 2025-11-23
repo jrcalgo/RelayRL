@@ -7,6 +7,7 @@ use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
+use crate::utilities::misc_utils::ServerAddresses;
 
 use thiserror::Error;
 
@@ -47,6 +48,10 @@ pub enum StateManagerError {
     NewActorError(String),
     #[error("Remove actor failed: {0}")]
     RemoveActorError(String),
+    #[error("Get config failed: {0}")]
+    GetConfigError(String),
+    #[error("Set config failed: {0}")]
+    SetConfigError(String),
 }
 
 type ActorInstance<
@@ -63,6 +68,7 @@ pub(crate) struct StateManager<
     const D_OUT: usize,
 > {
     shared_config: Arc<RwLock<ClientConfigLoader>>,
+    shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     default_model: Option<ModelModule<B>>,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
@@ -75,12 +81,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 {
     pub(crate) fn new(
         shared_config: Arc<RwLock<ClientConfigLoader>>,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         default_model: Option<ModelModule<B>>,
     ) -> (Self, Receiver<RoutedMessage>) {
-        let (global_dispatcher_tx, global_dispatcher_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT * 2);
+        let (global_dispatcher_tx, global_dispatcher_rx) =
+            mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT * 2);
         (
             Self {
                 shared_config,
+                shared_server_addresses,
                 default_model,
                 global_dispatcher_tx,
                 actor_inboxes: DashMap::new(),
@@ -208,11 +217,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .await?;
 
         let shared_config: Arc<RwLock<ClientConfigLoader>> = self.shared_config.clone();
-        
+
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         self.actor_inboxes.insert(id, tx_to_actor.clone());
-        
+
         let model_path = shared_config
             .read()
             .await
@@ -222,6 +231,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let transport = transport.clone();
         let shared_config_cloned = shared_config.clone();
+        let shared_server_addresses_cloned = self.shared_server_addresses.clone();
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let (mut actor, handshake_flag) = Actor::<B, D_IN, D_OUT>::new(
@@ -230,6 +240,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 reloadable_model,
                 model_path,
                 shared_config_cloned,
+                shared_server_addresses_cloned,
                 actor_inbox_rx,
                 tx_to_sender,
                 transport,
@@ -258,8 +269,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn __shutdown_all_actors(&self) -> Result<(), StateManagerError> {
         // Send Shutdown message to every actor inbox; actors will flush and exit
         for entry in self.actor_inboxes.iter() {
-            let actor_id = *entry.key();
-            let tx = entry.value().clone();
+            let actor_id: ActorUuid = *entry.key();
+            let tx: Sender<RoutedMessage> = entry.value().clone();
             let shutdown_msg = RoutedMessage {
                 actor_id,
                 protocol: RoutingProtocol::Shutdown,
@@ -267,7 +278,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             };
             let _ = tx.send(shutdown_msg).await;
 
-            let handle: Result<dashmap::mapref::one::Ref<'_, Uuid, Arc<JoinHandle<()>>>, StateManagerError> = self.actor_handles.get(&actor_id).ok_or(
+            let handle: Result<
+                dashmap::mapref::one::Ref<'_, Uuid, Arc<JoinHandle<()>>>,
+                StateManagerError,
+            > = self.actor_handles.get(&actor_id).ok_or(
                 StateManagerError::ActorHandleNotFoundError(format!(
                     "[StateManager] Actor handle not found"
                 )),

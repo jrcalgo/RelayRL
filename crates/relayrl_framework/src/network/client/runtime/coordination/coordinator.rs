@@ -17,6 +17,7 @@ use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_
 use crate::utilities::observability;
 use crate::utilities::observability::logging::builder::LoggingBuilder;
 use crate::utilities::observability::metrics::MetricsManager;
+use crate::utilities::misc_utils::ServerAddresses;
 
 use thiserror::Error;
 
@@ -125,7 +126,11 @@ pub trait ClientInterface<
     async fn _get_actors(
         &self,
     ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError>;
-    async fn _set_actor_id(&self, current_id: ActorUuid, new_id: ActorUuid) -> Result<(), CoordinatorError>;
+    async fn _set_actor_id(
+        &self,
+        current_id: ActorUuid,
+        new_id: ActorUuid,
+    ) -> Result<(), CoordinatorError>;
     async fn _request_action(
         &self,
         ids: Vec<ActorUuid>,
@@ -144,6 +149,8 @@ pub trait ClientInterface<
     ) -> Result<Vec<(ActorUuid, i64)>, CoordinatorError>;
     async fn _scale_up(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
     async fn _scale_down(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
+    async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError>;
+    async fn _set_config(&self, config: ClientConfigLoader) -> Result<(), CoordinatorError>;
 }
 
 pub struct CoordinatorParams<
@@ -180,7 +187,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _start(
         mut self,
         actor_count: u32,
-        scale: u32,
+        router_scale: u32,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         _algorithm_name: String,
@@ -202,90 +209,35 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
-        let transport: TransportClient<B> =
-            client_transport_factory(self.transport_type, &config_loader);
-
-        let lifecycle: LifeCycleManager = LifeCycleManager::new(config_loader.to_owned());
+        let lifecycle: LifeCycleManager =
+            LifeCycleManager::new(config_loader.to_owned(), config_path, self.transport_type);
         lifecycle.spawn_loop();
 
+        let shared_state_server_addresses: Arc<RwLock<ServerAddresses>> = lifecycle.get_server_addresses();
         let shared_state_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
-
         let (state, global_dispatcher_rx) =
-            StateManager::new(shared_state_config, default_model.clone());
+            StateManager::new(shared_state_config, shared_state_server_addresses, default_model.clone());
 
-        let shared_scaling_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
-
-        let (training_server_address, agent_listener_address) = match self.transport_type {
-            TransportType::ZMQ => (
-                config_loader
-                    .transport_config
-                    .training_server_address
-                    .host
-                    .clone()
-                    + ":"
-                    + &config_loader
-                        .transport_config
-                        .training_server_address
-                        .port
-                        .to_string(),
-                config_loader
-                    .transport_config
-                    .agent_listener_address
-                    .host
-                    .clone()
-                    + ":"
-                    + &config_loader
-                        .transport_config
-                        .agent_listener_address
-                        .port
-                        .to_string(),
-            ),
-            TransportType::GRPC => (
-                config_loader
-                    .transport_config
-                    .training_server_address
-                    .host
-                    .clone()
-                    + ":"
-                    + &config_loader
-                        .transport_config
-                        .training_server_address
-                        .port
-                        .to_string(),
-                config_loader
-                    .transport_config
-                    .agent_listener_address
-                    .host
-                    .clone()
-                    + ":"
-                    + &config_loader
-                        .transport_config
-                        .agent_listener_address
-                        .port
-                        .to_string(),
-            ),
-        };
-
+        let shared_scaling_server_addresses: Arc<RwLock<ServerAddresses>> = lifecycle.get_server_addresses();
+        let transport: TransportClient<B> = client_transport_factory(self.transport_type);
         let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
         // Subscribe to lifecycle shutdown and propagate to all actors
         StateManager::spawn_shutdown_watcher(shared_state.clone(), lifecycle.clone());
         let mut scaling = ScaleManager::new(
             shared_state.clone(),
-            Arc::clone(&shared_scaling_config),
             global_dispatcher_rx,
             transport,
-            agent_listener_address,
-            training_server_address,
+            shared_scaling_server_addresses,
             codec,
             Some(lifecycle.clone()),
         );
 
-        if let Err(e) = scaling.__scale_up(scale).await {
+        if let Err(e) = scaling.__scale_up(router_scale).await {
             return Err(CoordinatorError::ScaleManagerError(e));
         }
 
         if actor_count > 0 {
-            for _ in 0..actor_count {
+            for _ in 1..=actor_count {
                 Self::_new_actor(&self, default_device.clone(), default_model.clone()).await?;
             }
         }
@@ -330,7 +282,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _restart(
         mut self,
         actor_count: u32,
-        scale: u32,
+        router_scale: u32,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
@@ -340,7 +292,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self._shutdown().await?;
         self._start(
             actor_count,
-            scale,
+            router_scale,
             default_device,
             default_model,
             algorithm_name,
@@ -369,20 +321,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 params.metrics.record_counter("actors_created", 1, &[]);
 
                 // Get router runtime params to assign actor to a router
-                let router_runtime_params = params
-                    .scaling
-                    .runtime_params
-                    .as_ref()
-                    .ok_or_else(|| {
+                let router_runtime_params =
+                    params.scaling.runtime_params.as_ref().ok_or_else(|| {
                         CoordinatorError::ScaleManagerError(
                             ScaleManagerError::GetRouterRuntimeParamsError(
-                                "[Coordinator] No routers available for actor assignment".to_string(),
+                                "[Coordinator] No routers available for actor assignment"
+                                    .to_string(),
                             ),
                         )
                     })?;
 
                 // Round-robin assignment: pick a router based on current actor count
-                let router_ids: Vec<Uuid> = router_runtime_params.iter().map(|r| *r.key()).collect();
+                let router_ids: Vec<Uuid> =
+                    router_runtime_params.iter().map(|r| *r.key()).collect();
                 if router_ids.is_empty() {
                     return Err(CoordinatorError::ScaleManagerError(
                         ScaleManagerError::GetRouterRuntimeParamsError(
@@ -391,8 +342,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ));
                 }
 
-                let actor_count = params.state.read().await.actor_inboxes.len();
-                let router_id = router_ids[actor_count % router_ids.len()];
+                let actor_count: usize = params.state.read().await.actor_inboxes.len();
+                let router_id: Uuid = router_ids[actor_count % router_ids.len()];
 
                 // Get the router's sender_tx
                 let sender_tx = router_runtime_params
@@ -467,7 +418,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _set_actor_id(&self, current_id: ActorUuid, new_id: ActorUuid) -> Result<(), CoordinatorError> {
+    async fn _set_actor_id(
+        &self,
+        current_id: ActorUuid,
+        new_id: ActorUuid,
+    ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 StateManager::<B, D_IN, D_OUT>::__set_actor_id(
@@ -494,12 +449,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                let start_time = Instant::now();
-                let num_ids = ids.len() as u64;
-                let mut actions = Vec::with_capacity(ids.len());
+                let start_time: Instant = Instant::now();
+                let num_ids: u64 = ids.len() as u64;
+                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
 
                 // Extract router runtime params with clear error messages
-                let router_runtime_params = {
+                let router_runtime_params: &dashmap::DashMap<Uuid, super::scale_manager::RouterRuntimeParams> = {
                     let runtime_params = self.runtime_params.as_ref().ok_or_else(|| {
                         CoordinatorError::ScaleManagerError(
                             ScaleManagerError::GetRouterRuntimeParamsError(
@@ -690,6 +645,33 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
                     "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                ),
+            )),
+        }
+    }
+
+    async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError> {
+        match &self.runtime_params {
+            Some(params) => {
+                Ok(params.lifecycle.get_active_config().read().await.clone())
+            }
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::GetConfigError(
+                    "[Coordinator] No runtime instance to _get_config...".to_string(),
+                ),
+            )),
+        }
+    }
+
+    async fn _set_config(&self, config: ClientConfigLoader) -> Result<(), CoordinatorError> {
+        match &self.runtime_params {
+            Some(params) => {
+                params.lifecycle.set_active_config(&config).await?;
+                Ok(())
+            }
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::SetConfigError(
+                    "[Coordinator] No runtime instance to _set_config...".to_string(),
                 ),
             )),
         }

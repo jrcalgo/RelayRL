@@ -1,10 +1,11 @@
+use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
-use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::AsyncClientTransport;
 use crate::network::client::runtime::transport::TransportClient;
 use crate::network::client::runtime::transport::TransportError;
+use crate::utilities::misc_utils::ServerAddresses;
 
 use crate::utilities::orchestration::tonic_utils::relayrl_encoded_trajectory_to_grpc_encoded_trajectory;
 use thiserror::Error;
@@ -176,26 +177,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         }
                         Ok(())
                     }
-                    None => {
-                        Err(RouterError::FilterError(FilterError::RoutingError(
-                            format!("Actor inbox not found: {}", actor_id),
-                        )))
-                    }
+                    None => Err(RouterError::FilterError(FilterError::RoutingError(
+                        format!("Actor inbox not found: {}", actor_id),
+                    ))),
                 }
             }
-            Some(other_router_id) => {
-                Err(RouterError::FilterError(FilterError::RoutingError(
-                    format!("Actor {} is assigned to router {:?}, but message is for router {}", actor_id, other_router_id, router_id),
-                )))
-            }
-            None => {
-                Err(RouterError::FilterError(FilterError::RoutingError(
-                    format!("Actor {} is not assigned to any router or does not exist", actor_id),
-                )))
-            }
+            Some(other_router_id) => Err(RouterError::FilterError(FilterError::RoutingError(
+                format!(
+                    "Actor {} is assigned to router {:?}, but message is for router {}",
+                    actor_id, other_router_id, router_id
+                ),
+            ))),
+            None => Err(RouterError::FilterError(FilterError::RoutingError(
+                format!(
+                    "Actor {} is not assigned to any router or does not exist",
+                    actor_id
+                ),
+            ))),
         }
     }
-
 }
 
 //// End of Filtering (center of routing process)
@@ -229,18 +229,22 @@ pub(crate) struct ClientExternalReceiver<B: Backend + BackendMatcher<Backend = B
     active: AtomicBool,
     global_dispatcher_tx: Sender<RoutedMessage>,
     transport: Option<Arc<TransportClient<B>>>,
-    server_address: String,
+    shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalReceiver<B> {
-    pub fn new(associated_router_id: RouterUuid, global_dispatcher_tx: Sender<RoutedMessage>, server_address: String) -> Self {
+    pub fn new(
+        associated_router_id: RouterUuid,
+        global_dispatcher_tx: Sender<RoutedMessage>,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    ) -> Self {
         Self {
             associated_router_id,
             active: AtomicBool::new(false),
             global_dispatcher_tx,
             transport: None,
-            server_address,
+            shared_server_addresses,
             shutdown: None,
         }
     }
@@ -262,20 +266,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalReceiver<B> {
             match &**transport {
                 #[cfg(feature = "zmq_network")]
                 TransportClient::Sync(sync_tr) => {
-                    let server_address: String = self.server_address.clone();
-                    let global_dispatcher_tx: Sender<RoutedMessage> = self.global_dispatcher_tx.clone();
-                    let active: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
-                    let active_clone: Arc<AtomicBool> = active.clone();
-
-                    let transport_clone: Arc<TransportClient<B>> = transport.clone();
-
-                    let zmq_handle = tokio::task::spawn_blocking(move || {
-                        if let TransportClient::Sync(sync_tr) = &*transport_clone {
-                            while active_clone.load(Ordering::SeqCst) {
-                                match sync_tr
-                                    .listen_for_model(&server_address, global_dispatcher_tx.clone())
-                                {
-                                    Ok(()) => continue,
+                    while self.active.load(Ordering::SeqCst) {
+                        let agent_listener_address = self.shared_server_addresses.read().await.agent_listener_address.clone();
+                        let global_dispatcher_tx: Sender<RoutedMessage> = self.global_dispatcher_tx.clone();
+                        let transport_clone: Arc<TransportClient<B>> = transport.clone();
+                        
+                        let zmq_handle: tokio::task::JoinHandle<()> = tokio::task::spawn_blocking(move || {
+                            if let TransportClient::Sync(sync_tr) = &*transport_clone {
+                                match sync_tr.listen_for_model(
+                                    agent_listener_address.as_str(),
+                                    global_dispatcher_tx.clone(),
+                                ) {
+                                    Ok(()) => {},
                                     Err(e) => {
                                         eprintln!(
                                             "[ClientExternalReceiver] ZMQ listen error: {}",
@@ -285,27 +287,28 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalReceiver<B> {
                                     }
                                 }
                             }
+                        });
+
+                        if let Some(mut shutdown_rx) = self.shutdown.as_ref().and_then(|s| Some(s.resubscribe())) {
+                            let _ = shutdown_rx.recv().await;
+                        } else {
+                            std::future::pending::<()>().await;
                         }
-                    });
 
-                    if let Some(mut shutdown_rx) =
-                        self.shutdown.as_ref().and_then(|s| Some(s.resubscribe()))
-                    {
-                        let _ = shutdown_rx.recv().await;
-                    } else {
-                        std::future::pending::<()>().await;
+                        self.active.store(false, Ordering::SeqCst);
+                        zmq_handle.abort();
                     }
-
-                    active.store(false, Ordering::SeqCst);
-                    zmq_handle.abort();
                 }
                 #[cfg(feature = "grpc_network")]
                 TransportClient::Async(async_tr) => {
                     let mut shutdown_rx = self.shutdown.as_ref().map(|s| s.resubscribe());
 
                     while self.active.load(Ordering::SeqCst) {
+                        let agent_listener_address: String = self.shared_server_addresses.read().await.agent_listener_address.clone();
+                        let global_dispatcher_tx: Sender<RoutedMessage> = self.global_dispatcher_tx.clone();
+
                         tokio::select! {
-                            result = async_tr.listen_for_model(&self.server_address) => {
+                            result = async_tr.listen_for_model(agent_listener_address.as_str(), global_dispatcher_tx.clone()) => {
                                 match result {
                                     Ok(()) => {
                                         // this should never happen, but if it does, we need to break the loop
@@ -384,7 +387,7 @@ pub(crate) struct ClientExternalSender<B: Backend + BackendMatcher<Backend = B>>
     actor_last_sent: DashMap<Uuid, i64>,
     traj_heap: Arc<Mutex<BinaryHeap<SenderQueueEntry>>>,
     transport: Option<Arc<TransportClient<B>>>,
-    server_address: String,
+    shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     shutdown: Option<broadcast::Receiver<()>>,
     codec: CodecConfig,
 }
@@ -393,7 +396,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
     pub fn new(
         associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
-        server_address: String,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         codec: CodecConfig,
     ) -> Self {
         Self {
@@ -403,7 +406,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
             actor_last_sent: DashMap::new(),
             traj_heap: Arc::new(Mutex::new(BinaryHeap::new())),
             transport: None,
-            server_address,
+            shared_server_addresses,
             shutdown: None,
             codec,
         }
@@ -425,12 +428,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
         let mut rx: Receiver<RoutedMessage> = self.rx_from_actor;
         let mut shutdown: Option<broadcast::Receiver<()>> = self.shutdown.take();
         let mut tick: tokio::time::Interval = tokio::time::interval(Duration::from_millis(100));
-        
+
         // Extract fields we need to avoid borrowing self
         let actor_last_sent: &DashMap<Uuid, i64> = &self.actor_last_sent;
         let traj_heap: Arc<Mutex<BinaryHeap<SenderQueueEntry>>> = self.traj_heap.clone();
         let transport: Option<Arc<TransportClient<B>>> = self.transport.clone();
-        let server_address: String = self.server_address.clone();
+        let model_server_address: String = self.shared_server_addresses.read().await.model_server_address.clone();
+        let trajectory_server_address: String = self.shared_server_addresses.read().await.trajectory_server_address.clone();
         let codec: CodecConfig = self.codec.clone();
 
         while self.active.load(Ordering::SeqCst) {
@@ -450,11 +454,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                 }
                 _ = tick.tick() => {
                     let job_option = { let mut heap = traj_heap.lock().await; heap.pop() };
-                    if let Some(job) = job_option { 
-                        if let Err(e) = Self::send_trajectory(job, server_address.clone(), &transport, &codec, actor_last_sent).await { 
-                            eprintln!("[ClientExternalSender] Failed to send trajectory: {}", e); 
+                    if let Some(job) = job_option {
+                        if let Err(e) = Self::send_trajectory(job, &model_server_address, &trajectory_server_address, &transport, &codec, actor_last_sent).await {
+                            eprintln!("[ClientExternalSender] Failed to send trajectory: {}", e);
                             break;
-                        } 
+                        }
                     }
                 }
                 _ = async {
@@ -472,10 +476,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
         self.active.store(false, Ordering::SeqCst);
         Ok(())
     }
-    
+
     async fn send_trajectory(
         entry: SenderQueueEntry,
-        server_address: String,
+        model_server_address: &str,
+        trajectory_server_address: &str,
         transport: &Option<Arc<TransportClient<B>>>,
         codec: &CodecConfig,
         actor_last_sent: &DashMap<Uuid, i64>,
@@ -483,7 +488,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
         if let Some(transport) = transport {
             // Update last sent timestamp for this actor
             actor_last_sent.insert(entry.actor_id, entry.priority);
-            
+
             // Send trajectory via transport
             match &**transport {
                 #[cfg(feature = "zmq_network")]
@@ -494,7 +499,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                         .map_err(|e| ExternalSenderError::EncodeTrajectoryError(e))?;
 
                     sync_client
-                        .send_traj_to_server(encoded_traj, &server_address)
+                        .send_traj_to_server(
+                            encoded_traj,
+                            model_server_address,
+                            trajectory_server_address,
+                        )
                         .map_err(|e| ExternalSenderError::TransportError(e))?;
                     Ok(())
                 }
@@ -506,7 +515,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientExternalSender<B> {
                         .map_err(|e| ExternalSenderError::EncodeTrajectoryError(e))?;
 
                     async_client
-                        .send_traj_to_server(encoded_traj, &server_address)
+                        .send_traj_to_server(
+                            encoded_traj,
+                            model_server_address,
+                            trajectory_server_address,
+                        )
                         .await
                         .map_err(|e| ExternalSenderError::TransportError(e))?;
                     Ok(())

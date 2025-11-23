@@ -2,6 +2,7 @@ use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
     ClientCoordinator, ClientInterface, CoordinatorError,
 };
+use crate::prelude::config::ClientConfigLoader;
 
 use thiserror::Error;
 
@@ -29,8 +30,23 @@ pub enum ClientError {
     NoopRouterScale(String),
 }
 
+/// TODO: Add architecture support for ServerSide and Hybrid modes. This will probably be in a later update.
+#[derive(Debug, Clone)]
+pub enum InferenceMode {
+    ClientSide,
+    ServerSide,
+    Hybrid,
+}
+
+impl Default for InferenceMode {
+    fn default() -> Self {
+        Self::ClientSide
+    }
+}
+
 pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
-    pub actor_count: i64,
+    pub actor_count: u32,
+    pub router_scale: u32,
     pub default_device: DeviceType,
     pub default_model: Option<ModelModule<B>>,
     pub algorithm_name: String,
@@ -51,7 +67,8 @@ pub struct RelayRLAgentBuilder<
     const D_OUT: usize,
 > {
     pub transport_type: TransportType,
-    pub actor_count: Option<i64>,
+    pub actor_count: Option<u32>,
+    pub router_scale: Option<u32>,
     pub default_device: Option<DeviceType>,
     pub default_model: Option<ModelModule<B>>,
     pub algorithm_name: Option<String>,
@@ -67,6 +84,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Self {
             transport_type,
             actor_count: None,
+            router_scale: None,
             default_device: None,
             default_model: None,
             algorithm_name: None,
@@ -75,8 +93,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    pub fn actor_count(mut self, count: i64) -> Self {
+    pub fn actor_count(mut self, count: u32) -> Self {
         self.actor_count = Some(count);
+        self
+    }
+
+    pub fn router_scale(mut self, count: u32) -> Self {
+        self.router_scale = Some(count);
         self
     }
 
@@ -115,9 +138,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
             actor_count: self.actor_count.unwrap_or(1),
+            router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
             default_model: self.default_model,
-            algorithm_name: self.algorithm_name.ok_or("algorithm_name is required")?,
+            algorithm_name: self.algorithm_name.ok_or("REINFORCE")?,
             config_path: self.config_path,
             codec: self.codec.unwrap_or_default(),
         };
@@ -161,7 +185,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub async fn start(
         self,
         actor_count: u32,
-        scale: u32,
+        router_scale: u32,
+        inference_mode: InferenceMode,
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
@@ -171,7 +196,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.coordinator
             ._start(
                 actor_count,
-                scale,
+                router_scale,
                 default_device,
                 default_model,
                 algorithm_name,
@@ -184,25 +209,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Scale the agent's actor throughput by adding or removing routers
     ///
-    /// Takes routers: `i32` arg and converts to `u32` for internal operations.
+    /// Takes `router_scale`: `i32` arg and converts to `u32` for internal operations.
     ///
-    /// If the routers < 0: scale down by the absolute value of the routers.
+    /// If the `router_scale < 0`: scale down by the absolute value of the routers.
     ///
-    /// If the routers > 0: scale up by the value of the routers.
+    /// If the `router_scale > 0`: scale up by the value of the routers.
     ///
-    /// If routers == 0: do nothing.
-    pub async fn scale_throughput(&mut self, routers: i32) -> Result<(), ClientError> {
-        match routers {
-            add if routers > 0 => {
+    /// If `routers == 0`: do nothing and return error.
+    pub async fn scale_throughput(&mut self, router_scale: i32) -> Result<(), ClientError> {
+        match router_scale {
+            add if router_scale > 0 => {
                 self.coordinator._scale_up(add as u32).await?;
                 Ok(())
             }
-            remove if routers < 0 => {
+            remove if router_scale < 0 => {
                 self.coordinator._scale_down(remove.abs() as u32).await?;
                 Ok(())
             }
             _ => Err(ClientError::NoopRouterScale(
-                "Noop router scale".to_string(),
+                "Noop router scale: `router_scale` set to zero".to_string(),
             )),
         }
     }
@@ -253,8 +278,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Retrieves the model version for each actor ID listed (if instance IDs exist)
     pub async fn get_model_version(&self, ids: Vec<Uuid>) -> Result<Vec<(Uuid, i64)>, ClientError> {
-        let versions = self.coordinator._get_model_version(ids).await?;
-        Ok(versions)
+        Ok(self.coordinator._get_model_version(ids).await?)
     }
 
     /// Collect runtime statistics and save to a JSON file
@@ -334,6 +358,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         })?;
 
         Ok(stats_path)
+    }
+
+    pub async fn get_config(&self) -> Result<ClientConfigLoader, ClientError> {
+        Ok(self.coordinator._get_config().await?)
+    }
+
+    pub async fn set_config(&self, config: ClientConfigLoader) -> Result<(), ClientError> {
+        self.coordinator._set_config(config).await?;
+        Ok(())
     }
 }
 
