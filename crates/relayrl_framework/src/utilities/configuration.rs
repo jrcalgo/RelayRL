@@ -435,9 +435,10 @@ pub struct NetworkParams {
 /// This struct holds optional server parameters for training, trajectory, and agent listener.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NetworkConfigData {
-    pub training_server: Option<NetworkParams>,
+    pub model_server: Option<NetworkParams>,
     pub trajectory_server: Option<NetworkParams>,
     pub agent_listener: Option<NetworkParams>,
+    pub scaling_server: Option<NetworkParams>,
 }
 
 /// Tensorboard configuration structure.
@@ -654,6 +655,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 agent_listener_address: transport_config.agent_listener_address.clone(),
                 model_server_address: transport_config.model_server_address.clone(),
                 trajectory_server_address: transport_config.trajectory_server_address.clone(),
+                scaling_server_address: transport_config.scaling_server_address.clone(),
                 grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
                 local_model_path: transport_config.local_model_path.clone(),
@@ -1077,6 +1079,7 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
                 agent_listener_address: transport_config.agent_listener_address.clone(),
                 model_server_address: transport_config.model_server_address.clone(),
                 trajectory_server_address: transport_config.trajectory_server_address.clone(),
+                scaling_server_address: transport_config.scaling_server_address.clone(),
                 grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
                 local_model_path: transport_config.local_model_path.clone(),
@@ -1113,6 +1116,7 @@ pub struct TransportConfigParams {
     pub agent_listener_address: NetworkParams,
     pub model_server_address: NetworkParams,
     pub trajectory_server_address: NetworkParams,
+    pub scaling_server_address: NetworkParams,
     pub grpc_idle_timeout: u32,
     pub max_traj_length: u128,
     pub local_model_path: PathBuf,
@@ -1131,12 +1135,17 @@ impl TransportConfigParams {
     pub fn get_trajectory_server_address(&self) -> &NetworkParams {
         &self.trajectory_server_address
     }
+
+    pub fn get_scaling_server_address(&self) -> &NetworkParams {
+        &self.scaling_server_address
+    }
 }
 
 pub trait TransportConfigBuildParams {
     fn set_agent_listener_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_model_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_trajectory_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
+    fn set_scaling_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_grpc_idle_timeout(&mut self, grpc_idle_timeout: u32) -> &mut Self;
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self;
     fn set_config_update_polling(&mut self, config_update_polling: u32) -> &mut Self;
@@ -1149,6 +1158,7 @@ pub struct TransportConfigBuilder {
     agent_listener_address: Option<NetworkParams>,
     model_server_address: Option<NetworkParams>,
     trajectory_server_address: Option<NetworkParams>,
+    scaling_server_address: Option<NetworkParams>,
     grpc_idle_timeout: Option<u32>,
     max_traj_length: Option<u128>,
     config_update_polling: Option<u32>,
@@ -1183,6 +1193,14 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         self
     }
 
+    fn set_scaling_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
+        self.scaling_server_address = Some(NetworkParams {
+            prefix: prefix.to_string(),
+            host: host.to_string(),
+            port: port.to_string(),
+        });
+        self
+    }
     fn set_grpc_idle_timeout(&mut self, grpc_idle_timeout: u32) -> &mut Self {
         self.grpc_idle_timeout = Some(grpc_idle_timeout);
         self
@@ -1231,6 +1249,14 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             },
         };
 
+        let scaling_server_address: NetworkParams = match &self.scaling_server_address {
+            Some(address) => address.clone(),
+            None => NetworkParams {
+                prefix: "tcp://".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: "7777".to_string(),
+            },
+        };
         let grpc_idle_timeout: u32 = match &self.grpc_idle_timeout {
             Some(timeout) => *timeout,
             None => 30,
@@ -1255,6 +1281,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             agent_listener_address,
             model_server_address,
             trajectory_server_address,
+            scaling_server_address,
             grpc_idle_timeout,
             max_traj_length,
             local_model_path,
@@ -1279,6 +1306,11 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 prefix: "tcp://".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: "7776".to_string(),
+            },
+            scaling_server_address: NetworkParams {
+                prefix: "tcp://".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: "7777".to_string(),
             },
             config_update_polling: 10,
             grpc_idle_timeout: 30,

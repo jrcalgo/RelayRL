@@ -34,6 +34,8 @@ pub(crate) struct ServerAddresses {
     pub(crate) agent_listener_address: String,
     pub(crate) model_server_address: String,
     pub(crate) trajectory_server_address: String,
+    pub(crate) scaling_server_address: String,
+    // pub(crate) inference_server_address: String,
 }
 
 pub(crate) fn construct_server_addresses(
@@ -61,6 +63,10 @@ pub(crate) fn construct_server_addresses(
         trajectory_server_address: construct_address(
             &transport_type,
             &transport_config.trajectory_server_address,
+        ),
+        scaling_server_address: construct_address(
+            &transport_type,
+            &transport_config.scaling_server_address,
         ),
     }
 }
