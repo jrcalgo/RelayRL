@@ -69,6 +69,9 @@ pub mod prelude {
         // pub use crate::network::server::training_server::TrainingServer;
     }
     pub mod templates {
+        pub use crate::network::client::runtime::transport::{
+            AsyncClientTransport, SyncClientTransport,
+        };
         pub use crate::templates::{EnvironmentTestingTrait, EnvironmentTrainingTrait};
     }
 }
