@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ndarray::{ArrayBase, CowRepr, Dim, IxDynImpl};
-use ort::value::DynArrayRef;
 use ort::tensor::TensorDataToType;
+use ort::value::DynArrayRef;
 
 use burn_tensor::{Tensor, TensorData as BurnTensorData, TensorKind, backend::Backend};
 use ort::tensor::IntoTensorElementDataType;
@@ -320,18 +320,27 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
         let mask_td: Option<TensorData> = match mask {
             Some(mask_tensor) => match mask_tensor {
-                AnyBurnTensor::Float(wrapper) => Some(TensorData::try_from(ConversionBurnTensor {
-                    inner: wrapper.tensor,
-                    conversion_dtype: self.metadata.output_dtype.clone(),
-                }).expect("Failed to convert mask tensor to TensorData")),
-                AnyBurnTensor::Int(wrapper) => Some(TensorData::try_from(ConversionBurnTensor {
-                    inner: wrapper.tensor,
-                    conversion_dtype: self.metadata.output_dtype.clone(),
-                }).expect("Failed to convert mask tensor to TensorData")),
-                AnyBurnTensor::Bool(wrapper) => Some(TensorData::try_from(ConversionBurnTensor {
-                    inner: wrapper.tensor,
-                    conversion_dtype: self.metadata.output_dtype.clone(),
-                }).expect("Failed to convert mask tensor to TensorData")),
+                AnyBurnTensor::Float(wrapper) => Some(
+                    TensorData::try_from(ConversionBurnTensor {
+                        inner: wrapper.tensor,
+                        conversion_dtype: self.metadata.output_dtype.clone(),
+                    })
+                    .expect("Failed to convert mask tensor to TensorData"),
+                ),
+                AnyBurnTensor::Int(wrapper) => Some(
+                    TensorData::try_from(ConversionBurnTensor {
+                        inner: wrapper.tensor,
+                        conversion_dtype: self.metadata.output_dtype.clone(),
+                    })
+                    .expect("Failed to convert mask tensor to TensorData"),
+                ),
+                AnyBurnTensor::Bool(wrapper) => Some(
+                    TensorData::try_from(ConversionBurnTensor {
+                        inner: wrapper.tensor,
+                        conversion_dtype: self.metadata.output_dtype.clone(),
+                    })
+                    .expect("Failed to convert mask tensor to TensorData"),
+                ),
             },
             None => None,
         };
@@ -843,7 +852,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                     TchTensor::from_slice::<u8>(bytemuck::cast_slice(&obs_tensor_data.data))
                         .reshape(obs_shape_i64.as_slice())
                 }
-            }
+            },
         };
 
         // Step 3
@@ -1004,99 +1013,68 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         where
             IN: IntoTensorElementDataType + TensorDataToType + Debug + Clone + bytemuck::Pod,
             OUT: IntoTensorElementDataType + TensorDataToType + Debug + Clone + bytemuck::Pod,
-            for<'a> DynArrayRef<'a>: From<ArrayBase<CowRepr<'a, IN>, Dim<IxDynImpl>>>
+            for<'a> DynArrayRef<'a>: From<ArrayBase<CowRepr<'a, IN>, Dim<IxDynImpl>>>,
         {
             let typed_data: &[IN] = bytemuck::cast_slice(&tensor_data.data);
             let array = ArrayD::from_shape_vec(tensor_data.shape, typed_data.to_vec())
                 .map_err(|e| ModelError::BackendError(format!("Failed to create array: {}", e)))?;
-            
+
             // Let Rust infer the local lifetime - don't explicitly annotate
             let cow_array = CowArray::from(&array);
-            let ort_value = OrtValue::from_array(session_.allocator(), &cow_array)
-                .map_err(|e| ModelError::BackendError(format!("Failed to create OrtValue: {}", e)))?;
-            
-            let output_value = session_.run(vec![ort_value])
+            let ort_value =
+                OrtValue::from_array(session_.allocator(), &cow_array).map_err(|e| {
+                    ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
+                })?;
+
+            let output_value = session_
+                .run(vec![ort_value])
                 .map_err(|e| ModelError::BackendError(format!("Failed to run session: {}", e)))?;
-            let first = output_value
-                .into_iter()
-                .next()
-                .ok_or_else(|| ModelError::BackendError("No output from ONNX session".to_string()))?;
+            let first = output_value.into_iter().next().ok_or_else(|| {
+                ModelError::BackendError("No output from ONNX session".to_string())
+            })?;
             let owned: OrtOwnedTensor<'_, OUT, IxDyn> = first.try_extract().map_err(|e| {
                 ModelError::BackendError(format!("Failed to extract tensor from output: {:?}", e))
             })?;
-        
+
             let act_vec: Vec<OUT> = owned.view().iter().copied().collect();
             let act_bytes: Vec<u8> = bytemuck::cast_slice(&act_vec).to_vec();
             Ok(act_bytes)
         }
-        
 
-        fn match_obs_to_act<IN>(input_data: TensorData, output_dtype: DType, session_: &Arc<Session>) -> Result<Vec<u8>, ModelError>
+        fn match_obs_to_act<IN>(
+            input_data: TensorData,
+            output_dtype: DType,
+            session_: &Arc<Session>,
+        ) -> Result<Vec<u8>, ModelError>
         where
             IN: IntoTensorElementDataType + TensorDataToType + Debug + Clone + bytemuck::Pod,
-            for<'b> DynArrayRef<'b>: From<ArrayBase<CowRepr<'b, IN>, Dim<IxDynImpl>>>
+            for<'b> DynArrayRef<'b>: From<ArrayBase<CowRepr<'b, IN>, Dim<IxDynImpl>>>,
         {
             match &output_dtype {
                 #[cfg(feature = "ndarray-backend")]
                 DType::NdArray(nd) => match nd {
-                    NdArrayDType::F16 => {
-                        convert_obs_to_act::<IN, f32>(input_data, session_)
-                    }
-                    NdArrayDType::F32 => {
-                        convert_obs_to_act::<IN, f32>(input_data, session_)
-                    }
-                    NdArrayDType::F64 => {
-                        convert_obs_to_act::<IN, f64>(input_data, session_)
-                    }
-                    NdArrayDType::I8 => {
-                        convert_obs_to_act::<IN, i8>(input_data, session_)
-                    }
-                    NdArrayDType::I16 => {
-                        convert_obs_to_act::<IN, i16>(input_data, session_)
-                    }
-                    NdArrayDType::I32 => {
-                        convert_obs_to_act::<IN, i32>(input_data, session_)
-                    }
-                    NdArrayDType::I64 => {
-                        convert_obs_to_act::<IN, i64>(input_data, session_)
-                    }
-                    NdArrayDType::Bool => {
-                        convert_obs_to_act::<IN, u8>(input_data, session_)
-                    }
-                }
+                    NdArrayDType::F16 => convert_obs_to_act::<IN, f32>(input_data, session_),
+                    NdArrayDType::F32 => convert_obs_to_act::<IN, f32>(input_data, session_),
+                    NdArrayDType::F64 => convert_obs_to_act::<IN, f64>(input_data, session_),
+                    NdArrayDType::I8 => convert_obs_to_act::<IN, i8>(input_data, session_),
+                    NdArrayDType::I16 => convert_obs_to_act::<IN, i16>(input_data, session_),
+                    NdArrayDType::I32 => convert_obs_to_act::<IN, i32>(input_data, session_),
+                    NdArrayDType::I64 => convert_obs_to_act::<IN, i64>(input_data, session_),
+                    NdArrayDType::Bool => convert_obs_to_act::<IN, u8>(input_data, session_),
+                },
                 #[cfg(feature = "tch-backend")]
                 DType::Tch(tch) => match tch {
-                    TchDType::F16 => {
-                        convert_obs_to_act::<IN, f32>(input_data, session_)
-                    }
-                    TchDType::Bf16 => {
-                        convert_obs_to_act::<IN, f32>(input_data, session_)
-                    }
-                    TchDType::F32 => {
-                        convert_obs_to_act::<IN, f32>(input_data, session_)
-                    }
-                    TchDType::F64 => {
-                        convert_obs_to_act::<IN, f64>(input_data, session_)
-                    }
-                    TchDType::I8 => {
-                        convert_obs_to_act::<IN, i8>(input_data, session_)
-                    }
-                    TchDType::I16 => {
-                        convert_obs_to_act::<IN, i16>(input_data, session_)
-                    }
-                    TchDType::I32 => {
-                        convert_obs_to_act::<IN, i32>(input_data, session_)
-                    }
-                    TchDType::I64 => {
-                        convert_obs_to_act::<IN, i64>(input_data, session_)
-                    }
-                    TchDType::U8 => {
-                        convert_obs_to_act::<IN, u8>(input_data, session_)
-                    }
-                    TchDType::Bool => {
-                        convert_obs_to_act::<IN, u8>(input_data, session_)
-                    }
-                }
+                    TchDType::F16 => convert_obs_to_act::<IN, f32>(input_data, session_),
+                    TchDType::Bf16 => convert_obs_to_act::<IN, f32>(input_data, session_),
+                    TchDType::F32 => convert_obs_to_act::<IN, f32>(input_data, session_),
+                    TchDType::F64 => convert_obs_to_act::<IN, f64>(input_data, session_),
+                    TchDType::I8 => convert_obs_to_act::<IN, i8>(input_data, session_),
+                    TchDType::I16 => convert_obs_to_act::<IN, i16>(input_data, session_),
+                    TchDType::I32 => convert_obs_to_act::<IN, i32>(input_data, session_),
+                    TchDType::I64 => convert_obs_to_act::<IN, i64>(input_data, session_),
+                    TchDType::U8 => convert_obs_to_act::<IN, u8>(input_data, session_),
+                    TchDType::Bool => convert_obs_to_act::<IN, u8>(input_data, session_),
+                },
             }
         }
 
@@ -1113,7 +1091,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                                 e
                             ))
                         })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<f32>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 NdArrayDType::F32 => {
                     let obs_tensor_data = observation.clone().into_f32_data().map_err(|e| {
@@ -1122,7 +1104,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<f32>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 NdArrayDType::F64 => {
                     let obs_tensor_data = observation.clone().into_f64_data().map_err(|e| {
@@ -1131,7 +1117,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f64>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<f64>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 NdArrayDType::I8 => {
                     let obs_tensor_data = observation.clone().into_i8_data().map_err(|e| {
@@ -1140,7 +1130,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i8>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 NdArrayDType::I16 => {
                     let obs_tensor_data = observation.clone().into_i16_data().map_err(|e| {
@@ -1149,7 +1143,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i16>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i16>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 NdArrayDType::I32 => {
                     let obs_tensor_data = observation.clone().into_i32_data().map_err(|e| {
@@ -1158,7 +1156,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i32>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 NdArrayDType::I64 => {
                     let obs_tensor_data = observation.clone().into_i64_data().map_err(|e| {
@@ -1167,7 +1169,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i64>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i64>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 NdArrayDType::Bool => {
                     let obs_tensor_data = observation.clone().into_bool_data().map_err(|e| {
@@ -1176,7 +1182,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<u8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<u8>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
             },
             #[cfg(feature = "tch-backend")]
@@ -1189,7 +1199,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<f32>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::Bf16 => {
                     // ONNX doesn't support bf16, so convert to f32
@@ -1199,7 +1213,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<f32>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::F32 => {
                     let obs_tensor_data = observation.clone().into_f32_data().map_err(|e| {
@@ -1208,7 +1226,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<f32>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::F64 => {
                     let obs_tensor_data = observation.clone().into_f64_data().map_err(|e| {
@@ -1217,7 +1239,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<f64>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<f64>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::I8 => {
                     let obs_tensor_data = observation.clone().into_i8_data().map_err(|e| {
@@ -1226,7 +1252,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i8>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::I16 => {
                     let obs_tensor_data = observation.clone().into_i16_data().map_err(|e| {
@@ -1235,7 +1265,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i16>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i16>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::I32 => {
                     let obs_tensor_data = observation.clone().into_i32_data().map_err(|e| {
@@ -1244,7 +1278,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i32>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i32>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::I64 => {
                     let obs_tensor_data = observation.clone().into_i64_data().map_err(|e| {
@@ -1253,7 +1291,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<i64>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<i64>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::U8 => {
                     let obs_tensor_data = observation.clone().into_u8_data().map_err(|e| {
@@ -1262,7 +1304,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<u8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<u8>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
                 TchDType::Bool => {
                     let obs_tensor_data = observation.clone().into_bool_data().map_err(|e| {
@@ -1271,7 +1317,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                             e
                         ))
                     })?;
-                    match_obs_to_act::<u8>(obs_tensor_data, self.metadata.output_dtype.clone(), session)?
+                    match_obs_to_act::<u8>(
+                        obs_tensor_data,
+                        self.metadata.output_dtype.clone(),
+                        session,
+                    )?
                 }
             },
         };

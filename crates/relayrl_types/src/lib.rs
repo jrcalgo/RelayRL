@@ -13,7 +13,7 @@ pub mod prelude {
 
     pub use crate::types::data::tensor::{
         AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-        IntBurnTensor, SupportedTensorBackend, TensorData, TensorError
+        IntBurnTensor, SupportedTensorBackend, TensorData, TensorError,
     };
 
     pub use crate::types::data::trajectory::{
@@ -21,9 +21,7 @@ pub mod prelude {
     };
 
     #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-    pub use crate::types::model::{
-        ModelModule, ModelError, HotReloadableModel
-    };
+    pub use crate::types::model::{HotReloadableModel, ModelError, ModelModule};
 
     #[cfg(feature = "compression")]
     pub use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
