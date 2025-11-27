@@ -186,7 +186,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self,
         actor_count: u32,
         router_scale: u32,
-        inference_mode: InferenceMode,
+        _inference_mode: InferenceMode, // TODO: Add support for ServerSide and Hybrid modes.
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         algorithm_name: String,
