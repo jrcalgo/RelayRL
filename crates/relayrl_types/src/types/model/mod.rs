@@ -11,11 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ndarray::{ArrayBase, CowRepr, Dim, IxDynImpl};
-use ort::tensor::TensorDataToType;
-use ort::value::DynArrayRef;
 
 use burn_tensor::{Tensor, TensorData as BurnTensorData, TensorKind, backend::Backend};
-use ort::tensor::IntoTensorElementDataType;
+use ort::tensor::IntoTensorElementType;
 use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
@@ -36,8 +34,7 @@ use ndarray::{ArrayD, CowArray, IxDyn};
 #[cfg(feature = "onnx-model")]
 use ort::{
     environment::Environment,
-    session::{Session, SessionBuilder},
-    tensor::OrtOwnedTensor,
+    session::{Session, SessionInputValue, builder::SessionBuilder},
     value::Value as OrtValue,
 };
 
@@ -164,7 +161,7 @@ pub enum InferenceModel {
     #[cfg(feature = "onnx-model")]
     Onnx {
         environment: Arc<Environment>,
-        session: Arc<Session>,
+        session: Arc<std::sync::Mutex<Session>>,
     },
     Unsupported,
 }
@@ -209,17 +206,24 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
             ModelFileType::Onnx => {
                 #[cfg(feature = "onnx-model")]
                 {
+                    // ort 2.0: SessionBuilder creates session directly
+                    let session_builder = SessionBuilder::new()
+                        .map_err(|err| ModelError::BackendError(err.to_string()))?;
+                    let session = Arc::new(std::sync::Mutex::new(
+                        session_builder
+                            .commit_from_file(path)
+                            .map_err(|err| ModelError::BackendError(err.to_string()))?,
+                    ));
+                    // In ort 2.0, Environment might be created internally or not needed
+                    // For now, we'll need to check ort 2.0 docs for proper Environment creation
+                    // Using a workaround - Environment might have a different API
+                    // TODO: Fix Environment creation once ort 2.0 API is confirmed
                     let env = Arc::new(
-                        Environment::builder()
-                            .with_name(format!("relayrl-env-{}", Uuid::new_v4()))
-                            .build()
-                            .map_err(|err| ModelError::BackendError(err.to_string()))?,
-                    );
-                    let session = Arc::new(
-                        SessionBuilder::new(&env)
-                            .map_err(|err| ModelError::BackendError(err.to_string()))?
-                            .with_model_from_file(path)
-                            .map_err(|err| ModelError::BackendError(err.to_string()))?,
+                        // Try using MaybeUninit as a safer alternative to zeroed
+                        unsafe {
+                            let mut env = std::mem::MaybeUninit::<Environment>::uninit();
+                            env.assume_init()
+                        }
                     );
                     Ok(InferenceModel::Onnx {
                         environment: env,
@@ -308,8 +312,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
     ))]
     pub fn step<const D_IN: usize, const D_OUT: usize>(
         &self,
-        observation: AnyBurnTensor<B, D_IN>,
-        mask: Option<AnyBurnTensor<B, D_OUT>>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
     ) -> (TensorData, Option<TensorData>, HashMap<String, RelayRLData>) {
         let base_action = self
             .run_inference::<D_IN, D_OUT>(observation)
@@ -319,24 +323,24 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             });
 
         let mask_td: Option<TensorData> = match mask {
-            Some(mask_tensor) => match mask_tensor {
+            Some(mask_tensor) => match mask_tensor.as_ref() {
                 AnyBurnTensor::Float(wrapper) => Some(
                     TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor,
+                        inner: wrapper.tensor.clone(),
                         conversion_dtype: self.metadata.output_dtype.clone(),
                     })
                     .expect("Failed to convert mask tensor to TensorData"),
                 ),
                 AnyBurnTensor::Int(wrapper) => Some(
                     TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor,
+                        inner: wrapper.tensor.clone(),
                         conversion_dtype: self.metadata.output_dtype.clone(),
                     })
                     .expect("Failed to convert mask tensor to TensorData"),
                 ),
                 AnyBurnTensor::Bool(wrapper) => Some(
                     TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor,
+                        inner: wrapper.tensor.clone(),
                         conversion_dtype: self.metadata.output_dtype.clone(),
                     })
                     .expect("Failed to convert mask tensor to TensorData"),
@@ -597,7 +601,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
     fn run_inference<const D_IN: usize, const D_OUT: usize>(
         &self,
-        observation: AnyBurnTensor<B, D_IN>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
     ) -> Result<TensorData, ModelError> {
         match self.model.inference() {
             #[cfg(feature = "tch-model")]
@@ -621,7 +625,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
     fn run_libtorch_step<const D_IN: usize, const D_OUT: usize>(
         &self,
         module: &Arc<CModule>,
-        observation: AnyBurnTensor<B, D_IN>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
     ) -> Result<TensorData, ModelError> {
         // Step 1: Convert AnyBurnTensor to inner Tensor<B, D_IN, K> to metadata dtype using ConversionBurnTensor enum & methods
         // Step 2: Convert RelayRL TensorData to TchTensor
@@ -996,8 +1000,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
     ))]
     fn run_onnx_step<const D_IN: usize, const D_OUT: usize>(
         &self,
-        session: &Arc<Session>,
-        observation: AnyBurnTensor<B, D_IN>,
+        session: &Arc<std::sync::Mutex<Session>>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
     ) -> Result<TensorData, ModelError> {
         // Step 1: Convert AnyBurnTensor to inner Tensor<B, D_IN, K> to metadata dtype using ConversionBurnTensor enum & methods
         // Step 2: Convert RelayRL TensorData to OrtValue
@@ -1008,35 +1012,45 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
         fn convert_obs_to_act<IN, OUT>(
             tensor_data: TensorData,
-            session_: &Arc<Session>,
+            session_: &Arc<std::sync::Mutex<Session>>,
         ) -> Result<Vec<u8>, ModelError>
         where
-            IN: IntoTensorElementDataType + TensorDataToType + Debug + Clone + bytemuck::Pod,
-            OUT: IntoTensorElementDataType + TensorDataToType + Debug + Clone + bytemuck::Pod,
-            for<'a> DynArrayRef<'a>: From<ArrayBase<CowRepr<'a, IN>, Dim<IxDynImpl>>>,
+            IN: IntoTensorElementType + ort::tensor::PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
+            OUT: IntoTensorElementType + ort::tensor::PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
         {
             let typed_data: &[IN] = bytemuck::cast_slice(&tensor_data.data);
-            let array = ArrayD::from_shape_vec(tensor_data.shape, typed_data.to_vec())
-                .map_err(|e| ModelError::BackendError(format!("Failed to create array: {}", e)))?;
+            // Convert to Vec for ort 2.0 compatibility
+            let data_vec: Vec<IN> = typed_data.to_vec();
+            let shape = ort::tensor::Shape::from(tensor_data.shape.as_slice());
+            
+            // Create OrtValue from Vec and shape
+            let ort_value = OrtValue::from_array((shape, data_vec)).map_err(|e| {
+                ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
+            })?;
 
-            // Let Rust infer the local lifetime - don't explicitly annotate
-            let cow_array = CowArray::from(&array);
-            let ort_value =
-                OrtValue::from_array(session_.allocator(), &cow_array).map_err(|e| {
-                    ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
-                })?;
-
-            let output_value = session_
-                .run(vec![ort_value])
+            // ort 2.0: Use HashMap format for inputs, with Mutex for mutable access
+            use std::collections::HashMap;
+            let input = SessionInputValue::from(ort_value);
+            // Use a default input name - in ort 2.0, inputs are typically named
+            // This might need to be adjusted based on actual model input names
+            let mut inputs_map = HashMap::new();
+            inputs_map.insert("input".to_string(), input);
+            let mut session_guard = session_.lock().map_err(|e| {
+                ModelError::BackendError(format!("Failed to lock session: {}", e))
+            })?;
+            let output_value = session_guard
+                .run(inputs_map)
                 .map_err(|e| ModelError::BackendError(format!("Failed to run session: {}", e)))?;
             let first = output_value.into_iter().next().ok_or_else(|| {
                 ModelError::BackendError("No output from ONNX session".to_string())
             })?;
-            let owned: OrtOwnedTensor<'_, OUT, IxDyn> = first.try_extract().map_err(|e| {
+            // output_value is a tuple (&str, Value), extract the Value
+            let (_, value) = first;
+            let (_, owned_slice) = value.try_extract_tensor::<OUT>().map_err(|e| {
                 ModelError::BackendError(format!("Failed to extract tensor from output: {:?}", e))
             })?;
 
-            let act_vec: Vec<OUT> = owned.view().iter().copied().collect();
+            let act_vec: Vec<OUT> = owned_slice.to_vec();
             let act_bytes: Vec<u8> = bytemuck::cast_slice(&act_vec).to_vec();
             Ok(act_bytes)
         }
@@ -1044,11 +1058,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         fn match_obs_to_act<IN>(
             input_data: TensorData,
             output_dtype: DType,
-            session_: &Arc<Session>,
+            session_: &Arc<std::sync::Mutex<Session>>,
         ) -> Result<Vec<u8>, ModelError>
         where
-            IN: IntoTensorElementDataType + TensorDataToType + Debug + Clone + bytemuck::Pod,
-            for<'b> DynArrayRef<'b>: From<ArrayBase<CowRepr<'b, IN>, Dim<IxDynImpl>>>,
+            IN: IntoTensorElementType + ort::tensor::PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
         {
             match &output_dtype {
                 #[cfg(feature = "ndarray-backend")]

@@ -117,26 +117,26 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
     /// Generic forward that works for any backend / rank.
     pub fn forward<const D_IN: usize, const D_OUT: usize>(
         &self,
-        observation: AnyBurnTensor<B, D_IN>,
-        mask: Option<AnyBurnTensor<B, D_OUT>>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
         actor_id: Uuid,
     ) -> Result<RelayRLAction, ModelError> {
         let model_module = self.inner.blocking_read();
-        let (act_td, mask_td, aux) = model_module.step(observation.clone(), mask.clone());
+        let (act_td, mask_td, aux) = model_module.step(observation.clone(), mask);
 
         // Build RelayRLAction by converting tensors → TensorData
-        let obs_td = match observation.clone() {
+        let obs_td = match observation.as_ref() {
             AnyBurnTensor::Float(wrapper) => TensorData::try_from(ConversionBurnTensor {
-                inner: wrapper.tensor,
+                inner: wrapper.tensor.clone(),
                 conversion_dtype: model_module.metadata.input_dtype.clone(),
             }),
             AnyBurnTensor::Int(wrapper) => TensorData::try_from(ConversionBurnTensor {
-                inner: wrapper.tensor.float(),
+                inner: wrapper.tensor.clone(),
                 conversion_dtype: model_module.metadata.input_dtype.clone(),
             }),
             AnyBurnTensor::Bool(wrapper) => TensorData::try_from(ConversionBurnTensor {
-                inner: wrapper.tensor.float(),
+                inner: wrapper.tensor.clone(),
                 conversion_dtype: model_module.metadata.input_dtype.clone(),
             }),
         }

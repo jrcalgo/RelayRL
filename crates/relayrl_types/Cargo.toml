@@ -12,11 +12,12 @@ categories = ['science', 'data-structures', 'encoding']
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend", "codec-full"]
+default = ["ndarray-backend", "codec-full", "inference-models"]
  
 ndarray-backend = ["burn-ndarray"]
 tch-backend = ["burn-tch"]
 
+inference-models = ["tch-model", "onnx-model"]
 tch-model = ["tch", "tokio", "tempfile"]
 onnx-model = ["ort", "tokio", "tempfile", "ndarray"]
 
