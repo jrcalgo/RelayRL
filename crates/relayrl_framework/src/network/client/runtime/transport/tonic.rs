@@ -11,11 +11,9 @@ use async_trait::async_trait;
 #[cfg(feature = "grpc_network")]
 use relayrl_types::types::data::trajectory::EncodedTrajectory;
 #[cfg(feature = "grpc_network")]
-use relayrl_types::types::model::utils::{
-    deserialize_model_module, serialize_model_module, validate_module,
-};
+use relayrl_types::types::model::ModelModule;
 #[cfg(feature = "grpc_network")]
-use relayrl_types::types::model::{HotReloadableModel, ModelModule};
+use relayrl_types::types::model::utils::{deserialize_model_module, validate_module};
 #[cfg(feature = "grpc_network")]
 use std::collections::HashMap;
 #[cfg(feature = "grpc_network")]
@@ -39,22 +37,26 @@ pub mod rl_service {
 
 #[cfg(feature = "grpc_network")]
 use rl_service::{
-    EncodedAction as GrpcEncodedAction, EncodedTrajectory as GrpcEncodedTrajectory,
-    GetModelRequest, InitRequest, ModelResponse, ParameterValue, SendTrajectoriesRequest,
-    SendTrajectoriesResponse, rl_service_client::RlServiceClient,
+    EncodedTrajectory as GrpcEncodedTrajectory, GetModelRequest, InitRequest, ModelResponse,
+    ParameterValue, SendTrajectoriesRequest, SendTrajectoriesResponse,
+    rl_service_client::RlServiceClient,
 };
 
+use crate::network::UuidPoolError;
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::network::client::runtime::transport::{TransportError, TransportUuid};
 use crate::network::random_uuid;
-
-use tokio::sync::mpsc::Sender;
+use crate::network::remove_uuid_from_pool;
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use thiserror::Error;
+use tokio::sync::mpsc::Sender;
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum TonicClientError {
+    #[error(transparent)]
+    FailedToGenerateUniqueUuidError(#[from] UuidPoolError),
     #[error("Client connection error: {0}")]
     ClientConnectionError(String),
     #[error("Client not initialized: {0}")]
@@ -93,19 +95,27 @@ pub struct TonicClient {
 
 #[cfg(feature = "grpc_network")]
 impl TonicClient {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, TonicClientError> {
         let pid: u32 = std::process::id();
         let pid_bytes: [u8; _] = pid.to_be_bytes();
 
         let mut pid_buf: [u8; 16] = [0u8; 16];
         pid_buf[..4].copy_from_slice(&pid_bytes);
 
-        Self {
+        let transport_id = random_uuid(
+            "tonic_transport_client",
+            pid_buf.into_iter().sum::<u8>() as u32,
+            100,
+            0,
+        )
+        .map_err(|e| TonicClientError::FailedToGenerateUniqueUuidError(e))?;
+
+        Ok(Self {
             client: Mutex::new(None),
-            transport_id: random_uuid(pid_buf.into_iter().sum::<u8>() as u32),
+            transport_id,
             current_version: Arc::new(AtomicI64::new(0)),
             algorithm_initialized: Arc::new(AtomicBool::new(false)),
-        }
+        })
     }
 
     async fn ensure_client(&self, server_address: &str) -> Result<(), TonicClientError> {
@@ -250,20 +260,10 @@ impl TonicClient {
     /// Helper method to send an RelayRLTrajectory directly (for compatibility with internal usage)
     pub async fn send_relayrl_trajectory(
         &self,
+        identity: &Uuid,
         encoded_trajectory: EncodedTrajectory,
         training_server_address: &str,
     ) -> Result<(), TonicClientError> {
-        // Ensure algorithm is initialized
-        if let Err(e) = self
-            .initialize_algorithm_if_needed(training_server_address)
-            .await
-        {
-            return Err(TonicClientError::AlgorithmInitializationError(format!(
-                "Failed to initialize algorithm: {}",
-                e
-            )));
-        }
-
         let proto_trajectory =
             relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
 
@@ -295,27 +295,22 @@ impl TonicClient {
 #[cfg(feature = "grpc_network")]
 #[async_trait]
 impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for TonicClient {
+    async fn send_algorithm_init_request(
+        &self,
+        identity: &Uuid,
+        agent_listener_address: &str,
+    ) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     /// Helper method to perform initial handshake and return whether a model was received
     async fn initial_model_handshake(
         &self,
-        training_server_address: &str,
-        agent_listener_address: &str,
+        identity: &Uuid,
+        model_server_address: &str,
+        _agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
-        // Initialize algorithm first
-        if let Err(e) = self
-            .initialize_algorithm_if_needed(training_server_address)
-            .await
-        {
-            return Err(TransportError::ModelHandshakeError(format!(
-                "Failed to initialize algorithm: {}",
-                e
-            )));
-        }
-
-        match self
-            .get_model_with_timeout(training_server_address, 0)
-            .await
-        {
+        match self.get_model_with_timeout(model_server_address, 0).await {
             Ok(model_response) => {
                 let current_version: i64 = self.current_version.load(Ordering::SeqCst);
                 if model_response.version as i64 > current_version {
@@ -365,31 +360,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
 
     async fn send_traj_to_server(
         &self,
+        identity: &Uuid,
         encoded_trajectory: EncodedTrajectory,
-        training_server_address: &str,
+        model_server_address: &str,
         _trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
-        // Ensure algorithm is initialized
-        if let Err(e) = self
-            .initialize_algorithm_if_needed(training_server_address)
-            .await
-        {
-            eprintln!(
-                "[TonicClient] Failed to initialize algorithm before sending trajectory: {}",
-                e
-            );
-            return Err(TransportError::SendTrajError(format!(
-                "Failed to initialize algorithm before sending trajectory: {}",
-                e
-            )));
-        }
-
         // Convert from the old proto format to new format
         let proto_trajectory =
             relayrl_encoded_trajectory_to_grpc_encoded_trajectory(encoded_trajectory);
 
         match self
-            .send_trajectories_with_timeout(training_server_address, vec![proto_trajectory])
+            .send_trajectories_with_timeout(model_server_address, vec![proto_trajectory])
             .await
         {
             Ok(response) => {
@@ -420,25 +401,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
 
     async fn listen_for_model(
         &self,
+        identity: &Uuid,
         model_server_address: &str,
         global_dispatcher_tx: Sender<RoutedMessage>,
     ) -> Result<(), TransportError> {
         let mut polling_interval = tokio::time::interval(Duration::from_millis(100));
-
-        // Ensure algorithm is initialized before starting to listen
-        if let Err(e) = self
-            .initialize_algorithm_if_needed(model_server_address)
-            .await
-        {
-            eprintln!(
-                "[TonicClient] Failed to initialize algorithm before listening: {}",
-                e.to_string()
-            );
-            return Err(TransportError::ListenForModelError(format!(
-                "Failed to initialize algorithm before listening: {}",
-                e.to_string()
-            )));
-        }
 
         loop {
             polling_interval.tick().await;
@@ -479,7 +446,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
 
     async fn send_scaling_warning(
         &self,
+        identity: &Uuid,
         operation: ScalingOperation,
+        _scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         let operation_type = match operation {
             ScalingOperation::ScaleUp => "scale_up",
@@ -500,7 +469,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
 
     async fn send_scaling_complete(
         &self,
+        identity: &Uuid,
         operation: ScalingOperation,
+        _scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         let operation_type = match operation {
             ScalingOperation::ScaleUp => "scale_up",
@@ -521,6 +492,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransport<B> for Tonic
 
     async fn shutdown(&self) -> Result<(), TransportError> {
         // TODO: Implement shutdown logic
+        let client = self.client.blocking_lock().take();
+        remove_uuid_from_pool("tonic_transport_client", &self.transport_id)
+            .map_err(|e| TransportError::UuidPoolError(e))?;
         Ok(())
     }
 }
