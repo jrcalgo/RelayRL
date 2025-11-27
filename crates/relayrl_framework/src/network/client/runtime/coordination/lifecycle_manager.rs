@@ -1,7 +1,7 @@
-use crate::utilities::configuration::ClientConfigLoader;
-use crate::utilities::misc_utils::{construct_server_addresses, ServerAddresses};
 use crate::network::TransportType;
 use crate::prelude::config::TransportConfigParams;
+use crate::utilities::configuration::ClientConfigLoader;
+use crate::utilities::misc_utils::{ServerAddresses, construct_server_addresses};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,9 +38,13 @@ pub(crate) struct LifeCycleManager {
 }
 
 impl LifeCycleManager {
-    pub fn new(config: ClientConfigLoader, config_path: PathBuf, transport_type: TransportType) -> Self {
+    pub fn new(
+        config: ClientConfigLoader,
+        config_path: PathBuf,
+        transport_type: TransportType,
+    ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(10_000);
-        
+
         // Get file metadata with fallback to current time
         let last_modified: SystemTime = fs::metadata(&config_path)
             .and_then(|m| m.modified())

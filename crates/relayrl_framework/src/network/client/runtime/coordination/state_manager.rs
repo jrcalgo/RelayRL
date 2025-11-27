@@ -1,3 +1,4 @@
+use crate::network::UuidPoolError;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -6,6 +7,7 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
+use crate::network::{remove_uuid_from_pool, set_uuid_in_pool};
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::misc_utils::ServerAddresses;
 
@@ -26,6 +28,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
+    #[error(transparent)]
+    UuidPoolError(#[from] UuidPoolError),
     #[error("Failed to create reloadable model: {0}")]
     FailedToCreateReloadableModelError(String),
     #[error("Actor handle not found: {0}")]
@@ -59,6 +63,7 @@ type ActorInstance<
     const D_IN: usize,
     const D_OUT: usize,
 > = Arc<dyn ActorEntity<B>>;
+
 pub type ActorUuid = Uuid;
 
 /// In-memory actor state management and global channel transport
@@ -196,23 +201,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) async fn __new_actor(
         &mut self,
-        id: Uuid,
+        actor_id: ActorUuid,
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         transport: Arc<TransportClient<B>>,
         tx_to_sender: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
-        if self.actor_handles.contains_key(&id) {
+        if self.actor_handles.contains_key(&actor_id) {
             println!(
                 "[StateManager] Actor ID {} already exists, replacing existing actor...",
-                id
+                actor_id
             );
-            self.__remove_actor(id)?
+            self.__remove_actor(actor_id)?
         }
 
         // Use helper function to load model from various sources
-        let reloadable_model = self
+        let reloadable_model: Option<HotReloadableModel<B>> = self
             .load_reloadable_model(default_model, device.clone())
             .await?;
 
@@ -220,7 +225,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        self.actor_inboxes.insert(id, tx_to_actor.clone());
+        self.actor_inboxes.insert(actor_id, tx_to_actor.clone());
 
         let model_path = shared_config
             .read()
@@ -235,7 +240,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let (mut actor, handshake_flag) = Actor::<B, D_IN, D_OUT>::new(
-                id,
+                actor_id,
                 device.clone(),
                 reloadable_model,
                 model_path,
@@ -249,7 +254,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             if handshake_flag {
                 let model_handshake_ms = RoutedMessage {
-                    actor_id: id,
+                    actor_id,
                     protocol: RoutingProtocol::ModelHandshake,
                     payload: RoutedPayload::ModelHandshake,
                 };
@@ -257,12 +262,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
 
             if let Err(e) = actor.spawn_loop().await {
-                eprintln!("[StateManager] Actor {:?} loop error: {}", id, e);
+                eprintln!("[StateManager] Actor {:?} loop error: {}", actor_id, e);
             }
         }));
 
-        self.actor_handles.insert(id, handle);
-        self.actor_router_addresses.insert(id, router_id);
+        self.actor_handles.insert(actor_id, handle);
+        self.actor_router_addresses.insert(actor_id, router_id);
         Ok(())
     }
 
@@ -282,15 +287,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 dashmap::mapref::one::Ref<'_, Uuid, Arc<JoinHandle<()>>>,
                 StateManagerError,
             > = self.actor_handles.get(&actor_id).ok_or(
-                StateManagerError::ActorHandleNotFoundError(format!(
-                    "[StateManager] Actor handle not found"
-                )),
+                StateManagerError::ActorHandleNotFoundError(
+                    "[StateManager] Actor handle not found".to_string()
+                ),
             );
             if let Ok(handle) = handle {
                 handle.abort();
             } else {
                 continue;
             }
+            remove_uuid_from_pool("actor", &actor_id)
+                .map_err(StateManagerError::from)?;
         }
         Ok(())
     }
@@ -329,6 +336,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         self.actor_inboxes.remove(&id);
+        remove_uuid_from_pool("actor", &id).map_err(StateManagerError::from)?;
         Ok(())
     }
 
@@ -387,6 +395,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_handles.remove(&current_id);
         self.actor_inboxes.insert(new_id, current_id_inbox);
         self.actor_inboxes.remove(&current_id);
+
+        set_uuid_in_pool("actor", &current_id, &new_id)
+            .map_err(StateManagerError::from)?;
 
         Ok(())
     }

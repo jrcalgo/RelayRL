@@ -1,7 +1,9 @@
 use crate::network::TransportType;
+use crate::network::UuidPoolError;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
+use crate::network::client::runtime::coordination::scale_manager::ScaleManagerUuid;
 use crate::network::client::runtime::coordination::scale_manager::{
     ScaleManager, ScaleManagerError,
 };
@@ -12,12 +14,16 @@ use crate::network::client::runtime::coordination::state_manager::{
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-use crate::network::client::runtime::transport::{TransportClient, client_transport_factory};
+use crate::network::client::runtime::transport::{
+    TransportClient, TransportError, client_transport_factory,
+};
+use crate::network::random_uuid;
+use crate::network::remove_uuid_from_pool;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
+use crate::utilities::misc_utils::ServerAddresses;
 use crate::utilities::observability;
 use crate::utilities::observability::logging::builder::LoggingBuilder;
 use crate::utilities::observability::metrics::MetricsManager;
-use crate::utilities::misc_utils::ServerAddresses;
 
 use thiserror::Error;
 
@@ -76,6 +82,8 @@ impl From<String> for ClientConfigError {
 #[derive(Debug, Error)]
 pub enum CoordinatorError {
     #[error(transparent)]
+    TransportError(#[from] TransportError),
+    #[error(transparent)]
     ScaleManagerError(#[from] ScaleManagerError),
     #[error(transparent)]
     StateManagerError(#[from] StateManagerError),
@@ -87,6 +95,8 @@ pub enum CoordinatorError {
     MetricsError(#[from] MetricsError),
     #[error(transparent)]
     ConfigError(#[from] ClientConfigError),
+    #[error(transparent)]
+    UuidPoolError(#[from] UuidPoolError),
 }
 
 pub trait ClientInterface<
@@ -213,17 +223,26 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             LifeCycleManager::new(config_loader.to_owned(), config_path, self.transport_type);
         lifecycle.spawn_loop();
 
-        let shared_state_server_addresses: Arc<RwLock<ServerAddresses>> = lifecycle.get_server_addresses();
+        let shared_state_server_addresses: Arc<RwLock<ServerAddresses>> =
+            lifecycle.get_server_addresses();
         let shared_state_config: Arc<RwLock<ClientConfigLoader>> = lifecycle.get_active_config();
-        let (state, global_dispatcher_rx) =
-            StateManager::new(shared_state_config, shared_state_server_addresses, default_model.clone());
+        let (state, global_dispatcher_rx) = StateManager::new(
+            shared_state_config,
+            shared_state_server_addresses,
+            default_model.clone(),
+        );
 
-        let shared_scaling_server_addresses: Arc<RwLock<ServerAddresses>> = lifecycle.get_server_addresses();
-        let transport: TransportClient<B> = client_transport_factory(self.transport_type);
+        let shared_scaling_server_addresses: Arc<RwLock<ServerAddresses>> =
+            lifecycle.get_server_addresses();
+        let transport: TransportClient<B> = client_transport_factory(self.transport_type)
+            .map_err(|e| CoordinatorError::TransportError(e))?;
         let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
+        let scaling_identity: ScaleManagerUuid = random_uuid("scale_manager", 2, 100, 0)
+            .map_err(|e| CoordinatorError::UuidPoolError(e))?;
         // Subscribe to lifecycle shutdown and propagate to all actors
         StateManager::spawn_shutdown_watcher(shared_state.clone(), lifecycle.clone());
         let mut scaling = ScaleManager::new(
+            scaling_identity,
             shared_state.clone(),
             global_dispatcher_rx,
             transport,
@@ -275,6 +294,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     return Err(CoordinatorError::ScaleManagerError(e));
                 }
             }
+
+            remove_uuid_from_pool("scale_manager", &runtime_params.scaling.scaling_id)
+                .map_err(|e| CoordinatorError::UuidPoolError(e))?;
         }
         Ok(())
     }
@@ -316,7 +338,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut pid_buf: [u8; 16] = [0u8; 16];
                 pid_buf[..4].copy_from_slice(&pid_bytes);
 
-                let id: Uuid = Uuid::new_v8(pid_buf);
+                let actor_id: Uuid =
+                    random_uuid("actor", pid_buf.into_iter().sum::<u8>() as u32, 100, 0)
+                        .map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
                 params.metrics.record_counter("actors_created", 1, &[]);
 
@@ -363,7 +387,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .write()
                     .await
                     .__new_actor(
-                        id,
+                        actor_id,
                         router_id,
                         device,
                         default_model,
@@ -391,6 +415,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .__remove_actor(id)
                     .map_err(CoordinatorError::from)?;
+                remove_uuid_from_pool("actor", &id)
+                    .map_err(|e| CoordinatorError::UuidPoolError(e))?;
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
@@ -454,7 +480,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
 
                 // Extract router runtime params with clear error messages
-                let router_runtime_params: &dashmap::DashMap<Uuid, super::scale_manager::RouterRuntimeParams> = {
+                let router_runtime_params: &dashmap::DashMap<
+                    Uuid,
+                    super::scale_manager::RouterRuntimeParams,
+                > = {
                     let runtime_params = self.runtime_params.as_ref().ok_or_else(|| {
                         CoordinatorError::ScaleManagerError(
                             ScaleManagerError::GetRouterRuntimeParamsError(
@@ -652,9 +681,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => {
-                Ok(params.lifecycle.get_active_config().read().await.clone())
-            }
+            Some(params) => Ok(params.lifecycle.get_active_config().read().await.clone()),
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::GetConfigError(
                     "[Coordinator] No runtime instance to _get_config...".to_string(),

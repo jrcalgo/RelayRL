@@ -1,3 +1,5 @@
+use crate::network::UuidPoolError;
+use crate::network::add_uuid_to_pool;
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
@@ -10,7 +12,7 @@ use crate::network::client::runtime::router::{
 use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
 use crate::network::client::runtime::transport::{TransportClient, TransportError};
 use crate::network::random_uuid;
-use crate::utilities::configuration::ClientConfigLoader;
+use crate::network::remove_uuid_from_pool;
 use crate::utilities::misc_utils::ServerAddresses;
 
 use thiserror::Error;
@@ -29,6 +31,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ScaleManagerError {
+    #[error(transparent)]
+    UuidPoolError(#[from] UuidPoolError),
     #[error("Failed to send scaling warning: {0}")]
     SendScalingWarningError(#[from] TransportError),
     #[error("Failed to send scaling complete: {0}")]
@@ -69,12 +73,14 @@ pub(crate) struct RouterRuntimeParams {
 }
 
 pub type RouterUuid = Uuid;
+pub type ScaleManagerUuid = Uuid;
 
 pub(crate) struct ScaleManager<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
 > {
+    pub(crate) scaling_id: ScaleManagerUuid,
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     pub(crate) shared_transport: Arc<TransportClient<B>>,
@@ -89,6 +95,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ScaleManager<B, D_IN, D_OUT>
 {
     pub(crate) fn new(
+        scaling_id: ScaleManagerUuid,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         global_dispatcher_rx: Receiver<RoutedMessage>,
         transport: TransportClient<B>,
@@ -97,7 +104,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         lifecycle: Option<LifeCycleManager>,
     ) -> Self {
         // Spawn the RouterDispatcher
-        let router_filter_channels: Arc<DashMap<Uuid, Sender<RoutedMessage>>> =
+        let router_filter_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>> =
             Arc::new(DashMap::new());
         let dispatcher = RouterDispatcher::new(
             global_dispatcher_rx,
@@ -127,6 +134,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }));
 
         Self {
+            scaling_id,
             shared_state,
             shared_transport: Arc::new(transport),
             router_dispatcher,
@@ -144,7 +152,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) async fn __scale_up(&mut self, router_add: u32) -> Result<(), ScaleManagerError> {
-        self._send_scaling_warning(ScalingOperation::ScaleUp)
+        let scaling_server_address = self
+            .shared_server_addresses
+            .read()
+            .await
+            .scaling_server_address
+            .clone();
+        self._send_scaling_warning(ScalingOperation::ScaleUp, &scaling_server_address)
             .await?;
 
         if self.runtime_params.is_none() {
@@ -159,35 +173,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .unwrap_or(0);
 
         for i in 1..=router_add {
-            let mut router_id: RouterUuid = random_uuid(i);
-            let mut retry_count = 0;
-            const MAX_UUID_RETRIES: usize = 100;
-
-            while let Some(existing_id) = self
-                .runtime_params
-                .as_ref()
-                .and_then(|map| map.get(&router_id))
-            {
-                retry_count += 1;
-                if retry_count >= MAX_UUID_RETRIES {
-                    eprintln!(
-                        "[ScaleManager] Failed to generate unique router ID after {} attempts",
-                        MAX_UUID_RETRIES
-                    );
-                    return Err(ScaleManagerError::GetRouterRuntimeParamsError(format!(
-                        "UUID collision: failed to generate unique router ID after {} retries",
-                        MAX_UUID_RETRIES
-                    )));
-                }
-
-                eprintln!(
-                    "Router ID {} already exists, generating a new one... (attempt {}/{})",
-                    existing_id.key(),
-                    retry_count,
-                    MAX_UUID_RETRIES
-                );
-                router_id = random_uuid(i + retry_count as u32);
-            }
+            let router_id: RouterUuid = random_uuid("router", i * router_add, 100, 0)
+                .map_err(|e| ScaleManagerError::UuidPoolError(e))?;
 
             // Create per-router channels
             let (filter_tx, filter_rx) =
@@ -199,6 +186,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             self.router_filter_channels
                 .insert(router_id, filter_tx.clone());
 
+            add_uuid_to_pool("external_receiver", &router_id)
+                .map_err(|e| ScaleManagerError::UuidPoolError(e))?;
             // Create ExternalReceiver - sends to global dispatcher
             let shared_receiver_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
                 self.shared_state.clone();
@@ -235,6 +224,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 filter
             };
 
+            add_uuid_to_pool("external_sender", &router_id)
+                .map_err(|e| ScaleManagerError::UuidPoolError(e))?;
             // Create Sender - receives from actors via sender_rx
             let sender: ClientExternalSender<B> = ClientExternalSender::new(
                 router_id,
@@ -271,7 +262,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .and_then(|map| map.insert(router_id, runtime_params));
         }
 
-        let current_router_count = self
+        let current_router_count: usize = self
             .runtime_params
             .as_ref()
             .map(|params| params.len())
@@ -286,7 +277,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             eprintln!("Rolling back newly created routers...");
             self._rollback_routers(&new_router_ids).await;
 
-            return self._send_scaling_complete(ScalingOperation::ScaleUp).await;
+            return self
+                ._send_scaling_complete(ScalingOperation::ScaleUp, &scaling_server_address)
+                .await;
         }
 
         let router_ids: Vec<RouterUuid> = self
@@ -310,7 +303,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             StateManager::<B, D_IN, D_OUT>::distribute_actors(&state, router_ids.clone());
         }
 
-        if let Err(e) = self._send_scaling_complete(ScalingOperation::ScaleUp).await {
+        if let Err(e) = self
+            ._send_scaling_complete(ScalingOperation::ScaleUp, &scaling_server_address)
+            .await
+        {
             eprintln!(
                 "Rolling back: removing newly created routers and restoring actor mappings..."
             );
@@ -347,8 +343,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &mut self,
         router_remove: u32,
     ) -> Result<(), ScaleManagerError> {
+        let scaling_server_address = self
+            .shared_server_addresses
+            .read()
+            .await
+            .scaling_server_address
+            .clone();
         if let Err(e) = self
-            ._send_scaling_warning(ScalingOperation::ScaleDown)
+            ._send_scaling_warning(ScalingOperation::ScaleDown, &scaling_server_address)
             .await
         {
             return Err(e);
@@ -365,7 +367,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     );
 
                     let result: Result<(), ScaleManagerError> = self
-                        ._send_scaling_complete(ScalingOperation::ScaleDown)
+                        ._send_scaling_complete(
+                            ScalingOperation::ScaleDown,
+                            &scaling_server_address,
+                        )
                         .await;
 
                     return result;
@@ -380,7 +385,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     tokio::task::block_in_place(|| {
                         let mut removed: Vec<(RouterUuid, RouterRuntimeParams)> = Vec::new();
 
-                        for _ in 0..router_remove {
+                        for _ in 1..=router_remove {
                             if let Some(router_entry) = params.iter().next() {
                                 let router_id = *router_entry.key();
 
@@ -410,7 +415,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
 
                     let result: Result<(), ScaleManagerError> = self
-                        ._send_scaling_complete(ScalingOperation::ScaleDown)
+                        ._send_scaling_complete(
+                            ScalingOperation::ScaleDown,
+                            &scaling_server_address,
+                        )
                         .await;
 
                     return result;
@@ -420,6 +428,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     router_params.receiver_loop.abort();
                     router_params.filter_loop.abort();
                     router_params.sender_loop.abort();
+                    remove_uuid_from_pool("router", router_id)
+                        .map_err(|e| ScaleManagerError::UuidPoolError(e))?;
+                    remove_uuid_from_pool("external_receiver", router_id)
+                        .map_err(|e| ScaleManagerError::UuidPoolError(e))?;
+                    remove_uuid_from_pool("external_sender", router_id)
+                        .map_err(|e| ScaleManagerError::UuidPoolError(e))?;
                     eprintln!("Router with ID {} has been removed.", router_id);
                 }
 
@@ -429,7 +443,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
 
                 if let Err(e) = self
-                    ._send_scaling_complete(ScalingOperation::ScaleDown)
+                    ._send_scaling_complete(ScalingOperation::ScaleDown, &scaling_server_address)
                     .await
                 {
                     eprintln!("Restoring actor mappings to best-effort state...");
@@ -459,7 +473,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 println!("No routers to scale down.");
 
                 let result = self
-                    ._send_scaling_complete(ScalingOperation::ScaleDown)
+                    ._send_scaling_complete(ScalingOperation::ScaleDown, &scaling_server_address)
                     .await;
 
                 return result;
@@ -483,36 +497,46 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _send_scaling_warning(
         &self,
         operation: ScalingOperation,
+        scaling_server_address: &str,
     ) -> Result<(), ScaleManagerError> {
         match &*self.shared_transport {
             #[cfg(feature = "grpc_network")]
             TransportClient::Async(async_transport) => async_transport
-                .send_scaling_warning(operation)
+                .send_scaling_warning(&self.scaling_id, operation, scaling_server_address)
                 .await
                 .map_err(|e| ScaleManagerError::SendScalingWarningError(e)),
             #[cfg(feature = "zmq_network")]
-            TransportClient::Sync(sync_transport) => {
-                tokio::task::block_in_place(|| sync_transport.send_scaling_warning(operation))
-                    .map_err(|e| ScaleManagerError::SendScalingWarningError(e))
-            }
+            TransportClient::Sync(sync_transport) => tokio::task::block_in_place(|| {
+                sync_transport.send_scaling_warning(
+                    &self.scaling_id,
+                    operation,
+                    scaling_server_address,
+                )
+            })
+            .map_err(|e| ScaleManagerError::SendScalingWarningError(e)),
         }
     }
 
     async fn _send_scaling_complete(
         &self,
         operation: ScalingOperation,
+        scaling_server_address: &str,
     ) -> Result<(), ScaleManagerError> {
         match &*self.shared_transport {
             #[cfg(feature = "grpc_network")]
             TransportClient::Async(async_transport) => async_transport
-                .send_scaling_complete(operation)
+                .send_scaling_complete(&self.scaling_id, operation, scaling_server_address)
                 .await
                 .map_err(|e| ScaleManagerError::SendScalingCompleteError(e)),
             #[cfg(feature = "zmq_network")]
-            TransportClient::Sync(sync_transport) => {
-                tokio::task::block_in_place(|| sync_transport.send_scaling_complete(operation))
-                    .map_err(|e| ScaleManagerError::SendScalingCompleteError(e))
-            }
+            TransportClient::Sync(sync_transport) => tokio::task::block_in_place(|| {
+                sync_transport.send_scaling_complete(
+                    &self.scaling_id,
+                    operation,
+                    scaling_server_address,
+                )
+            })
+            .map_err(|e| ScaleManagerError::SendScalingCompleteError(e)),
         }
     }
 

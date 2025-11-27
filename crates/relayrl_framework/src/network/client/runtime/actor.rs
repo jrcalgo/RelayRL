@@ -1,16 +1,17 @@
+use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
 #[cfg(feature = "grpc_network")]
 use crate::network::client::runtime::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
-use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
 use crate::utilities::misc_utils::ServerAddresses;
+use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
 
 use relayrl_types::prelude::AnyBurnTensor;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{BackendMatcher, DeviceType};
-use relayrl_types::types::data::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
+use relayrl_types::types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::types::model::{HotReloadableModel, ModelError, ModelModule};
 
@@ -43,7 +44,7 @@ pub enum ActorError {
 
 pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + 'static {
     async fn new(
-        id: Uuid,
+        actor_id: ActorUuid,
         device: DeviceType,
         model: Option<HotReloadableModel<B>>,
         model_path: PathBuf,
@@ -71,7 +72,7 @@ pub(crate) struct Actor<
     const D_IN: usize,
     const D_OUT: usize,
 > {
-    id: Uuid,
+    actor_id: ActorUuid,
     model: Option<HotReloadableModel<B>>,
     model_path: PathBuf,
     model_device: DeviceType,
@@ -87,7 +88,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     for Actor<B, D_IN, D_OUT>
 {
     async fn new(
-        id: Uuid,
+        actor_id: ActorUuid,
         device: DeviceType,
         model: Option<HotReloadableModel<B>>,
         model_path: PathBuf,
@@ -103,7 +104,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let max_length: u128 = shared_config.read().await.transport_config.max_traj_length;
 
         let mut actor: Actor<B, D_IN, D_OUT> = Self {
-            id,
+            actor_id,
             model: None,
             model_path,
             model_device: device,
@@ -167,8 +168,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if let RoutedPayload::ModelHandshake = msg.payload {
             if self.model.is_none() {
                 if let Some(transport) = &self.transport {
-                    let model_server_address: String = self.shared_server_addresses.read().await.model_server_address.clone();
-                    let agent_listener_address: String = self.shared_server_addresses.read().await.agent_listener_address.clone();
+                    let model_server_address: String = self
+                        .shared_server_addresses
+                        .read()
+                        .await
+                        .model_server_address
+                        .clone();
+                    let agent_listener_address: String = self
+                        .shared_server_addresses
+                        .read()
+                        .await
+                        .agent_listener_address
+                        .clone();
 
                     match &**transport {
                         #[cfg(feature = "grpc_network")]
@@ -176,11 +187,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             // Use training server address for model handshake
                             println!(
                                 "[Actor {:?}] Starting async model handshake with {}",
-                                self.id, model_server_address
+                                self.actor_id, model_server_address
                             );
 
                             if let Ok(Some(model)) = async_tr
                                 .initial_model_handshake(
+                                    &self.actor_id,
                                     &model_server_address,
                                     &agent_listener_address,
                                 )
@@ -188,14 +200,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             {
                                 println!(
                                     "[Actor {:?}] Model handshake successful, received model data",
-                                    self.id
+                                    self.actor_id
                                 );
 
                                 // Save model to configured path
                                 if let Err(e) = model.save(&self.model_path) {
                                     eprintln!(
                                         "[Actor {:?}] Failed to save model: {:?}",
-                                        self.id, e
+                                        self.actor_id, e
                                     );
                                 }
 
@@ -211,7 +223,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         model_version.map_err(|e| {
                                             eprintln!(
                                                 "[Actor {:?}] Failed to reload model: {:?}",
-                                                self.id, e
+                                                self.actor_id, e
                                             );
                                             ActorError::from(e)
                                         })?;
@@ -230,7 +242,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             } else {
                                 eprintln!(
                                     "[Actor {:?}] Model handshake failed or no model update needed",
-                                    self.id
+                                    self.actor_id
                                 );
                             }
                         }
@@ -238,23 +250,24 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             // Use agent listener address for model handshake
                             println!(
                                 "[Actor {:?}] Starting sync model handshake with {}",
-                                self.id, model_server_address
+                                self.actor_id, model_server_address
                             );
 
                             if let Ok(Some(model)) = sync_tr.initial_model_handshake(
+                                &self.actor_id,
                                 &model_server_address,
                                 &agent_listener_address,
                             ) {
                                 println!(
                                     "[Actor {:?}] Model handshake successful, received model data",
-                                    self.id
+                                    self.actor_id
                                 );
 
                                 // Save model to configured path
                                 if let Err(e) = model.save(&self.model_path) {
                                     eprintln!(
                                         "[Actor {:?}] Failed to save model: {:?}",
-                                        self.id, e
+                                        self.actor_id, e
                                     );
                                 }
 
@@ -267,7 +280,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         model_version.map_err(|e| {
                                             eprintln!(
                                                 "[Actor {:?}] Failed to reload model: {:?}",
-                                                self.id, e
+                                                self.actor_id, e
                                             );
                                             ActorError::from(e)
                                         })?;
@@ -286,7 +299,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             } else {
                                 eprintln!(
                                     "[Actor {:?}] Model handshake failed or no model update needed",
-                                    self.id
+                                    self.actor_id
                                 );
                             }
                         }
@@ -294,13 +307,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 } else {
                     eprintln!(
                         "[Actor {:?}] No transport configured for model handshake",
-                        self.id
+                        self.actor_id
                     );
                 }
             } else {
                 println!(
                     "[Actor {:?}] Model already available, handshake not needed",
-                    self.id
+                    self.actor_id
                 );
             }
         }
@@ -343,7 +356,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         )
                     })?;
 
-                let actor_id = self.id;
+                let actor_id = self.actor_id;
                 let rt = get_or_init_tokio_runtime();
                 let timeout_secs = 30;
                 match rt.block_on(async {
@@ -376,7 +389,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         Err(e) => {
                             eprintln!(
                                 "[ActorEntity {:?}] Failed inference, no inference created or available... {:?}",
-                                self.id, e
+                                self.actor_id, e
                             );
                             return Err(ActorError::ActionRequestError(format!("{:?}", e)));
                         }
@@ -403,7 +416,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// If deadlocks occur, consider making the entire ActorEntity trait async.
     fn __flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::FlagLastInference { reward } = msg.payload {
-            let actor_id = self.id;
+            let actor_id = self.actor_id;
             let mut last_action: RelayRLAction =
                 RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
             last_action.update_reward(reward);
@@ -419,7 +432,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .duration_since(UNIX_EPOCH)
                     .map_err(|e| ActorError::SystemError(format!("Clock skew: {}", e)))?;
                 RoutedMessage {
-                    actor_id: self.id,
+                    actor_id: self.actor_id,
                     protocol: RoutingProtocol::SendTrajectory,
                     payload: RoutedPayload::SendTrajectory {
                         timestamp: (duration_ms.as_millis(), duration_ns.as_nanos()),
@@ -474,13 +487,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 if let Err(e) = validate_module::<B>(&ok_model).map_err(ActorError::from) {
                     eprintln!(
                         "[ActorEntity {:?}] Failed to validate model: {:?}",
-                        self.id, e
+                        self.actor_id, e
                     );
                     return Err(e);
                 };
 
                 if let Err(e) = ok_model.save(&model_path).map_err(ActorError::from) {
-                    eprintln!("[ActorEntity {:?}] Failed to save model: {:?}", self.id, e);
+                    eprintln!(
+                        "[ActorEntity {:?}] Failed to save model: {:?}",
+                        self.actor_id, e
+                    );
                     return Err(e);
                 }
 
@@ -494,7 +510,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     None => {
                         eprintln!(
                             "[ActorEntity {:?}] Model does not exist, no model refresh possible...",
-                            self.id
+                            self.actor_id
                         );
                         return Err(ActorError::ModelError(ModelError::IoError(
                             "Model does not exist in actor instance".to_string(),
@@ -522,7 +538,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .duration_since(UNIX_EPOCH)
                     .map_err(|e| ActorError::SystemError(format!("Clock skew: {}", e)))?;
                 RoutedMessage {
-                    actor_id: self.id,
+                    actor_id: self.actor_id,
                     protocol: RoutingProtocol::SendTrajectory,
                     payload: RoutedPayload::SendTrajectory {
                         timestamp: (duration_ms.as_millis(), duration_ns.as_nanos()),
