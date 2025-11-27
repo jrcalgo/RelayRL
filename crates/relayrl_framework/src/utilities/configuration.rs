@@ -115,14 +115,13 @@ pub static DEFAULT_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> =
 
 pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
     "client_config": {
-        "actor_count": 2,
-        "_comment1": "For >= 2 distinct actors, algorithm_name value format as PPO;REINFORCE;...",
-        "_comment2": "For multiagent algorithms with single inference (1 actor), use single algorithm name.",
-        "_comment3": "If > 1 actors and single algorithm name, default to algorithm name for all actors.",
-        "algorithm_name": "PPO;REINFORCE",
+        "actor_count": 1,
+        "algorithm_name": "REINFORCE",
+        "_comment": "training_mode can either be 'individual' or 'shared'.",
+        "training_mode": "individual",
         "config_path": "client_config.json",
         "default_device": "cuda",
-        "default_model_path": ""
+        "default_model_dir": ""
     },
     "transport_config": {
         "addresses": {
@@ -142,11 +141,16 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
                 "host": "127.0.0.1",
                 "port": "7777"
             },
+            "scaling_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7778"
+            },
             "_comment2": "Only used when client-side inference is disabled or when client-side inference is used as fallback.",
             "inference_server": {
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
-                "port": "7778"
+                "port": "7779"
             }
         },
         "config_update_polling": 10,
@@ -240,11 +244,16 @@ pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
                 "host": "127.0.0.1",
                 "port": "7777"
             },
+            "scaling_server": {
+                "prefix": "tcp://",
+                "host": "127.0.0.1",
+                "port": "7778"
+            },
             "_comment2": "Only available when client-side inference is disabled or when client-side inference is used as fallback.",
             "inference_server": {
                 "prefix": "tcp://",
                 "host": "127.0.0.1",
-                "port": "7778"
+                "port": "7779"
             }
         },
         "config_update_polling": 10,
@@ -481,6 +490,7 @@ where
 pub struct ClientConfigParams {
     pub actor_count: u64,
     pub algorithm_name: String,
+    pub training_mode: String,
     pub config_path: PathBuf,
     pub default_device: String,
     pub default_model_path: PathBuf,
@@ -515,6 +525,7 @@ impl ClientConfigLoader {
         Self {
             client_config: ClientConfigParams {
                 actor_count: client_config.actor_count,
+                training_mode: client_config.training_mode,
                 algorithm_name: _algorithm_name,
                 config_path: _config_path,
                 default_device: client_config.default_device,
@@ -535,6 +546,7 @@ impl ClientConfigLoader {
                     ClientConfigLoader {
                         client_config: ClientConfigParams {
                             actor_count: 1,
+                            training_mode: "individual".to_string(),
                             algorithm_name: "".to_string(),
                             config_path: PathBuf::from("client_config.json"),
                             default_device: "cpu".to_string(),
@@ -555,6 +567,10 @@ impl ClientConfigLoader {
 
     pub fn get_actor_count(&self) -> &u64 {
         &self.client_config.actor_count
+    }
+
+    pub fn get_training_mode(&self) -> &str {
+        &self.client_config.training_mode
     }
 
     pub fn get_algorithm_name(&self) -> &str {
@@ -580,6 +596,7 @@ impl ClientConfigLoader {
 
 pub trait ClientConfigBuildParams {
     fn set_actor_count(&mut self, actor_count: u64) -> &mut Self;
+    fn set_training_mode(&mut self, training_mode: &str) -> &mut Self;
     fn set_algorithm_name(&mut self, algorithm_name: &str) -> &mut Self;
     fn set_config_path(&mut self, config_path: &str) -> &mut Self;
     fn set_default_device(&mut self, default_device: &str) -> &mut Self;
@@ -591,6 +608,7 @@ pub trait ClientConfigBuildParams {
 
 pub struct ClientConfigBuilder {
     actor_count: Option<u64>,
+    training_mode: Option<String>,
     algorithm_name: Option<String>,
     config_path: Option<PathBuf>,
     default_device: Option<String>,
@@ -601,6 +619,11 @@ pub struct ClientConfigBuilder {
 impl ClientConfigBuildParams for ClientConfigBuilder {
     fn set_actor_count(&mut self, actor_count: u64) -> &mut Self {
         self.actor_count = Some(actor_count);
+        self
+    }
+
+    fn set_training_mode(&mut self, training_mode: &str) -> &mut Self {
+        self.training_mode = Some(training_mode.to_string());
         self
     }
 
@@ -632,6 +655,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
     fn build(&self) -> ClientConfigLoader {
         let client_config: ClientConfigParams = ClientConfigParams {
             actor_count: self.actor_count.unwrap_or(1),
+            training_mode: self.training_mode.clone().unwrap_or_else(|| "individual".to_string()),
             algorithm_name: self
                 .algorithm_name
                 .clone()
@@ -674,6 +698,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         ClientConfigLoader {
             client_config: ClientConfigParams {
                 actor_count: 1,
+                training_mode: "individual".to_string(),
                 algorithm_name: "".to_string(),
                 config_path: PathBuf::from("client_config.json"),
                 default_device: "cpu".to_string(),

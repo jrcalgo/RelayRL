@@ -1,10 +1,9 @@
 {
     "client_config": {
-        "actor_count": 2,
-        "_comment1": "For >= 2 distinct actors, algorithm_name value format as PPO;REINFORCE;...",
-        "_comment2": "For multiagent algorithms with single inference (1 actor), use single algorithm name.",
-        "_comment3": "If > 1 actors and single algorithm name, default to algorithm name for all actors.",
-        "algorithm_name": "PPO;REINFORCE",
+        "actor_count": 1,
+        "algorithm_name": "REINFORCE",
+        "_comment": "training_mode can either be 'individual' or 'shared'.",
+        "training_mode": "individual",
         "config_path": "client_config.json",
         "default_device": "cuda",
         "default_model_dir": ""
