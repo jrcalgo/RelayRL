@@ -2,12 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.13] - 2025-11-17
+## [0.3.2] - 2025-11-27
 
 ### Changed
-- **ModelError Cleanup** - Removed redundant manual `std::fmt::Display` implementation for `ModelError`
-  - The `thiserror` derive added in 0.3.12 automatically provides `Display` implementation via `#[error(...)]` attributes
-  - Removes duplicate code and ensures consistent error formatting through `thiserror`
+- **Memory Optimization** - Tensor wrappers and models now consume shared references (`Arc`) instead of cloning values
+  - `FloatBurnTensor`, `IntBurnTensor`, and `BoolBurnTensor` now store tensors as `Arc<Tensor<...>>`
+  - `AnyBurnTensor` conversion methods (`into_f16_data`, `into_f32_data`, etc.) now accept `Arc<Self>` instead of `Self`
+  - Significantly reduces memory allocations and improves performance for tensor operations
+  - Model inference paths updated to work with shared tensor references
+- **ONNX Runtime Update** - Updated `ort` dependency from `1.16.3` to `2.0.0-rc.10`
+  - Provides access to latest ONNX Runtime features and improvements
+  - Better compatibility with newer ONNX models
+- **Default Features** - Added `inference-models` to default features
+  - `inference-models` feature bundle includes both `tch-model` and `onnx-model`
+  - Enables model inference capabilities by default for better out-of-the-box experience
+- **Code Simplification** - Reduced code complexity in model module
+  - Simplified tensor extraction and conversion logic
+  - Removed redundant type conversion paths
+  - Improved code maintainability with cleaner helper functions
+
+### Fixed
+- **Tensor Conversion Methods** - Fixed tensor type extraction to use pattern matching on `Arc` references
+  - Improved type safety for tensor conversions
+  - Better error handling for unsupported tensor type conversions
 
 ## [0.3.12] - 2025-11-17
 
