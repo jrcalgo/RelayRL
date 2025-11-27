@@ -5,6 +5,7 @@ use relayrl_types::types::data::tensor::{AnyBurnTensor, TensorData};
 use rand::Rng;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use uuid::Uuid;
 
 /// **Client Modules**: Handles client-side runtime coordination and actor management.
@@ -62,12 +63,125 @@ pub mod server {
     }
 }
 
-pub fn random_uuid(base: u32) -> Uuid {
-    let random_num = base * rand::thread_rng().gen_range(11..100)
-        + base
-        + 1 * rand::thread_rng().gen_range(11..100)
-        - rand::thread_rng().gen_range(1..10);
-    Uuid::new_v8([random_num as u8; 16])
+/// UUID generation code with thread-safe pool management.
+///
+/// This module provides functions for generating unique UUIDs and tracking them in a thread-safe pool.
+
+#[derive(Debug, thiserror::Error)]
+pub enum UuidPoolError {
+    #[error("Failed to generate unique UUID: {0}")]
+    FailedToGenerateUniqueUuidError(String),
+    #[error("Failed to find UUID in pool: {0}")]
+    FailedToFindUuidInPoolError(String),
+    #[error("Failed to set UUID in pool: {0}")]
+    FailedToSetUuidInPoolError(String),
+}
+
+// Thread-safe UUID pool using Mutex
+pub(crate) static GLOBAL_UUID_POOL: Mutex<Vec<(Uuid, String)>> = Mutex::new(Vec::new());
+
+pub(crate) fn random_uuid(
+    context: &str,
+    base: u32,
+    max_retries: usize,
+    retry_count: usize,
+) -> Result<Uuid, UuidPoolError> {
+    if retry_count >= max_retries {
+        return Err(UuidPoolError::FailedToGenerateUniqueUuidError(format!(
+            "Failed to generate unique UUID after {} attempts",
+            max_retries
+        )));
+    }
+
+    let mut rng: rand::prelude::ThreadRng = rand::rng();
+    let mut uuid_bytes: [u8; 16] = [0u8; 16];
+
+    uuid_bytes[0..4].copy_from_slice(&base.to_be_bytes());
+    for i in 4..16 {
+        uuid_bytes[i] = rng.random_range(0..=255);
+    }
+
+    let uuid: Uuid = Uuid::new_v8(uuid_bytes);
+
+    let mut pool = GLOBAL_UUID_POOL.lock().map_err(|e| {
+        UuidPoolError::FailedToGenerateUniqueUuidError(format!("Failed to lock UUID pool: {}", e))
+    })?;
+
+    if pool.contains(&(uuid, context.to_string())) {
+        drop(pool); // Release lock before recursion
+        return random_uuid(context, base, max_retries, retry_count + 1);
+    }
+
+    pool.push((uuid, context.to_string()));
+    drop(pool);
+
+    Ok(uuid)
+}
+
+pub(crate) fn add_uuid_to_pool(context: &str, uuid: &Uuid) -> Result<(), UuidPoolError> {
+    let mut pool = GLOBAL_UUID_POOL.lock().map_err(|e| {
+        UuidPoolError::FailedToGenerateUniqueUuidError(format!("Failed to lock UUID pool: {}", e))
+    })?;
+
+    if pool.contains(&(uuid.clone(), context.to_string())) {
+        drop(pool);
+        return Err(UuidPoolError::FailedToGenerateUniqueUuidError(format!(
+            "UUID already exists in pool: {}",
+            uuid.to_string()
+        )));
+    }
+
+    pool.push((uuid.clone(), context.to_string()));
+    drop(pool);
+    Ok(())
+}
+
+pub(crate) fn remove_uuid_from_pool(context: &str, uuid: &Uuid) -> Result<(), UuidPoolError> {
+    let mut pool = GLOBAL_UUID_POOL.lock().map_err(|e| {
+        UuidPoolError::FailedToGenerateUniqueUuidError(format!("Failed to lock UUID pool: {}", e))
+    })?;
+
+    if let Some(pos) = pool
+        .iter()
+        .position(|x| x.0 == *uuid && x.1 == context.to_string())
+    {
+        pool.remove(pos);
+    }
+
+    drop(pool);
+    Ok(())
+}
+
+pub(crate) fn set_uuid_in_pool(
+    context: &str,
+    old_uuid: &Uuid,
+    new_uuid: &Uuid,
+) -> Result<(), UuidPoolError> {
+    let mut pool = GLOBAL_UUID_POOL.lock().map_err(|e| {
+        UuidPoolError::FailedToGenerateUniqueUuidError(format!("Failed to lock UUID pool: {}", e))
+    })?;
+
+    if pool.contains(&(old_uuid.clone(), context.to_string())) {
+        let confirmed_pos = pool
+            .iter()
+            .position(|x| x.0 == *old_uuid && x.1 == context.to_string());
+        match confirmed_pos {
+            Some(pos) => {
+                pool.remove(pos);
+                pool.push((new_uuid.clone(), context.to_string()));
+                return Ok(());
+            }
+            None => {
+                drop(pool);
+                return Err(UuidPoolError::FailedToFindUuidInPoolError(format!(
+                    "Failed to find UUID in pool: {}",
+                    old_uuid.to_string()
+                )));
+            }
+        }
+    }
+    drop(pool);
+    Ok(())
 }
 
 /// Extend for future utility with other transport protocols (extend transport.rs accordingly)
