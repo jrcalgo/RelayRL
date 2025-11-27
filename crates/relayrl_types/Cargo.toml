@@ -50,7 +50,7 @@ burn-tch = { version = "0.18.0", optional = true}
 # burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu (probably 0.3.0)
 
 tch = { version = "0.19.0", features = ["download-libtorch"], default-features = false, optional = true }
-ort = { version = "1.16.3", features = ["load-dynamic"], default-features = false, optional = true }
+ort = { version = "2.0.0-rc.10", features = ["load-dynamic"], default-features = false, optional = true }
 tokio = { version = "1.35.1", features = ["full"], optional = true }
 tempfile = { version = "3.9.0", optional = true }
 ndarray = { version = "0.15.6", optional = true }
