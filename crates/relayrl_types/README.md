@@ -3,7 +3,7 @@ relayrl_types
 
 Core data types and encoding/decoding utilities for the RelayRL framework.
 
-[![Changelog](https://img.shields.io/badge/Changelog-0.3.11-blue.svg)](CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/Changelog-0.3.2-blue.svg)](CHANGELOG.md)
 
 ## Features
 
@@ -17,11 +17,12 @@ Core data types and encoding/decoding utilities for the RelayRL framework.
 
 ```toml
 # Backend selection (choose one)
-default = ["ndarray-backend", "codec-full"]
+default = ["ndarray-backend", "codec-full", "inference-models"]
 
 tch-backend = ["burn-tch"]          # GPU backend
 ndarray-backend = ["burn-ndarray"]  # CPU backend
 
+inference-models = ["tch-model", "onnx-model"]  # All inference models
 tch-model = ["tch", "tokio", "tempfile"]  # LibTorch Inference
 onnx-model = ["ort", "tokio", "tempfile", "ndarray"]  # ONNX Inference
 

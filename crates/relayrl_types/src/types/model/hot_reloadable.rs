@@ -158,12 +158,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
 fn default_dtype() -> DType {
     #[cfg(feature = "tch-backend")]
     {
-        return DType::Tch(TchDType::F32);
+        DType::Tch(TchDType::F32)
     }
 
     #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
     {
-        return DType::NdArray(NdArrayDType::F32);
+        DType::NdArray(NdArrayDType::F32)
     }
 
     #[cfg(all(not(feature = "tch-backend"), not(feature = "ndarray-backend")))]

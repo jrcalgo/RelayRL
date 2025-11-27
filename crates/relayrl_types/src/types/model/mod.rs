@@ -9,6 +9,7 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use ndarray::{ArrayBase, CowRepr, Dim, IxDynImpl};
 
@@ -34,7 +35,7 @@ use ndarray::{ArrayD, CowArray, IxDyn};
 #[cfg(feature = "onnx-model")]
 use ort::{
     environment::Environment,
-    session::{Session, SessionInputValue, builder::SessionBuilder},
+    session::{Session, SessionInputValue},
     value::Value as OrtValue,
 };
 
@@ -159,10 +160,7 @@ pub enum InferenceModel {
     #[cfg(feature = "tch-model")]
     Pt(Arc<CModule>),
     #[cfg(feature = "onnx-model")]
-    Onnx {
-        environment: Arc<Environment>,
-        session: Arc<std::sync::Mutex<Session>>,
-    },
+    Onnx(Arc<Mutex<Session>>),
     Unsupported,
 }
 
@@ -206,29 +204,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
             ModelFileType::Onnx => {
                 #[cfg(feature = "onnx-model")]
                 {
-                    // ort 2.0: SessionBuilder creates session directly
-                    let session_builder = SessionBuilder::new()
-                        .map_err(|err| ModelError::BackendError(err.to_string()))?;
                     let session = Arc::new(std::sync::Mutex::new(
-                        session_builder
+                        Session::builder()
+                            .map_err(|err| ModelError::BackendError(err.to_string()))?
                             .commit_from_file(path)
                             .map_err(|err| ModelError::BackendError(err.to_string()))?,
                     ));
-                    // In ort 2.0, Environment might be created internally or not needed
-                    // For now, we'll need to check ort 2.0 docs for proper Environment creation
-                    // Using a workaround - Environment might have a different API
-                    // TODO: Fix Environment creation once ort 2.0 API is confirmed
-                    let env = Arc::new(
-                        // Try using MaybeUninit as a safer alternative to zeroed
-                        unsafe {
-                            let mut env = std::mem::MaybeUninit::<Environment>::uninit();
-                            env.assume_init()
-                        }
-                    );
-                    Ok(InferenceModel::Onnx {
-                        environment: env,
-                        session: session,
-                    })
+                    Ok(InferenceModel::Onnx(session))
                 }
                 #[cfg(not(feature = "onnx-model"))]
                 {
@@ -239,10 +221,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
     }
 
     fn save_to_path(&self, path: &Path) -> Result<(), ModelError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent() && !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
         }
         fs::write(path, self.raw_bytes.as_ref())?;
         Ok(())
@@ -378,9 +358,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
     }
 
     fn zeros_action<const D_OUT: usize>(&self) -> Result<TensorData, ModelError> {
-        let device = self.resolve_device();
         let shape = Shape::from(self.metadata.output_shape.clone());
-        let data = vec![0_u8; shape.num_elements()];
 
         // Create zeros tensor based on output dtype
         match &self.metadata.output_dtype {
@@ -389,7 +367,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 NdArrayDType::F16 => {
                     let data_vec = vec![f16::ZERO; shape.dims.iter().product()];
                     let data: &[f16] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<f16, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<f16, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::NdArray(dtype.clone()),
@@ -400,7 +378,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 NdArrayDType::F32 => {
                     let data_vec = vec![0_f32; shape.dims.iter().product()];
                     let data: &[f32] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<f32, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<f32, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::NdArray(dtype.clone()),
@@ -411,7 +389,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 NdArrayDType::F64 => {
                     let data_vec = vec![0_f64; shape.dims.iter().product()];
                     let data: &[f64] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<f64, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<f64, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::NdArray(dtype.clone()),
@@ -422,7 +400,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 NdArrayDType::I8 => {
                     let data_vec = vec![0_i8; shape.dims.iter().product()];
                     let data: &[i8] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i8, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i8, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::NdArray(dtype.clone()),
@@ -433,7 +411,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 NdArrayDType::I16 => {
                     let data_vec = vec![0_i16; shape.dims.iter().product()];
                     let data: &[i16] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i16, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i16, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::NdArray(dtype.clone()),
@@ -444,7 +422,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 NdArrayDType::I32 => {
                     let data_vec = vec![0_i32; shape.dims.iter().product()];
                     let data: &[i32] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i32, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i32, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::NdArray(dtype.clone()),
@@ -455,7 +433,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 NdArrayDType::I64 => {
                     let data_vec = vec![0_i64; shape.dims.iter().product()];
                     let data: &[i64] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i64, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i64, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::NdArray(dtype.clone()),
@@ -484,7 +462,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::F16 => {
                     let data_vec = vec![f16::ZERO; shape.dims.iter().product()];
                     let data: &[f16] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<f16, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<f16, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -495,7 +473,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::Bf16 => {
                     let data_vec = vec![bf16::ZERO; shape.dims.iter().product()];
                     let data: &[bf16] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<bf16, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<bf16, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -506,7 +484,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::F32 => {
                     let data_vec = vec![0_f32; shape.dims.iter().product()];
                     let data: &[f32] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<f32, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<f32, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -517,7 +495,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::F64 => {
                     let data_vec = vec![0_f64; shape.dims.iter().product()];
                     let data: &[f64] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<f64, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<f64, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -528,7 +506,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::I8 => {
                     let data_vec = vec![0_i8; shape.dims.iter().product()];
                     let data: &[i8] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i8, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i8, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -539,7 +517,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::I16 => {
                     let data_vec = vec![0_i16; shape.dims.iter().product()];
                     let data: &[i16] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i16, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i16, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -550,7 +528,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::I32 => {
                     let data_vec = vec![0_i32; shape.dims.iter().product()];
                     let data: &[i32] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i32, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i32, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -561,7 +539,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::I64 => {
                     let data_vec = vec![0_i64; shape.dims.iter().product()];
                     let data: &[i64] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<i64, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<i64, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -572,7 +550,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::U8 => {
                     let data_vec = vec![0_u8; shape.dims.iter().product()];
                     let data: &[u8] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<u8, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<u8, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -583,7 +561,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 TchDType::Bool => {
                     let data_vec = vec![false; shape.dims.iter().product()];
                     let data: &[bool] = data_vec.as_slice();
-                    let u8_data = bytemuck::cast_slice::<bool, u8>(&data);
+                    let u8_data = bytemuck::cast_slice::<bool, u8>(data);
                     Ok(TensorData::new(
                         shape.dims.to_vec(),
                         DType::Tch(dtype.clone()),
@@ -609,7 +587,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 self.run_libtorch_step::<D_IN, D_OUT>(module, observation)
             }
             #[cfg(feature = "onnx-model")]
-            InferenceModel::Onnx { session, .. } => {
+            InferenceModel::Onnx(session) => {
                 self.run_onnx_step::<D_IN, D_OUT>(session, observation)
             }
             _ => Err(ModelError::UnsupportedModelType(
@@ -1019,20 +997,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             OUT: IntoTensorElementType + ort::tensor::PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
         {
             let typed_data: &[IN] = bytemuck::cast_slice(&tensor_data.data);
-            // Convert to Vec for ort 2.0 compatibility
+
             let data_vec: Vec<IN> = typed_data.to_vec();
             let shape = ort::tensor::Shape::from(tensor_data.shape.as_slice());
             
-            // Create OrtValue from Vec and shape
             let ort_value = OrtValue::from_array((shape, data_vec)).map_err(|e| {
                 ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
             })?;
 
-            // ort 2.0: Use HashMap format for inputs, with Mutex for mutable access
-            use std::collections::HashMap;
             let input = SessionInputValue::from(ort_value);
-            // Use a default input name - in ort 2.0, inputs are typically named
-            // This might need to be adjusted based on actual model input names
+
             let mut inputs_map = HashMap::new();
             inputs_map.insert("input".to_string(), input);
             let mut session_guard = session_.lock().map_err(|e| {
@@ -1044,7 +1018,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             let first = output_value.into_iter().next().ok_or_else(|| {
                 ModelError::BackendError("No output from ONNX session".to_string())
             })?;
-            // output_value is a tuple (&str, Value), extract the Value
+
             let (_, value) = first;
             let (_, owned_slice) = value.try_extract_tensor::<OUT>().map_err(|e| {
                 ModelError::BackendError(format!("Failed to extract tensor from output: {:?}", e))
