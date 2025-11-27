@@ -73,7 +73,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// This loop:
     /// 1. Receives new messages from the global channel
     /// 2. Attempts to dispatch them immediately to the appropriate router
-    /// 3. Drops messages for unassigned actors with a warning
+    /// 3. Drops messages for unassigned actors with a warning (this is a rare edge case)
     pub(crate) async fn spawn_loop(mut self) -> Result<(), RouterDispatcherError> {
         let mut shutdown = self.shutdown.take();
 
@@ -82,64 +82,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 msg_opt = self.global_dispatcher_rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
-                            let actor_id = msg.actor_id;
-
-                            // Check if actor is assigned before attempting dispatch
-                            let router_id_opt = {
-                                let state = self.shared_state.read().await;
-                                state
-                                    .actor_router_addresses
-                                    .get(&actor_id)
-                                    .map(|entry| *entry.value())
-                            };
-
-                            match router_id_opt {
-                                Some(router_id) => {
-                                    // Actor is assigned, try to dispatch
-                                    if let Err(e) = self.dispatch_message(msg).await {
+                            if let Err(e) = self.dispatch_message(msg).await {
+                                // Log errors but continue processing
+                                match e {
+                                    RouterDispatcherError::ActorNotAssignedError(error_message) => {
+                                        eprintln!("[RouterDispatcher] {}. Retrying for 5 seconds...", error_message);
+                                    }
+                                    _ => {
                                         eprintln!("[RouterDispatcher] Dispatch error: {}", e);
                                     }
-                                }
-                                None => {
-                                    // Actor not assigned, spawn retry task
-                                    let error_message = format!("Actor {} not assigned to any router (message dropped)", actor_id);
-                                    eprintln!("[RouterDispatcher] {}. Retrying for 5 seconds...", error_message);
-
-                                    // Clone the Arc references needed for the retry task
-                                    let router_channels = self.router_channels.clone();
-                                    let shared_state = self.shared_state.clone();
-
-                                    // Spawn a task to retry in the background
-                                    // Note: We can't retry the exact same message because it contains non-cloneable oneshot::Sender
-                                    // Instead, we'll monitor for assignment and log when it happens
-                                    tokio::spawn(async move {
-                                        use tokio::time::{Duration, Instant};
-                                        let start = Instant::now();
-                                        let retry_duration = Duration::from_secs(5);
-
-                                        loop {
-                                            // Check if actor is now assigned
-                                            let router_id_opt = {
-                                                let state = shared_state.read().await;
-                                                state
-                                                    .actor_router_addresses
-                                                    .get(&actor_id)
-                                                    .map(|entry| *entry.value())
-                                            };
-
-                                            if router_id_opt.is_some() {
-                                                println!("[RouterDispatcher] Actor {} is now assigned (original message was dropped - consider implementing message queuing)", actor_id);
-                                                break;
-                                            }
-
-                                            if start.elapsed() >= retry_duration {
-                                                eprintln!("[RouterDispatcher] Retry timeout: actor still not assigned after 5 seconds");
-                                                break;
-                                            }
-
-                                            tokio::time::sleep(Duration::from_millis(100)).await;
-                                        }
-                                    });
                                 }
                             }
                         }
@@ -166,7 +117,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// Dispatch a single message to the appropriate router
     ///
     /// Messages for unassigned actors are dropped with an error.
-    async fn dispatch_message(&self, msg: RoutedMessage) -> Result<(), RouterDispatcherError> {
+    async fn dispatch_message(&mut self, msg: RoutedMessage) -> Result<(), RouterDispatcherError> {
         let actor_id = msg.actor_id;
 
         // Look up which router this actor is assigned to
