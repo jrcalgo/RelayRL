@@ -88,7 +88,7 @@ pub(crate) enum RoutedPayload {
 }
 
 /// observation and mask are Arc<AnyBurnTensor<B, D_IN>> and Arc<Option<AnyBurnTensor<B, D_OUT>>> respectively
-/// 
+///
 /// Using Box<dyn Any + Send> to avoid adding generic parameters to this struct.
 /// This is (probably) safe because InferenceRequest is only sent to the actor from the coordinator layer
 pub(crate) struct InferenceRequest {

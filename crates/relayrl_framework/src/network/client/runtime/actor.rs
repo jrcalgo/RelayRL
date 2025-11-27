@@ -341,15 +341,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     reply_to,
                 } = *inference_request; // Dereference the Box to get the inner value
 
-                let observation_tensor: AnyBurnTensor<B, D_IN> = *observation
-                    .downcast::<AnyBurnTensor<B, D_IN>>()
+                let observation_tensor: Arc<AnyBurnTensor<B, D_IN>> = *observation
+                    .downcast::<Arc<AnyBurnTensor<B, D_IN>>>()
                     .map_err(|_| {
                         ActorError::TypeConversionError(
                             "Failed to downcast observation to AnyBurnTensor".to_string(),
                         )
                     })?;
-                let mask_tensor: Option<AnyBurnTensor<B, D_OUT>> = *mask
-                    .downcast::<Option<AnyBurnTensor<B, D_OUT>>>()
+                let mask_tensor: Option<Arc<AnyBurnTensor<B, D_OUT>>> = *mask
+                    .downcast::<Option<Arc<AnyBurnTensor<B, D_OUT>>>>()
                     .map_err(|_| {
                         ActorError::TypeConversionError(
                             "Failed to downcast mask to Option<AnyBurnTensor>".to_string(),

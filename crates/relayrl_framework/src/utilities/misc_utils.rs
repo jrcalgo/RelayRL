@@ -46,26 +46,29 @@ pub(crate) fn construct_server_addresses(
         match *transport_type {
             TransportType::GRPC => network_params.host.clone() + ":" + &network_params.port.clone(),
             TransportType::ZMQ => {
-                network_params.prefix.clone() + &network_params.host.clone() + ":" + &network_params.port.clone()
+                network_params.prefix.clone()
+                    + &network_params.host.clone()
+                    + ":"
+                    + &network_params.port.clone()
             }
         }
     }
 
     ServerAddresses {
         agent_listener_address: construct_address(
-            &transport_type,
+            transport_type,
             &transport_config.agent_listener_address,
         ),
         model_server_address: construct_address(
-            &transport_type,
+            transport_type,
             &transport_config.model_server_address,
         ),
         trajectory_server_address: construct_address(
-            &transport_type,
+            transport_type,
             &transport_config.trajectory_server_address,
         ),
         scaling_server_address: construct_address(
-            &transport_type,
+            transport_type,
             &transport_config.scaling_server_address,
         ),
     }

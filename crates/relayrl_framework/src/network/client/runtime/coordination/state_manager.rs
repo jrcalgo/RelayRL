@@ -288,7 +288,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 StateManagerError,
             > = self.actor_handles.get(&actor_id).ok_or(
                 StateManagerError::ActorHandleNotFoundError(
-                    "[StateManager] Actor handle not found".to_string()
+                    "[StateManager] Actor handle not found".to_string(),
                 ),
             );
             if let Ok(handle) = handle {
@@ -296,8 +296,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             } else {
                 continue;
             }
-            remove_uuid_from_pool("actor", &actor_id)
-                .map_err(StateManagerError::from)?;
+            remove_uuid_from_pool("actor", &actor_id).map_err(StateManagerError::from)?;
         }
         Ok(())
     }
@@ -396,8 +395,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_inboxes.insert(new_id, current_id_inbox);
         self.actor_inboxes.remove(&current_id);
 
-        set_uuid_in_pool("actor", &current_id, &new_id)
-            .map_err(StateManagerError::from)?;
+        set_uuid_in_pool("actor", &current_id, &new_id).map_err(StateManagerError::from)?;
 
         Ok(())
     }

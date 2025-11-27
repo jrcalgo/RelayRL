@@ -153,15 +153,15 @@ impl ZmqClient {
 
 #[repr(i64)]
 enum ScalingResponse {
-    Success(i64) = 0,
-    Failure(i64) = 1,
+    Success = 0,
+    Failure = 1,
 }
 impl ScalingResponse {
     fn from_i64(value: i64) -> Self {
         match value {
-            0 => ScalingResponse::Success(value),
-            1 => ScalingResponse::Failure(value),
-            _ => ScalingResponse::Failure(value),
+            0 => ScalingResponse::Success,
+            1 => ScalingResponse::Failure,
+            _ => ScalingResponse::Failure,
         }
     }
 }
@@ -183,7 +183,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         if agent_listener_address.is_empty() {
             return Err(TransportError::ModelHandshakeError(
-                "Agent listener address is empty".to_string()
+                "Agent listener address is empty".to_string(),
             ));
         }
 
@@ -298,9 +298,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
                     eprintln!("[ZmqClient] Malformed handshake response");
-                    return Err(TransportError::ModelHandshakeError(format!(
-                        "Malformed handshake response"
-                    )));
+                    return Err(TransportError::ModelHandshakeError(
+                        "Malformed handshake response".to_string(),
+                    ));
                 }
 
                 let model_bytes: &Vec<u8> = &message_parts[1];
@@ -334,28 +334,28 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
                             }
                             Err(e) => {
                                 eprintln!("[ZmqClient] Failed to load model: {:?}", e);
-                                return Err(TransportError::ModelHandshakeError(format!(
+                                Err(TransportError::ModelHandshakeError(format!(
                                     "Failed to load model: {:?}",
                                     e
-                                )));
+                                )))
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("[ZmqClient] Failed to create temp file: {}", e);
-                        return Err(TransportError::ModelHandshakeError(format!(
+                        Err(TransportError::ModelHandshakeError(format!(
                             "Failed to create temp file: {}",
                             e
-                        )));
+                        )))
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[ZmqClient] Failed to receive model: {}", e);
-                return Err(TransportError::ModelHandshakeError(format!(
+                Err(TransportError::ModelHandshakeError(format!(
                     "Failed to receive model: {}",
                     e
-                )));
+                )))
             }
         }
     }
@@ -368,9 +368,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
         trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
         if trajectory_server_address.is_empty() {
-            return Err(TransportError::SendTrajError(format!(
-                "Trajectory server address is empty"
-            )));
+            return Err(TransportError::SendTrajError(
+                "Trajectory server address is empty".to_string(),
+            ));
         }
 
         {
@@ -434,10 +434,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
 
         // Serialize the trajectory
         let serialized_traj: Vec<u8> = serde_json::to_vec(&encoded_trajectory).map_err(|e| {
-            TransportError::SendTrajError(format!(
-                "Failed to serialize trajectory: {}",
-                e
-            ))
+            TransportError::SendTrajError(format!("Failed to serialize trajectory: {}", e))
         })?;
 
         println!(
@@ -483,9 +480,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
         global_dispatcher_tx: tokio::sync::mpsc::Sender<RoutedMessage>,
     ) -> Result<(), TransportError> {
         if model_server_address.is_empty() {
-            return Err(TransportError::ListenForModelError(format!(
-                "Model server address is empty"
-            )));
+            return Err(TransportError::ListenForModelError(
+                "Model server address is empty".to_string(),
+            ));
         }
 
         {
@@ -728,9 +725,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
                     eprintln!("[ZmqClient] Malformed scaling warning response");
-                    return Err(TransportError::SendScalingWarningError(format!(
-                        "Malformed scaling warning response"
-                    )));
+                    return Err(TransportError::SendScalingWarningError(
+                        "Malformed scaling warning response".to_string(),
+                    ));
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
@@ -741,15 +738,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
 
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ScalingResponse::from_i64(value) {
-                        ScalingResponse::Success(version) => {
+                        ScalingResponse::Success => {
                             println!("[ZmqClient] Server acknowledged scaling warning");
                         }
-                        ScalingResponse::Failure(version) => {
+                        ScalingResponse::Failure => {
                             println!("[ZmqClient] Server failed to acknowledge scaling warning");
-                            return Err(TransportError::SendScalingWarningError(format!(
-                                "Server failed to acknowledge scaling warning: {}",
-                                version
-                            )));
+                            return Err(TransportError::SendScalingWarningError(
+                                "Server failed to acknowledge scaling warning".to_string(),
+                            ));
                         }
                     },
                     Err(e) => {
@@ -909,9 +905,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
                     eprintln!("[ZmqClient] Malformed scaling complete response");
-                    return Err(TransportError::SendScalingCompleteError(format!(
-                        "Malformed scaling complete response"
-                    )));
+                    return Err(TransportError::SendScalingCompleteError(
+                        "Malformed scaling complete response".to_string(),
+                    ));
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
@@ -922,15 +918,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
 
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ScalingResponse::from_i64(value) {
-                        ScalingResponse::Success(_) => {
+                        ScalingResponse::Success => {
                             println!("[ZmqClient] Server acknowledged scaling complete");
                         }
-                        ScalingResponse::Failure(version) => {
+                        ScalingResponse::Failure => {
                             println!("[ZmqClient] Server failed to acknowledge scaling complete");
-                            return Err(TransportError::SendScalingCompleteError(format!(
-                                "Server failed to acknowledge scaling complete: {}",
-                                version
-                            )));
+                            return Err(TransportError::SendScalingCompleteError(
+                                "Server failed to acknowledge scaling complete".to_string(),
+                            ));
                         }
                     },
                     Err(e) => {
@@ -965,7 +960,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
                 remove_uuid_from_pool("zmq_dealer_socket", &socket_id)
-                    .map_err(|e| TransportError::UuidPoolError(e))?;
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -975,7 +970,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
                 remove_uuid_from_pool("zmq_sub_socket", &socket_id)
-                    .map_err(|e| TransportError::UuidPoolError(e))?;
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -985,7 +980,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
                 remove_uuid_from_pool("zmq_push_socket", &socket_id)
-                    .map_err(|e| TransportError::UuidPoolError(e))?;
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -995,14 +990,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqCli
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
                 remove_uuid_from_pool("zmq_dealer_socket", &socket_id)
-                    .map_err(|e| TransportError::UuidPoolError(e))?;
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
         }
 
         remove_uuid_from_pool("zmq_transport_client", &self.transport_id)
-            .map_err(|e| TransportError::UuidPoolError(e))?;
+            .map_err(TransportError::from)?;
         Ok(())
     }
 }

@@ -655,7 +655,10 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
     fn build(&self) -> ClientConfigLoader {
         let client_config: ClientConfigParams = ClientConfigParams {
             actor_count: self.actor_count.unwrap_or(1),
-            training_mode: self.training_mode.clone().unwrap_or_else(|| "individual".to_string()),
+            training_mode: self
+                .training_mode
+                .clone()
+                .unwrap_or_else(|| "individual".to_string()),
             algorithm_name: self
                 .algorithm_name
                 .clone()
