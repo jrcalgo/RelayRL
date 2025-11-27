@@ -26,7 +26,7 @@ metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-ot
 profile = ["flamegraph", "console-subscriber"]       # Enables runtime profiling support via flamegraph.
 
 [dependencies]
-relayrl_types = { version = "0.3.13", features = ["ndarray-backend", "codec-full", "tch-model", "onnx-model"] }
+relayrl_types = { version = "0.3.21", features = ["ndarray-backend", "tch-backend", "codec-full", "inference-models"] }
 
 zmq = { version = "0.10.0", optional = true }                               # ZeroMQ messaging library.
 tonic = { version = "0.12.3", optional = true }                             # gRPC library for Rust.

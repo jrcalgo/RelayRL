@@ -144,8 +144,8 @@ pub trait ClientInterface<
     async fn _request_action(
         &self,
         ids: Vec<ActorUuid>,
-        observation: AnyBurnTensor<B, D_IN>,
-        mask: AnyBurnTensor<B, D_OUT>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError>;
     async fn _flag_last_action(
@@ -469,8 +469,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _request_action(
         &self,
         ids: Vec<ActorUuid>,
-        observation: AnyBurnTensor<B, D_IN>,
-        mask: AnyBurnTensor<B, D_OUT>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError> {
         match &self.runtime_params {

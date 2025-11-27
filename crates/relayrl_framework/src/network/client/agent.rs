@@ -246,15 +246,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub async fn request_action(
         &self,
         ids: Vec<Uuid>,
-        observation: AnyBurnTensor<B, D_IN>,
-        mask: AnyBurnTensor<B, D_OUT>,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
     ) -> Result<Vec<(Uuid, Arc<RelayRLAction>)>, ClientError> {
         match B::matches_backend(&self.supported_backend) {
             true => {
                 let result = self
                     .coordinator
-                    ._request_action(ids, observation, mask, reward)
+                    ._request_action(ids, observation.clone(), mask.clone(), reward)
                     .await?;
                 Ok(result)
             }
