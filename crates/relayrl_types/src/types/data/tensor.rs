@@ -217,7 +217,9 @@ impl<B: Backend + 'static, const D: usize> Clone for AnyBurnTensor<B, D> {
 
 impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     /// Helper function to extract tensor and determine backend from dtype for Float conversions
-    fn extract_tensor_and_backend_float(self: Arc<Self>) -> (Arc<Tensor<B, D, Float>>, SupportedTensorBackend) {
+    fn extract_tensor_and_backend_float(
+        self: Arc<Self>,
+    ) -> (Arc<Tensor<B, D, Float>>, SupportedTensorBackend) {
         match self.as_ref() {
             AnyBurnTensor::Float(wrapper) => {
                 let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
@@ -228,7 +230,9 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     }
 
     /// Helper function to extract tensor and determine backend from dtype for Int conversions
-    fn extract_tensor_and_backend_int(self: Arc<Self>) -> (Arc<Tensor<B, D, Int>>, SupportedTensorBackend) {
+    fn extract_tensor_and_backend_int(
+        self: Arc<Self>,
+    ) -> (Arc<Tensor<B, D, Int>>, SupportedTensorBackend) {
         match self.as_ref() {
             AnyBurnTensor::Int(wrapper) => {
                 let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
@@ -239,7 +243,9 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     }
 
     /// Helper function to extract tensor and determine backend from dtype for Bool conversions
-    fn extract_tensor_and_backend_bool(self: Arc<Self>) -> (Arc<Tensor<B, D, Bool>>, SupportedTensorBackend) {
+    fn extract_tensor_and_backend_bool(
+        self: Arc<Self>,
+    ) -> (Arc<Tensor<B, D, Bool>>, SupportedTensorBackend) {
         match self.as_ref() {
             AnyBurnTensor::Bool(wrapper) => {
                 let backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
@@ -538,7 +544,9 @@ impl TensorData {
                         let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
                         let data = BurnTensorData::new(f32_values, shape);
                         Ok(FloatBurnTensor {
-                            tensor: Arc::new(Tensor::<B::Backend, D, Float>::from_data(data, &device)),
+                            tensor: Arc::new(Tensor::<B::Backend, D, Float>::from_data(
+                                data, &device,
+                            )),
                             dtype: DType::NdArray(NdArrayDType::F16),
                         })
                     }
@@ -546,7 +554,9 @@ impl TensorData {
                         let values: &[f32] = bytemuck::cast_slice(&self.data);
                         let data = BurnTensorData::new(values.to_vec(), shape);
                         Ok(FloatBurnTensor {
-                            tensor: Arc::new(Tensor::<B::Backend, D, Float>::from_data(data, &device)),
+                            tensor: Arc::new(Tensor::<B::Backend, D, Float>::from_data(
+                                data, &device,
+                            )),
                             dtype: DType::NdArray(NdArrayDType::F32),
                         })
                     }
@@ -554,7 +564,9 @@ impl TensorData {
                         let values: &[f64] = bytemuck::cast_slice(&self.data);
                         let data = BurnTensorData::new(values.to_vec(), shape);
                         Ok(FloatBurnTensor {
-                            tensor: Arc::new(Tensor::<B::Backend, D, Float>::from_data(data, &device)),
+                            tensor: Arc::new(Tensor::<B::Backend, D, Float>::from_data(
+                                data, &device,
+                            )),
                             dtype: DType::NdArray(NdArrayDType::F64),
                         })
                     }

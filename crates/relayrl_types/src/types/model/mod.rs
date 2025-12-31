@@ -221,7 +221,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
     }
 
     fn save_to_path(&self, path: &Path) -> Result<(), ModelError> {
-        if let Some(parent) = path.parent() && !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, self.raw_bytes.as_ref())?;
@@ -993,14 +995,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             session_: &Arc<std::sync::Mutex<Session>>,
         ) -> Result<Vec<u8>, ModelError>
         where
-            IN: IntoTensorElementType + ort::tensor::PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
-            OUT: IntoTensorElementType + ort::tensor::PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
+            IN: IntoTensorElementType
+                + ort::tensor::PrimitiveTensorElementType
+                + Debug
+                + Clone
+                + bytemuck::Pod,
+            OUT: IntoTensorElementType
+                + ort::tensor::PrimitiveTensorElementType
+                + Debug
+                + Clone
+                + bytemuck::Pod,
         {
             let typed_data: &[IN] = bytemuck::cast_slice(&tensor_data.data);
 
             let data_vec: Vec<IN> = typed_data.to_vec();
             let shape = ort::tensor::Shape::from(tensor_data.shape.as_slice());
-            
+
             let ort_value = OrtValue::from_array((shape, data_vec)).map_err(|e| {
                 ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
             })?;
@@ -1009,9 +1019,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
             let mut inputs_map = HashMap::new();
             inputs_map.insert("input".to_string(), input);
-            let mut session_guard = session_.lock().map_err(|e| {
-                ModelError::BackendError(format!("Failed to lock session: {}", e))
-            })?;
+            let mut session_guard = session_
+                .lock()
+                .map_err(|e| ModelError::BackendError(format!("Failed to lock session: {}", e)))?;
             let output_value = session_guard
                 .run(inputs_map)
                 .map_err(|e| ModelError::BackendError(format!("Failed to run session: {}", e)))?;
@@ -1035,7 +1045,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             session_: &Arc<std::sync::Mutex<Session>>,
         ) -> Result<Vec<u8>, ModelError>
         where
-            IN: IntoTensorElementType + ort::tensor::PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
+            IN: IntoTensorElementType
+                + ort::tensor::PrimitiveTensorElementType
+                + Debug
+                + Clone
+                + bytemuck::Pod,
         {
             match &output_dtype {
                 #[cfg(feature = "ndarray-backend")]

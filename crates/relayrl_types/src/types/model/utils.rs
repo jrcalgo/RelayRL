@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io::Write;
 use std::path::PathBuf;
-use tempfile::NamedTempFile;
 use std::sync::Arc;
+use tempfile::NamedTempFile;
 
 use crate::types::data::action::RelayRLData;
 use crate::types::data::tensor::{
@@ -131,9 +131,13 @@ fn validate_model_shapes<
     let obs: Arc<AnyBurnTensor<B, D_IN>> = match &module.metadata.input_dtype {
         #[cfg(feature = "ndarray-backend")]
         DType::NdArray(nd) => match nd {
-            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => Arc::new(AnyBurnTensor::Float(
-                FloatBurnTensor::empty(input_shape, &DType::NdArray(nd.clone()), device),
-            )),
+            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
+                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
+                    input_shape,
+                    &DType::NdArray(nd.clone()),
+                    device,
+                )))
+            }
             NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
                 Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
                     input_shape,
@@ -149,9 +153,13 @@ fn validate_model_shapes<
         },
         #[cfg(feature = "tch-backend")]
         DType::Tch(tch) => match tch {
-            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => Arc::new(AnyBurnTensor::Float(
-                FloatBurnTensor::empty(input_shape, &DType::Tch(tch.clone()), device),
-            )),
+            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
+                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
+                    input_shape,
+                    &DType::Tch(tch.clone()),
+                    device,
+                )))
+            }
             TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
                 Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
                     input_shape,
@@ -170,9 +178,13 @@ fn validate_model_shapes<
     let mask: Arc<AnyBurnTensor<B, D_OUT>> = match &module.metadata.output_dtype {
         #[cfg(feature = "ndarray-backend")]
         DType::NdArray(nd) => match nd {
-            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => Arc::new(AnyBurnTensor::Float(
-                FloatBurnTensor::empty(output_shape, &DType::NdArray(nd.clone()), device),
-            )),
+            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
+                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
+                    output_shape,
+                    &DType::NdArray(nd.clone()),
+                    device,
+                )))
+            }
             NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
                 Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
                     output_shape,
@@ -188,9 +200,13 @@ fn validate_model_shapes<
         },
         #[cfg(feature = "tch-backend")]
         DType::Tch(tch) => match tch {
-            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => Arc::new(AnyBurnTensor::Float(
-                FloatBurnTensor::empty(output_shape, &DType::Tch(tch.clone()), device),
-            )),
+            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
+                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
+                    output_shape,
+                    &DType::Tch(tch.clone()),
+                    device,
+                )))
+            }
             TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
                 Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
                     output_shape,
