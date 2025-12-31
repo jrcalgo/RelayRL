@@ -51,7 +51,6 @@ pub mod templates;
 /// and configuration resolution. These utilities support seamless inter-module communication.
 pub mod utilities {
     pub mod configuration;
-    pub(crate) mod misc_utils;
     pub mod observability;
     pub(crate) mod orchestration;
 }
@@ -69,9 +68,8 @@ pub mod prelude {
         // pub use crate::network::server::training_server::TrainingServer;
     }
     pub mod templates {
-        pub use crate::network::client::runtime::transport::{
-            AsyncClientTransport, SyncClientTransport,
+        pub use crate::templates::environment_traits::{
+            EnvironmentTestingTrait, EnvironmentTrainingTrait,
         };
-        pub use crate::templates::{EnvironmentTestingTrait, EnvironmentTrainingTrait};
     }
 }
