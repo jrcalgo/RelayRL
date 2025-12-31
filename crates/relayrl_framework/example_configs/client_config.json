@@ -1,12 +1,73 @@
 {
     "client_config": {
-        "actor_count": 1,
         "algorithm_name": "REINFORCE",
-        "_comment": "training_mode can either be 'individual' or 'shared'.",
-        "training_mode": "individual",
-        "config_path": "client_config.json",
-        "default_device": "cuda",
-        "default_model_dir": ""
+        "init_hyperparameters": {
+            "DDPG": {
+                "seed": 1,
+                "gamma": 0.99,
+                "tau": 1e-2,
+                "learning_rate": 3e-3,
+                "batch_size": 128,
+                "buffer_size": 50000,
+                "learning_starts": 128,
+                "policy_frequency": 1,  
+                "noise_scale": 0.1,
+                "train_iters": 50
+            },
+            "PPO": {
+                "discrete": true,
+                "seed": 0,
+                "traj_per_epoch": 1,
+                "clip_ratio": 0.1,
+                "gamma": 0.99,
+                "lam": 0.97,
+                "pi_lr": 3e-4,
+                "vf_lr": 3e-4,
+                "train_pi_iters": 40,
+                "train_v_iters": 40,
+                "target_kl": 0.01
+            },
+            "REINFORCE": {
+                "discrete": true,
+                "with_vf_baseline": true,
+                "seed": 1,
+                "traj_per_epoch": 8,
+                "gamma": 0.98,
+                "lam": 0.97,
+                "pi_lr": 3e-4,
+                "vf_lr": 1e-3,
+                "train_vf_iters": 80
+            },
+            "TD3": {
+                "seed": 1,
+                "gamma": 0.99,
+                "tau": 0.005,
+                "learning_rate": 3e-4,
+                "batch_size": 128,
+                "buffer_size": 50000,
+                "exploration_noise": 0.1,
+                "policy_noise": 0.2,
+                "noise_clip": 0.5,
+                "learning_starts": 25000,
+                "policy_frequency": 2
+            },
+            "CUSTOM": {
+                "_comment": "Add custom algorithm hyperparams here formatted just like the other algorithms. i.e. \"MAPPO\": {...}",
+                "_comment2": "Make sure to add the algorithm name to the algorithm_name field",
+                "_comment3": "These key-values will be sent to the server for initialization"
+            }
+
+        },
+        "trajectory_file_output": {
+            "enabled": true,
+            "encode": true,
+            "output": {
+                "directory": "data",
+                "file_name": "experiment_data",
+                "_comment": "csv, txt, json are supported.",
+                "format": "json"
+            }
+        }
     },
     "transport_config": {
         "addresses": {
@@ -41,9 +102,10 @@
         "config_update_polling": 10,
         "grpc_idle_timeout": 30,
         "local_model_module": {
-            "directory_name": "model_module",
-            "model_name": "client_model"
+            "directory": "model_module",
+            "model_name": "client_model",
+            "format": "pt"
         },
-        "max_traj_length": 1000
+        "max_traj_length": 100000000
     }
 }
