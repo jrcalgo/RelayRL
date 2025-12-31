@@ -1,16 +1,18 @@
 use crate::network::UuidPoolError;
+use crate::network::client::agent::ClientCapabilities;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::coordination::lifecycle_manager::TransportRuntimeParams;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    LifeCycleManager, LifeCycleManagerError,
+    LifeCycleManager, LifeCycleManagerError, ServerAddresses,
 };
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
 use crate::network::{remove_uuid_from_pool, set_uuid_in_pool};
 use crate::utilities::configuration::ClientConfigLoader;
-use crate::utilities::misc_utils::ServerAddresses;
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
@@ -58,12 +60,6 @@ pub enum StateManagerError {
     SetConfigError(String),
 }
 
-type ActorInstance<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> = Arc<dyn ActorEntity<B>>;
-
 pub type ActorUuid = Uuid;
 
 /// In-memory actor state management and global channel transport
@@ -72,8 +68,10 @@ pub(crate) struct StateManager<
     const D_IN: usize,
     const D_OUT: usize,
 > {
-    shared_config: Arc<RwLock<ClientConfigLoader>>,
+    shared_client_capabilities: Arc<ClientCapabilities>,
+    shared_transport_params: Arc<RwLock<TransportRuntimeParams>>,
     shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    shared_local_model_path: Arc<RwLock<PathBuf>>,
     default_model: Option<ModelModule<B>>,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
@@ -85,16 +83,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     StateManager<B, D_IN, D_OUT>
 {
     pub(crate) fn new(
-        shared_config: Arc<RwLock<ClientConfigLoader>>,
+        shared_client_capabilities: Arc<ClientCapabilities>,
+        shared_transport_params: Arc<RwLock<TransportRuntimeParams>>,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        shared_local_model_path: Arc<RwLock<PathBuf>>,
         default_model: Option<ModelModule<B>>,
     ) -> (Self, Receiver<RoutedMessage>) {
         let (global_dispatcher_tx, global_dispatcher_rx) =
             mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT * 2);
         (
             Self {
-                shared_config,
+                shared_client_capabilities,
+                shared_transport_params,
                 shared_server_addresses,
+                shared_local_model_path,
                 default_model,
                 global_dispatcher_tx,
                 actor_inboxes: DashMap::new(),
@@ -110,9 +112,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// Priority order:
     /// 1. Provided `default_model` parameter
     /// 2. Cached `self.default_model`
-    /// 3. Config `default_model_path`
-    /// 4. Config `local_model_path`
-    /// 5. None
+    /// 3. Config `local_model_path`
+    /// 4. None
     async fn load_reloadable_model(
         &self,
         default_model: Option<ModelModule<B>>,
@@ -146,52 +147,24 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ));
         }
 
-        // Try loading from config paths
-        let config = self.shared_config.read().await;
-
-        // Try default_model_path
-        let default_model_path_str = config
-            .client_config
-            .default_model_path
-            .to_str()
-            .unwrap_or_default()
-            .to_string();
-
-        if !default_model_path_str.is_empty() {
-            return Ok(Some(
-                HotReloadableModel::<B>::new_from_path(
-                    config.client_config.default_model_path.clone(),
-                    device,
-                )
-                .await
-                .map_err(|_| {
-                    StateManagerError::FailedToCreateReloadableModelError(
-                        "[StateManager] Failed to load model from default_model_path".to_string(),
-                    )
-                })?,
-            ));
-        }
-
         // Try local_model_path
-        let local_model_path_str = config
-            .transport_config
-            .local_model_path
+        let local_model_path_str = self
+            .shared_local_model_path
+            .read()
+            .await
             .to_str()
-            .unwrap_or_default()
+            .unwrap_or("")
             .to_string();
 
         if !local_model_path_str.is_empty() {
             return Ok(Some(
-                HotReloadableModel::<B>::new_from_path(
-                    config.transport_config.local_model_path.clone(),
-                    device,
-                )
-                .await
-                .map_err(|_| {
-                    StateManagerError::FailedToCreateReloadableModelError(
-                        "[StateManager] Failed to load model from local_model_path".to_string(),
-                    )
-                })?,
+                HotReloadableModel::<B>::new_from_path(local_model_path_str.clone(), device)
+                    .await
+                    .map_err(|_| {
+                        StateManagerError::FailedToCreateReloadableModelError(
+                            "[StateManager] Failed to load model from local_model_path".to_string(),
+                        )
+                    })?,
             ));
         }
 
@@ -205,7 +178,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        transport: Arc<TransportClient<B>>,
+        shared_transport: Arc<TransportClient<B>>,
         tx_to_sender: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&actor_id) {
@@ -221,36 +194,34 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .load_reloadable_model(default_model, device.clone())
             .await?;
 
-        let shared_config: Arc<RwLock<ClientConfigLoader>> = self.shared_config.clone();
-
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         self.actor_inboxes.insert(actor_id, tx_to_actor.clone());
 
-        let model_path = shared_config
-            .read()
-            .await
-            .transport_config
-            .local_model_path
-            .clone();
+        let shared_local_model_path = self.shared_local_model_path.clone();
+        let shared_server_addresses = self.shared_server_addresses.clone();
+        let shared_transport_params = self.shared_transport_params.clone();
 
-        let transport = transport.clone();
-        let shared_config_cloned = shared_config.clone();
-        let shared_server_addresses_cloned = self.shared_server_addresses.clone();
+        let shared_client_capabilities = self.shared_client_capabilities.clone();
+        let shared_transport_clone = shared_transport.clone();
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
-            let (mut actor, handshake_flag) = Actor::<B, D_IN, D_OUT>::new(
-                actor_id,
-                device.clone(),
-                reloadable_model,
-                model_path,
-                shared_config_cloned,
-                shared_server_addresses_cloned,
-                actor_inbox_rx,
-                tx_to_sender,
-                transport,
-            )
-            .await;
+            let (mut actor, handshake_flag): (Actor<B, D_IN, D_OUT>, bool) =
+                Actor::<B, D_IN, D_OUT>::new(
+                    actor_id,
+                    device.clone(),
+                    reloadable_model,
+                    shared_local_model_path,
+                    shared_transport_params,
+                    shared_server_addresses,
+                    actor_inbox_rx,
+                    tx_to_sender,
+                    shared_client_capabilities,
+                )
+                .await;
+
+            // Set transport after creation
+            actor.with_transport(shared_transport_clone).await;
 
             if handshake_flag {
                 let model_handshake_ms = RoutedMessage {
@@ -268,6 +239,28 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         self.actor_handles.insert(actor_id, handle);
         self.actor_router_addresses.insert(actor_id, router_id);
+        Ok(())
+    }
+
+    pub(crate) async fn _restart_actor(
+        &mut self,
+        actor_id: ActorUuid,
+        router_id: RouterUuid,
+        device: DeviceType,
+        default_model: Option<ModelModule<B>>,
+        shared_transport: Arc<TransportClient<B>>,
+        tx_to_sender: Sender<RoutedMessage>,
+    ) -> Result<(), StateManagerError> {
+        self.__remove_actor(actor_id)?;
+        self.__new_actor(
+            actor_id,
+            router_id,
+            device,
+            default_model,
+            shared_transport,
+            tx_to_sender,
+        )
+        .await?;
         Ok(())
     }
 
@@ -301,31 +294,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    pub(crate) fn spawn_shutdown_watcher(
-        shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
-        lifecycle: LifeCycleManager,
-    ) -> Result<(), StateManagerError> {
-        tokio::spawn(async move {
-            let mut rx = lifecycle
-                .subscribe_shutdown()
-                .map_err(StateManagerError::from)?;
-            rx.recv()
-                .await
-                .map_err(|e| StateManagerError::ReceiveShutdownSignalError(e.to_string()))?;
-            shared_state
-                .read()
-                .await
-                .__shutdown_all_actors()
-                .await
-                .map_err(|e| {
-                    StateManagerError::ShutdownAllActorsError(format!(
-                        "Failed to shutdown all actors: {}",
-                        e
-                    ))
-                })?;
+    pub(crate) async fn clear_runtime_components(&mut self) -> Result<(), StateManagerError> {
+        self.actor_handles.clear();
+        self.actor_inboxes.clear();
+        self.actor_router_addresses.clear();
 
-            Ok::<(), StateManagerError>(())
-        });
         Ok(())
     }
 
@@ -428,7 +401,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .collect()
     }
 
-    fn get_actor_id_list(&self) -> Vec<ActorUuid> {
+    pub(crate) fn get_actor_id_list(&self) -> Vec<ActorUuid> {
         self.actor_handles
             .iter()
             .map(|entry| *entry.key())
