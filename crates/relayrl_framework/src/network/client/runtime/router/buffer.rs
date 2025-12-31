@@ -340,7 +340,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
 
             // Send trajectory via transport
             match &**transport {
-                #[cfg(feature = "zmq_network")]
+                #[cfg(feature = "sync_transport")]
                 TransportClient::Sync(sync_client) => {
                     sync_client
                         .send_traj_to_server(
@@ -352,12 +352,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
                         .map_err(TrajectorySinkError::TransportError)?;
                     Ok(())
                 }
-                #[cfg(feature = "grpc_network")]
+                #[cfg(feature = "async_transport")]
                 TransportClient::Async(async_client) => {
                     async_client
                         .send_traj_to_server(
                             associated_router_id,
-                            encoded_trajectory,
+                            encoded_trajectory.clone(),
                             model_server_address,
                             trajectory_server_address,
                         )
@@ -402,7 +402,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
             tokio::time::sleep(delay).await;
 
             let result = match &**transport {
-                #[cfg(feature = "zmq_network")]
+                #[cfg(feature = "sync_transport")]
                 TransportClient::Sync(sync_client) => sync_client
                     .send_traj_to_server(
                         associated_router_id,
@@ -411,7 +411,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
                         trajectory_server_address,
                     )
                     .map_err(TrajectorySinkError::TransportError),
-                #[cfg(feature = "grpc_network")]
+                #[cfg(feature = "async_transport")]
                 TransportClient::Async(async_client) => async_client
                     .send_traj_to_server(
                         associated_router_id,

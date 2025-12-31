@@ -47,9 +47,7 @@ pub(crate) fn construct_server_addresses(
 ) -> ServerAddresses {
     fn construct_address(transport_type: &TransportType, network_params: &NetworkParams) -> String {
         match *transport_type {
-            #[cfg(feature = "grpc_network")]
-            TransportType::GRPC => network_params.host.clone() + ":" + &network_params.port.clone(),
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "zmq_transport")]
             TransportType::ZMQ => {
                 network_params.prefix.clone()
                     + &network_params.host.clone()

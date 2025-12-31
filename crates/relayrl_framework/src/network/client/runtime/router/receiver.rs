@@ -59,7 +59,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
 
         if let Some(transport) = &self.transport {
             match &**transport {
-                #[cfg(feature = "zmq_network")]
+                #[cfg(feature = "sync_transport")]
                 TransportClient::Sync(_) => {
                     while self.active.load(Ordering::SeqCst) {
                         let agent_listener_address = self
@@ -73,7 +73,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                         let transport_clone: Arc<TransportClient<B>> = transport.clone();
                         let identity: RouterUuid = self.associated_router_id;
 
-                        let zmq_handle: tokio::task::JoinHandle<()> = tokio::task::spawn_blocking(
+                        let transport_handle: tokio::task::JoinHandle<()> = tokio::task::spawn_blocking(
                             move || {
                                 if let TransportClient::Sync(sync_tr) = &*transport_clone {
                                     match sync_tr.listen_for_model(
@@ -103,10 +103,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                         }
 
                         self.active.store(false, Ordering::SeqCst);
-                        zmq_handle.abort();
+                        transport_handle.abort();
                     }
                 }
-                #[cfg(feature = "grpc_network")]
+                #[cfg(feature = "async_transport")]
                 TransportClient::Async(async_tr) => {
                     let mut shutdown_rx = self.shutdown.as_ref().map(|s| s.resubscribe());
 

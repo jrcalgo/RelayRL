@@ -9,6 +9,6 @@ pub(crate) mod runtime {
     }
     pub(crate) mod router;
     pub(crate) mod router_dispatcher;
-    #[cfg(any(feature = "grpc_network", feature = "zmq_network"))]
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub(crate) mod transport;
 }

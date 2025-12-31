@@ -457,7 +457,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(sync_tr) => {
                 let actor_id = *actor_id;
                 let obs_bytes = obs_bytes.to_vec();
@@ -468,7 +468,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
 
                 tokio::task::spawn_blocking(move || {
                     if let TransportClient::Sync(sync_tr) = &*transport {
-                        sync_tr.send_inference_request(&actor_id, &obs_bytes, &address)
+                        sync_tr.send_action_request(&actor_id, &obs_bytes, &address)
                     } else {
                         Err(TransportError::NoTransportConfiguredError(
                             "Expected sync transport".to_string(),
@@ -478,7 +478,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::NoTransportConfiguredError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(_async_tr) => {
                 // Tonic async implementation would go here
                 Err(TransportError::NoTransportConfiguredError(
@@ -585,7 +585,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(sync_tr) => {
                 let sender_id = *sender_id;
                 let model_addr = model_server_address.to_string();
@@ -609,7 +609,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::SendTrajError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
                     .send_traj_to_server(
@@ -668,7 +668,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let actor_id = *actor_id;
                 let model_addr = model_server_address.to_string();
@@ -687,7 +687,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::ModelHandshakeError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
                     .initial_model_handshake(actor_id, model_server_address, agent_listener_address)
@@ -707,7 +707,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
     ) -> Result<(), DispatcherError> {
         // No backpressure or circuit breaker for long-running listener
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let receiver_id = *receiver_id;
                 let agent_addr = agent_listener_address.to_string();
@@ -726,7 +726,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
                 .map_err(|e| DispatcherError::JoinError(e.to_string()))?
                 .map_err(DispatcherError::Transport)
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => async_tr
                 .listen_for_model(receiver_id, agent_listener_address, global_dispatcher_tx)
                 .await
@@ -843,7 +843,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let scaling_id = *scaling_id;
                 let address = scaling_server_address.to_string();
@@ -861,7 +861,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::SendClientIdsToServerError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
                     .send_client_ids_to_server(scaling_id, scaling_server_address)
@@ -923,7 +923,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let scaling_id = *scaling_id;
                 let address = agent_listener_address.to_string();
@@ -946,7 +946,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::SendAlgorithmInitRequestError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
                     .send_algorithm_init_request(
@@ -1005,7 +1005,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let scaling_id = *scaling_id;
                 let address = scaling_server_address.to_string();
@@ -1023,7 +1023,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::SendScalingWarningError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
                     .send_scaling_warning(scaling_id, operation, scaling_server_address)
@@ -1077,7 +1077,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let scaling_id = *scaling_id;
                 let address = scaling_server_address.to_string();
@@ -1095,7 +1095,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::SendScalingCompleteError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
                     .send_scaling_complete(scaling_id, operation, scaling_server_address)
@@ -1147,7 +1147,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let scaling_id = *scaling_id;
                 let address = scaling_server_address.to_string();
@@ -1165,7 +1165,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 .await
                 .map_err(|e| TransportError::SendShutdownSignalError(e.to_string()))?
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
                     .send_shutdown_signal_to_server(scaling_id, scaling_server_address)
@@ -1177,7 +1177,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
     /// Shutdown the transport.
     pub async fn shutdown(&self) -> Result<(), DispatcherError> {
         match &*self.transport {
-            #[cfg(feature = "zmq_network")]
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(_) => {
                 let transport = Arc::clone(&self.transport);
 
@@ -1194,7 +1194,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 .map_err(|e| DispatcherError::JoinError(e.to_string()))?
                 .map_err(DispatcherError::Transport)
             }
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => async_tr
                 .shutdown()
                 .await

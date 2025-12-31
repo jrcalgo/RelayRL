@@ -328,13 +328,21 @@ impl ServerResponse {
 impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqClient {}
 
 impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceServerTransport<B> for ZmqClient {
-    fn send_inference_request(
+    fn send_action_request(
         &self,
         actor_id: &Uuid,
         action_request: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
         Ok(RelayRLAction::minimal(0.0, false))
+    }
+    fn send_flag_last_action(
+        &self,
+        actor_id: &Uuid,
+        reward: f32,
+        inference_server_address: &str,
+    ) -> Result<(), TransportError> {
+        Ok(())
     }
 }
 

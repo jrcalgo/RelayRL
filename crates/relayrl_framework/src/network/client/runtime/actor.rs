@@ -205,31 +205,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let _ = obs; // suppress unused warning
 
         let actor_id = self.actor_id;
-        let inference_addr = self
+        let inference_address = self
             .shared_server_addresses
             .read()
             .await
             .inference_server_address
             .clone();
-        let model_addr = self
-            .shared_server_addresses
-            .read()
-            .await
-            .model_server_address
-            .clone();
 
         let r4sa = match &**transport {
-            #[cfg(feature = "grpc_network")]
+            #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 // Choose the correct server endpoint for your implementation.
                 async_tr
-                    .send_inference_request(&actor_id, obs_bytes, &model_addr)
+                    .send_action_request(&actor_id, &obs_bytes, &inference_address)
                     .await
                     .map_err(|e| ActorError::InferenceRequestError(format!("{e:?}")))?
-            }
-            #[cfg(feature = "zmq_network")]
+            },
+            #[cfg(feature = "sync_transport")]
             TransportClient::Sync(sync_tr) => sync_tr
-                .send_inference_request(&actor_id, &obs_bytes, &inference_addr)
+                .send_action_request(&actor_id, &obs_bytes, &inference_address)
                 .map_err(|e| ActorError::InferenceRequestError(format!("{e:?}")))?,
         };
 
@@ -379,7 +373,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .clone();
 
                     match transport.as_ref() {
-                        #[cfg(feature = "grpc_network")]
+                        #[cfg(feature = "async_transport")]
                         TransportClient::Async(async_tr) => {
                             // Use training server address for model handshake
                             println!(
@@ -451,7 +445,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 );
                             }
                         }
-                        #[cfg(feature = "zmq_network")]
+                        #[cfg(feature = "sync_transport")]
                         TransportClient::Sync(sync_tr) => {
                             // Use agent listener address for model handshake
                             println!(

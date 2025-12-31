@@ -44,7 +44,7 @@ pub mod server {
             pub(crate) mod state_manager;
         }
         pub(crate) mod router;
-        #[cfg(feature = "networks")]
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         pub(crate) mod transport;
         pub(crate) mod worker;
     }
@@ -180,9 +180,7 @@ pub(crate) fn drain_uuid_pool() -> Result<(), UuidPoolError> {
 /// Extend for future utility with other transport protocols (extend transport.rs accordingly)
 #[derive(Clone, Copy, Debug)]
 pub enum TransportType {
-    #[cfg(feature = "grpc_network")]
-    GRPC,
-    #[cfg(feature = "zmq_network")]
+    #[cfg(feature = "zmq_transport")]
     ZMQ,
 }
 

@@ -18,9 +18,7 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
-#[cfg(feature = "grpc_network")]
-pub mod tonic;
-#[cfg(feature = "zmq_network")]
+#[cfg(feature = "zmq_transport")]
 pub mod zmq;
 
 pub mod transport_dispatcher;
@@ -58,25 +56,25 @@ pub enum TransportError {
 }
 
 pub(crate) enum TransportClient<B: Backend + BackendMatcher<Backend = B>> {
-    #[cfg(feature = "zmq_network")]
+    #[cfg(feature = "sync_transport")]
     Sync(Box<dyn SyncClientTransport<B>>),
-    #[cfg(feature = "grpc_network")]
+    #[cfg(feature = "async_transport")]
     Async(Box<dyn AsyncClientTransport<B>>),
 }
 
-#[cfg(feature = "grpc_network")]
+#[cfg(feature = "async_transport")]
 pub(crate) trait AsyncClientTransport<B: Backend + BackendMatcher<Backend = B>>:
     AsyncInferenceServerTransport<B> + AsyncTrainingServerTransport<B>
 {
 }
 
-#[cfg(feature = "zmq_network")]
+#[cfg(feature = "sync_transport")]
 pub(crate) trait SyncClientTransport<B: Backend + BackendMatcher<Backend = B>>:
     SyncInferenceServerTransport<B> + SyncTrainingServerTransport<B>
 {
 }
 
-#[cfg(feature = "grpc_network")]
+#[cfg(feature = "async_transport")]
 #[async_trait]
 pub(crate) trait AsyncInferenceServerTransport<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync
@@ -84,9 +82,9 @@ pub(crate) trait AsyncInferenceServerTransport<B: Backend + BackendMatcher<Backe
     async fn send_action_request(
         &self,
         actor_id: &Uuid,
-        action_request: &InferenceRequest,
+        obs_bytes: &[u8],
         inference_server_address: &str,
-    ) -> Result<(), TransportError>;
+    ) -> Result<RelayRLAction, TransportError>;
     async fn send_flag_last_action(
         &self,
         actor_id: &Uuid,
@@ -95,19 +93,25 @@ pub(crate) trait AsyncInferenceServerTransport<B: Backend + BackendMatcher<Backe
     ) -> Result<(), TransportError>;
 }
 
-#[cfg(feature = "zmq_network")]
+#[cfg(feature = "sync_transport")]
 pub(crate) trait SyncInferenceServerTransport<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync
 {
-    fn send_inference_request(
+    fn send_action_request(
         &self,
         actor_id: &Uuid,
         obs_bytes: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError>;
+    fn send_flag_last_action(
+        &self,
+        actor_id: &Uuid,
+        reward: f32,
+        inference_server_address: &str,
+    ) -> Result<(), TransportError>;
 }
 
-#[cfg(feature = "grpc_network")]
+#[cfg(feature = "async_transport")]
 #[async_trait]
 pub(crate) trait AsyncTrainingServerTransport<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync
@@ -163,7 +167,7 @@ pub(crate) trait AsyncTrainingServerTransport<B: Backend + BackendMatcher<Backen
     async fn shutdown(&self) -> Result<(), TransportError>;
 }
 
-#[cfg(feature = "zmq_network")]
+#[cfg(feature = "sync_transport")]
 pub(crate) trait SyncTrainingServerTransport<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync
 {
@@ -222,12 +226,7 @@ pub(crate) fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>
     transport_type: TransportType,
 ) -> Result<TransportClient<B>, TransportError> {
     match transport_type {
-        #[cfg(feature = "grpc_network")]
-        TransportType::GRPC => Ok(TransportClient::<B>::Async(Box::new(
-            tonic::TonicClient::new()
-                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
-        ))),
-        #[cfg(feature = "zmq_network")]
+        #[cfg(feature = "sync_transport")]
         TransportType::ZMQ => Ok(TransportClient::<B>::Sync(Box::new(
             zmq::ZmqClient::new()
                 .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,

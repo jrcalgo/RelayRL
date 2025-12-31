@@ -365,9 +365,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 // shutdown transport client components (sockets, etc.)
                 match &*params.scaling.transport {
-                    #[cfg(feature = "grpc_network")]
+                    #[cfg(feature = "async_transport")]
                     TransportClient::Async(async_tr) => async_tr.shutdown().await?,
-                    #[cfg(feature = "zmq_network")]
+                    #[cfg(feature = "sync_transport")]
                     TransportClient::Sync(sync_tr) => sync_tr
                         .shutdown()
                         .map_err(|e| CoordinatorError::TransportError(e))?,
@@ -491,7 +491,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await?;
 
                 if send_id {
-                    params.scaling._send_client_ids_to_server();
+                    params.scaling._send_client_ids_to_server().await?;
                 }
 
                 Ok(())
