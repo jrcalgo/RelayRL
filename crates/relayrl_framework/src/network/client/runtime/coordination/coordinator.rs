@@ -1,6 +1,5 @@
 use crate::network::HyperparameterArgs;
 use crate::network::TransportType;
-use crate::network::UuidPoolError;
 use crate::network::client::agent::ActorInferenceMode;
 use crate::network::client::agent::ActorServerModelMode;
 use crate::network::client::agent::{ClientCapabilities, ClientModes};
@@ -23,8 +22,6 @@ use crate::network::client::runtime::transport::{
     DispatcherConfig, DispatcherError, ScalingDispatcher, TrainingDispatcher, TransportClient,
     TransportError, client_transport_factory,
 };
-use crate::network::random_uuid;
-use crate::network::{drain_uuid_pool, remove_uuid_from_pool};
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 use crate::utilities::observability;
 use crate::utilities::observability::logging::builder::LoggingBuilder;
@@ -33,10 +30,13 @@ use crate::utilities::observability::metrics::MetricsManager;
 use thiserror::Error;
 
 use burn_tensor::{Tensor, backend::Backend};
+
 use relayrl_types::prelude::DeviceType;
 use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::{reserve_with, remove, clear_context, clear_all};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -380,7 +380,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 params.scaling._send_shutdown_signal_to_server().await?;
 
                 // drain the UUID pool to ensure all UUIDs are removed from the pool
-                drain_uuid_pool()?;
+                clear_all().map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
                 params
                     .shared_state
@@ -433,7 +433,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                let actor_id: Uuid = random_uuid("actor", 117, 100, 0)
+                let actor_id: Uuid = reserve_with("actor", 117, 100)
                     .map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
                 params.metrics.record_counter("actors_created", 1, &[]);
@@ -514,7 +514,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .__remove_actor(id)
                     .map_err(CoordinatorError::from)?;
-                remove_uuid_from_pool("actor", &id)
+                remove("actor", id)
                     .map_err(|e| CoordinatorError::UuidPoolError(e))?;
                 Ok(())
             }

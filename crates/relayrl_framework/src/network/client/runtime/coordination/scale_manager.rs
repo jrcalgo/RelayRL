@@ -1,6 +1,4 @@
 use crate::network::HyperparameterArgs;
-use crate::network::UuidPoolError;
-use crate::network::add_uuid_to_pool;
 use crate::network::client::agent::ClientCapabilities;
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::FormattedTrajectoryFileParams;
@@ -18,8 +16,6 @@ use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
 use crate::network::client::runtime::transport::{
     DispatcherError, ScalingDispatcher, TrainingDispatcher, TransportClient, TransportError,
 };
-use crate::network::random_uuid;
-use crate::network::remove_uuid_from_pool;
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::HyperparameterConfig;
 
@@ -28,6 +24,8 @@ use thiserror::Error;
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::tensor::BackendMatcher;
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::{reserve_with, remove, add};
 
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -132,7 +130,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         lifecycle: LifeCycleManager,
     ) -> Result<Self, ScaleManagerError> {
         let scaling_id: ScaleManagerUuid =
-            random_uuid("scale_manager", 67, 100, 0).map_err(ScaleManagerError::from)?;
+            reserve_with("scale_manager", 67, 100).map_err(ScaleManagerError::from)?;
 
         // Spawn the RouterDispatcher
         let router_filter_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>> =
@@ -292,7 +290,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         for i in 1..=router_add {
             let router_id: RouterUuid =
-                random_uuid("router", i * router_add, 100, 0).map_err(ScaleManagerError::from)?;
+                reserve_with("router", i * router_add, 100).map_err(ScaleManagerError::from)?;
 
             // Create per-router channels
             let (_filter_tx, filter_rx) =
@@ -304,7 +302,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             self.router_filter_channels
                 .insert(router_id, _filter_tx.clone());
 
-            add_uuid_to_pool("external_receiver", &router_id).map_err(ScaleManagerError::from)?;
+            add("external_receiver", router_id).map_err(ScaleManagerError::from)?;
             // Create ExternalReceiver - sends to global dispatcher
             let shared_receiver_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
                 self.shared_state.clone();
@@ -341,7 +339,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 filter
             };
 
-            add_uuid_to_pool("external_sender", &router_id).map_err(ScaleManagerError::from)?;
+            add("external_sender", router_id).map_err(ScaleManagerError::from)?;
             // Create Sender - receives from actors via sender_rx
             let mut sender: ClientTrajectoryBuffer<B> =
                 ClientTrajectoryBuffer::new(router_id, sender_rx, self.codec.clone());
@@ -533,11 +531,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     router_params.receiver_loop.abort();
                     router_params.filter_loop.abort();
                     router_params.sender_loop.abort();
-                    remove_uuid_from_pool("router", router_id).map_err(ScaleManagerError::from)?;
-                    remove_uuid_from_pool("external_receiver", router_id)
-                        .map_err(ScaleManagerError::from)?;
-                    remove_uuid_from_pool("external_sender", router_id)
-                        .map_err(ScaleManagerError::from)?;
+                    remove("router", *router_id).map_err(ScaleManagerError::from)?;
+                    remove("external_receiver", *router_id).map_err(ScaleManagerError::from)?;
+                    remove("external_sender", *router_id).map_err(ScaleManagerError::from)?;
                     println!("Router with ID {} has been removed.", router_id);
                 }
 

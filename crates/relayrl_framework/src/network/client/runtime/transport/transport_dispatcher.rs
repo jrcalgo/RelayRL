@@ -27,13 +27,14 @@
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::network::client::runtime::transport::{TransportClient, TransportError};
-use crate::network::{HyperparameterArgs, random_uuid};
+use crate::network::{HyperparameterArgs};
 use crate::utilities::configuration::Algorithm;
 
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use relayrl_types::types::data::trajectory::EncodedTrajectory;
 use relayrl_types::types::model::ModelModule;
+use active_uuid_registry::interface::reserve_with;
 
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
@@ -778,7 +779,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         transport: Arc<TransportClient<B>>,
         config: DispatcherConfig,
     ) -> Result<Self, DispatcherError> {
-        let transport_id = random_uuid("scaling_dispatcher", rand::random::<u32>(), 100, 0)
+        let transport_id = reserve_with("scaling_dispatcher", 117, 100)
             .map_err(|e| DispatcherError::InvalidState(e.to_string()))?;
 
         Ok(Self {

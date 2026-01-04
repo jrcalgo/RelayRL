@@ -1,4 +1,3 @@
-use crate::network::UuidPoolError;
 use crate::network::client::agent::ClientCapabilities;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
@@ -9,7 +8,6 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::network::client::runtime::transport::TransportClient;
-use crate::network::{remove_uuid_from_pool, set_uuid_in_pool};
 use crate::utilities::configuration::ClientConfigLoader;
 
 use std::path::PathBuf;
@@ -17,6 +15,8 @@ use thiserror::Error;
 
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::{replace, remove};
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -289,7 +289,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             } else {
                 continue;
             }
-            remove_uuid_from_pool("actor", &actor_id).map_err(StateManagerError::from)?;
+            remove("actor", actor_id).map_err(StateManagerError::from)?;
         }
         Ok(())
     }
@@ -308,7 +308,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         self.actor_inboxes.remove(&id);
-        remove_uuid_from_pool("actor", &id).map_err(StateManagerError::from)?;
+        remove("actor", id).map_err(StateManagerError::from)?;
         Ok(())
     }
 
@@ -368,7 +368,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_inboxes.insert(new_id, current_id_inbox);
         self.actor_inboxes.remove(&current_id);
 
-        set_uuid_in_pool("actor", &current_id, &new_id).map_err(StateManagerError::from)?;
+        replace("actor", current_id, new_id).map_err(StateManagerError::from)?;
 
         Ok(())
     }
