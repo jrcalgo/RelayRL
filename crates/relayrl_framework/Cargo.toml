@@ -17,7 +17,7 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["network", "database_layer", "logging", "metrics"]
+default = ["network", "logging", "metrics"]
 
 network = ["client", "inference_server", "training_server"]
 client = []
@@ -40,7 +40,7 @@ profile = ["flamegraph", "console-subscriber"]
 [dependencies]
 # Crates built by me
 relayrl_types = { version = "0.3.21", features = ["ndarray-backend", "tch-backend", "codec-full", "inference-models"] }
-active-uuid-registry = { version = "0.2.0", features = ["concurrent"]}
+active-uuid-registry = { version = "0.3.0", features = ["concurrent-map"]}
 
 # External crates
 tokio = { version = "1.48.0", features = ["full"] }
@@ -94,3 +94,6 @@ optional = true
 [dev-dependencies.criterion]
 version = "0.5.1"
 features = ["html_reports", "async_tokio"]
+
+[dev-dependencies.gym]
+version = "2.2.1"
