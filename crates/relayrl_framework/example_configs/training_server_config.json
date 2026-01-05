@@ -1,6 +1,6 @@
 {
-    "server_config": {
-        "config_path": "server_config.json",
+    "training_server_config": {
+        "config_update_polling_seconds": 10.0,
         "default_hyperparameters": {
             "DDPG": {
                 "seed": 1,
@@ -91,12 +91,11 @@
                 "port": "7779"
             }
         },
-        "config_update_polling": 10,
-        "grpc_idle_timeout": 30,
         "local_model_module": {
-            "directory_name": "model_module",
-            "model_name": "server_model"
+            "directory": "model_module",
+            "model_name": "training_model",
+            "format": "pt"
         },
-        "max_traj_length": 1000
+        "max_traj_length": 100000000
     }
 }

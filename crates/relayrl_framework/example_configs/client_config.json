@@ -1,6 +1,7 @@
 {
     "client_config": {
         "algorithm_name": "REINFORCE",
+        "config_update_polling_seconds": 10.0,
         "init_hyperparameters": {
             "DDPG": {
                 "seed": 1,
@@ -99,8 +100,6 @@
                 "port": "7779"
             }
         },
-        "config_update_polling": 10,
-        "grpc_idle_timeout": 30,
         "local_model_module": {
             "directory": "model_module",
             "model_name": "client_model",

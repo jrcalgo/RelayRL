@@ -2,7 +2,6 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::{fs, fs::File, io::Read, path::PathBuf};
-use zmq::SocketType::PAIR;
 
 use dashmap::DashMap;
 
@@ -118,6 +117,7 @@ pub static DEFAULT_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> =
 pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
     "client_config": {
         "algorithm_name": "REINFORCE",
+        "config_update_polling_seconds": 10.0,
         "init_hyperparameters": {
             "DDPG": {
                 "seed": 1,
@@ -213,8 +213,6 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
                 "port": "7779"
             }
         },
-        "config_update_polling": 10,
-        "grpc_idle_timeout": 30,
         "local_model_module": {
             "directory": "model_module",
             "model_name": "client_model",
@@ -226,6 +224,7 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
 
 pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
     "server_config": {
+        "config_update_polling_seconds": 10.0,
         "default_hyperparameters": {
             "DDPG": {
                 "seed": 1,
@@ -316,8 +315,6 @@ pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
                 "port": "7779"
             }
         },
-        "config_update_polling": 10,
-        "grpc_idle_timeout": 30,
         "local_model_module": {
             "directory_name": "model_module",
             "model_name": "server_model"
@@ -880,6 +877,7 @@ where
 pub struct ClientConfigParams {
     pub algorithm_name: String,
     pub config_path: PathBuf,
+    pub config_update_polling_seconds: f32,
     pub init_hyperparameters: HyperparameterConfig,
     pub trajectory_file_output: TrajectoryFileOutputParams,
 }
@@ -914,6 +912,7 @@ impl ClientConfigLoader {
             client_config: ClientConfigParams {
                 algorithm_name: _algorithm_name,
                 config_path: _config_path,
+                config_update_polling_seconds: client_config.config_update_polling_seconds,
                 init_hyperparameters: client_config.init_hyperparameters,
                 trajectory_file_output: client_config.trajectory_file_output,
             },
@@ -933,6 +932,7 @@ impl ClientConfigLoader {
                         client_config: ClientConfigParams {
                             algorithm_name: "REINFORCE".to_string(),
                             config_path: PathBuf::from("client_config.json"),
+                            config_update_polling_seconds: 10.0,
                             init_hyperparameters: HyperparameterConfig::default(),
                             trajectory_file_output: TrajectoryFileOutputParams::default(),
                         },
@@ -994,6 +994,7 @@ pub trait ClientConfigBuildParams {
 pub struct ClientConfigBuilder {
     algorithm_name: Option<String>,
     config_path: Option<PathBuf>,
+    config_update_polling_seconds: Option<f32>,
     init_hyperparameters: Option<HyperparameterConfig>,
     transport_config: Option<TransportConfigParams>,
     trajectory_file_output: Option<TrajectoryFileOutputParams>,
@@ -1041,6 +1042,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 .config_path
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("client_config.json")),
+            config_update_polling_seconds: self.config_update_polling_seconds.clone().unwrap_or_else(|| 10.0),
             init_hyperparameters: self
                 .init_hyperparameters
                 .clone()
@@ -1058,10 +1060,8 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 model_server_address: transport_config.model_server_address.clone(),
                 trajectory_server_address: transport_config.trajectory_server_address.clone(),
                 scaling_server_address: transport_config.scaling_server_address.clone(),
-                grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
                 local_model_module: transport_config.local_model_module.clone(),
-                config_update_polling: transport_config.config_update_polling,
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -1077,6 +1077,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
             client_config: ClientConfigParams {
                 algorithm_name: "REINFORCE".to_string(),
                 config_path: PathBuf::from("client_config.json"),
+                config_update_polling_seconds: 10.0,
                 init_hyperparameters: HyperparameterConfig::default(),
                 trajectory_file_output: TrajectoryFileOutputParams::default(),
             },
@@ -1489,10 +1490,8 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
                 model_server_address: transport_config.model_server_address.clone(),
                 trajectory_server_address: transport_config.trajectory_server_address.clone(),
                 scaling_server_address: transport_config.scaling_server_address.clone(),
-                grpc_idle_timeout: transport_config.grpc_idle_timeout,
                 max_traj_length: transport_config.max_traj_length,
                 local_model_module: transport_config.local_model_module.clone(),
-                config_update_polling: transport_config.config_update_polling,
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -1527,10 +1526,8 @@ pub struct TransportConfigParams {
     pub model_server_address: NetworkParams,
     pub trajectory_server_address: NetworkParams,
     pub scaling_server_address: NetworkParams,
-    pub grpc_idle_timeout: u32,
     pub max_traj_length: u128,
     pub local_model_module: LocalModelModuleParams,
-    pub config_update_polling: u32,
 }
 
 impl TransportConfigParams {
@@ -1561,9 +1558,7 @@ pub trait TransportConfigBuildParams {
     fn set_model_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_trajectory_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
     fn set_scaling_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
-    fn set_grpc_idle_timeout(&mut self, grpc_idle_timeout: u32) -> &mut Self;
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self;
-    fn set_config_update_polling(&mut self, config_update_polling: u32) -> &mut Self;
     fn set_local_model_module(&mut self, directory_name: &str, model_name: &str) -> &mut Self;
     fn build(&self) -> TransportConfigParams;
     fn build_default() -> TransportConfigParams;
@@ -1575,9 +1570,7 @@ pub struct TransportConfigBuilder {
     model_server_address: Option<NetworkParams>,
     trajectory_server_address: Option<NetworkParams>,
     scaling_server_address: Option<NetworkParams>,
-    grpc_idle_timeout: Option<u32>,
     max_traj_length: Option<u128>,
-    config_update_polling: Option<u32>,
     local_model_module: Option<LocalModelModuleParams>,
 }
 
@@ -1633,18 +1626,9 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         });
         self
     }
-    fn set_grpc_idle_timeout(&mut self, grpc_idle_timeout: u32) -> &mut Self {
-        self.grpc_idle_timeout = Some(grpc_idle_timeout);
-        self
-    }
 
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self {
         self.max_traj_length = Some(max_traj_length);
-        self
-    }
-
-    fn set_config_update_polling(&mut self, config_update_polling: u32) -> &mut Self {
-        self.config_update_polling = Some(config_update_polling);
         self
     }
 
@@ -1701,19 +1685,10 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 port: "7777".to_string(),
             },
         };
-        let grpc_idle_timeout: u32 = match &self.grpc_idle_timeout {
-            Some(timeout) => *timeout,
-            None => 30,
-        };
 
         let max_traj_length: u128 = match &self.max_traj_length {
             Some(length) => *length,
             None => 1000,
-        };
-
-        let config_update_polling: u32 = match &self.config_update_polling {
-            Some(polling) => *polling,
-            None => 10,
         };
 
         let local_model_module: LocalModelModuleParams = match &self.local_model_module {
@@ -1731,10 +1706,8 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             model_server_address,
             trajectory_server_address,
             scaling_server_address,
-            grpc_idle_timeout,
             max_traj_length,
             local_model_module,
-            config_update_polling,
         }
     }
 
@@ -1766,8 +1739,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 host: "127.0.0.1".to_string(),
                 port: "7777".to_string(),
             },
-            config_update_polling: 10,
-            grpc_idle_timeout: 30,
             max_traj_length: 1000,
             local_model_module: LocalModelModuleParams {
                 directory: "model_module".to_string(),
