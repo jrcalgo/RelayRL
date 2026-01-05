@@ -1,4 +1,5 @@
 use crate::network::HyperparameterArgs;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::prelude::config::TransportConfigParams;
@@ -27,8 +28,6 @@ pub(crate) struct FormattedTrajectoryFileParams {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TransportRuntimeParams {
-    pub(crate) config_update_polling: u32,
-    pub(crate) grpc_idle_timeout: u32,
     pub(crate) max_traj_length: u128,
 }
 
@@ -41,6 +40,7 @@ pub(crate) struct ServerAddresses {
     pub(crate) scaling_server_address: String,
 }
 
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 pub(crate) fn construct_server_addresses(
     transport_config: &TransportConfigParams,
     transport_type: &TransportType,
@@ -124,13 +124,16 @@ pub enum LifeCycleManagerError {
 #[derive(Debug, Clone)]
 pub(crate) struct LifeCycleManager {
     algorithm_args: Arc<AlgorithmArgs>,
-    transport_params: Arc<RwLock<TransportRuntimeParams>>,
+    max_traj_length: Arc<RwLock<u128>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     server_addresses: Arc<RwLock<ServerAddresses>>,
     init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
     local_model_path: Arc<RwLock<PathBuf>>,
     trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     transport_type: Arc<TransportType>,
     config_path: Arc<PathBuf>,
+    config_update_polling_seconds: Arc<RwLock<f32>>,
     last_modified: Arc<RwLock<SystemTime>>,
     shutdown_tx: broadcast::Sender<()>,
     shutdown_notifier: Arc<Notify>,
@@ -141,6 +144,7 @@ impl LifeCycleManager {
         algorithm_args: AlgorithmArgs,
         config: ClientConfigLoader,
         config_path: PathBuf,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         transport_type: TransportType,
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(10_000);
@@ -156,18 +160,15 @@ impl LifeCycleManager {
                 SystemTime::now()
             });
 
+        let config_update_polling = config.client_config.config_update_polling_seconds.clone();
+
         let transport_config = config.get_transport_config();
-        let config_update_polling = transport_config.config_update_polling.clone();
-        let grpc_idle_timeout = transport_config.grpc_idle_timeout.clone();
         let max_traj_length = transport_config.max_traj_length.clone();
 
         Self {
             algorithm_args: Arc::new(algorithm_args),
-            transport_params: Arc::new(RwLock::new(TransportRuntimeParams {
-                config_update_polling,
-                grpc_idle_timeout,
-                max_traj_length,
-            })),
+            max_traj_length: Arc::new(RwLock::new(max_traj_length)),
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             server_addresses: Arc::new(RwLock::new(construct_server_addresses(
                 &config.transport_config,
                 &transport_type,
@@ -183,7 +184,9 @@ impl LifeCycleManager {
             ))),
             config_path: Arc::new(config_path),
             last_modified: Arc::new(RwLock::new(last_modified)),
+            config_update_polling_seconds: Arc::new(RwLock::new(config_update_polling)),
             shutdown_tx,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             transport_type: Arc::new(transport_type),
             shutdown_notifier: Arc::new(Notify::new()),
         }
@@ -199,10 +202,11 @@ impl LifeCycleManager {
         });
     }
 
-    pub fn get_transport_params(&self) -> Arc<RwLock<TransportRuntimeParams>> {
-        self.transport_params.clone()
+    pub fn get_max_traj_length(&self) -> Arc<RwLock<u128>> {
+        self.max_traj_length.clone()
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn get_server_addresses(&self) -> Arc<RwLock<ServerAddresses>> {
         self.server_addresses.clone()
     }
@@ -223,22 +227,17 @@ impl LifeCycleManager {
         self.algorithm_args.clone()
     }
 
-    pub async fn set_transport_params(
-        &self,
-        transport_params: &TransportConfigParams,
-    ) -> Result<(), LifeCycleManagerError> {
-        let mut transport_params_guard = self.transport_params.write().await;
-        *transport_params_guard = TransportRuntimeParams {
-            config_update_polling: transport_params.config_update_polling,
-            grpc_idle_timeout: transport_params.grpc_idle_timeout,
-            max_traj_length: transport_params.max_traj_length,
-        };
+    pub async fn set_max_traj_length(&self, max_traj_length: &u128) -> Result<(), LifeCycleManagerError> {
+        let mut max_traj_length_guard = self.max_traj_length.write().await;
+        *max_traj_length_guard = max_traj_length.clone();
         Ok(())
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub async fn set_server_addresses(
         &self,
         transport_params: &TransportConfigParams,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         transport_type: &TransportType,
     ) -> Result<(), LifeCycleManagerError> {
         let mut server_addresses_guard = self.server_addresses.write().await;
@@ -281,10 +280,10 @@ impl LifeCycleManager {
 
     async fn _watch(&self) -> Result<(), LifeCycleManagerError> {
         loop {
-            let config_update_polling =
-                self.transport_params.read().await.config_update_polling as u64;
+            let config_update_polling_seconds =
+                self.config_update_polling_seconds.read().await.clone() as u64;
             let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(config_update_polling));
+                tokio::time::interval(std::time::Duration::from_secs(config_update_polling_seconds));
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -320,12 +319,30 @@ impl LifeCycleManager {
         Ok(())
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);
 
         tokio::try_join!(
-            self.set_transport_params(&new_config.transport_config),
+            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_server_addresses(&new_config.transport_config, &self.transport_type),
+            self.set_local_model_path(&new_config.transport_config.local_model_module),
+            self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
+            self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),
+        )
+        .map_err(|e| {
+            LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
+        })?;
+
+        Ok(())
+    }
+
+    #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+    async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
+        let new_config = ClientConfigLoader::load_config(&path);
+
+        tokio::try_join!(
+            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
             self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),

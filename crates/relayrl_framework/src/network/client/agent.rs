@@ -3,7 +3,9 @@ use crate::network::client::runtime::coordination::coordinator::{
 };
 use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-use crate::network::{HyperparameterArgs, TransportType};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::TransportType;
+use crate::network::HyperparameterArgs;
 use crate::prelude::config::ClientConfigLoader;
 use crate::utilities::configuration::Algorithm;
 
@@ -16,16 +18,21 @@ use relayrl_types::types::data::tensor::{
     AnyBurnTensor, BackendMatcher, DeviceType, SupportedTensorBackend,
 };
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::get;
 
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
+    #[error(transparent)]
+    UuidPoolError(#[from] UuidPoolError),
     #[error("Inference server mode disabled: {0}")]
     InferenceServerModeDisabled(String),
     #[error("Inference server mode enabled: {0}")]
@@ -42,6 +49,19 @@ pub enum ClientError {
     InvalidInferenceMode(String),
 }
 
+/// Pass this to `fn runtime_statistics()` of `RelayRLAgent` to determine the return type of the statistics.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuntimeStatisticsReturnType {
+    JsonFile(PathBuf),
+    JsonString(String),
+    Hashmap(HashMap<String, String>),
+}
+
+/// Inference mode for actor runtime
+///
+/// - `Local`: Model inference occurs on local device.
+/// - `Server`: Model inference occurs on inference server.
+///    - Ensure that the client runtime is configured properly to be compatible with the inference server and that the server is running.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorInferenceMode {
     Local,
@@ -53,6 +73,9 @@ impl Default for ActorInferenceMode {
         Self::Local
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalRecordParams(pub PathBuf);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseTypeParams {
@@ -72,9 +95,14 @@ pub struct PostgreSQLParams {
     pub connection: String,
 }
 
+/// Trajectory recording mode for each router buffer
+/// 
+/// - `Local`: Trajectories are recorded to file on local device.
+/// - `Database`: Trajectories are recorded to a supported database.
+///    - Supported databases: SQLite, PostgreSQL.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrajectoryRecordMode {
-    Local,
+    Local(LocalRecordParams),
     Database(DatabaseTypeParams),
     Hybrid(DatabaseTypeParams),
     Disabled,
@@ -164,7 +192,7 @@ impl ClientModes {
 
         let (local_trajectory_recording, database_trajectory_recording) =
             match &self.trajectory_recording_mode {
-                TrajectoryRecordMode::Local => (true, false),
+                TrajectoryRecordMode::Local(_) => (true, false),
                 TrajectoryRecordMode::Database(_) => (false, true),
                 TrajectoryRecordMode::Hybrid(_) => (true, true),
                 TrajectoryRecordMode::Disabled => (false, false),
@@ -188,6 +216,9 @@ impl ClientModes {
     }
 }
 
+/// Parameters used for starting the `RelayRLAgent`
+/// 
+/// Pass these parameters to the `fn start()` of `RelayRLAgent`
 pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub algorithm_args: AlgorithmArgs,
     pub actor_count: u32,
@@ -204,16 +235,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for AgentStartPar
     }
 }
 
-/// `AgentBuilder` is a builder for the `RelayRLAgent` instance and its associated `fn start()` parameters, returned as `AgentStartParameters`.
+/// `AgentBuilder` is a builder for the `RelayRLAgent` instance and its associated `fn start()` parameters, 
+/// returned as `AgentStartParameters`.
 pub struct AgentBuilder<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
 > {
     pub client_modes: Option<ClientModes>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub transport_type: Option<TransportType>,
-    pub algorithm: Option<Algorithm>,
-    pub hyperparams: Option<HyperparameterArgs>,
+    pub algorithm_args: Option<AlgorithmArgs>,
     pub actor_count: Option<u32>,
     pub router_scale: Option<u32>,
     pub default_device: Option<DeviceType>,
@@ -229,9 +261,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub fn builder() -> Self {
         Self {
             client_modes: Some(ClientModes::default()),
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             transport_type: Some(TransportType::default()),
-            algorithm: None,
-            hyperparams: None,
+            algorithm_args: Some(AlgorithmArgs::default()),
             actor_count: None,
             router_scale: None,
             default_device: None,
@@ -272,6 +304,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn transport_type(mut self, transport_type: TransportType) -> Self {
         self.transport_type = Some(transport_type);
         self
@@ -298,12 +331,27 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub fn algorithm(mut self, algorithm: Algorithm) -> Self {
-        self.algorithm = Some(algorithm);
+        let hyperparams = match self.algorithm_args {
+            Some(args) => args.hyperparams,
+            None => None,
+        };
+        self.algorithm_args = Some(AlgorithmArgs {
+            algorithm,
+            hyperparams,
+        });
         self
     }
 
     pub fn hyperparams(mut self, hyperparams: HyperparameterArgs) -> Self {
-        self.hyperparams = Some(hyperparams);
+        let algorithm = match self.algorithm_args {
+            Some(args) => args.algorithm,
+            None => Algorithm::ConfigInit,
+        };
+
+        self.algorithm_args = Some(AlgorithmArgs {
+            algorithm,
+            hyperparams: Some(hyperparams),
+        });
         self
     }
 
@@ -323,16 +371,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(RelayRLAgent<B, D_IN, D_OUT>, AgentStartParameters<B>), ClientError> {
         // Initialize agent object
         let agent: RelayRLAgent<B, D_IN, D_OUT> = RelayRLAgent::new(
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             self.transport_type.unwrap_or(TransportType::ZMQ),
             self.client_modes.unwrap_or(ClientModes::default()),
         )?;
 
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
-            algorithm_args: AlgorithmArgs {
-                algorithm: self.algorithm.unwrap_or(Algorithm::ConfigInit),
-                hyperparams: self.hyperparams,
-            },
+            algorithm_args: self.algorithm_args.unwrap_or(AlgorithmArgs::default()),
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
@@ -349,7 +395,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 ///
 /// Functions as a thin facade over the `ClientCoordinator`, providing a clean public API for the client runtime.
 ///
-/// - `coordinator`: The `ClientCoordinator`` instance for managing the client runtime.
+/// - `coordinator`: The `ClientCoordinator` instance for managing the client runtime.
 /// - `supported_backend`: The supported tensor backend for the client runtime.
 pub struct RelayRLAgent<
     B: Backend + BackendMatcher<Backend = B>,
@@ -411,13 +457,22 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ///   - `_inference_mode == ActorInferenceMode::Hybrid` and `_inference_server_mode == ActorServerMode::Disabled`: the inference server mode is disabled for hybrid inference.
     ///   - `_inference_mode == ActorInferenceMode::ClientSide` and `_inference_server_mode != ActorServerMode::Disabled`: the inference server mode is enabled for client-side inference.
     pub fn new(
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         transport_type: TransportType,
         client_modes: ClientModes,
     ) -> Result<Self, ClientError> {
         let capabilities = client_modes.capabilities()?;
+        let supported_backend = if B::matches_backend(&SupportedTensorBackend::NdArray) {
+            SupportedTensorBackend::NdArray
+        } else if B::matches_backend(&SupportedTensorBackend::Tch) {
+            SupportedTensorBackend::Tch
+        } else {
+            SupportedTensorBackend::None
+        };
+
         Ok(Self {
-            coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(transport_type, capabilities)?,
-            supported_backend: SupportedTensorBackend::default(),
+            coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(#[cfg(any(feature = "async_transport", feature = "sync_transport"))] transport_type, capabilities)?,
+            supported_backend,
         })
     }
 
@@ -474,13 +529,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// Scale the agent's actor throughput by load balancing actors across message-passing routers
     ///
     /// Takes `router_scale`: `i32` arg and converts to `u32` for internal operations.
-    ///
-    /// If the `router_scale < 0`: scale down by the absolute value of the routers.
-    ///
-    /// If the `router_scale > 0`: scale up by the value of the routers.
-    ///
-    /// If `routers == 0`: do nothing and return error.
-    ///
+    /// 
+    /// - If the `router_scale > 0`: scale out by the value of the routers.
+    /// - If the `router_scale < 0`: scale in by the absolute value of the routers.
+    /// - If `routers == 0`: do nothing and return error.
     pub async fn scale_throughput(&mut self, router_scale: i32) -> Result<(), ClientError> {
         match router_scale {
             add if router_scale > 0 => {
@@ -497,7 +549,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    /// Shut down the Agent's client runtime components
+    /// Shutdown the Agent's client runtime components
     ///
     /// This requests all client runtime componenets (managers, actors, routers, transport, etc.) to conclude their operations and gracefully shut down.
     pub async fn shutdown(&mut self) -> Result<(), ClientError> {
@@ -556,8 +608,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// - Runtime configuration
     /// - Timestamp
     ///
-    /// TODO: I want to rewrite this to pipe stats from actor, managers, coordinator, routers, and transport layers into a single JSON object/map.
-    pub fn runtime_statistics(&self) -> Result<PathBuf, ClientError> {
+    /// TODO: Pipe logs and metrics into a single HashM
+    pub fn runtime_statistics(&self, return_type: RuntimeStatisticsReturnType) -> Result<PathBuf, ClientError> {
         use std::fs::File;
         use std::io::Write;
         use std::time::SystemTime;
@@ -714,7 +766,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ._new_actor(device.clone(), default_model.clone(), false)
                     .await?;
             }
-            self.coordinator._send_client_ids_to_server().await?;
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            let actor_ids = get("actor").map_err(ClientError::from)?;
+
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            self.coordinator._send_client_ids_to_server(actor_ids).await?;
+
             Ok(())
         })
     }

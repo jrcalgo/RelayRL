@@ -8,7 +8,9 @@ use std::collections::HashMap;
 ///   - `actor`: Individual agent actor implementations
 ///   - `coordination`: Manages lifecycle, scaling, metrics, and state across actors
 ///   - `router`: Message routing between actors and transport layers
-///   - `transport`: Network transport implementations (gRPC, ZeroMQ)
+///   - `transport`: Network transport implementations (ZeroMQ)
+///   - `database`: Database implementations (PostgreSQL, SQLite)
+#[cfg(feature = "client")]
 pub mod client;
 
 /// **Server Modules**: Implements RelayRL training servers and communication channels.
@@ -24,32 +26,21 @@ pub mod client;
 ///   - `transport`: Network transport implementations (gRPC, ZeroMQ)
 ///   - `router`: Message routing between workers and transport layers
 ///   - `worker`: Individual training worker implementations
-pub mod server {
-    pub mod inference_server;
-    pub mod training_server;
-    pub(crate) mod runtime {
-        pub(crate) mod coordination {
-            pub(crate) mod coordinator;
-            pub(crate) mod lifecycle_manager;
-            pub(crate) mod scale_manager;
-            pub(crate) mod state_manager;
-        }
-        pub(crate) mod router;
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        pub(crate) mod transport;
-        pub(crate) mod worker;
-    }
-}
+#[cfg(any(feature = "inference_server", feature = "training_server"))]
+pub mod server;
 
 /// Extend for future utility with other transport protocols (extend transport.rs accordingly)
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 #[derive(Clone, Copy, Debug)]
 pub enum TransportType {
     #[cfg(feature = "zmq_transport")]
     ZMQ,
 }
 
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 impl Default for TransportType {
     fn default() -> Self {
+        #[cfg(feature = "zmq_transport")]
         TransportType::ZMQ
     }
 }

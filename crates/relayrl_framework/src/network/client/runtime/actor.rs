@@ -4,7 +4,8 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-use crate::network::client::runtime::transport::TransportClient;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
 
@@ -48,6 +49,7 @@ pub enum ActorError {
 #[derive(Clone, Copy, Debug)]
 enum InferenceKind {
     Local,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     Server,
 }
 
@@ -60,7 +62,12 @@ impl InferenceKind {
             };
         }
         if !capabilities.local_inference && capabilities.server_inference {
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             return Self::Server;
+
+            println!("Transport mode not enabled, using local inference");
+            #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+            return Self::Local;
         }
 
         unreachable!()
@@ -73,7 +80,8 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
         device: DeviceType,
         model: Option<HotReloadableModel<B>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
-        shared_transport_params: Arc<RwLock<TransportRuntimeParams>>,
+        shared_max_traj_length: Arc<RwLock<u128>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         rx_from_router: Receiver<RoutedMessage>,
         shared_tx_to_sender: Sender<RoutedMessage>,
@@ -81,11 +89,11 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
     ) -> (Self, bool)
     where
         Self: Sized;
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     async fn with_transport(&mut self, shared_transport: Arc<TransportClient<B>>);
     async fn spawn_loop(&mut self) -> Result<(), ActorError>;
     async fn _initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError>;
     async fn __get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError>;
-    async fn __get_actor_statistics(&self, msg: RoutedMessage) -> Result<(), ActorError>;
     async fn _refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError>;
     async fn _handle_shutdown(&self, _msg: RoutedMessage) -> Result<(), ActorError>;
 }
@@ -99,12 +107,14 @@ pub(crate) struct Actor<
     actor_id: ActorUuid,
     model: Option<Arc<HotReloadableModel<B>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
-    shared_transport_params: Arc<RwLock<TransportRuntimeParams>>,
+    shared_max_traj_length: Arc<RwLock<u128>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     model_device: DeviceType,
     current_traj: RelayRLTrajectory,
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_sender: Sender<RoutedMessage>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_transport: Option<Arc<TransportClient<B>>>,
     shared_client_capabilities: Arc<ClientCapabilities>,
     inference_kind: InferenceKind,
@@ -155,6 +165,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn handle_inference_kind(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         match self.inference_kind {
             InferenceKind::Local => self.perform_local_inference(msg).await,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             InferenceKind::Server => self.request_server_inference(msg).await,
         }
     }
@@ -186,6 +197,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Server inference: serialize observation (and optionally mask) and send to server.
     /// Note: if obs/mask live on GPU, you will pay a device->host copy during serialization.
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     async fn request_server_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         let _model = self
             .model
@@ -274,7 +286,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         device: DeviceType,
         model: Option<HotReloadableModel<B>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
-        shared_transport_params: Arc<RwLock<TransportRuntimeParams>>,
+        shared_max_traj_length: Arc<RwLock<u128>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         rx_from_router: Receiver<RoutedMessage>,
         shared_tx_to_sender: Sender<RoutedMessage>,
@@ -283,7 +296,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     where
         Self: Sized,
     {
-        let max_traj_length: u128 = shared_transport_params.read().await.max_traj_length;
+        let max_traj_length: u128 = shared_max_traj_length.read().await.clone();
 
         let inference_kind = InferenceKind::device(&device, &shared_client_capabilities);
 
@@ -291,12 +304,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             actor_id,
             model: None,
             shared_local_model_path,
-            shared_transport_params,
+            shared_max_traj_length,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_server_addresses,
             model_device: device,
             current_traj: RelayRLTrajectory::new(max_traj_length as usize),
             rx_from_router,
             shared_tx_to_sender,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_transport: None,
             shared_client_capabilities,
             inference_kind,
@@ -318,6 +333,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         (actor, model_init_flag)
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     async fn with_transport(&mut self, shared_transport: Arc<TransportClient<B>>) {
         self.shared_transport = Some(shared_transport);
     }
@@ -341,10 +357,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 RoutingProtocol::ModelUpdate => {
                     <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::_refresh_model(self, msg).await?;
                 }
-                RoutingProtocol::ActorStatistics => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::__get_actor_statistics(self, msg)
-                        .await?;
-                }
                 RoutingProtocol::Shutdown => {
                     <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::_handle_shutdown(self, msg).await?;
                     break;
@@ -358,6 +370,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelHandshake = msg.payload {
             if self.model.is_none() {
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 if let Some(transport) = &self.shared_transport {
                     let model_server_address: String = self
                         .shared_server_addresses
@@ -515,6 +528,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         self.actor_id
                     );
                 }
+                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                {
+                    eprintln!(
+                        "[Actor {:?}] No transport configured for model handshake",
+                        self.actor_id
+                    );
+                }
             } else {
                 println!(
                     "[Actor {:?}] Model already available, handshake not needed",
@@ -592,11 +612,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn __get_actor_statistics(&self, _msg: RoutedMessage) -> Result<(), ActorError> {
-        // TODO: Implement actor statistics collection
         Ok(())
     }
 

@@ -1,4 +1,5 @@
 use crate::network::HyperparameterArgs;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::ActorInferenceMode;
 use crate::network::client::agent::ActorServerModelMode;
@@ -18,7 +19,8 @@ use crate::network::client::runtime::coordination::state_manager::{
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-use crate::network::client::runtime::transport::{
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport::{
     DispatcherConfig, DispatcherError, ScalingDispatcher, TrainingDispatcher, TransportClient,
     TransportError, client_transport_factory,
 };
@@ -36,7 +38,7 @@ use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{reserve_with, remove, clear_context, clear_all};
+use active_uuid_registry::interface::{reserve_with, remove, clear_context, clear_all, get};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,8 +88,10 @@ impl From<String> for ClientConfigError {
 
 #[derive(Debug, Error)]
 pub enum CoordinatorError {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[error(transparent)]
     DispatcherError(#[from] DispatcherError),
     #[error(transparent)]
@@ -115,6 +119,7 @@ pub trait ClientInterface<
 >
 {
     fn new(
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         transport_type: TransportType,
         client_capabilities: ClientCapabilities,
     ) -> Result<Self, CoordinatorError>
@@ -197,6 +202,7 @@ pub struct ClientCoordinator<
     const D_IN: usize,
     const D_OUT: usize,
 > {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     transport_type: TransportType,
     client_capabilities: Arc<ClientCapabilities>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
@@ -205,11 +211,12 @@ pub struct ClientCoordinator<
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ClientCoordinator<B, D_IN, D_OUT>
 {
-    pub(crate) async fn _send_client_ids_to_server(&self) -> Result<(), CoordinatorError> {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    pub(crate) async fn _send_client_ids_to_server(&self, client_ids: Vec<(String, Uuid)>) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => params
                 .scaling
-                ._send_client_ids_to_server()
+                ._send_client_ids_to_server(client_ids)
                 .await
                 .map_err(CoordinatorError::from),
             None => Err(CoordinatorError::NoRuntimeInstanceError),
@@ -222,10 +229,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
 {
     fn new(
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         transport_type: TransportType,
         client_capabilities: ClientCapabilities,
     ) -> Result<Self, CoordinatorError> {
         Ok(Self {
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             transport_type,
             client_capabilities: Arc::new(client_capabilities),
             runtime_params: None,
@@ -261,26 +270,30 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             algorithm_args.to_owned(),
             config_loader.to_owned(),
             config_path,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             self.transport_type,
         );
         lifecycle.spawn_loop();
 
         let shared_client_capabilities = self.client_capabilities.clone();
-        let shared_transport_params = lifecycle.get_transport_params();
+        let shared_max_traj_length = lifecycle.get_max_traj_length();
 
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_state_server_addresses: Arc<RwLock<ServerAddresses>> =
             lifecycle.get_server_addresses();
         let shared_local_model_path: Arc<RwLock<PathBuf>> = lifecycle.get_local_model_path();
 
         let (state, global_dispatcher_rx) = StateManager::new(
             shared_client_capabilities.clone(),
-            shared_transport_params,
+            shared_max_traj_length,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))] 
             shared_state_server_addresses,
             shared_local_model_path,
             default_model.clone(),
         );
 
         let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_scaling_server_addresses: Arc<RwLock<ServerAddresses>> =
             lifecycle.get_server_addresses();
         let shared_algorithm_args: Arc<AlgorithmArgs> = lifecycle.get_algorithm_args();
@@ -288,15 +301,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             lifecycle.get_trajectory_file_output();
 
         // Create transport and wrap in Arc for sharing across dispatchers
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let transport: TransportClient<B> = client_transport_factory(self.transport_type)
             .map_err(|e| CoordinatorError::TransportError(e))?;
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_transport: Arc<TransportClient<B>> = Arc::new(transport);
 
         // Create dispatchers with reliability layer (retry, circuit breaker, backpressure)
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let scaling_dispatcher = Arc::new(
             ScalingDispatcher::with_default_config(shared_transport.clone())
                 .map_err(CoordinatorError::DispatcherError)?,
         );
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let training_dispatcher = Arc::new(TrainingDispatcher::with_default_config(
             shared_transport.clone(),
         ));
@@ -306,9 +323,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             shared_algorithm_args,
             shared_state.clone(),
             global_dispatcher_rx,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_transport,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             scaling_dispatcher,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             training_dispatcher,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_scaling_server_addresses,
             codec,
             lifecycle.clone(),
@@ -334,7 +355,43 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let metrics: MetricsManager = observability::init_observability();
 
-        scaling._send_client_ids_to_server().await?;
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        let client_ids: Vec<(String, Uuid)> = {
+            let actor_pairs = get("actor").map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to get actor pairs: {}",
+                    e
+                ))
+            })?;
+            let scale_manager_pairs = get("scale_manager").map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to get scale manager pairs: {}",
+                    e
+                ))
+            })?;
+            let external_sender_pairs = get("external_sender").map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to get external sender pairs: {}",
+                    e
+                ))
+            })?;
+            let zmq_transport_client_pairs = get("zmq_transport_client").map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to get zmq transport client pairs: {}",
+                    e
+                ))
+            })?;
+            actor_pairs
+                .iter()
+                .chain(scale_manager_pairs.iter())
+                .chain(external_sender_pairs.iter())
+                .chain(zmq_transport_client_pairs.iter())
+                .map(|(id, name)| (id.clone(), name.clone()))
+                .collect::<Vec<(String, Uuid)>>()
+        };
+
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        scaling._send_client_ids_to_server(client_ids).await?;
 
         self.runtime_params = Some(CoordinatorParams {
             logger,
@@ -364,6 +421,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
 
                 // shutdown transport client components (sockets, etc.)
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 match &*params.scaling.transport {
                     #[cfg(feature = "async_transport")]
                     TransportClient::Async(async_tr) => async_tr.shutdown().await?,
@@ -377,6 +435,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 params.scaling.clear_runtime_components().await?;
 
                 // inform server that the client is being shutdown and to remove all actor-related data from server runtime
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 params.scaling._send_shutdown_signal_to_server().await?;
 
                 // drain the UUID pool to ensure all UUIDs are removed from the pool
@@ -464,7 +523,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let router_id: Uuid = router_ids[actor_count % router_ids.len()];
 
                 // Get the router's sender_tx
-                let sender_tx = router_runtime_params
+                let trajectory_buffer_tx = router_runtime_params
                     .get(&router_id)
                     .ok_or_else(|| {
                         CoordinatorError::ScaleManagerError(
@@ -473,7 +532,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             ),
                         )
                     })?
-                    .sender_tx
+                    .trajectory_buffer_tx
                     .clone();
 
                 params
@@ -481,17 +540,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .write()
                     .await
                     .__new_actor(
-                        actor_id,
+                        actor_id.clone(),
                         router_id,
                         device,
                         default_model,
+                        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                         params.scaling.transport.clone(),
-                        sender_tx,
+                        trajectory_buffer_tx,
                     )
                     .await?;
-
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 if send_id {
-                    params.scaling._send_client_ids_to_server().await?;
+                    params.scaling._send_client_ids_to_server(vec![("actor".to_string(), actor_id)]).await?;
                 }
 
                 Ok(())
@@ -556,7 +616,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     current_id,
                     new_id,
                 )?;
-                params.scaling._send_client_ids_to_server().await?;
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                let actor_ids = get("actor").map_err(CoordinatorError::from)?;
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                params.scaling._send_client_ids_to_server(actor_ids).await?;
+
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(

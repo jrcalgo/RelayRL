@@ -140,7 +140,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     fn get_timeout_for_message_protocol(protocol: &RoutingProtocol) -> Duration {
         match protocol {
             RoutingProtocol::RequestInference => Duration::from_secs(10),
-            RoutingProtocol::ModelVersion | RoutingProtocol::ActorStatistics => {
+            RoutingProtocol::ModelVersion => {
                 Duration::from_secs(15)
             }
             RoutingProtocol::FlagLastInference => Duration::from_secs(20),

@@ -4,7 +4,8 @@ use crate::network::client::runtime::coordination::lifecycle_manager::FormattedT
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-use crate::network::client::runtime::transport::{TransportClient, TransportError};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport::{TransportClient, TransportError};
 
 use relayrl_types::prelude::{BackendMatcher, CodecConfig};
 use relayrl_types::types::data::action::RelayRLAction;
@@ -22,6 +23,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
+use std::marker::PhantomData;
 
 type PriorityRank = i64;
 
@@ -59,6 +61,7 @@ impl Ord for SinkQueueEntry {
 
 #[derive(Debug, Error)]
 pub enum TrajectorySinkError {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[error("Transport error: {0}")]
     TransportError(#[from] TransportError),
     #[error("Failed to encode trajectory: {0}")]
@@ -67,6 +70,7 @@ pub enum TrajectorySinkError {
     DatabaseWriteError(String),
 }
 
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>:
     TransportTrajectorySinkTrait<B> + DatabaseTrajectorySinkTrait<B> + LocalTrajectorySinkTrait<B>
 {
@@ -93,7 +97,30 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     ) -> PriorityRank;
 }
 
-pub(crate) trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
+#[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>:
+    DatabaseTrajectorySinkTrait<B> + LocalTrajectorySinkTrait<B>
+{
+    fn new(
+        associated_router_id: RouterUuid,
+        rx_from_actor: Receiver<RoutedMessage>,
+        codec: CodecConfig,
+    ) -> Self;
+    fn with_trajectory_writer(
+        &mut self,
+        shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
+    ) -> &mut Self;
+    fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
+    fn spawn_loop(&mut self) -> Result<(), RouterError>;
+    fn _compute_priority(
+        actor_id: &ActorUuid,
+        actor_last_sent: &DashMap<Uuid, i64>,
+        timestamp: (u128, u128),
+    ) -> PriorityRank;
+}
+
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn send_trajectory(
         associated_router_id: &RouterUuid,
         actor_id: &ActorUuid,
@@ -116,7 +143,7 @@ pub(crate) trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backen
     ) -> Result<(), TrajectorySinkError>;
 }
 
-pub(crate) trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
+trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn write_database_trajectory(
         database_params: &DatabaseTypeParams,
         actor_id: &ActorUuid,
@@ -131,7 +158,7 @@ pub(crate) trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend
     ) -> Result<(), TrajectorySinkError>;
 }
 
-pub(crate) trait LocalTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
+trait LocalTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn write_local_trajectory(
         associated_router_id: &RouterUuid,
         entry: &SinkQueueEntry,
@@ -152,11 +179,14 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     rx_from_actor: Receiver<RoutedMessage>,
     actor_last_processed: DashMap<Uuid, i64>,
     traj_queue_tx: Option<Sender<SinkQueueEntry>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_transport: Option<Arc<TransportClient<B>>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_server_addresses: Option<Arc<RwLock<ServerAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<FormattedTrajectoryFileParams>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     codec: CodecConfig,
+    _phantom: PhantomData<B>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
@@ -173,14 +203,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             rx_from_actor,
             actor_last_processed: DashMap::new(),
             traj_queue_tx: None,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_transport: None,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_server_addresses: None,
             shared_trajectory_file_output: None,
             shutdown: None,
             codec,
+            _phantom: PhantomData,
         }
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     fn with_transport(
         &mut self,
         transport: Arc<TransportClient<B>>,
@@ -209,7 +243,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         // Extract fields we need to avoid borrowing self
         let trajectory_writer_enabled: bool = self.shared_trajectory_file_output.is_some();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let transport_enabled: bool = self.shared_transport.is_some();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let server_addresses_enabled: bool = self.shared_server_addresses.is_some();
         let actor_last_processed: DashMap<Uuid, i64> = self.actor_last_processed.clone();
 
@@ -219,18 +255,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let worker_priority_queue: Arc<Mutex<BinaryHeap<SinkQueueEntry>>> =
             Arc::new(Mutex::new(BinaryHeap::new()));
 
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_transport = self.shared_transport.clone();
         let codec: CodecConfig = self.codec.clone();
         let identity: RouterUuid = self.associated_router_id;
-
+ 
         // Clone for worker async tasks
         let worker_queue: Arc<Mutex<BinaryHeap<SinkQueueEntry>>> = worker_priority_queue.clone();
         let worker_actor_last_processed: DashMap<Uuid, i64> = actor_last_processed.clone();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let worker_transport: Option<Arc<TransportClient<B>>> = shared_transport.clone();
         let worker_codec: CodecConfig = codec.clone();
         let worker_identity: Uuid = identity;
         let worker_trajectory_writer_enabled: bool = trajectory_writer_enabled;
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let worker_transport_enabled: bool = transport_enabled;
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let worker_server_addresses_enabled: bool = server_addresses_enabled;
         let worker_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
 
@@ -269,9 +309,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             let _job_identity = worker_identity;
                             let _job_codec = worker_codec.clone();
                             let _job_actor_last_processed = worker_actor_last_processed.clone();
+                            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                             let _job_transport = worker_transport.clone();
                             let _job_trajectory_writer_enabled = worker_trajectory_writer_enabled;
+                            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                             let _job_transport_enabled = worker_transport_enabled;
+                            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                             let _job_server_addresses_enabled = worker_server_addresses_enabled;
 
                             // TODO: IO task implementation
@@ -321,6 +364,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     }
 }
 
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
     for ClientTrajectoryBuffer<B>
 {

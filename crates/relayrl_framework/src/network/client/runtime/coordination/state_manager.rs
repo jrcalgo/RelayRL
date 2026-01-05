@@ -7,7 +7,8 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
 };
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
-use crate::network::client::runtime::transport::TransportClient;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
 
 use std::path::PathBuf;
@@ -69,7 +70,8 @@ pub(crate) struct StateManager<
     const D_OUT: usize,
 > {
     shared_client_capabilities: Arc<ClientCapabilities>,
-    shared_transport_params: Arc<RwLock<TransportRuntimeParams>>,
+    shared_max_traj_length: Arc<RwLock<u128>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     default_model: Option<ModelModule<B>>,
@@ -84,7 +86,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 {
     pub(crate) fn new(
         shared_client_capabilities: Arc<ClientCapabilities>,
-        shared_transport_params: Arc<RwLock<TransportRuntimeParams>>,
+        shared_max_traj_length: Arc<RwLock<u128>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         default_model: Option<ModelModule<B>>,
@@ -94,7 +97,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         (
             Self {
                 shared_client_capabilities,
-                shared_transport_params,
+                shared_max_traj_length,
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 shared_server_addresses,
                 shared_local_model_path,
                 default_model,
@@ -178,6 +182,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_transport: Arc<TransportClient<B>>,
         tx_to_sender: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
@@ -199,10 +204,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_inboxes.insert(actor_id, tx_to_actor.clone());
 
         let shared_local_model_path = self.shared_local_model_path.clone();
+
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_server_addresses = self.shared_server_addresses.clone();
-        let shared_transport_params = self.shared_transport_params.clone();
+
+        let shared_max_traj_length = self.shared_max_traj_length.clone();
 
         let shared_client_capabilities = self.shared_client_capabilities.clone();
+
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_transport_clone = shared_transport.clone();
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
@@ -212,7 +222,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     device.clone(),
                     reloadable_model,
                     shared_local_model_path,
-                    shared_transport_params,
+                    shared_max_traj_length,
+                    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                     shared_server_addresses,
                     actor_inbox_rx,
                     tx_to_sender,
@@ -221,6 +232,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .await;
 
             // Set transport after creation
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             actor.with_transport(shared_transport_clone).await;
 
             if handshake_flag {
@@ -248,6 +260,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_transport: Arc<TransportClient<B>>,
         tx_to_sender: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
@@ -257,6 +270,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             router_id,
             device,
             default_model,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_transport,
             tx_to_sender,
         )

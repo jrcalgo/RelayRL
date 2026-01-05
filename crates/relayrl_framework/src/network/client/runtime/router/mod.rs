@@ -37,7 +37,6 @@ pub(crate) enum RoutingProtocol {
     FlagLastInference,
     ModelVersion,
     ModelUpdate,
-    ActorStatistics,
     SendTrajectory,
     Shutdown,
 }
@@ -54,9 +53,6 @@ pub(crate) enum RoutedPayload {
     ModelUpdate {
         model_bytes: Vec<u8>,
         version: i64,
-    },
-    ActorStatistics {
-        reply_to: oneshot::Sender<Vec<(Uuid, i64)>>,
     },
     SendTrajectory {
         timestamp: (u128, u128),

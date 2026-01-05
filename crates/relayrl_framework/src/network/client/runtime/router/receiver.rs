@@ -1,7 +1,8 @@
 use super::{RoutedMessage, RouterError};
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
-use crate::network::client::runtime::transport::{TransportClient, TransportError};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport::{TransportClient, TransportError};
 
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::tensor::BackendMatcher;
@@ -14,11 +15,13 @@ use tokio::sync::{RwLock, broadcast};
 
 #[derive(Debug, Error)]
 pub enum TransportReceiverError {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[error("Transport error: {0}")]
     TransportError(#[from] TransportError),
 }
 
 /// Listens & receives model bytes from a training server
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backend = B>> {
     associated_router_id: RouterUuid,
     active: AtomicBool,
@@ -28,6 +31,7 @@ pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backe
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
     pub fn new(
         associated_router_id: RouterUuid,
@@ -44,6 +48,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
         }
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn with_transport(mut self, transport: Arc<TransportClient<B>>) -> Self {
         self.transport = Some(transport);
         self
@@ -57,6 +62,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
     pub(crate) async fn spawn_loop(&self) -> Result<(), RouterError> {
         self.active.store(true, Ordering::SeqCst);
 
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         if let Some(transport) = &self.transport {
             match &**transport {
                 #[cfg(feature = "sync_transport")]
