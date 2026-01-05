@@ -26,7 +26,7 @@
 
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::router::RoutedMessage;
-use crate::network::client::runtime::transport::{TransportClient, TransportError};
+use crate::network::client::runtime::data::transport::{TransportClient, TransportError};
 use crate::network::{HyperparameterArgs};
 use crate::utilities::configuration::Algorithm;
 
@@ -805,6 +805,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
     pub async fn send_client_ids_to_server(
         &self,
         scaling_id: &Uuid,
+        client_ids: Vec<(String, Uuid)>,
         scaling_server_address: &str,
     ) -> Result<(), DispatcherError> {
         let _permit = self.backpressure.acquire().await?;
@@ -816,7 +817,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         let mut attempts = 0;
         loop {
             let result = self
-                .execute_send_client_ids(scaling_id, scaling_server_address)
+                .execute_send_client_ids(scaling_id, client_ids.to_owned(), scaling_server_address)
                 .await;
 
             match result {
@@ -841,6 +842,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
     async fn execute_send_client_ids(
         &self,
         scaling_id: &Uuid,
+        client_ids: Vec<(String, Uuid)>,
         scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         match &*self.transport {
@@ -852,7 +854,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 
                 tokio::task::spawn_blocking(move || {
                     if let TransportClient::Sync(sync_tr) = &*transport {
-                        sync_tr.send_client_ids_to_server(&scaling_id, &address)
+                        sync_tr.send_client_ids_to_server(&scaling_id, &client_ids, &address)
                     } else {
                         Err(TransportError::NoTransportConfiguredError(
                             "Expected sync transport".to_string(),
@@ -865,7 +867,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
             #[cfg(feature = "async_transport")]
             TransportClient::Async(async_tr) => {
                 async_tr
-                    .send_client_ids_to_server(scaling_id, scaling_server_address)
+                    .send_client_ids_to_server(scaling_id, &client_ids, scaling_server_address)
                     .await
             }
         }

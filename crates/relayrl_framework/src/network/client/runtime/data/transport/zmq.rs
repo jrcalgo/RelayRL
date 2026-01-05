@@ -4,7 +4,7 @@ use crate::network::client::runtime::coordination::scale_manager::ScalingOperati
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-use crate::network::client::runtime::transport::{
+use crate::network::client::runtime::data::transport::{
     SyncClientTransport, SyncInferenceServerTransport, SyncTrainingServerTransport, TransportError,
     TransportUuid,
 };
@@ -350,6 +350,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
     fn send_client_ids_to_server(
         &self,
         scaling_id: &Uuid,
+        client_ids: &Vec<(String, Uuid)>,
         scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         if scaling_id.is_nil() {
@@ -371,39 +372,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
             SocketPoolType::ScalingDealer,
         );
 
-        let relevant_ids: Vec<(String, Uuid)> = {
-            let actor_pairs = get("actor").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get actor pairs: {}",
-                    e
-                ))
-            })?;
-            let scale_manager_pairs = get("scale_manager").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get scale manager pairs: {}",
-                    e
-                ))
-            })?;
-            let external_sender_pairs = get("external_sender").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get external sender pairs: {}",
-                    e
-                ))
-            })?;
-            let zmq_transport_client_pairs = get("zmq_transport_client").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get zmq transport client pairs: {}",
-                    e
-                ))
-            })?;
-            actor_pairs
-                .iter()
-                .chain(scale_manager_pairs.iter())
-                .chain(external_sender_pairs.iter())
-                .chain(zmq_transport_client_pairs.iter())
-                .map(|(id, name)| (id.clone(), name.clone()))
-                .collect::<Vec<(String, Uuid)>>()
-        };
         // TODO: Send client IDs to server for caching, validation, and routing
         let transport_id_string = self.transport_id.to_string();
         let scaling_id_string = scaling_id.to_string();
@@ -411,7 +379,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         let empty_frame: Vec<u8> = vec![];
         let transport_id_frame: &[u8] = transport_id_string.as_bytes();
         let scaling_id_frame: &[u8] = scaling_id_string.as_bytes();
-        let pairs_payload = relevant_ids
+        let pairs_payload = client_ids
             .iter()
             .map(|(name, id)| name.to_string() + " " + id.to_string().as_str())
             .collect::<Vec<_>>()

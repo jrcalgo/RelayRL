@@ -120,6 +120,7 @@ pub(crate) trait AsyncTrainingServerTransport<B: Backend + BackendMatcher<Backen
     async fn send_client_ids_to_server(
         &self,
         scaling_id: &Uuid,
+        client_ids: &Vec<(String, Uuid)>,
         scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     async fn send_algorithm_init_request(
@@ -175,6 +176,7 @@ pub(crate) trait SyncTrainingServerTransport<B: Backend + BackendMatcher<Backend
     fn send_client_ids_to_server(
         &self,
         scaling_id: &Uuid,
+        client_ids: &Vec<(String, Uuid)>,
         scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn send_algorithm_init_request(
