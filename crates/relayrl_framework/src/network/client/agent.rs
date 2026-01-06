@@ -1,16 +1,18 @@
+use crate::network::HyperparameterArgs;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
     ClientCoordinator, ClientInterface, CoordinatorError,
 };
 use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::TransportType;
-use crate::network::HyperparameterArgs;
 use crate::prelude::config::ClientConfigLoader;
 use crate::utilities::configuration::Algorithm;
 
 use thiserror::Error;
 
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::get;
 use burn_tensor::{Tensor, backend::Backend};
 use relayrl_types::Hyperparams;
 use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
@@ -18,13 +20,11 @@ use relayrl_types::types::data::tensor::{
     AnyBurnTensor, BackendMatcher, DeviceType, SupportedTensorBackend,
 };
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
-use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::get;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -75,7 +75,21 @@ impl Default for ActorInferenceMode {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LocalRecordParams(pub PathBuf);
+pub(crate) struct FormattedTrajectoryFileParams {
+    pub(crate) enabled: bool,
+    pub(crate) encode: bool,
+    pub(crate) path: PathBuf,
+}
+
+impl Default for FormattedTrajectoryFileParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            encode: false,
+            path: PathBuf::from(""),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseTypeParams {
@@ -96,13 +110,13 @@ pub struct PostgreSQLParams {
 }
 
 /// Trajectory recording mode for each router buffer
-/// 
+///
 /// - `Local`: Trajectories are recorded to file on local device.
 /// - `Database`: Trajectories are recorded to a supported database.
 ///    - Supported databases: SQLite, PostgreSQL.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrajectoryRecordMode {
-    Local(LocalRecordParams),
+    Local(FormattedTrajectoryFileParams),
     Database(DatabaseTypeParams),
     Hybrid(DatabaseTypeParams),
     Disabled,
@@ -217,7 +231,7 @@ impl ClientModes {
 }
 
 /// Parameters used for starting the `RelayRLAgent`
-/// 
+///
 /// Pass these parameters to the `fn start()` of `RelayRLAgent`
 pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub algorithm_args: AlgorithmArgs,
@@ -235,7 +249,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for AgentStartPar
     }
 }
 
-/// `AgentBuilder` is a builder for the `RelayRLAgent` instance and its associated `fn start()` parameters, 
+/// `AgentBuilder` is a builder for the `RelayRLAgent` instance and its associated `fn start()` parameters,
 /// returned as `AgentStartParameters`.
 pub struct AgentBuilder<
     B: Backend + BackendMatcher<Backend = B>,
@@ -471,7 +485,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         };
 
         Ok(Self {
-            coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(#[cfg(any(feature = "async_transport", feature = "sync_transport"))] transport_type, capabilities)?,
+            coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                transport_type,
+                capabilities,
+            )?,
             supported_backend,
         })
     }
@@ -529,7 +547,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// Scale the agent's actor throughput by load balancing actors across message-passing routers
     ///
     /// Takes `router_scale`: `i32` arg and converts to `u32` for internal operations.
-    /// 
+    ///
     /// - If the `router_scale > 0`: scale out by the value of the routers.
     /// - If the `router_scale < 0`: scale in by the absolute value of the routers.
     /// - If `routers == 0`: do nothing and return error.
@@ -609,76 +627,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// - Timestamp
     ///
     /// TODO: Pipe logs and metrics into a single HashM
-    pub fn runtime_statistics(&self, return_type: RuntimeStatisticsReturnType) -> Result<PathBuf, ClientError> {
-        use std::fs::File;
-        use std::io::Write;
-        use std::time::SystemTime;
-
-        // Create statistics directory if it doesn't exist
-        let stats_dir = std::path::Path::new("./runtime_stats");
-        if !stats_dir.exists() {
-            std::fs::create_dir_all(stats_dir).map_err(|e| {
-                ClientError::CoordinatorError(
-                    crate::network::client::runtime::coordination::coordinator::CoordinatorError::ConfigError(
-                        crate::network::client::runtime::coordination::coordinator::ClientConfigError::InvalidValue(
-                            format!("Failed to create stats directory: {}", e)
-                        )
-                    )
-                )
-            })?;
-        }
-
-        // Generate unique filename with timestamp
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| {
-                ClientError::CoordinatorError(
-                    crate::network::client::runtime::coordination::coordinator::CoordinatorError::ConfigError(
-                        crate::network::client::runtime::coordination::coordinator::ClientConfigError::InvalidValue(
-                            format!("System time error: {}", e)
-                        )
-                    )
-                )
-            })?
-            .as_secs();
-
-        let stats_path = stats_dir.join(format!("runtime_stats_{}.json", timestamp));
-
-        let backend_name = match B::matches_backend(&self.supported_backend) {
-            true => "ndarray",
-            false => "tch",
-        };
-
-        // Collect basic statistics (in a real implementation, this would be more comprehensive)
-        let stats_json = serde_json::json!({
-            "timestamp": timestamp,
-            "backend": backend_name,
-            "input_dimensions": D_IN,
-            "output_dimensions": D_OUT,
-        });
-
-        // Write to file
-        let mut file = File::create(&stats_path).map_err(|e| {
-            ClientError::CoordinatorError(
-                crate::network::client::runtime::coordination::coordinator::CoordinatorError::ConfigError(
-                    crate::network::client::runtime::coordination::coordinator::ClientConfigError::InvalidValue(
-                        format!("Failed to create stats file: {}", e)
-                    )
-                )
-            )
-        })?;
-
-        file.write_all(stats_json.to_string().as_bytes()).map_err(|e| {
-            ClientError::CoordinatorError(
-                crate::network::client::runtime::coordination::coordinator::CoordinatorError::ConfigError(
-                    crate::network::client::runtime::coordination::coordinator::ClientConfigError::InvalidValue(
-                        format!("Failed to write stats: {}", e)
-                    )
-                )
-            )
-        })?;
-
-        Ok(stats_path)
+    pub fn runtime_statistics(
+        &self,
+        return_type: RuntimeStatisticsReturnType,
+    ) -> Result<PathBuf, ClientError> {
+        Ok(PathBuf::new())
     }
 
     pub async fn get_config(&self) -> Result<ClientConfigLoader, ClientError> {
@@ -770,7 +723,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let actor_ids = get("actor").map_err(ClientError::from)?;
 
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            self.coordinator._send_client_ids_to_server(actor_ids).await?;
+            self.coordinator
+                ._send_client_ids_to_server(actor_ids)
+                .await?;
 
             Ok(())
         })
