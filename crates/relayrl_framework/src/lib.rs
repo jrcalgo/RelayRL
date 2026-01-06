@@ -51,8 +51,8 @@ pub mod templates;
 /// and configuration resolution. These utilities support seamless inter-module communication.
 pub mod utilities {
     pub mod configuration;
-    pub mod observability;
-    pub(crate) mod orchestration;
+    pub(crate) mod observability;
+    pub(crate) mod tokio;
 }
 
 pub mod prelude {
@@ -63,9 +63,9 @@ pub mod prelude {
         };
     }
     pub mod network {
-        pub use crate::network::client::agent::RelayRLAgent;
-        // pub use crate::network::server::inference_server::InferenceServer;
-        // pub use crate::network::server::training_server::TrainingServer;
+        pub use crate::network::client::agent::*;
+        // pub use crate::network::server::inference_server::*;
+        // pub use crate::network::server::training_server::*;
     }
     pub mod templates {
         pub use crate::templates::environment_traits::{
