@@ -3,8 +3,10 @@ use crate::network::client::agent::ClientCapabilities;
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::agent::FormattedTrajectoryFileParams;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    LifeCycleManager, LifeCycleManagerError, ServerAddresses,
+    LifeCycleManager, LifeCycleManagerError,
 };
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, TrajectorySinkError};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]

@@ -1,4 +1,5 @@
 use super::{RoutedMessage, RouterError};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]

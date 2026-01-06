@@ -1,5 +1,4 @@
 use crate::network::client::agent::ClientCapabilities;
-use crate::network::client::runtime::coordination::lifecycle_manager::TransportRuntimeParams;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::data::transport::TransportClient;
@@ -8,8 +7,9 @@ use crate::network::client::runtime::router::{
 };
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::tokio::get_or_init_tokio_runtime;
-
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
+
 use relayrl_types::prelude::AnyBurnTensor;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{BackendMatcher, ConversionBurnTensor, DeviceType};

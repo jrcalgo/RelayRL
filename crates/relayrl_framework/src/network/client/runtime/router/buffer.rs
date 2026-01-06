@@ -1,5 +1,6 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
 use crate::network::client::agent::{DatabaseTypeParams, FormattedTrajectoryFileParams};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
