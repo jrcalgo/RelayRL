@@ -638,8 +638,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(self.coordinator._get_config().await?)
     }
 
-    pub async fn set_config(&self, config: ClientConfigLoader) -> Result<(), ClientError> {
-        self.coordinator._set_config(config).await?;
+    pub async fn set_config_path(&self, config_path: PathBuf) -> Result<(), ClientError> {
+        self.coordinator._set_config_path(config_path).await?;
         Ok(())
     }
 }

@@ -1,6 +1,7 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
+use crate::network::client::agent::FormattedTrajectoryFileParams;
 use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::prelude::config::TransportConfigParams;
 use crate::utilities::configuration::Algorithm;
@@ -19,18 +20,7 @@ use tokio::sync::{Notify, RwLock, broadcast};
 
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
-pub(crate) struct FormattedTrajectoryFileParams {
-    pub(crate) enabled: bool,
-    pub(crate) encode: bool,
-    pub(crate) path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct TransportRuntimeParams {
-    pub(crate) max_traj_length: u128,
-}
-
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 #[derive(Debug, Clone)]
 pub(crate) struct ServerAddresses {
     pub(crate) inference_server_address: String,
@@ -202,6 +192,10 @@ impl LifeCycleManager {
         });
     }
 
+    pub fn get_config_path(&self) -> Arc<PathBuf> {
+        self.config_path.clone()
+    }
+
     pub fn get_max_traj_length(&self) -> Arc<RwLock<u128>> {
         self.max_traj_length.clone()
     }
@@ -227,7 +221,10 @@ impl LifeCycleManager {
         self.algorithm_args.clone()
     }
 
-    pub async fn set_max_traj_length(&self, max_traj_length: &u128) -> Result<(), LifeCycleManagerError> {
+    pub async fn set_max_traj_length(
+        &self,
+        max_traj_length: &u128,
+    ) -> Result<(), LifeCycleManagerError> {
         let mut max_traj_length_guard = self.max_traj_length.write().await;
         *max_traj_length_guard = max_traj_length.clone();
         Ok(())
@@ -282,8 +279,9 @@ impl LifeCycleManager {
         loop {
             let config_update_polling_seconds =
                 self.config_update_polling_seconds.read().await.clone() as u64;
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(config_update_polling_seconds));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                config_update_polling_seconds,
+            ));
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -320,7 +318,7 @@ impl LifeCycleManager {
     }
 
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
+    pub(crate) async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);
 
         tokio::try_join!(
@@ -338,7 +336,7 @@ impl LifeCycleManager {
     }
 
     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-    async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
+    pub(crate) async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);
 
         tokio::try_join!(

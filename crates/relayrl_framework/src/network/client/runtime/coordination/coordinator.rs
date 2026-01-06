@@ -4,10 +4,12 @@ use crate::network::TransportType;
 use crate::network::client::agent::ActorInferenceMode;
 use crate::network::client::agent::ActorServerModelMode;
 use crate::network::client::agent::{ClientCapabilities, ClientModes};
-use crate::network::client::runtime::coordination::lifecycle_manager::FormattedTrajectoryFileParams;
+use crate::network::client::agent::FormattedTrajectoryFileParams;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    LifeCycleManager, LifeCycleManagerError, ServerAddresses,
+    LifeCycleManager, LifeCycleManagerError,
 };
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScaleManagerUuid;
 use crate::network::client::runtime::coordination::scale_manager::{
     AlgorithmArgs, ScaleManager, ScaleManagerError,
@@ -16,29 +18,31 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
-use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
-};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::data::transport::{
     DispatcherConfig, DispatcherError, ScalingDispatcher, TrainingDispatcher, TransportClient,
     TransportError, client_transport_factory,
 };
+use crate::network::client::runtime::router::{
+    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+};
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 use crate::utilities::observability;
+#[cfg(feature = "logging")]
 use crate::utilities::observability::logging::builder::LoggingBuilder;
+#[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
 use thiserror::Error;
 
 use burn_tensor::{Tensor, backend::Backend};
 
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::{clear_all, clear_context, get, remove, reserve_with};
 use relayrl_types::prelude::DeviceType;
 use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
-use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{reserve_with, remove, clear_context, clear_all, get};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,8 +104,10 @@ pub enum CoordinatorError {
     StateManagerError(#[from] StateManagerError),
     #[error(transparent)]
     LifeCycleManagerError(#[from] LifeCycleManagerError),
+    #[cfg(feature = "logging")]
     #[error(transparent)]
     LoggingError(#[from] LoggingError),
+    #[cfg(feature = "metrics")]
     #[error(transparent)]
     MetricsError(#[from] MetricsError),
     #[error(transparent)]
@@ -180,7 +186,7 @@ pub trait ClientInterface<
     async fn _scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
     async fn _scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
     async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError>;
-    async fn _set_config(&self, config: ClientConfigLoader) -> Result<(), CoordinatorError>;
+    async fn _set_config_path(&self, config_path: PathBuf) -> Result<(), CoordinatorError>;
 }
 
 pub struct CoordinatorParams<
@@ -188,11 +194,13 @@ pub struct CoordinatorParams<
     const D_IN: usize,
     const D_OUT: usize,
 > {
+    #[cfg(feature = "logging")]
     pub(crate) logger: LoggingBuilder,
+    #[cfg(feature = "metrics")]
+    pub(crate) metrics: MetricsManager,
     pub(crate) lifecycle: LifeCycleManager,
     pub(crate) shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     pub(crate) scaling: ScaleManager<B, D_IN, D_OUT>,
-    pub(crate) metrics: MetricsManager,
 }
 
 type ClientUuid = Uuid;
@@ -212,7 +220,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ClientCoordinator<B, D_IN, D_OUT>
 {
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    pub(crate) async fn _send_client_ids_to_server(&self, client_ids: Vec<(String, Uuid)>) -> Result<(), CoordinatorError> {
+    pub(crate) async fn _send_client_ids_to_server(
+        &self,
+        client_ids: Vec<(String, Uuid)>,
+    ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => params
                 .scaling
@@ -251,6 +262,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         config_path: Option<PathBuf>,
         codec: Option<CodecConfig>,
     ) -> Result<(), CoordinatorError> {
+        #[cfg(feature = "logging")]
         let logger = LoggingBuilder::new();
 
         let config_path: PathBuf = match config_path {
@@ -286,7 +298,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let (state, global_dispatcher_rx) = StateManager::new(
             shared_client_capabilities.clone(),
             shared_max_traj_length,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))] 
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_state_server_addresses,
             shared_local_model_path,
             default_model.clone(),
@@ -353,6 +365,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ));
         }
 
+        #[cfg(feature = "metrics")]
         let metrics: MetricsManager = observability::init_observability();
 
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -394,11 +407,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         scaling._send_client_ids_to_server(client_ids).await?;
 
         self.runtime_params = Some(CoordinatorParams {
+            #[cfg(feature = "logging")]
             logger,
+            #[cfg(feature = "metrics")]
+            metrics,
             lifecycle,
             shared_state,
             scaling,
-            metrics,
         });
         Ok(())
     }
@@ -495,6 +510,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let actor_id: Uuid = reserve_with("actor", 117, 100)
                     .map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
+                #[cfg(feature = "metrics")]
                 params.metrics.record_counter("actors_created", 1, &[]);
 
                 // Get router runtime params
@@ -551,7 +567,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await?;
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 if send_id {
-                    params.scaling._send_client_ids_to_server(vec![("actor".to_string(), actor_id)]).await?;
+                    params
+                        .scaling
+                        ._send_client_ids_to_server(vec![("actor".to_string(), actor_id)])
+                        .await?;
                 }
 
                 Ok(())
@@ -567,6 +586,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
+                #[cfg(feature = "metrics")]
                 params.metrics.record_counter("actors_removed", 1, &[]);
                 params
                     .shared_state
@@ -574,8 +594,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .__remove_actor(id)
                     .map_err(CoordinatorError::from)?;
-                remove("actor", id)
-                    .map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                remove("actor", id).map_err(|e| CoordinatorError::UuidPoolError(e))?;
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
@@ -717,9 +736,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
 
                 let duration: f64 = start_time.elapsed().as_secs_f64();
+                #[cfg(feature = "metrics")]
                 params
                     .metrics
                     .record_histogram("action_request_latency", duration, &[]);
+                #[cfg(feature = "metrics")]
                 params
                     .metrics
                     .record_counter("action_requests", num_ids, &[]);
@@ -861,11 +882,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError> {
         match &self.runtime_params {
-            Some(_params) => {
-                // TODO: Implement config retrieval from lifecycle manager
-                Err(CoordinatorError::ConfigError(ClientConfigError::NotFound(
-                    "[Coordinator] Config retrieval not implemented yet".to_string(),
-                )))
+            Some(params) => {
+                Ok(ClientConfigLoader::load_config(&params.lifecycle.get_config_path()))
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::GetConfigError(
@@ -875,15 +893,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _set_config(&self, _config: ClientConfigLoader) -> Result<(), CoordinatorError> {
+    async fn _set_config_path(&self, config_path: PathBuf) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
-            Some(_params) => {
-                // TODO: Implement config update via lifecycle manager
-                Err(CoordinatorError::ConfigError(
-                    ClientConfigError::InvalidValue(
-                        "[Coordinator] Config update not implemented yet".to_string(),
-                    ),
-                ))
+            Some(params) => {
+                params.lifecycle._handle_config_change(config_path).await?;
+                Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::SetConfigError(
