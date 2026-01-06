@@ -1,13 +1,13 @@
 use crate::network::client::agent::ClientCapabilities;
 use crate::network::client::runtime::coordination::lifecycle_manager::TransportRuntimeParams;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport::TransportClient;
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport::TransportClient;
 use crate::utilities::configuration::ClientConfigLoader;
-use crate::utilities::orchestration::tokio_utils::get_or_init_tokio_runtime;
+use crate::utilities::tokio::get_or_init_tokio_runtime;
 
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use relayrl_types::prelude::AnyBurnTensor;
@@ -232,7 +232,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .send_action_request(&actor_id, &obs_bytes, &inference_address)
                     .await
                     .map_err(|e| ActorError::InferenceRequestError(format!("{e:?}")))?
-            },
+            }
             #[cfg(feature = "sync_transport")]
             TransportClient::Sync(sync_tr) => sync_tr
                 .send_action_request(&actor_id, &obs_bytes, &inference_address)
