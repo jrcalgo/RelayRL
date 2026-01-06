@@ -1,6 +1,5 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
-use crate::network::client::agent::DatabaseTypeParams;
-use crate::network::client::runtime::coordination::lifecycle_manager::FormattedTrajectoryFileParams;
+use crate::network::client::agent::{DatabaseTypeParams, FormattedTrajectoryFileParams};
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
@@ -12,10 +11,12 @@ use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::trajectory::{
     EncodedTrajectory, RelayRLTrajectory, TrajectoryError,
 };
+use relayrl_types::types::data::tensor::{DType, TensorData, NdArrayDType, TchDType};
 
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::collections::BinaryHeap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,7 +24,13 @@ use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
-use std::marker::PhantomData;
+use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::writer::FileWriter;
+use arrow::record_batch::RecordBatch;
+use arrow::array::BinaryBuilder;
+use arrow::array::{Float32Builder, Float64Builder, ListBuilder, UInt64Builder};
+use std::fs::File;
 
 type PriorityRank = i64;
 
@@ -32,11 +39,6 @@ struct SinkQueueEntry {
     priority: PriorityRank, // lower = sooner, higher = later
     actor_id: ActorUuid,
     traj_for_processing: Arc<RelayRLTrajectory>,
-}
-
-enum TrajectoryToWrite {
-    Encoded(EncodedTrajectory),
-    Raw(Arc<RelayRLTrajectory>),
 }
 
 impl Eq for SinkQueueEntry {}
@@ -66,19 +68,22 @@ pub enum TrajectorySinkError {
     TransportError(#[from] TransportError),
     #[error("Failed to encode trajectory: {0}")]
     EncodeTrajectoryError(#[from] TrajectoryError),
+    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
     #[error("Failed to write to database: {0}")]
     DatabaseWriteError(String),
 }
 
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>:
-    TransportTrajectorySinkTrait<B> + DatabaseTrajectorySinkTrait<B> + LocalTrajectorySinkTrait<B>
+    TransportTrajectorySinkTrait<B> + PersistentTrajectoryDataSinkTrait<B>
 {
     fn new(
         associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
         codec: CodecConfig,
     ) -> Self;
+    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self;
     fn with_transport(
         &mut self,
         transport: Arc<TransportClient<B>>,
@@ -99,13 +104,15 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
 
 #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
 pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>:
-    DatabaseTrajectorySinkTrait<B> + LocalTrajectorySinkTrait<B>
+    PersistentTrajectoryDataSinkTrait<B>
 {
     fn new(
         associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
         codec: CodecConfig,
     ) -> Self;
+    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self;
     fn with_trajectory_writer(
         &mut self,
         shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
@@ -143,33 +150,37 @@ trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     ) -> Result<(), TrajectorySinkError>;
 }
 
+#[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
+    DatabaseTrajectorySinkTrait<B> + LocalTrajectorySinkTrait<B>
+{
+}
+
+#[cfg(not(any(feature = "postgres_db", feature = "sqlite")))]
+trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
+    LocalTrajectorySinkTrait<B>
+{
+}
+
 trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn write_database_trajectory(
         database_params: &DatabaseTypeParams,
         actor_id: &ActorUuid,
         priority: &PriorityRank,
-        trajectory: &TrajectoryToWrite,
+        trajectory: Arc<RelayRLTrajectory>,
     ) -> Result<(), TrajectorySinkError>;
     async fn retry_write_database(
         database_params: &DatabaseTypeParams,
         actor_id: &ActorUuid,
         priority: &PriorityRank,
-        trajectory: TrajectoryToWrite,
+        trajectory: Arc<RelayRLTrajectory>,
     ) -> Result<(), TrajectorySinkError>;
 }
 
 trait LocalTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn write_local_trajectory(
-        associated_router_id: &RouterUuid,
         entry: &SinkQueueEntry,
-        codec: &CodecConfig,
-        actor_last_sent: &DashMap<Uuid, i64>,
-    ) -> Result<(), TrajectorySinkError>;
-    async fn retry_write_local(
-        shared_writer_params: &FormattedTrajectoryFileParams,
-        actor_id: &ActorUuid,
-        priority: &PriorityRank,
-        trajectory: &TrajectoryToWrite,
+        actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError>;
 }
 
@@ -186,6 +197,7 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     shared_trajectory_file_output: Option<Arc<RwLock<FormattedTrajectoryFileParams>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     codec: CodecConfig,
+    #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
     _phantom: PhantomData<B>,
 }
 
@@ -210,8 +222,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             shared_trajectory_file_output: None,
             shutdown: None,
             codec,
+            #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
             _phantom: PhantomData,
         }
+    }
+
+    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self {
+        self
     }
 
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -259,7 +277,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let shared_transport = self.shared_transport.clone();
         let codec: CodecConfig = self.codec.clone();
         let identity: RouterUuid = self.associated_router_id;
- 
+
         // Clone for worker async tasks
         let worker_queue: Arc<Mutex<BinaryHeap<SinkQueueEntry>>> = worker_priority_queue.clone();
         let worker_actor_last_processed: DashMap<Uuid, i64> = actor_last_processed.clone();
@@ -498,6 +516,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
     }
 }
 
+#[cfg(any(feature = "postgres_db", feature = "sqlite"))]
 impl<B: Backend + BackendMatcher<Backend = B>> DatabaseTrajectorySinkTrait<B>
     for ClientTrajectoryBuffer<B>
 {
@@ -505,7 +524,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> DatabaseTrajectorySinkTrait<B>
         _database_params: &DatabaseTypeParams,
         _actor_id: &ActorUuid,
         _priority: &PriorityRank,
-        _trajectory: &TrajectoryToWrite,
+        _trajectory: Arc<RelayRLTrajectory>,
     ) -> Result<(), TrajectorySinkError> {
         // TODO: Implement database trajectory writing
         Ok(())
@@ -515,33 +534,435 @@ impl<B: Backend + BackendMatcher<Backend = B>> DatabaseTrajectorySinkTrait<B>
         _database_params: &DatabaseTypeParams,
         _actor_id: &ActorUuid,
         _priority: &PriorityRank,
-        _trajectory: TrajectoryToWrite,
+        _trajectory: Arc<RelayRLTrajectory>,
     ) -> Result<(), TrajectorySinkError> {
         // TODO: Implement database trajectory retry writing
         Ok(())
     }
 }
 
+struct TensorArrowData {
+    dtype_str: String,
+    shape: Vec<u64>,
+    f32_data: Option<Vec<f32>>,
+    f64_data: Option<Vec<f64>>,
+    binary_data: Option<Vec<u8>>,
+}
+
+fn tensor_to_arrow_data(tensor: &TensorData) -> TensorArrowData {
+    let dtype_str = tensor.dtype.to_string();
+    let shape: Vec<u64> = tensor.shape.iter().map(|&s| s as u64).collect();
+
+    match &tensor.dtype {
+        DType::NdArray(NdArrayDType::F32) => {
+            let floats: Vec<f32> = tensor
+                .data
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            TensorArrowData {
+                dtype_str,
+                shape,
+                f32_data: Some(floats),
+                f64_data: None,
+                binary_data: None,
+            }
+        }
+        DType::NdArray(NdArrayDType::F64) => {
+            let floats: Vec<f64> = tensor
+                .data
+                .chunks_exact(8)
+                .map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+                .collect();
+            TensorArrowData {
+                dtype_str,
+                shape,
+                f32_data: None,
+                f64_data: Some(floats),
+                binary_data: None,
+            }
+        }
+        DType::Tch(TchDType::F32) => {
+            let floats: Vec<f32> = tensor
+                .data
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            TensorArrowData {
+                dtype_str,
+                shape,
+                f32_data: Some(floats),
+                f64_data: None,
+                binary_data: None,
+            }
+        }
+        DType::Tch(TchDType::F64) => {
+            let floats: Vec<f64> = tensor
+                .data
+                .chunks_exact(8)
+                .map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+                .collect();
+            TensorArrowData {
+                dtype_str,
+                shape,
+                f32_data: None,
+                f64_data: Some(floats),
+                binary_data: None,
+            }
+        }
+        _ => {
+            TensorArrowData {
+                dtype_str,
+                shape,
+                f32_data: None,
+                f64_data: None,
+                binary_data: Some(tensor.data.clone()),
+            }
+        }
+    }
+}
+
+fn get_backend_str(trajectory: &RelayRLTrajectory) -> String {
+    trajectory
+        .actions
+        .iter()
+        .find_map(|a| a.get_obs().map(|t| format!("{:?}", t.supported_backend)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn build_f32_list_array(data: Vec<Option<Vec<f32>>>) -> arrow::array::ArrayRef {
+    let mut builder = ListBuilder::new(Float32Builder::new());
+    for item in data {
+        match item {
+            Some(values) => {
+                for v in values {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+            }
+            None => builder.append(false),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
+fn build_f64_list_array(data: Vec<Option<Vec<f64>>>) -> arrow::array::ArrayRef {
+    let mut builder = ListBuilder::new(Float64Builder::new());
+    for item in data {
+        match item {
+            Some(values) => {
+                for v in values {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+            }
+            None => builder.append(false),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
+fn build_shape_list_array(data: Vec<Option<Vec<u64>>>) -> arrow::array::ArrayRef {
+    let mut builder = ListBuilder::new(UInt64Builder::new());
+    for item in data {
+        match item {
+            Some(values) => {
+                for v in values {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+            }
+            None => builder.append(false),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
+fn build_binary_array(data: Vec<Option<Vec<u8>>>) -> arrow::array::ArrayRef {
+    let mut builder = BinaryBuilder::new();
+    for item in data {
+        match item {
+            Some(bytes) => builder.append_value(&bytes),
+            None => builder.append_null(),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
 impl<B: Backend + BackendMatcher<Backend = B>> LocalTrajectorySinkTrait<B>
     for ClientTrajectoryBuffer<B>
 {
     async fn write_local_trajectory(
-        _associated_router_id: &RouterUuid,
-        _entry: &SinkQueueEntry,
-        _codec: &CodecConfig,
-        _actor_last_sent: &DashMap<Uuid, i64>,
+        entry: &SinkQueueEntry,
+        actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError> {
-        // TODO: Implement local trajectory writing
-        Ok(())
-    }
+        let trajectory = entry.traj_for_processing.clone();
+        let actor_id = entry.actor_id;
+        let priority = entry.priority;
+        let num_actions = trajectory.actions.len();
 
-    async fn retry_write_local(
-        _writer_params: &FormattedTrajectoryFileParams,
-        _actor_id: &ActorUuid,
-        _priority: &PriorityRank,
-        _trajectory: &TrajectoryToWrite,
-    ) -> Result<(), TrajectorySinkError> {
-        // TODO: Implement local trajectory retry writing
+        if num_actions == 0 {
+            return Ok(());
+        }
+
+        let backend_str = get_backend_str(&trajectory);
+        let mut backends: Vec<String> = Vec::with_capacity(num_actions);
+        let mut rewards: Vec<f32> = Vec::with_capacity(num_actions);
+        let mut dones: Vec<bool> = Vec::with_capacity(num_actions);
+        let mut timestamps: Vec<u64> = Vec::with_capacity(num_actions);
+        let mut agent_ids: Vec<Option<String>> = Vec::with_capacity(num_actions);
+
+        // Observation tensor columns
+        let mut obs_dtypes: Vec<Option<String>> = Vec::with_capacity(num_actions);
+        let mut obs_shapes: Vec<Option<Vec<u64>>> = Vec::with_capacity(num_actions);
+        let mut obs_f32: Vec<Option<Vec<f32>>> = Vec::with_capacity(num_actions);
+        let mut obs_f64: Vec<Option<Vec<f64>>> = Vec::with_capacity(num_actions);
+        let mut obs_binary: Vec<Option<Vec<u8>>> = Vec::with_capacity(num_actions);
+
+        // Action tensor columns
+        let mut act_dtypes: Vec<Option<String>> = Vec::with_capacity(num_actions);
+        let mut act_shapes: Vec<Option<Vec<u64>>> = Vec::with_capacity(num_actions);
+        let mut act_f32: Vec<Option<Vec<f32>>> = Vec::with_capacity(num_actions);
+        let mut act_f64: Vec<Option<Vec<f64>>> = Vec::with_capacity(num_actions);
+        let mut act_binary: Vec<Option<Vec<u8>>> = Vec::with_capacity(num_actions);
+
+        // Mask tensor columns
+        let mut mask_dtypes: Vec<Option<String>> = Vec::with_capacity(num_actions);
+        let mut mask_shapes: Vec<Option<Vec<u64>>> = Vec::with_capacity(num_actions);
+        let mut mask_f32: Vec<Option<Vec<f32>>> = Vec::with_capacity(num_actions);
+        let mut mask_f64: Vec<Option<Vec<f64>>> = Vec::with_capacity(num_actions);
+        let mut mask_binary: Vec<Option<Vec<u8>>> = Vec::with_capacity(num_actions);
+
+        for action in trajectory.actions.iter() {
+            backends.push(backend_str.clone());
+            rewards.push(action.get_rew());
+            dones.push(action.get_done());
+            timestamps.push(action.get_timestamp());
+            agent_ids.push(action.get_agent_id().map(|id| id.to_string()));
+
+            if let Some(obs) = action.get_obs() {
+                let arrow_data = tensor_to_arrow_data(obs);
+                obs_dtypes.push(Some(arrow_data.dtype_str));
+                obs_shapes.push(Some(arrow_data.shape));
+                obs_f32.push(arrow_data.f32_data);
+                obs_f64.push(arrow_data.f64_data);
+                obs_binary.push(arrow_data.binary_data);
+            } else {
+                obs_dtypes.push(None);
+                obs_shapes.push(None);
+                obs_f32.push(None);
+                obs_f64.push(None);
+                obs_binary.push(None);
+            }
+
+            if let Some(act) = action.get_act() {
+                let arrow_data = tensor_to_arrow_data(act);
+                act_dtypes.push(Some(arrow_data.dtype_str));
+                act_shapes.push(Some(arrow_data.shape));
+                act_f32.push(arrow_data.f32_data);
+                act_f64.push(arrow_data.f64_data);
+                act_binary.push(arrow_data.binary_data);
+            } else {
+                act_dtypes.push(None);
+                act_shapes.push(None);
+                act_f32.push(None);
+                act_f64.push(None);
+                act_binary.push(None);
+            }
+
+            if let Some(mask) = action.get_mask() {
+                let arrow_data = tensor_to_arrow_data(mask);
+                mask_dtypes.push(Some(arrow_data.dtype_str));
+                mask_shapes.push(Some(arrow_data.shape));
+                mask_f32.push(arrow_data.f32_data);
+                mask_f64.push(arrow_data.f64_data);
+                mask_binary.push(arrow_data.binary_data);
+            } else {
+                mask_dtypes.push(None);
+                mask_shapes.push(None);
+                mask_f32.push(None);
+                mask_f64.push(None);
+                mask_binary.push(None);
+            }
+        }
+
+        let file_path = std::path::PathBuf::from(format!(
+            "trajectories/trajectory_{}_{}.arrow",
+            actor_id, trajectory.timestamp
+        ));
+
+        tokio::task::spawn_blocking(move || -> Result<(), TrajectorySinkError> {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("backend", DataType::Utf8, false),
+                Field::new("reward", DataType::Float32, false),
+                Field::new("done", DataType::Boolean, false),
+                Field::new("timestamp", DataType::UInt64, false),
+                Field::new("agent_id", DataType::Utf8, true),
+
+                // Observation columns
+                Field::new("obs_dtype", DataType::Utf8, true),
+                Field::new(
+                    "obs_shape",
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+                    true,
+                ),
+                Field::new(
+                    "obs_f32",
+                    DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+                    true,
+                ),
+                Field::new(
+                    "obs_f64",
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    true,
+                ),
+                Field::new("obs_binary", DataType::Binary, true),
+
+                // Action columns
+                Field::new("act_dtype", DataType::Utf8, true),
+                Field::new(
+                    "act_shape",
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+                    true,
+                ),
+                Field::new(
+                    "act_f32",
+                    DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+                    true,
+                ),
+                Field::new(
+                    "act_f64",
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    true,
+                ),
+                Field::new("act_binary", DataType::Binary, true),
+
+                // Mask columns
+                Field::new("mask_dtype", DataType::Utf8, true),
+                Field::new(
+                    "mask_shape",
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+                    true,
+                ),
+                Field::new(
+                    "mask_f32",
+                    DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+                    true,
+                ),
+                Field::new(
+                    "mask_f64",
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    true,
+                ),
+                Field::new("mask_binary", DataType::Binary, true),
+            ]));
+
+            let backend_array = StringArray::from(backends);
+            let reward_array = Float32Array::from(rewards);
+            let done_array = BooleanArray::from(dones);
+            let timestamp_array = UInt64Array::from(timestamps);
+            let agent_id_array = StringArray::from(agent_ids);
+
+            let obs_dtype_array = StringArray::from(obs_dtypes);
+            let obs_shape_array = build_shape_list_array(obs_shapes);
+            let obs_f32_array = build_f32_list_array(obs_f32);
+            let obs_f64_array = build_f64_list_array(obs_f64);
+            let obs_binary_array = build_binary_array(obs_binary);
+
+            let act_dtype_array = StringArray::from(act_dtypes);
+            let act_shape_array = build_shape_list_array(act_shapes);
+            let act_f32_array = build_f32_list_array(act_f32);
+            let act_f64_array = build_f64_list_array(act_f64);
+            let act_binary_array = build_binary_array(act_binary);
+
+            let mask_dtype_array = StringArray::from(mask_dtypes);
+            let mask_shape_array = build_shape_list_array(mask_shapes);
+            let mask_f32_array = build_f32_list_array(mask_f32);
+            let mask_f64_array = build_f64_list_array(mask_f64);
+            let mask_binary_array = build_binary_array(mask_binary);
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(backend_array) as ArrayRef,
+                    Arc::new(reward_array) as ArrayRef,
+                    Arc::new(done_array) as ArrayRef,
+                    Arc::new(timestamp_array) as ArrayRef,
+                    Arc::new(agent_id_array) as ArrayRef,
+                    Arc::new(obs_dtype_array) as ArrayRef,
+                    obs_shape_array,
+                    obs_f32_array,
+                    obs_f64_array,
+                    obs_binary_array,
+                    Arc::new(act_dtype_array) as ArrayRef,
+                    act_shape_array,
+                    act_f32_array,
+                    act_f64_array,
+                    act_binary_array,
+                    Arc::new(mask_dtype_array) as ArrayRef,
+                    mask_shape_array,
+                    mask_f32_array,
+                    mask_f64_array,
+                    mask_binary_array,
+                ],
+            )
+            .map_err(|e| {
+                TrajectorySinkError::EncodeTrajectoryError(TrajectoryError::SerializationError(
+                    e.to_string(),
+                ))
+            })?;
+
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+
+            let file = File::create(&file_path).map_err(|e| {
+                TrajectorySinkError::EncodeTrajectoryError(TrajectoryError::SerializationError(
+                    format!("Failed to create file: {}", e),
+                ))
+            })?;
+
+            let mut writer = FileWriter::try_new(file, &schema).map_err(|e| {
+                TrajectorySinkError::EncodeTrajectoryError(TrajectoryError::SerializationError(
+                    format!("Failed to create Arrow writer: {}", e),
+                ))
+            })?;
+
+            writer.write(&batch).map_err(|e| {
+                TrajectorySinkError::EncodeTrajectoryError(TrajectoryError::SerializationError(
+                    format!("Failed to write batch: {}", e),
+                ))
+            })?;
+
+            writer.finish().map_err(|e| {
+                TrajectorySinkError::EncodeTrajectoryError(TrajectoryError::SerializationError(
+                    format!("Failed to finish file: {}", e),
+                ))
+            })?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            TrajectorySinkError::EncodeTrajectoryError(TrajectoryError::SerializationError(
+                format!("Task join error: {}", e),
+            ))
+        })??;
+
+        actor_last_processed.insert(actor_id, priority);
+
         Ok(())
     }
+}
+
+#[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+impl<B: Backend + BackendMatcher<Backend = B>> PersistentTrajectoryDataSinkTrait<B>
+    for ClientTrajectoryBuffer<B>
+{
+}
+
+#[cfg(not(any(feature = "postgres_db", feature = "sqlite")))]
+impl<B: Backend + BackendMatcher<Backend = B>> PersistentTrajectoryDataSinkTrait<B>
+    for ClientTrajectoryBuffer<B>
+{
 }
