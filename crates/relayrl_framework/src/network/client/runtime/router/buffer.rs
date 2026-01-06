@@ -165,16 +165,12 @@ trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>
 
 trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn write_database_trajectory(
-        database_params: &DatabaseTypeParams,
-        actor_id: &ActorUuid,
-        priority: &PriorityRank,
-        trajectory: Arc<RelayRLTrajectory>,
+        entry: &SinkQueueEntry,
+        actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError>;
     async fn retry_write_database(
-        database_params: &DatabaseTypeParams,
-        actor_id: &ActorUuid,
-        priority: &PriorityRank,
-        trajectory: Arc<RelayRLTrajectory>,
+        entry: &SinkQueueEntry,
+        actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError>;
 }
 
@@ -195,6 +191,8 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     shared_transport: Option<Arc<TransportClient<B>>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_server_addresses: Option<Arc<RwLock<ServerAddresses>>>,
+    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    database_params: Option<DatabaseTypeParams>,
     shared_trajectory_file_output: Option<Arc<RwLock<FormattedTrajectoryFileParams>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     codec: CodecConfig,
@@ -220,6 +218,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             shared_transport: None,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_server_addresses: None,
+            #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+            database_params: None,
             shared_trajectory_file_output: None,
             shutdown: None,
             codec,
@@ -230,6 +230,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
     #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
     fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self {
+        self.database_params = Some(database_params);
         self
     }
 
@@ -956,13 +957,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> LocalTrajectorySinkTrait<B>
     }
 }
 
-#[cfg(any(feature = "postgres_db", feature = "sqlite"))]
-impl<B: Backend + BackendMatcher<Backend = B>> PersistentTrajectoryDataSinkTrait<B>
-    for ClientTrajectoryBuffer<B>
-{
-}
-
-#[cfg(not(any(feature = "postgres_db", feature = "sqlite")))]
 impl<B: Backend + BackendMatcher<Backend = B>> PersistentTrajectoryDataSinkTrait<B>
     for ClientTrajectoryBuffer<B>
 {
