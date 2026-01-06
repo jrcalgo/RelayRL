@@ -17,7 +17,7 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["network", "logging", "metrics"]
+default = ["client"]
 
 network = ["client", "inference_server", "training_server"]
 client = []
@@ -42,7 +42,7 @@ profile = ["flamegraph", "console-subscriber"]
 relayrl_types = { version = "0.3.21", features = ["ndarray-backend", "tch-backend", "codec-full", "inference-models"] }
 active-uuid-registry = { version = "0.3.0", features = ["concurrent-map"]}
 
-# External crates
+# General external crates used throughout framework
 tokio = { version = "1.48.0", features = ["full"] }
 serde = { version = "1.0.195", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v8"] }
@@ -60,6 +60,11 @@ bytemuck = "1.14.1"
 bincode = "2.0.1"
 # TODO: Add Redis support for training data storagen & querying
 # redis = 0.32.7
+
+# Trajectory data writing
+arrow = { version = "57.1.0", features = ["ipc_compression", "default"]}
+arrow-schema = "57.1.0"
+arrow-array = "57.1.0"
 
 # Optional dependencies
 zmq = { version = "0.10.0", optional = true }
