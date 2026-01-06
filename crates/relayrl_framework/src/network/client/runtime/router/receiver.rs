@@ -79,8 +79,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                         let transport_clone: Arc<TransportClient<B>> = transport.clone();
                         let identity: RouterUuid = self.associated_router_id;
 
-                        let transport_handle: tokio::task::JoinHandle<()> = tokio::task::spawn_blocking(
-                            move || {
+                        let transport_handle: tokio::task::JoinHandle<()> =
+                            tokio::task::spawn_blocking(move || {
                                 if let TransportClient::Sync(sync_tr) = &*transport_clone {
                                     match sync_tr.listen_for_model(
                                         &identity,
@@ -97,8 +97,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                                         }
                                     }
                                 }
-                            },
-                        );
+                            });
 
                         if let Some(mut shutdown_rx) =
                             self.shutdown.as_ref().map(|s| s.resubscribe())

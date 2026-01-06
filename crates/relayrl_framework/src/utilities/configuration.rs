@@ -1042,7 +1042,10 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 .config_path
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("client_config.json")),
-            config_update_polling_seconds: self.config_update_polling_seconds.clone().unwrap_or_else(|| 10.0),
+            config_update_polling_seconds: self
+                .config_update_polling_seconds
+                .clone()
+                .unwrap_or_else(|| 10.0),
             init_hyperparameters: self
                 .init_hyperparameters
                 .clone()
@@ -1712,7 +1715,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
     }
 
     fn build_default() -> TransportConfigParams {
-        let random_model_path_id: String = std::process::id().to_string();
         TransportConfigParams {
             inference_server_address: NetworkParams {
                 prefix: "tcp://".to_string(),

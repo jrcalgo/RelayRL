@@ -1,33 +1,35 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::ClientCapabilities;
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-use crate::network::client::runtime::coordination::lifecycle_manager::FormattedTrajectoryFileParams;
+use crate::network::client::agent::FormattedTrajectoryFileParams;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError, ServerAddresses,
 };
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, TrajectorySinkError};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::router::receiver::{TransportReceiverError, ClientTransportModelReceiver};
-
-use crate::network::client::runtime::router::{
-    RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter
+use crate::network::client::runtime::router::receiver::{
+    ClientTransportModelReceiver, TransportReceiverError,
 };
-use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
+
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::data::transport::{
     DispatcherError, ScalingDispatcher, TrainingDispatcher, TransportClient, TransportError,
 };
+use crate::network::client::runtime::router::{
+    RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
+};
+use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::HyperparameterConfig;
 
 use thiserror::Error;
 
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::{add, get_all, remove, reserve_with};
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::tensor::BackendMatcher;
-use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{reserve_with, remove, add, get_all};
 
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -143,8 +145,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         shared_algorithm_args: Arc<AlgorithmArgs>,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         global_dispatcher_rx: Receiver<RoutedMessage>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        transport: Arc<TransportClient<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] transport: Arc<
+            TransportClient<B>,
+        >,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         scaling_dispatcher: Arc<ScalingDispatcher<B>>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -228,7 +231,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    pub(crate) async fn _send_client_ids_to_server(&self, client_ids: Vec<(String, Uuid)>) -> Result<(), ScaleManagerError> {
+    pub(crate) async fn _send_client_ids_to_server(
+        &self,
+        client_ids: Vec<(String, Uuid)>,
+    ) -> Result<(), ScaleManagerError> {
         let scaling_server_address = self
             .shared_server_addresses
             .read()
@@ -389,7 +395,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             add("trajectory_buffer", router_id).map_err(ScaleManagerError::from)?;
             // Create Sender - receives from actors via sender_rx
             let mut sender: ClientTrajectoryBuffer<B> =
-                ClientTrajectoryBuffer::new(router_id,trajectory_buffer_rx, self.codec.clone());
+                ClientTrajectoryBuffer::new(router_id, trajectory_buffer_rx, self.codec.clone());
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             sender.with_transport(self.transport.clone(), self.shared_server_addresses.clone());
             sender.with_trajectory_writer(self.shared_trajectory_file_output.clone());
@@ -441,7 +447,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ._send_scaling_complete(ScalingOperation::ScaleOut, &scaling_server_address)
                 .await;
             #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-            return Err(ScaleManagerError::ScalingOperationNotSupportedError("Scale out operation not supported".to_string()));
+            return Err(ScaleManagerError::ScalingOperationNotSupportedError(
+                "Scale out operation not supported".to_string(),
+            ));
         }
 
         let router_ids: Vec<RouterUuid> = self
@@ -540,7 +548,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                     return result;
                     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-                    return Err(ScaleManagerError::ScalingOperationNotSupportedError("Scale in operation not supported".to_string()));
+                    return Err(ScaleManagerError::ScalingOperationNotSupportedError(
+                        "Scale in operation not supported".to_string(),
+                    ));
                 }
 
                 let old_actor_mappings: Vec<(Uuid, Uuid)> = {
@@ -585,12 +595,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let result: Result<(), ScaleManagerError> = self
                         ._send_scaling_complete(ScalingOperation::ScaleIn, &scaling_server_address)
                         .await;
-                    
+
                     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                     return result;
 
                     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-                    return Err(ScaleManagerError::ScalingOperationNotSupportedError("Scale in operation not supported".to_string()));
+                    return Err(ScaleManagerError::ScalingOperationNotSupportedError(
+                        "Scale in operation not supported".to_string(),
+                    ));
                 }
 
                 for (router_id, router_params) in &removed_routers {
@@ -609,7 +621,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let state = self.shared_state.read().await;
                     state.distribute_actors(router_ids.clone());
                 }
-  
+
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 if let Err(e) = self
                     ._send_scaling_complete(ScalingOperation::ScaleIn, &scaling_server_address)
@@ -631,7 +643,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     return Err(e);
                 }
-                
+
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 if send_ids {
                     let client_ids = get_all().map_err(ScaleManagerError::from)?;
@@ -647,10 +659,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             None => {
                 println!("No routers to scale down.");
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                return self._send_scaling_complete(ScalingOperation::ScaleIn, &scaling_server_address).await;
+                return self
+                    ._send_scaling_complete(ScalingOperation::ScaleIn, &scaling_server_address)
+                    .await;
 
                 #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-                return Err(ScaleManagerError::ScalingOperationNotSupportedError("Scale in operation not supported".to_string()));
+                return Err(ScaleManagerError::ScalingOperationNotSupportedError(
+                    "Scale in operation not supported".to_string(),
+                ));
             }
         }
     }
@@ -702,7 +718,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    async fn _spawn_transport_receiver(receiver: ClientTransportModelReceiver<B>) -> JoinHandle<()> {
+    async fn _spawn_transport_receiver(
+        receiver: ClientTransportModelReceiver<B>,
+    ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = receiver.spawn_loop().await {
                 eprintln!("[ScaleManager] External receiver error: {}", e);

@@ -1,22 +1,22 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
-use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
-};
 use crate::network::client::runtime::data::transport::{
     SyncClientTransport, SyncInferenceServerTransport, SyncTrainingServerTransport, TransportError,
     TransportUuid,
 };
+use crate::network::client::runtime::router::{
+    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+};
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
 
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::{add, get, remove, reserve_with};
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use relayrl_types::types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
 use relayrl_types::types::model::utils::validate_module;
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
-use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{reserve_with, add, remove, get};
 
 use burn_tensor::backend::Backend;
 use std::io::Write;
@@ -117,8 +117,8 @@ impl ZmqClient {
         let socket = context.socket(zmq::DEALER)?;
 
         // Set socket identity
-        let identity: SocketUuid = reserve_with("zmq_dealer_socket", 117, 100)
-            .map_err(ZmqClientError::from)?;
+        let identity: SocketUuid =
+            reserve_with("zmq_dealer_socket", 117, 100).map_err(ZmqClientError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         // Set socket options for performance
@@ -140,8 +140,8 @@ impl ZmqClient {
     ) -> Result<Socket, ZmqClientError> {
         let socket = context.socket(zmq::PUSH)?;
 
-        let identity: SocketUuid = reserve_with("zmq_push_socket", 67, 100)
-            .map_err(ZmqClientError::from)?;
+        let identity: SocketUuid =
+            reserve_with("zmq_push_socket", 67, 100).map_err(ZmqClientError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         // Set send timeout to non-blocking
@@ -160,8 +160,8 @@ impl ZmqClient {
     ) -> Result<Socket, ZmqClientError> {
         let socket = context.socket(zmq::SUB)?;
 
-        let identity: SocketUuid = reserve_with("zmq_sub_socket", 69, 100)
-            .map_err(ZmqClientError::from)?;
+        let identity: SocketUuid =
+            reserve_with("zmq_sub_socket", 69, 100).map_err(ZmqClientError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         socket.set_subscribe(b"")?;
@@ -1263,8 +1263,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         if let Some(sockets) = &self.cached_sockets.model_dealer_socket {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_dealer_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -1273,8 +1272,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         if let Some(sockets) = &self.cached_sockets.model_sub_socket {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_sub_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove("zmq_sub_socket", socket_id.clone()).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -1283,8 +1281,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         if let Some(sockets) = &self.cached_sockets.traj_push_socket {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_push_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove("zmq_push_socket", socket_id.clone()).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -1293,15 +1290,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         if let Some(sockets) = &self.cached_sockets.scaling_dealer_socket {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_dealer_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
         }
 
-        remove("zmq_transport_client", self.transport_id.clone())
-            .map_err(TransportError::from)?;
+        remove("zmq_transport_client", self.transport_id.clone()).map_err(TransportError::from)?;
         Ok(())
     }
 }

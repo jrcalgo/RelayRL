@@ -3,12 +3,12 @@ use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
 use crate::network::{HyperparameterArgs, TransportType};
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
 
+use active_uuid_registry::UuidPoolError;
 use relayrl_types::Hyperparams;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use relayrl_types::types::data::trajectory::EncodedTrajectory;
 use relayrl_types::types::model::ModelModule;
-use active_uuid_registry::UuidPoolError;
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;

@@ -6,18 +6,18 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError, ServerAddresses,
 };
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::data::transport::TransportClient;
+use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::ClientConfigLoader;
 
 use std::path::PathBuf;
 use thiserror::Error;
 
+use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::{remove, replace};
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
-use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{replace, remove};
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -182,8 +182,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        shared_transport: Arc<TransportClient<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] shared_transport: Arc<
+            TransportClient<B>,
+        >,
         tx_to_sender: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&actor_id) {
@@ -260,8 +261,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        shared_transport: Arc<TransportClient<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] shared_transport: Arc<
+            TransportClient<B>,
+        >,
         tx_to_sender: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         self.__remove_actor(actor_id)?;

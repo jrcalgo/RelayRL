@@ -24,17 +24,17 @@
 //!                  └────────────────┘
 //! ```
 
+use crate::network::HyperparameterArgs;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
-use crate::network::client::runtime::router::RoutedMessage;
 use crate::network::client::runtime::data::transport::{TransportClient, TransportError};
-use crate::network::{HyperparameterArgs};
+use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
 
+use active_uuid_registry::interface::reserve_with;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use relayrl_types::types::data::trajectory::EncodedTrajectory;
 use relayrl_types::types::model::ModelModule;
-use active_uuid_registry::interface::reserve_with;
 
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
