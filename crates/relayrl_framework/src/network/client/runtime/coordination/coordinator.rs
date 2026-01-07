@@ -357,7 +357,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         )
         .map_err(|e| CoordinatorError::ScaleManagerError(e))?;
 
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         if let Err(e) = scaling.__scale_out(router_scale, false).await {
+            return Err(CoordinatorError::ScaleManagerError(e));
+        }
+
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        if let Err(e) = scaling.__scale_in(router_scale).await {
             return Err(CoordinatorError::ScaleManagerError(e));
         }
 
@@ -864,11 +870,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 return params
                     .scaling
                     .__scale_out(router_add, true)
                     .await
                     .map_err(CoordinatorError::ScaleManagerError);
+                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                return params.scaling.__scale_out(router_add).await.map_err(CoordinatorError::ScaleManagerError);
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
@@ -881,7 +890,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 params.scaling.__scale_in(router_remove, true).await?;
+                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                params.scaling.__scale_in(router_remove).await?;
                 Ok(())
             }
             None => Err(CoordinatorError::ScaleManagerError(

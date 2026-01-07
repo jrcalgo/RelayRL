@@ -227,7 +227,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map(|m| m.len() as u32)
             .unwrap_or(0);
         if router_count > 0 {
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             self.__scale_in(router_count, false).await?;
+            #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+            self.__scale_in(router_count).await?;
         }
         self.router_dispatcher.take().map(|handle| handle.abort());
         self.router_filter_channels.clear();
@@ -311,6 +314,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn __scale_out(
         &mut self,
         router_add: u32,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         send_ids: bool,
     ) -> Result<(), ScaleManagerError> {
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -530,6 +534,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn __scale_in(
         &mut self,
         router_remove: u32,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         send_ids: bool,
     ) -> Result<(), ScaleManagerError> {
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
