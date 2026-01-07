@@ -1,4 +1,6 @@
 use crate::network::client::agent::ClientCapabilities;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::data::transport::TransportClient;
@@ -7,8 +9,6 @@ use crate::network::client::runtime::router::{
 };
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::tokio::get_or_init_tokio_runtime;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 
 use relayrl_types::prelude::AnyBurnTensor;
 use relayrl_types::types::data::action::RelayRLAction;
@@ -55,13 +55,18 @@ enum InferenceKind {
 
 impl InferenceKind {
     fn device(device: &DeviceType, capabilities: &ClientCapabilities) -> Self {
-        if capabilities.local_inference && !capabilities.server_inference {
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        let server_inference = capabilities.server_inference;
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        let server_inference = false;
+
+        if capabilities.local_inference && !server_inference {
             return match device {
                 DeviceType::Cpu => Self::Local,
                 DeviceType::Cuda(_) | DeviceType::Mps => Self::Local,
             };
         }
-        if !capabilities.local_inference && capabilities.server_inference {
+        if !capabilities.local_inference && server_inference {
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             return Self::Server;
 

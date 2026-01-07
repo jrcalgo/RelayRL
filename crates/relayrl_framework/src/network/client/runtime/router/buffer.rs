@@ -1,5 +1,7 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
-use crate::network::client::agent::{DatabaseTypeParams, FormattedTrajectoryFileParams};
+#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+use crate::network::client::agent::DatabaseTypeParams;
+use crate::network::client::agent::FormattedTrajectoryFileParams;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
@@ -9,14 +11,21 @@ use crate::network::client::runtime::data::transport::{TransportClient, Transpor
 
 use relayrl_types::prelude::{BackendMatcher, CodecConfig};
 use relayrl_types::types::data::action::RelayRLAction;
+use relayrl_types::types::data::tensor::{DType, NdArrayDType, TchDType, TensorData};
 use relayrl_types::types::data::trajectory::{
     EncodedTrajectory, RelayRLTrajectory, TrajectoryError,
 };
-use relayrl_types::types::data::tensor::{DType, TensorData, NdArrayDType, TchDType};
 
+use arrow::array::BinaryBuilder;
+use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
+use arrow::array::{Float32Builder, Float64Builder, ListBuilder, UInt64Builder};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::writer::FileWriter;
+use arrow::record_batch::RecordBatch;
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::collections::BinaryHeap;
+use std::fs::File;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,13 +34,6 @@ use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
-use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::FileWriter;
-use arrow::record_batch::RecordBatch;
-use arrow::array::BinaryBuilder;
-use arrow::array::{Float32Builder, Float64Builder, ListBuilder, UInt64Builder};
-use std::fs::File;
 
 type PriorityRank = i64;
 
@@ -69,7 +71,7 @@ pub enum TrajectorySinkError {
     TransportError(#[from] TransportError),
     #[error("Failed to encode trajectory: {0}")]
     EncodeTrajectoryError(#[from] TrajectoryError),
-    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     #[error("Failed to write to database: {0}")]
     DatabaseWriteError(String),
 }
@@ -83,7 +85,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
         rx_from_actor: Receiver<RoutedMessage>,
         codec: CodecConfig,
     ) -> Self;
-    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self;
     fn with_transport(
         &mut self,
@@ -110,9 +112,9 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn new(
         associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
-        codec: CodecConfig,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: CodecConfig,
     ) -> Self;
-    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self;
     fn with_trajectory_writer(
         &mut self,
@@ -151,13 +153,13 @@ trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     ) -> Result<(), TrajectorySinkError>;
 }
 
-#[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
 trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
     DatabaseTrajectorySinkTrait<B> + LocalTrajectorySinkTrait<B>
 {
 }
 
-#[cfg(not(any(feature = "postgres_db", feature = "sqlite")))]
+#[cfg(not(any(feature = "postgres_db", feature = "sqlite_db")))]
 trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
     LocalTrajectorySinkTrait<B>
 {
@@ -191,10 +193,11 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     shared_transport: Option<Arc<TransportClient<B>>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_server_addresses: Option<Arc<RwLock<ServerAddresses>>>,
-    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     database_params: Option<DatabaseTypeParams>,
     shared_trajectory_file_output: Option<Arc<RwLock<FormattedTrajectoryFileParams>>>,
     shutdown: Option<broadcast::Receiver<()>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     codec: CodecConfig,
     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
     _phantom: PhantomData<B>,
@@ -206,7 +209,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     fn new(
         associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
-        codec: CodecConfig,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: CodecConfig,
     ) -> Self {
         Self {
             associated_router_id,
@@ -218,17 +221,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             shared_transport: None,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_server_addresses: None,
-            #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
             database_params: None,
             shared_trajectory_file_output: None,
             shutdown: None,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             codec,
             #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
             _phantom: PhantomData,
         }
     }
 
-    #[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self {
         self.database_params = Some(database_params);
         self
@@ -277,6 +281,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_transport = self.shared_transport.clone();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let codec: CodecConfig = self.codec.clone();
         let identity: RouterUuid = self.associated_router_id;
 
@@ -285,6 +290,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let worker_actor_last_processed: DashMap<Uuid, i64> = actor_last_processed.clone();
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let worker_transport: Option<Arc<TransportClient<B>>> = shared_transport.clone();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let worker_codec: CodecConfig = codec.clone();
         let worker_identity: Uuid = identity;
         let worker_trajectory_writer_enabled: bool = trajectory_writer_enabled;
@@ -327,6 +333,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
                         for _job in jobs_to_process {
                             let _job_identity = worker_identity;
+                            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                             let _job_codec = worker_codec.clone();
                             let _job_actor_last_processed = worker_actor_last_processed.clone();
                             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -518,25 +525,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
     }
 }
 
-#[cfg(any(feature = "postgres_db", feature = "sqlite"))]
+#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
 impl<B: Backend + BackendMatcher<Backend = B>> DatabaseTrajectorySinkTrait<B>
     for ClientTrajectoryBuffer<B>
 {
     async fn write_database_trajectory(
-        _database_params: &DatabaseTypeParams,
-        _actor_id: &ActorUuid,
-        _priority: &PriorityRank,
-        _trajectory: Arc<RelayRLTrajectory>,
+        entry: &SinkQueueEntry,
+        actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError> {
         // TODO: Implement database trajectory writing
         Ok(())
     }
 
     async fn retry_write_database(
-        _database_params: &DatabaseTypeParams,
-        _actor_id: &ActorUuid,
-        _priority: &PriorityRank,
-        _trajectory: Arc<RelayRLTrajectory>,
+        entry: &SinkQueueEntry,
+        actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError> {
         // TODO: Implement database trajectory retry writing
         Ok(())
@@ -612,15 +615,13 @@ fn tensor_to_arrow_data(tensor: &TensorData) -> TensorArrowData {
                 binary_data: None,
             }
         }
-        _ => {
-            TensorArrowData {
-                dtype_str,
-                shape,
-                f32_data: None,
-                f64_data: None,
-                binary_data: Some(tensor.data.clone()),
-            }
-        }
+        _ => TensorArrowData {
+            dtype_str,
+            shape,
+            f32_data: None,
+            f64_data: None,
+            binary_data: Some(tensor.data.clone()),
+        },
     }
 }
 
@@ -800,7 +801,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> LocalTrajectorySinkTrait<B>
                 Field::new("done", DataType::Boolean, false),
                 Field::new("timestamp", DataType::UInt64, false),
                 Field::new("agent_id", DataType::Utf8, true),
-
                 // Observation columns
                 Field::new("obs_dtype", DataType::Utf8, true),
                 Field::new(
@@ -819,7 +819,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> LocalTrajectorySinkTrait<B>
                     true,
                 ),
                 Field::new("obs_binary", DataType::Binary, true),
-
                 // Action columns
                 Field::new("act_dtype", DataType::Utf8, true),
                 Field::new(
@@ -838,7 +837,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> LocalTrajectorySinkTrait<B>
                     true,
                 ),
                 Field::new("act_binary", DataType::Binary, true),
-
                 // Mask columns
                 Field::new("mask_dtype", DataType::Utf8, true),
                 Field::new(

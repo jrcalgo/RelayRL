@@ -15,7 +15,9 @@ use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::get;
 use burn_tensor::{Tensor, backend::Backend};
 use relayrl_types::Hyperparams;
-use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use relayrl_types::types::data::action::CodecConfig;
+use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{
     AnyBurnTensor, BackendMatcher, DeviceType, SupportedTensorBackend,
 };
@@ -65,6 +67,7 @@ pub enum RuntimeStatisticsReturnType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorInferenceMode {
     Local,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     Server,
 }
 
@@ -86,11 +89,12 @@ impl Default for FormattedTrajectoryFileParams {
         Self {
             enabled: false,
             encode: false,
-            path: PathBuf::from(""),
+            path: PathBuf::from("./trajectories"),
         }
     }
 }
 
+#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseTypeParams {
     Sqlite(SqliteParams),
@@ -98,12 +102,14 @@ pub enum DatabaseTypeParams {
 }
 
 // TODO: Add actual Sqlite params
+#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqliteParams {
     pub path: PathBuf,
 }
 
 // TODO: Add actual PostgreSQL params
+#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostgreSQLParams {
     pub connection: String,
@@ -117,14 +123,25 @@ pub struct PostgreSQLParams {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrajectoryRecordMode {
     Local(FormattedTrajectoryFileParams),
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     Database(DatabaseTypeParams),
-    Hybrid(DatabaseTypeParams),
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+    Hybrid(DatabaseTypeParams, FormattedTrajectoryFileParams),
+    #[cfg(any(
+        feature = "postgres_db",
+        feature = "sqlite_db",
+        feature = "async_transport",
+        feature = "sync_transport"
+    ))]
     Disabled,
 }
 
 impl Default for TrajectoryRecordMode {
     fn default() -> Self {
-        Self::Disabled
+        #[cfg(any(feature = "postgres_db", feature = "sqlite_db", feature = "async_transport", feature = "sync_transport"))]
+        return Self::Disabled;
+        #[cfg(not(any(feature = "postgres_db", feature = "sqlite_db", feature = "async_transport", feature = "sync_transport")))]
+        return Self::Local(FormattedTrajectoryFileParams::default());
     }
 }
 
@@ -145,23 +162,35 @@ impl Default for ActorServerModelMode {
 #[derive(Debug, Clone)]
 pub struct ClientCapabilities {
     pub local_inference: bool,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub server_inference: bool,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub inference_server_mode: ActorServerModelMode,
     pub local_trajectory_recording: bool,
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     pub database_trajectory_recording: bool,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub training_server_mode: ActorServerModelMode,
+    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     pub db_params: Option<DatabaseTypeParams>,
 }
 
 impl ClientCapabilities {
     pub fn trajectory_recording_enabled(&self) -> bool {
-        self.local_trajectory_recording || self.database_trajectory_recording
+        #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+        let database_trajectory_recording = self.database_trajectory_recording;
+        #[cfg(not(any(feature = "postgres_db", feature = "sqlite_db")))]
+        let database_trajectory_recording = false;
+
+        self.local_trajectory_recording || database_trajectory_recording
     }
 }
 
 pub struct ClientModes {
     pub actor_inference_mode: ActorInferenceMode,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub inference_server_mode: ActorServerModelMode,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub training_server_mode: ActorServerModelMode,
     pub trajectory_recording_mode: TrajectoryRecordMode,
 }
@@ -170,14 +199,32 @@ impl Default for ClientModes {
     fn default() -> Self {
         Self {
             actor_inference_mode: ActorInferenceMode::Local,
+            #[cfg(any(
+                feature = "postgres_db",
+                feature = "sqlite_db",
+                feature = "async_transport",
+                feature = "sync_transport"
+            ))]
             trajectory_recording_mode: TrajectoryRecordMode::Disabled,
+            #[cfg(not(any(
+                feature = "postgres_db",
+                feature = "sqlite_db",
+                feature = "async_transport",
+                feature = "sync_transport"
+            )))]
+            trajectory_recording_mode: TrajectoryRecordMode::Local(
+                FormattedTrajectoryFileParams::default(),
+            ),
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             inference_server_mode: ActorServerModelMode::Disabled,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             training_server_mode: ActorServerModelMode::Independent,
         }
     }
 }
 
 impl ClientModes {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn validate_modes(&self) -> Result<(), ClientError> {
         if self.actor_inference_mode == ActorInferenceMode::Server
             && self.inference_server_mode == ActorServerModelMode::Disabled
@@ -197,34 +244,50 @@ impl ClientModes {
     }
 
     pub fn capabilities(&self) -> Result<ClientCapabilities, ClientError> {
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         self.validate_modes()?;
 
         let (local_inference, server_inference) = match self.actor_inference_mode {
             ActorInferenceMode::Local => (true, false),
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             ActorInferenceMode::Server => (false, true),
         };
 
         let (local_trajectory_recording, database_trajectory_recording) =
             match &self.trajectory_recording_mode {
                 TrajectoryRecordMode::Local(_) => (true, false),
+                #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
                 TrajectoryRecordMode::Database(_) => (false, true),
-                TrajectoryRecordMode::Hybrid(_) => (true, true),
+                #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+                TrajectoryRecordMode::Hybrid(_, _) => (true, true),
+                #[cfg(any(
+                    feature = "postgres_db",
+                    feature = "sqlite_db",
+                    feature = "async_transport",
+                    feature = "sync_transport"
+                ))]
                 TrajectoryRecordMode::Disabled => (false, false),
             };
 
+        #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
         let db_params: Option<DatabaseTypeParams> = match &self.trajectory_recording_mode {
             TrajectoryRecordMode::Database(params) => Some(params.clone()),
-            TrajectoryRecordMode::Hybrid(params) => Some(params.clone()),
+            TrajectoryRecordMode::Hybrid(params, _) => Some(params.clone()),
             _ => None,
         };
 
         Ok(ClientCapabilities {
             local_inference,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             server_inference,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             inference_server_mode: self.inference_server_mode.clone(),
             local_trajectory_recording,
+            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
             database_trajectory_recording,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             training_server_mode: self.training_server_mode.clone(),
+            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
             db_params,
         })
     }
@@ -240,12 +303,13 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub default_device: DeviceType,
     pub default_model: Option<ModelModule<B>>,
     pub config_path: Option<PathBuf>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub codec: CodecConfig,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for AgentStartParameters<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AgentStartParameters")
+        write!(f, "RLAgentStartParameters")
     }
 }
 
@@ -265,6 +329,7 @@ pub struct AgentBuilder<
     pub default_device: Option<DeviceType>,
     pub default_model: Option<ModelModule<B>>,
     pub config_path: Option<PathBuf>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub codec: Option<CodecConfig>,
 }
 
@@ -283,6 +348,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             default_device: None,
             default_model: None,
             config_path: None,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             codec: None,
         }
     }
@@ -304,6 +370,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn inference_server_mode(mut self, inference_server_mode: ActorServerModelMode) -> Self {
         if let Some(ref mut modes) = self.client_modes {
             modes.inference_server_mode = inference_server_mode;
@@ -311,6 +378,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn training_server_mode(mut self, training_server_mode: ActorServerModelMode) -> Self {
         if let Some(ref mut modes) = self.client_modes {
             modes.training_server_mode = training_server_mode;
@@ -374,6 +442,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn codec(mut self, codec: CodecConfig) -> Self {
         self.codec = Some(codec);
         self
@@ -398,6 +467,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             default_device: self.default_device.unwrap_or_default(),
             default_model: self.default_model,
             config_path: self.config_path,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             codec: self.codec.unwrap_or_default(),
         };
 
@@ -528,7 +598,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
-        codec: Option<CodecConfig>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+            CodecConfig,
+        >,
     ) -> Result<(), ClientError> {
         self.coordinator
             ._start(
@@ -538,6 +610,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 default_device,
                 default_model,
                 config_path,
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 codec,
             )
             .await
@@ -562,7 +635,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 Ok(())
             }
             _ => Err(ClientError::NoopRouterScale(
-                "Noop router scale: `router_scale` set to zero".to_string(),
+                "Noop router scale: `router_scale` set to zero in `scale_throughput()`".to_string(),
             )),
         }
     }
@@ -626,7 +699,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// - Runtime configuration
     /// - Timestamp
     ///
-    /// TODO: Pipe logs and metrics into a single HashM
+    /// TODO: Pipe logs and metrics into a single HashMap<String, String>
     pub fn runtime_statistics(
         &self,
         return_type: RuntimeStatisticsReturnType,

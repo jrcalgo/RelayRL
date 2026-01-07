@@ -318,7 +318,10 @@ impl LifeCycleManager {
     }
 
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    pub(crate) async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
+    pub(crate) async fn _handle_config_change(
+        &self,
+        path: PathBuf,
+    ) -> Result<(), LifeCycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);
 
         tokio::try_join!(
@@ -336,7 +339,10 @@ impl LifeCycleManager {
     }
 
     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-    pub(crate) async fn _handle_config_change(&self, path: PathBuf) -> Result<(), LifeCycleManagerError> {
+    pub(crate) async fn _handle_config_change(
+        &self,
+        path: PathBuf,
+    ) -> Result<(), LifeCycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);
 
         tokio::try_join!(

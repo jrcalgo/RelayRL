@@ -3,13 +3,13 @@ use crate::network::HyperparameterArgs;
 use crate::network::TransportType;
 use crate::network::client::agent::ActorInferenceMode;
 use crate::network::client::agent::ActorServerModelMode;
-use crate::network::client::agent::{ClientCapabilities, ClientModes};
 use crate::network::client::agent::FormattedTrajectoryFileParams;
+use crate::network::client::agent::{ClientCapabilities, ClientModes};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScaleManagerUuid;
 use crate::network::client::runtime::coordination::scale_manager::{
     AlgorithmArgs, ScaleManager, ScaleManagerError,
@@ -40,7 +40,9 @@ use burn_tensor::{Tensor, backend::Backend};
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{clear_all, clear_context, get, remove, reserve_with};
 use relayrl_types::prelude::DeviceType;
-use relayrl_types::types::data::action::{CodecConfig, RelayRLAction};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use relayrl_types::types::data::action::CodecConfig;
+use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
 use relayrl_types::types::model::{HotReloadableModel, ModelModule};
 
@@ -139,7 +141,9 @@ pub trait ClientInterface<
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
-        codec: Option<CodecConfig>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+            CodecConfig,
+        >,
     ) -> Result<(), CoordinatorError>;
     async fn _shutdown(&mut self) -> Result<(), CoordinatorError>;
     async fn _restart(
@@ -150,7 +154,9 @@ pub trait ClientInterface<
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
-        codec: Option<CodecConfig>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+            CodecConfig,
+        >,
     ) -> Result<(), CoordinatorError>;
     async fn _new_actor(
         &mut self,
@@ -260,7 +266,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
-        codec: Option<CodecConfig>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+            CodecConfig,
+        >,
     ) -> Result<(), CoordinatorError> {
         #[cfg(feature = "logging")]
         let logger = LoggingBuilder::new();
@@ -343,6 +351,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             training_dispatcher,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_scaling_server_addresses,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             codec,
             lifecycle.clone(),
         )
@@ -483,7 +492,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         default_device: DeviceType,
         default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
-        codec: Option<CodecConfig>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+            CodecConfig,
+        >,
     ) -> Result<(), CoordinatorError> {
         self._shutdown().await?;
         self._start(
@@ -493,6 +504,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             default_device,
             default_model,
             config_path,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             codec,
         )
         .await?;
@@ -882,9 +894,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => {
-                Ok(ClientConfigLoader::load_config(&params.lifecycle.get_config_path()))
-            }
+            Some(params) => Ok(ClientConfigLoader::load_config(
+                &params.lifecycle.get_config_path(),
+            )),
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::GetConfigError(
                     "[Coordinator] No runtime instance to _get_config...".to_string(),

@@ -1,12 +1,12 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::ClientCapabilities;
-use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::agent::FormattedTrajectoryFileParams;
+use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, TrajectorySinkError};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -30,6 +30,7 @@ use thiserror::Error;
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{add, get_all, remove, reserve_with};
 use burn_tensor::backend::Backend;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::tensor::BackendMatcher;
 
@@ -134,6 +135,7 @@ pub(crate) struct ScaleManager<
     pub(crate) router_dispatcher: Option<JoinHandle<()>>,
     pub(crate) router_filter_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>>,
     pub(crate) runtime_params: Option<DashMap<RouterUuid, RouterRuntimeParams>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     codec: CodecConfig,
     cached_hyperparameters: HashMap<Algorithm, HyperparameterArgs>,
     lifecycle: Option<LifeCycleManager>,
@@ -156,7 +158,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         training_dispatcher: Arc<TrainingDispatcher<B>>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
-        codec: Option<CodecConfig>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+            CodecConfig,
+        >,
         lifecycle: LifeCycleManager,
     ) -> Result<Self, ScaleManagerError> {
         let scaling_id: ScaleManagerUuid =
@@ -209,6 +213,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             shared_server_addresses,
             shared_init_hyperparameters,
             shared_trajectory_file_output,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             codec: codec.unwrap_or_default(),
             cached_hyperparameters: HashMap::new(),
             lifecycle: Some(lifecycle),
@@ -396,8 +401,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             add("trajectory_buffer", router_id).map_err(ScaleManagerError::from)?;
             // Create Sender - receives from actors via sender_rx
-            let mut sender: ClientTrajectoryBuffer<B> =
-                ClientTrajectoryBuffer::new(router_id, trajectory_buffer_rx, self.codec.clone());
+            let mut sender: ClientTrajectoryBuffer<B> = ClientTrajectoryBuffer::new(
+                router_id,
+                trajectory_buffer_rx,
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                self.codec.clone(),
+            );
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             sender.with_transport(self.transport.clone(), self.shared_server_addresses.clone());
             sender.with_trajectory_writer(self.shared_trajectory_file_output.clone());
