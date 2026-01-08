@@ -44,7 +44,7 @@ use relayrl_types::prelude::DeviceType;
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
-use relayrl_types::types::model::{HotReloadableModel, ModelModule};
+use relayrl_types::types::model::ModelModule;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -135,11 +135,15 @@ pub trait ClientInterface<
         Self: Sized;
     async fn _start(
         &mut self,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         default_model: Option<ModelModule<B>>,
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
             CodecConfig,
@@ -148,11 +152,15 @@ pub trait ClientInterface<
     async fn _shutdown(&mut self) -> Result<(), CoordinatorError>;
     async fn _restart(
         &mut self,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         default_model: Option<ModelModule<B>>,
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
             CodecConfig,
@@ -209,8 +217,6 @@ pub struct CoordinatorParams<
     pub(crate) scaling: ScaleManager<B, D_IN, D_OUT>,
 }
 
-type ClientUuid = Uuid;
-
 pub struct ClientCoordinator<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
@@ -260,11 +266,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _start(
         &mut self,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         default_model: Option<ModelModule<B>>,
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
             CodecConfig,
@@ -287,6 +297,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             algorithm_args.to_owned(),
             config_loader.to_owned(),
             config_path,
@@ -302,6 +313,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let shared_state_server_addresses: Arc<RwLock<ServerAddresses>> =
             lifecycle.get_server_addresses();
         let shared_local_model_path: Arc<RwLock<PathBuf>> = lifecycle.get_local_model_path();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        let state_default_model = default_model.clone();
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        let state_default_model: Option<ModelModule<B>> = Some(default_model.clone());
 
         let (state, global_dispatcher_rx) = StateManager::new(
             shared_client_capabilities.clone(),
@@ -309,13 +324,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_state_server_addresses,
             shared_local_model_path,
-            default_model.clone(),
+            state_default_model
         );
 
         let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_scaling_server_addresses: Arc<RwLock<ServerAddresses>> =
             lifecycle.get_server_addresses();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_algorithm_args: Arc<AlgorithmArgs> = lifecycle.get_algorithm_args();
         let shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>> =
             lifecycle.get_trajectory_file_output();
@@ -340,6 +356,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let mut scaling = ScaleManager::new(
             shared_client_capabilities,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_algorithm_args,
             shared_state.clone(),
             global_dispatcher_rx,
@@ -367,9 +384,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             return Err(CoordinatorError::ScaleManagerError(e));
         }
 
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        let actor_default_model: Option<ModelModule<B>> = default_model.clone();
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        let actor_default_model: Option<ModelModule<B>> = Some(default_model.clone());
         if actor_count > 0 {
             for _ in 1..=actor_count {
-                Self::_new_actor(self, default_device.clone(), default_model.clone(), false)
+                Self::_new_actor(self, default_device.clone(), actor_default_model.clone(), false)
                     .await?;
             }
         } else {
@@ -492,11 +513,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _restart(
         &mut self,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         default_model: Option<ModelModule<B>>,
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
             CodecConfig,
@@ -504,6 +529,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(), CoordinatorError> {
         self._shutdown().await?;
         self._start(
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             algorithm_args,
             actor_count,
             router_scale,
@@ -877,7 +903,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .map_err(CoordinatorError::ScaleManagerError);
                 #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-                return params.scaling.__scale_out(router_add).await.map_err(CoordinatorError::ScaleManagerError);
+                return params
+                    .scaling
+                    .__scale_out(router_add)
+                    .await
+                    .map_err(CoordinatorError::ScaleManagerError);
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(

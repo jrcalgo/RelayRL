@@ -113,6 +113,7 @@ pub enum LifeCycleManagerError {
 /// Spins up and tears down futures cleanly
 #[derive(Debug, Clone)]
 pub(crate) struct LifeCycleManager {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     algorithm_args: Arc<AlgorithmArgs>,
     max_traj_length: Arc<RwLock<u128>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -131,6 +132,7 @@ pub(crate) struct LifeCycleManager {
 
 impl LifeCycleManager {
     pub fn new(
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         algorithm_args: AlgorithmArgs,
         config: ClientConfigLoader,
         config_path: PathBuf,
@@ -156,6 +158,7 @@ impl LifeCycleManager {
         let max_traj_length = transport_config.max_traj_length.clone();
 
         Self {
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             algorithm_args: Arc::new(algorithm_args),
             max_traj_length: Arc::new(RwLock::new(max_traj_length)),
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -217,6 +220,7 @@ impl LifeCycleManager {
         self.init_hyperparameters.clone()
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn get_algorithm_args(&self) -> Arc<AlgorithmArgs> {
         self.algorithm_args.clone()
     }
@@ -242,6 +246,7 @@ impl LifeCycleManager {
         Ok(())
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub async fn set_init_hyperparameters(
         &self,
         init_hyperaparameters: &HyperparameterConfig,
@@ -349,7 +354,6 @@ impl LifeCycleManager {
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),
         )
         .map_err(|e| {
             LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))

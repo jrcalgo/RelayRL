@@ -29,7 +29,7 @@ use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-    IntBurnTensor, SupportedTensorBackend,
+    IntBurnTensor, SupportedTensorBackend, NdArrayDType, TchDType,
 };
 use relayrl_types::types::model::ModelModule;
 
@@ -381,12 +381,12 @@ impl ClientModes {
         Ok(ClientCapabilities {
             local_inference,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            _server_inference,
+            server_inference: _server_inference,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             inference_server_mode: self.inference_server_mode.clone(),
             local_trajectory_recording,
             #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-            _database_trajectory_recording,
+            database_trajectory_recording: _database_trajectory_recording,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             training_server_mode: self.training_server_mode.clone(),
             #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
@@ -771,7 +771,7 @@ impl<
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let (input_dtype, output_dtype) = if let Some(ref model_module) = default_model {
-            (model_module.metadata.input_dtype, model_module.metadata.output_dtype)
+            (model_module.metadata.input_dtype.clone(), model_module.metadata.output_dtype.clone())
         } else {
             let default_dtype = match &self.supported_backend {
                 SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),

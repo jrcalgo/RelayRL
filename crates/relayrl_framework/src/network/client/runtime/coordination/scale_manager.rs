@@ -120,10 +120,12 @@ pub(crate) struct ScaleManager<
 > {
     pub(crate) scaling_id: ScaleManagerUuid,
     shared_client_capabilities: Arc<ClientCapabilities>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_algorithm_args: Arc<AlgorithmArgs>,
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
     shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -146,6 +148,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 {
     pub(crate) fn new(
         shared_client_capabilities: Arc<ClientCapabilities>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_algorithm_args: Arc<AlgorithmArgs>,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         global_dispatcher_rx: Receiver<RoutedMessage>,
@@ -192,12 +195,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
         }));
 
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_init_hyperparameters = lifecycle.get_init_hyperparameters();
         let shared_trajectory_file_output = lifecycle.get_trajectory_file_output();
 
         Ok(Self {
             scaling_id,
             shared_client_capabilities,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_algorithm_args,
             shared_state,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -211,6 +216,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             runtime_params: None,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_server_addresses,
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_init_hyperparameters,
             shared_trajectory_file_output,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -314,8 +320,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn __scale_out(
         &mut self,
         router_add: u32,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        send_ids: bool,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] send_ids: bool,
     ) -> Result<(), ScaleManagerError> {
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let scaling_server_address = self
@@ -477,6 +482,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map(|router| *router.key())
             .collect();
 
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let old_actor_mappings: Vec<(Uuid, Uuid)> = {
             let state = self.shared_state.read().await;
             StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&state)
@@ -534,8 +540,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn __scale_in(
         &mut self,
         router_remove: u32,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        send_ids: bool,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] send_ids: bool,
     ) -> Result<(), ScaleManagerError> {
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let scaling_server_address = self
@@ -569,6 +574,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ));
                 }
 
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 let old_actor_mappings: Vec<(Uuid, Uuid)> = {
                     let state = self.shared_state.read().await;
                     StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&state)
