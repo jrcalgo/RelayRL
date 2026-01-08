@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::{fs, fs::File, io::Read, path::PathBuf};
 
-use dashmap::DashMap;
-
 use crate::get_or_create_client_config_json_path;
 use crate::network::HyperparameterArgs;
 

@@ -1,15 +1,19 @@
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::FormattedTrajectoryFileParams;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::prelude::config::TransportConfigParams;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::utilities::configuration::Algorithm;
-use crate::utilities::configuration::{
-    ClientConfigLoader, HyperparameterConfig, LocalModelModuleParams, NetworkParams,
-    TrajectoryFileOutputParams,
-};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
+use crate::utilities::configuration::{ClientConfigLoader, LocalModelModuleParams, TrajectoryFileOutputParams};
 
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -118,6 +122,7 @@ pub(crate) struct LifeCycleManager {
     max_traj_length: Arc<RwLock<u128>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     server_addresses: Arc<RwLock<ServerAddresses>>,
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
     local_model_path: Arc<RwLock<PathBuf>>,
     trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
@@ -166,6 +171,7 @@ impl LifeCycleManager {
                 &config.transport_config,
                 &transport_type,
             ))),
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             init_hyperparameters: Arc::new(RwLock::new(
                 config.client_config.init_hyperparameters.to_args(None),
             )),
@@ -216,6 +222,7 @@ impl LifeCycleManager {
         self.trajectory_file_output.clone()
     }
 
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub fn get_init_hyperparameters(&self) -> Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>> {
         self.init_hyperparameters.clone()
     }

@@ -984,8 +984,13 @@ impl<
         default_model: Option<ModelModule<B>>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             self.coordinator
                 ._new_actor(device, default_model, true)
+                .await?;
+            #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+            self.coordinator
+                ._new_actor(device, default_model)
                 .await?;
             Ok(())
         })
@@ -1007,8 +1012,13 @@ impl<
         }
         Box::pin(async move {
             for _ in 0..count {
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 self.coordinator
                     ._new_actor(device.clone(), default_model.clone(), false)
+                    .await?;
+                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                self.coordinator
+                    ._new_actor(device.clone(), default_model.clone())
                     .await?;
             }
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]

@@ -1,18 +1,18 @@
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::ActorInferenceMode;
-use crate::network::client::agent::ActorServerModelMode;
 use crate::network::client::agent::FormattedTrajectoryFileParams;
-use crate::network::client::agent::{ClientCapabilities, ClientModes};
+use crate::network::client::agent::ClientCapabilities;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
-use crate::network::client::runtime::coordination::scale_manager::ScaleManagerUuid;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::network::client::runtime::coordination::scale_manager::{
-    AlgorithmArgs, ScaleManager, ScaleManagerError,
+    ScaleManager, ScaleManagerError,
 };
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::{
@@ -26,8 +26,9 @@ use crate::network::client::runtime::data::transport::{
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-use crate::utilities::configuration::{Algorithm, ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
-use crate::utilities::observability;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::utilities::configuration::Algorithm;
+use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 #[cfg(feature = "logging")]
 use crate::utilities::observability::logging::builder::LoggingBuilder;
 #[cfg(feature = "metrics")]
@@ -35,7 +36,7 @@ use crate::utilities::observability::metrics::MetricsManager;
 
 use thiserror::Error;
 
-use burn_tensor::{Tensor, backend::Backend};
+use burn_tensor::backend::Backend;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{clear_all, clear_context, get, remove, reserve_with};
@@ -59,6 +60,7 @@ pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
 /// Logging subsystem errors
 #[derive(Debug, Error)]
+#[cfg(feature = "logging")]
 pub enum LoggingError {
     #[error("Failed to initialize logging: {0}")]
     InitializationError(String),
@@ -68,6 +70,7 @@ pub enum LoggingError {
 
 /// Metrics subsystem errors
 #[derive(Debug, Error)]
+#[cfg(feature = "metrics")]
 pub enum MetricsError {
     #[error("Failed to initialize metrics: {0}")]
     InitializationError(String),
@@ -170,6 +173,7 @@ pub trait ClientInterface<
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         send_id: bool,
     ) -> Result<(), CoordinatorError>;
     async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError>;
@@ -390,7 +394,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let actor_default_model: Option<ModelModule<B>> = Some(default_model.clone());
         if actor_count > 0 {
             for _ in 1..=actor_count {
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 Self::_new_actor(self, default_device.clone(), actor_default_model.clone(), false)
+                    .await?;
+                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                Self::_new_actor(self, default_device.clone(), actor_default_model.clone())
                     .await?;
             }
         } else {
@@ -547,6 +555,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         send_id: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
@@ -609,6 +618,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         trajectory_buffer_tx,
                     )
                     .await?;
+
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 if send_id {
                     params
