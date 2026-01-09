@@ -5,7 +5,7 @@
 ---
 **Version:** 0.5.0-alpha
 
-**Status:** Under active development, expect breaking changes!
+**Status:** Under active development, expect broken functionality and breaking changes!
 
 **Tested Platform Support:** macOS (Silicon), Linux (Ubuntu), Windows 10 (x86_64)
 
