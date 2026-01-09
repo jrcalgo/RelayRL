@@ -810,6 +810,52 @@ impl<
         Ok(())
     }
 
+    /// Restart the Agent's client runtime components
+    ///
+    /// # Errors
+    /// Returns an error if restart coordination fails.
+    pub async fn restart(
+        &mut self,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        algorithm_args: AlgorithmArgs,
+        actor_count: u32,
+        router_scale: u32,
+        default_device: DeviceType,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+            ModelModule<B>,
+        >,
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        default_model: ModelModule<B>,
+        config_path: Option<PathBuf>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+            CodecConfig,
+        >,
+    ) -> Result<(), ClientError> {
+        self.coordinator
+            ._restart(
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                algorithm_args,
+                actor_count,
+                router_scale,
+                default_device,
+                default_model,
+                config_path,
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                codec,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Gracefully shut down the Agent's client runtime components
+    ///
+    /// # Errors
+    /// Returns an error if shutdown coordination fails.
+    pub async fn shutdown(&mut self) -> Result<(), ClientError> {
+        self.coordinator._shutdown().await?;
+        Ok(())
+    }
+
     /// Scale actor throughput by adjusting the number of routing workers.
     ///
     /// - `router_scale > 0`: scale out by that amount.
@@ -831,15 +877,6 @@ impl<
                 "Noop router scale: `router_scale` set to zero in `scale_throughput()`".to_string(),
             )),
         }
-    }
-
-    /// Gracefully shut down the Agent's client runtime components
-    ///
-    /// # Errors
-    /// Returns an error if shutdown coordination fails.
-    pub async fn shutdown(&mut self) -> Result<(), ClientError> {
-        self.coordinator._shutdown().await?;
-        Ok(())
     }
 
     /// Request actions from the specified actor IDs (if they exist)
@@ -961,9 +998,7 @@ pub trait RelayRLAgentActors<
         &mut self,
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>>;
-    fn get_actor_ids(
-        &mut self
-    ) -> Result<Vec<ActorUuid>, ClientError>;
+    fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError>;
     fn set_actor_id(
         &mut self,
         current_id: Uuid,
@@ -1046,9 +1081,7 @@ impl<
     }
 
     /// Retrieves the current actor instance IDs
-    fn get_actor_ids(
-        &mut self
-    ) -> Result<Vec<ActorUuid>, ClientError> {
+    fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError> {
         let ids = get("actor").map_err(ClientError::from)?;
         Ok(ids.iter().map(|(_, id)| id.clone()).collect())
     }
