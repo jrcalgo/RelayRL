@@ -329,22 +329,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    pub(crate) fn __get_actors(
-        &self,
-    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), StateManagerError> {
-        let actor_ids: Vec<Uuid> = self.get_actor_id_list();
-        let actor_handles: Vec<Arc<JoinHandle<()>>> = actor_ids
-            .iter()
-            .map(|id| {
-                self.get_actor_handle(*id)
-                    .ok_or(StateManagerError::ActorHandleNotFoundError(
-                        "[StateManager] Actor handle not found".to_string(),
-                    ))
-            })
-            .collect::<Result<Vec<Arc<JoinHandle<()>>>, StateManagerError>>()?;
-        Ok((actor_ids, actor_handles))
-    }
-
     pub(crate) fn __set_actor_id(
         &self,
         current_id: ActorUuid,

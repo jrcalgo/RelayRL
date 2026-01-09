@@ -22,15 +22,16 @@ use crate::prelude::config::ClientConfigLoader;
 use crate::utilities::configuration::Algorithm;
 
 use active_uuid_registry::UuidPoolError;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use active_uuid_registry::interface::get;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-    IntBurnTensor, SupportedTensorBackend, NdArrayDType, TchDType,
+    IntBurnTensor, SupportedTensorBackend,
 };
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use relayrl_types::types::data::tensor::{NdArrayDType, TchDType};
 use relayrl_types::types::model::ModelModule;
 
 use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
@@ -59,6 +60,8 @@ pub enum ClientError {
     CoordinatorError(#[from] CoordinatorError),
     #[error("Backend mismatch: {0}")]
     BackendMismatchError(String),
+    #[error("No input or output dtype set")]
+    NoInputOrOutputDtypeSet(String),
     #[error("Noop router scale: {0}")]
     NoopRouterScale(String),
     #[error("Noop actor count: {0}")]
@@ -625,7 +628,7 @@ impl<
     }
 }
 
-trait ToAnyBurnTensor<B: Backend + BackendMatcher<Backend = B>, const D: usize> {
+pub trait ToAnyBurnTensor<B: Backend + BackendMatcher<Backend = B>, const D: usize> {
     fn to_any_burn_tensor(self, dtype: DType) -> AnyBurnTensor<B, D>;
 }
 
@@ -760,8 +763,9 @@ impl<
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+            ModelModule<B>,
+        >,
         #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
@@ -771,21 +775,22 @@ impl<
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let (input_dtype, output_dtype) = if let Some(ref model_module) = default_model {
-            (model_module.metadata.input_dtype.clone(), model_module.metadata.output_dtype.clone())
+            (
+                Some(model_module.metadata.input_dtype.clone()),
+                Some(model_module.metadata.output_dtype.clone()),
+            )
         } else {
-            let default_dtype = match &self.supported_backend {
-                SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
-                SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
-                _ => return Err(ClientError::BackendMismatchError("Unsupported backend".to_string())),
-            };
-            (default_dtype.clone(), default_dtype)
+            (None, None)
         };
 
         #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-        let (input_dtype, output_dtype) = (default_model.metadata.input_dtype.clone(), default_model.metadata.output_dtype.clone());
+        let (input_dtype, output_dtype) = (
+            Some(default_model.metadata.input_dtype.clone()),
+            Some(default_model.metadata.output_dtype.clone()),
+        );
 
-        self.input_dtype = Some(input_dtype);
-        self.output_dtype = Some(output_dtype);
+        self.input_dtype = input_dtype;
+        self.output_dtype = output_dtype;
 
         self.coordinator
             ._start(
@@ -857,11 +862,13 @@ impl<
     {
         match B::matches_backend(&self.supported_backend) {
             true => {
-                if let (Some(input_dtype), Some(output_dtype)) = (self.input_dtype.clone(), self.output_dtype.clone()) {
+                if let (Some(input_dtype), Some(output_dtype)) =
+                    (self.input_dtype.clone(), self.output_dtype.clone())
+                {
                     let obs_tensor: Arc<AnyBurnTensor<B, D_IN>> =
-                    Arc::new(observation.to_any_burn_tensor(input_dtype));
-                    let mask_tensor: Option<Arc<AnyBurnTensor<B, D_OUT>>> = mask
-                        .map(|tensor| Arc::new(tensor.to_any_burn_tensor(output_dtype)));
+                        Arc::new(observation.to_any_burn_tensor(input_dtype));
+                    let mask_tensor: Option<Arc<AnyBurnTensor<B, D_OUT>>> =
+                        mask.map(|tensor| Arc::new(tensor.to_any_burn_tensor(output_dtype)));
 
                     let result = self
                         .coordinator
@@ -869,7 +876,9 @@ impl<
                         .await?;
                     Ok(result)
                 } else {
-                    Err(ClientError::BackendMismatchError("No input or output dtype set".to_string()))
+                    Err(ClientError::NoInputOrOutputDtypeSet(
+                        "No input or output dtype set in agent".to_string(),
+                    ))
                 }
             }
             false => Err(ClientError::BackendMismatchError(
@@ -952,15 +961,9 @@ pub trait RelayRLAgentActors<
         &mut self,
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>>;
-    fn get_actors(
-        &self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<(Vec<Uuid>, Vec<Arc<JoinHandle<()>>>), ClientError>>
-                + Send
-                + '_,
-        >,
-    >;
+    fn get_actor_ids(
+        &mut self
+    ) -> Result<Vec<ActorUuid>, ClientError>;
     fn set_actor_id(
         &mut self,
         current_id: Uuid,
@@ -989,9 +992,7 @@ impl<
                 ._new_actor(device, default_model, true)
                 .await?;
             #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-            self.coordinator
-                ._new_actor(device, default_model)
-                .await?;
+            self.coordinator._new_actor(device, default_model).await?;
             Ok(())
         })
     }
@@ -1044,20 +1045,12 @@ impl<
         })
     }
 
-    /// Retrieves the current actor instances and their associated join handles from the Agent instance
-    fn get_actors(
-        &self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), ClientError>>
-                + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async move {
-            let actors = self.coordinator._get_actors().await?;
-            Ok(actors)
-        })
+    /// Retrieves the current actor instance IDs
+    fn get_actor_ids(
+        &mut self
+    ) -> Result<Vec<ActorUuid>, ClientError> {
+        let ids = get("actor").map_err(ClientError::from)?;
+        Ok(ids.iter().map(|(_, id)| id.clone()).collect())
     }
 
     /// Sets the ID of the actor instance with the specified current ID to the new ID

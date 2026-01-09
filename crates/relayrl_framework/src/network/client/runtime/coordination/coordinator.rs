@@ -2,7 +2,6 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::FormattedTrajectoryFileParams;
 use crate::network::client::agent::ClientCapabilities;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
@@ -39,7 +38,9 @@ use thiserror::Error;
 use burn_tensor::backend::Backend;
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{clear_all, clear_context, get, remove, reserve_with};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use active_uuid_registry::interface::get;
+use active_uuid_registry::interface::{clear_all, remove, reserve_with};
 use relayrl_types::prelude::DeviceType;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use relayrl_types::types::data::action::CodecConfig;
@@ -143,8 +144,9 @@ pub trait ClientInterface<
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+            ModelModule<B>,
+        >,
         #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
@@ -160,8 +162,9 @@ pub trait ClientInterface<
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+            ModelModule<B>,
+        >,
         #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
@@ -173,13 +176,9 @@ pub trait ClientInterface<
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        send_id: bool,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] send_id: bool,
     ) -> Result<(), CoordinatorError>;
     async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError>;
-    async fn _get_actors(
-        &self,
-    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError>;
     async fn _set_actor_id(
         &mut self,
         current_id: ActorUuid,
@@ -275,8 +274,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+            ModelModule<B>,
+        >,
         #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
@@ -328,7 +328,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_state_server_addresses,
             shared_local_model_path,
-            state_default_model
+            state_default_model,
         );
 
         let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
@@ -337,8 +337,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             lifecycle.get_server_addresses();
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_algorithm_args: Arc<AlgorithmArgs> = lifecycle.get_algorithm_args();
-        let shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>> =
-            lifecycle.get_trajectory_file_output();
 
         // Create transport and wrap in Arc for sharing across dispatchers
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -395,11 +393,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if actor_count > 0 {
             for _ in 1..=actor_count {
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                Self::_new_actor(self, default_device.clone(), actor_default_model.clone(), false)
-                    .await?;
+                Self::_new_actor(
+                    self,
+                    default_device.clone(),
+                    actor_default_model.clone(),
+                    false,
+                )
+                .await?;
                 #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-                Self::_new_actor(self, default_device.clone(), actor_default_model.clone())
-                    .await?;
+                Self::_new_actor(self, default_device.clone(), actor_default_model.clone()).await?;
             }
         } else {
             return Err(CoordinatorError::StateManagerError(
@@ -526,8 +528,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        default_model: Option<ModelModule<B>>,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+            ModelModule<B>,
+        >,
         #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
@@ -555,8 +558,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        send_id: bool,
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] send_id: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
@@ -654,24 +656,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::RemoveActorError(
                     "[Coordinator] No runtime instance to _remove_actor...".to_string(),
-                ),
-            )),
-        }
-    }
-
-    async fn _get_actors(
-        &self,
-    ) -> Result<(Vec<ActorUuid>, Vec<Arc<JoinHandle<()>>>), CoordinatorError> {
-        match &self.runtime_params {
-            Some(params) => {
-                let actors = StateManager::<B, D_IN, D_OUT>::__get_actors(
-                    &*params.shared_state.read().await,
-                )?;
-                Ok(actors)
-            }
-            None => Err(CoordinatorError::StateManagerError(
-                StateManagerError::GetActorsError(
-                    "[Coordinator] No runtime parameter instance to _get_actors...".to_string(),
                 ),
             )),
         }
