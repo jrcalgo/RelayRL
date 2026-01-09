@@ -1,72 +1,226 @@
-//! # RelayRL Framework Structure
-//! RelayRL is a high-performance reinforcement learning framework designed for distributed
-//! and asynchronous RL training, particularly in high-performance computing (HPC) environments.
+//! # RelayRL Framework
 //!
-//! RelayRL follows a modular architecture with clearly defined roles for agents, training servers,
-//! configuration management, and inter-process communication. These modules are structured into
-//! the following submodules:
+//! **Version:** 0.5.0-alpha  
+//! **Status:** Under active development, expect breaking changes
 //!
-//! - **Client Modules** (`client::*`): Define agent implementations and wrappers for different communication
-//!   methods, such as gRPC and ZMQ.
-//! - **Server Modules** (`server::*`): Contain implementations for the RelayRL training server, including
-//!   gRPC and ZMQ-based communication layers.
-//! - **Core Modules** (`action`, `config_loader`, `trajectory`): Define fundamental RelayRL components,
-//!   including action handling, configuration parsing, and trajectory management.
-//! - **Python Bindings** (`bindings::*`): Expose the Rust implementation to Python via PyO3, enabling
-//!   Python scripts to interact with RelayRL seamlessly.
+//! RelayRL is a high-performance, multi-actor native reinforcement learning framework designed for
+//! concurrent actor execution and efficient trajectory collection. This crate currently provides the core
+//! client runtime infrastructure for distributed RL experiments.
 //!
-//! ## Rust-to-Python Bindings
+//! ## Architecture Overview
 //!
-//! RelayRL provides a primary entry point for RelayRL Python bindings using PyO3,
-//! allowing seamless integration of RelayRL functionality into Python environments.
+//! The framework follows a layered architecture optimized for concurrent multi-actor execution:
 //!
-//! Agents, training servers, configuration loaders, actions, and trajectories are exposed as
-//! Python-accessible classes within the `relayrl_framework` module. This enables Python users to
-//! interact with RelayRL's core functionality without directly handling the Rust backend.
+//! ```text
+//! ┌─────────────────────────────────────────────────┐
+//! │  Public API (RelayRLAgent, AgentBuilder)        │
+//! └─────────────────────────────────────────────────┘
+//!                         │
+//! ┌─────────────────────────────────────────────────┐
+//! │  Runtime Coordination Layer                     │
+//! │  - ClientCoordinator                            │
+//! │  - ScaleManager (router scaling)                │
+//! │  - StateManager (actor state)                   │
+//! │  - LifecycleManager (shutdown coordination)     │
+//! └─────────────────────────────────────────────────┘
+//!                         │
+//! ┌─────────────────────────────────────────────────┐
+//! │  Message Routing Layer                          │
+//! │  - RouterDispatcher                             │
+//! │  - Router instances (scalable workers)          │
+//! └─────────────────────────────────────────────────┘
+//!                         │
+//! ┌─────────────────────────────────────────────────┐
+//! │  Actor Execution Layer                          │
+//! │  - Concurrent Actor instances                   │
+//! │  - Local model inference                        │
+//! │  - Trajectory building                          │
+//! └─────────────────────────────────────────────────┘
+//!                         │
+//! ┌─────────────────────────────────────────────────┐
+//! │  Data Collection Layer                          │
+//! │  - TrajectoryBuffer (priority scheduling)       │
+//! │  - Arrow File Sink (available)                  │
+//! │  - Transport Sink (under development)           │
+//! │  - Database Sink (under development)            │
+//! └─────────────────────────────────────────────────┘
+//! ```
 //!
-//! The exposed Python module includes the following key classes:
+//! ## Module Structure
 //!
-//! - **`ConfigLoader`**: Manages configuration settings for RelayRL components, including model paths
-//!   and training parameters.
-//! - **`TrainingServer`**: Represents the RelayRL training server, which is responsible for processing
-//!   and optimizing trajectories sent by agents.
-//! - **`RelayRLAgent`**: A Python wrapper for the RelayRL agent, allowing interaction with the reinforcement
-//!   learning model and execution of actions.
-//! - **`RelayRLTrajectory`**: Handles the storage and management of action sequences (trajectories).
-//! - **`RelayRLAction`**: Represents individual actions taken within the RL environment, including
-//!   observation, action, reward, and auxiliary data.
+//! - **[`network::client`]**: Multi-actor client runtime (complete rewrite in v0.5.0)
+//!   - [`agent`](network::client::agent): Public API for agent construction and interaction
+//!   - `runtime`: Internal runtime components
+//!     - `actor`: Individual actor implementations with local inference
+//!     - `coordination`: Lifecycle, scaling, metrics, and state management
+//!     - `router`: Message routing between actors and data sinks
+//!     - `data`: Transport and database layers (under development)
 //!
-//! ## Using RelayRL
+//! - **[`network::server`]**: Training and inference server implementations (optional features)
 //!
+//! - **[`templates`]**: Environment trait definitions for training and testing
+//!
+//! - **[`utilities`]**: Configuration loading, logging, metrics, and system utilities
+//!
+//! ## Current Status
+//!
+//! ### Available
+//! - Multi-actor client runtime with concurrent execution
+//! - Local Arrow file sink for trajectory data
+//! - Builder pattern API for ergonomic agent construction
+//! - Router-based message dispatching with scaling support
+//! - Actor lifecycle management (create, remove, scale)
+//!
+//! ### Under Development
+//! - Network transport layer (ZMQ)
+//! - Database trajectory sinks (PostgreSQL/SQLite)
+//! - Server-side inference mode
+//! - Training server integration
+//!
+//! ### Not In This Crate
+//! - **Python Bindings**: See `relayrl_python` crate
+//! - **Algorithms**: See `relayrl_algorithms` crate
+//! - **Type Definitions**: See `relayrl_types` crate
+//!
+//! ## Quick Example
+//!
+//! ```rust,no_run
+//! use relayrl_framework::prelude::network::*;
+//! use relayrl_types::types::data::tensor::DeviceType;
+//! use burn_ndarray::NdArray;
+//! use burn_tensor::{Tensor, Float};
+//! use std::path::PathBuf;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Build agent with 4 concurrent actors
+//! let (agent, params) = AgentBuilder::<NdArray, 4, 2, Float, Float>::builder()
+//!     .actor_count(4)
+//!     .router_scale(2)
+//!     .default_device(DeviceType::Cpu)
+//!     .config_path(PathBuf::from("client_config.json"))
+//!     .build()
+//!     .await?;
+//!
+//! // Start runtime
+//! agent.start(
+//!     params.actor_count,
+//!     params.router_scale,
+//!     params.default_device,
+//!     params.default_model,
+//!     params.config_path,
+//! ).await?;
+//!
+//! // Request actions from actors
+//! let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+//! let actions = agent.request_action(
+//!     vec![/* actor IDs */],
+//!     observation,
+//!     None,
+//!     0.0
+//! ).await?;
+//!
+//! // Shutdown gracefully
+//! agent.shutdown().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Feature Flags
+//!
+//! - `client` (default): Core client runtime
+//! - `network`: Full network stack (client + servers)
+//! - `transport_layer`: Network transport (ZMQ)
+//! - `database_layer`: Database support (PostgreSQL, SQLite)
+//! - `logging`: Log4rs logging
+//! - `metrics`: Prometheus/OpenTelemetry metrics
+//! - `profile`: Flamegraph and tokio-console profiling
 
-/// **Network Modules**: Provides the core networking functionality for RelayRL, including gRPC and ZMQ communication layers.
+/// Core networking functionality for RelayRL.
+///
+/// This module provides the multi-actor client runtime and optional server implementations.
+///
+/// ## Client Runtime
+///
+/// The [`client`](network::client) module contains the complete rewrite (v0.5.0) of the
+/// multi-actor client runtime, including:
+/// - Public [`agent`](network::client::agent) API for agent construction and control
+/// - Internal runtime coordination (scaling, lifecycle, state management)
+/// - Router-based message dispatching
+/// - Actor execution with local inference
+/// - Data collection via Arrow file sink (transport/database under development)
+///
+/// ## Server Components (Optional)
+///
+/// The [`server`](network::server) module provides training and inference server implementations,
+/// available via feature flags (`training_server`, `inference_server`).
 pub mod network;
 
-/// **Development Templates**: Provides base algorithm and application templates for RelayRL.
-/// These templates serve as foundations for extending or customizing RL environments, models,
-/// or training strategies.
+/// Environment trait definitions for RL training and testing.
+///
+/// This module provides:
+/// - [`EnvironmentTrainingTrait`](templates::environment_traits::EnvironmentTrainingTrait):
+///   Interface for training environments with performance metrics
+/// - [`EnvironmentTestingTrait`](templates::environment_traits::EnvironmentTestingTrait):
+///   Interface for inference/testing environments
 pub mod templates;
 
-/// **System Utilities**: Provides helper functions for gRPC communication, model serialization,
-/// and configuration resolution. These utilities support seamless inter-module communication.
+/// Configuration, logging, metrics, and system utilities.
+///
+/// This module contains:
+/// - `configuration`: JSON-based configuration loading and builders
+/// - `observability`: Logging (log4rs) and metrics (Prometheus/OpenTelemetry) systems
+/// - `tokio`: Tokio runtime utilities
 pub mod utilities {
     pub mod configuration;
     pub(crate) mod observability;
     pub(crate) mod tokio;
 }
 
+/// Prelude module for convenient imports.
+///
+/// This module re-exports commonly used types and traits for easier access:
+///
+/// ```rust
+/// use relayrl_framework::prelude::network::*;  // Agent API
+/// use relayrl_framework::prelude::config::*;   // Configuration
+/// use relayrl_framework::prelude::templates::*; // Environment traits
+/// ```
 pub mod prelude {
+    /// Configuration types and builders.
+    ///
+    /// Includes client and server configuration loaders, builders, and parameter types.
     pub mod config {
         pub use crate::utilities::configuration::{
             ClientConfigBuilder, ClientConfigLoader, ClientConfigParams, ServerConfigBuilder,
             ServerConfigLoader, ServerConfigParams, TransportConfigBuilder, TransportConfigParams,
         };
     }
+
+    /// Network client API.
+    ///
+    /// Re-exports all public agent API types including:
+    /// - `RelayRLAgent`: Main agent interface
+    /// - `AgentBuilder`: Builder pattern for agent construction
+    /// - `ClientModes`, `ClientCapabilities`: Runtime mode configuration
+    /// - `TrajectoryRecordMode`, `ActorInferenceMode`: Operational modes
+    /// - Actor management traits and types
     pub mod network {
         pub use crate::network::client::agent::*;
+        // Server APIs are not yet stabilized in v0.5.0-alpha
         // pub use crate::network::server::inference_server::*;
         // pub use crate::network::server::training_server::*;
     }
+
+    /// Type definitions for the RelayRL framework.
+    ///
+    /// Re-exports commonly used types and traits for easier access
+    pub mod types {
+        pub use relayrl_types::prelude::*;
+    }
+
+    /// Environment trait definitions.
+    ///
+    /// Re-exports training and testing environment traits for custom environment implementations.
     pub mod templates {
         pub use crate::templates::environment_traits::{
             EnvironmentTestingTrait, EnvironmentTrainingTrait,
