@@ -15,7 +15,7 @@ With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `rel
 
 As of now, the only way to perform inference is to provide your own `LibTorch` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
 
-All feature flags other than `client` are (more) unstable - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
+All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
 
 **Key Features:**
 
