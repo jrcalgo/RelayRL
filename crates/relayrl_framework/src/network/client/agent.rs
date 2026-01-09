@@ -411,7 +411,18 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub actor_count: u32,
     pub router_scale: u32,
     pub default_device: DeviceType,
+    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tch-model", feature = "onnx-model")))
+    )]
     pub default_model: Option<ModelModule<B>>,
+    #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(any(feature = "tch-model", feature = "onnx-model"))))
+    )]
+    pub default_model: ModelModule<B>,
     pub config_path: Option<PathBuf>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub codec: CodecConfig,
@@ -618,7 +629,10 @@ impl<
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
+            #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
             default_model: self.default_model,
+            #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
+            default_model: self.default_model.unwrap(), // this is guaranteed to panic if not set
             config_path: self.config_path,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             codec: self.codec.unwrap_or_default(),
@@ -757,7 +771,7 @@ impl<
     /// # Errors
     /// Returns an error if startup fails (configuration, runtime init, transport init, etc).
     pub async fn start(
-        mut self,
+        &mut self,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
