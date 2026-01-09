@@ -1,329 +1,147 @@
 # RelayRL Framework
 
-**Core Rust Library & Python Bindings for RelayRL**
+**Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
+**Version:** 0.5.0-alpha
 
-> **Platform Support:**
-> RelayRL runs on **MacOS, Linux, and Windows** (x86_64). Some dependencies may require additional setup on Windows.
+**Status:** Under active development, expect breaking changes!
 
-> **Warning:**  
-> This is a **prototype** and is **unstable during training**.  
-> For general usage and project overview, see the [root README](../README.md).
-
----
+**Tested Platform Support:** macOS (Silicon), Linux (Ubuntu), Windows 10 (x86_64)
 
 ## Overview
 
-The `relayrl_framework` crate provides the core infrastructure for distributed RL experiments, including:
+With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `relayrl_framework` crate now provides a **multi-actor native** client runtime for deep reinforcement learning experiments. The training server (and new inference server) are under development and remain unavailable in this update.
 
-- High-performance agent and training server implementations (gRPC & ZMQ)
-- Core RL data structures (actions, trajectories, configs)
-- Python bindings via PyO3 for seamless integration with Python RL algorithms
-- Utilities for configuration, logging, and benchmarking
+As of now, the only way to perform inference is to provide your own `LibTorch` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
 
----
+All feature flags other than `client` are (more) unstable - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
 
-**Default Rust Usage Example**
+**Key Features:**
+
+- **Multi-actor native architecture** with concurrent actor execution
+- Local Arrow file sink for **offline trajectory data collection** and training
+- **Scalable** router-based message dispatching for actor runtimes
+- **Ergonomic builder pattern** API for agent construction
+
+**Current Limitations:**
+
+- **Data Collection:** Only local Arrow file sink is available
+- **Transport Layer:** Network transport (ZMQ) is under active development
+- **Database Layer:** PostgreSQL/SQLite support is under active development
+
+**Major Changes:**
+
+- **Architecture Redesign:** Monolithic design of v0.4.5 abstracted into a decoupled layered architecture, enhancing modularity, maintainability, and testability.
+- **Rust-First Design Philosophy:** Complete removal of PyO3 and its Python code dependencies from framework; all core components written entirely in Rust.
+- **Backend Independence:** Replacement of direct `Tch` crate dependency with `Burn`, enabling generic Tensor interfacing with the framework (currently supports Burn's `Tch` and `NdArray` Tensor backends, as well as `LibTorch` and `ONNX` model inference).
+- **Improved Error Handling:** Near complete removal of panics and replacement with proper error handling (retries, branches, etc.) and upstream propagation.
+- **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building a strong `ZMQ` transport implementation.
+- **Type System:** Moved to a separate crate (`relayrl_types`).
+- **RL Algorithms:** Moved to a separate crate (`relayrl_algorithms`), which remains unimplemented for now.
+- **Python Bindings:** Moved to a separate crate (`relayrl_python`), which remains unimplemented for now.
+
+## Quick Start
 
 ```rust
-use relayrl_framework::network::client::agent_wrapper::RelayRLAgent;
-use relayrl_framework::network::server::training_server_wrapper::TrainingServer;
+use relayrl_framework::prelude::network::{RelayRLAgent, AgentBuilder, RelayRLAgentActors};
+use relayrl_framework::prelude::types::{ModelModule, DeviceType};
+use burn_ndarray::NdArray;
+use burn_tensor::{Tensor, Float};
 use std::path::PathBuf;
-use tch::{CModule, Tensor};
-use tokio;
 
 #[tokio::main]
-async fn main() {
-    // Start a training server (REINFORCE, discrete, CartPole)
-    let _server = TrainingServer::new(
-        "REINFORCE".to_string(), // algorithm_name
-        4,                        // obs_dim
-        2,                        // act_dim
-        100000,                   // buf_size
-        false,                    // tensorboard
-        false,                    // multiactor
-        Some("./env".to_string()),
-        None,                     // algorithm_dir
-        Some(PathBuf::from("relayrl_config.json")),
-        None,                     // hyperparams
-        Some("zmq".to_string()), // server_type
-        None, None, None          // training_prefix, training_host, training_port
-    ).await;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Build and Start
+    const OBS_RANK: usize = 2;
+    const ACT_RANK: usize = 2;
 
-    // Load a TorchScript model (optional, can be None to fetch from server)
-    let model = None; // Or: Some(CModule::load("client_model.pt").expect("Failed to load model"));
+    let model_path = PathBuf::from("dummy_model");
+    
+    // The builder initializes with default local inference settings
+    let (mut agent, params) = AgentBuilder::<NdArray, OBS_RANK, ACT_RANK, Float, Float>::builder()
+        .actor_count(4)
+        .default_model(ModelModule::<NdArray>::load_from_path(model_path))
+        .build().await?;
 
-    // Create a ZMQ agent (use "grpc" for gRPC)
-    let agent = RelayRLAgent::new(
-        model,
-        Some(PathBuf::from("relayrl_config.json")),
-        Some("zmq".to_string()),
-        None, // training_prefix
-        None, // training_port
-        None, // training_host
-    ).await;
+    // Start the agent using the parameters generated by the builder
+    agent.start(
+        params.actor_count, 
+        params.router_scale, 
+        params.default_device, 
+        params.default_model, 
+        params.config_path
+    ).await?;
 
-    // Example: Request an action (replace with your actual observation and mask tensors)
-    // let obs = Tensor::of_slice(&[0.0, 0.1, 0.0, 0.0]).reshape(&[1, 4]);
-    // let mask = Tensor::of_slice(&[1.0, 1.0]).reshape(&[1, 2]);
-    // let reward = 0.0_f32;
-    // let action = agent.request_for_action(obs, mask, reward).await;
-}
-```
+    // 2. Interact (using Burn Tensors)
+    let reward: f32 = 1.0;
+    let obs = Tensor::<NdArray, OBS_RANK, Float>::zeros([1, 4], &Default::default());
+    
+    // get_actor_ids returns a Result
+    let ids = agent.get_actor_ids()?; 
+    
+    let acts = agent.request_action(ids.clone(), obs, None, reward).await?;
+    let versions = agent.get_model_version(ids.clone()).await?;
 
-**Default Python Usage Example**
-
-```python
-from relayrl_framework import TrainingServer, RelayRLAgent
-
-# Start a training server (REINFORCE, discrete, CartPole)
-server = TrainingServer(
-    algorithm_name="REINFORCE",
-    obs_dim=4,           # CartPole observation space
-    act_dim=2,           # CartPole action space
-    buf_size=100000,
-    config_path="relayrl_config.json",
-    server_type="zmq"
-)
-
-# Create an agent and interact with the environment
-agent = RelayRLAgent(
-    model_path=None,                 # None to fetch model from server
-    config_path="relayrl_config.json",
-    server_type="zmq"
-)
-
-# Example: Request an action from the agent
-obs = [0.0, 0.1, 0.0, 0.0]  # Should be a numpy array or torch tensor in real use
-mask = [1.0, 1.0]           # Should be a numpy array or torch tensor
-reward = 0.0
-action_obj = agent.request_for_action(obs, mask, reward)
-action = action_obj.get_act()
-```
-
-## More Explanatory Tutorial
-
-[See the examples' README!](https://github.com/jrcalgo/RelayRL-proto/blob/main/examples/README.md#how-to-use-in-novel-environments)
-
----
-
-**Framework Requirements:**
-- **Python Algorithms:** The framework requires Python RL algorithms to be implemented and provided
-- **TorchScript Models:** Algorithms must export their models as TorchScript for deployment
-- **Custom Algorithm Support:** Custom algorithms can be integrated via configuration parameters
-
----
-
-## Building & Development
-
-### Prerequisites
-
-- **Supported Platforms:** MacOS, Linux, Windows (x86_64)
-- Rust (latest stable recommended)
-- Python 3.8+
-- PyTorch 2.5.1
-- [maturin](https://github.com/PyO3/maturin) (for building Python bindings)
-- Protobuf compiler (`protoc`) for gRPC
-
-### Build the Rust Library
-
-```sh
-cargo build --release
-```
-
-### Build & Install Python Bindings
-
-From the `relayrl_framework` directory:
-
-```sh
-pip install maturin
-maturin develop
-```
-
-This will build the Rust library and install the Python bindings into your current environment.
-
----
-
-## Python Algorithms
-
-### Included Algorithms
-
-Currently, the framework includes:
-- **REINFORCE with baseline value functions**
-- **REINFORCE without baseline value functions**
-
-### Custom Algorithm Implementation
-
-Custom algorithms can be implemented and integrated into the framework. Your algorithm must:
-
-1. **Inherit from BaseAlgorithm:** Extend the `AlgorithmAbstract` class
-2. **Export Required Methods:** Use `@torch.jit.export` annotations for critical methods
-3. **Implement Core Interface:** Provide `step`, `get_obs_dim`, and `get_act_dim` methods
-
-#### Required TorchScript Exports
-
-Your algorithm's model must export these methods via `@torch.jit.export`:
-
-```python
-import torch
-import torch.nn as nn
-
-class CustomPolicy(nn.Module):
-    def __init__(self, obs_dim, act_dim):
-        super().__init__()
-        self.input_dim = obs_dim
-        self.output_dim = act_dim
-        # Your network architecture here
-        
-    @torch.jit.export
-    def step(self, obs: torch.Tensor, mask: torch.Tensor):
-        """Execute one step of the policy"""
-        with torch.no_grad():
-            # Your inference logic here
-            action = self.forward(obs, mask)
-            logp_a = self.get_log_prob(obs, action)
-        data = {'logp_a': logp_a}
-        return action, data
-        
-    @torch.jit.export
-    def get_obs_dim(self):
-        """Return observation dimension"""
-        return self.input_dim
-        
-    @torch.jit.export
-    def get_act_dim(self):
-        """Return action dimension"""
-        return self.output_dim
-```
-
-#### Algorithm Class Structure
-
-```python
-from _common._algorithms.BaseAlgorithm import AlgorithmAbstract
-from relayrl_framework import RelayRLTrajectory, ConfigLoader
-
-class CustomAlgorithm(AlgorithmAbstract):
-    def __init__(self, env_dir: str, config_path: str, obs_dim: int, act_dim: int, buf_size: int):
-        super().__init__()
-        
-        # Load configuration
-        config_loader = ConfigLoader(algorithm_name='CUSTOM_ALGO', config_path=config_path)
-        hyperparams = config_loader.get_algorithm_params()['CUSTOM_ALGO']
-        self.save_model_path = config_loader.get_server_model_path()
-        
-        # Initialize your model
-        self._model = CustomPolicy(obs_dim, act_dim)
-        
-    def save(self) -> None:
-        """Save model as TorchScript"""
-        self._model.eval()
-        model_script = torch.jit.script(self._model)
-        torch.jit.save(model_script, self.save_model_path)
-        self._model.train()
-        
-    def receive_trajectory(self, trajectory: RelayRLTrajectory) -> bool:
-        """Process received trajectory and return True if training should occur"""
-        # Your training logic here
-        return training_ready
-```
-
-### Using Custom Algorithms
-
-#### Configuration
-
-Specify custom algorithms in your `relayrl_config.json`:
-
-```json
-{
-    "algorithms": {
-        "CUSTOM_ALGO": {
-            "learning_rate": 3e-4,
-            "batch_size": 64,
-            "gamma": 0.99
-        }
-    },
-    "server": {
-        "training_server": {
-            "host": "127.0.0.1",
-            "port": "50051"
-        }
+    // 3. Actor Runtime Management
+    agent.new_actor(DeviceType::Default, None).await?;
+    
+    let new_actor_count: u32 = 10;
+    agent.new_actors(new_actor_count, DeviceType::Default, None).await?;
+    
+    let ids = agent.get_actor_ids()?;
+    if ids.len() >= 2 {
+        agent.set_actor_id(ids[0], uuid::Uuid::new_v4()).await?;
+        agent.remove_actor(ids[1]).await?;
     }
+
+    // 4. Agent Management and Shutdown
+    let last_reward: Option<f32> = Some(3.0);
+    let ids = agent.get_actor_ids()?;
+    agent.flag_last_action(ids.clone(), last_reward).await?;
+    
+    agent.scale_throughput(2).await?;
+    
+    agent.shutdown().await?;
+    
+    Ok(())
 }
 ```
 
-#### Server Initialization
+## Usage Instructions
 
-```python
-from relayrl_framework import TrainingServer
+[View this guide for agent usage :)](CLIENT_GUIDE)
 
-# Initialize server with custom algorithm
-server = TrainingServer(
-    algorithm_name="CUSTOM_ALGO",
-    algorithm_dir="/path/to/your/algorithm",
-    obs_dim=8,
-    act_dim=4,
-    buf_size=1000000,
-    config_path="relayrl_config.json",
-    server_type="ZMQ"
-)
-```
+## Roadmap
 
-#### Agent Initialization
+- ### **v0.5.0:**
+  - Client `ZMQ` transport interface completion
+  - Client `PostgreSQL` and `SQLite` database interface completion
+  - Comprehensive Client testing and benchmarking on common gym environments
+  - Short Client stabilization period to enable focused server-side development
 
-```python
-from relayrl_framework import RelayRLAgent
+- ### **v0.6.0:**
+  - Training Server implementation with support for Online/Offline training workflows
+  - `relayrl_algorithms` crate integration to enable deep RL algorithmic training and Client `ModelModule` acquisition
+  - Comprehensive Training Server testing and benchmarking
+  - Comprehensive Client-Training Server network testing and benchmarking on common gym environments
+  - Momentary Training Server stabilization
 
-# Initialize agent with custom algorithm
-agent = RelayRLAgent(
-    algorithm_name="CUSTOM_ALGO",
-    config_path="relayrl_config.json",
-    server_type="ZMQ"
-)
-```
+- ### **v0.7.0:**
+  - Inference Server implementation to provide client with remote inference capabilities
+  - Inference Server and Training Server communication for updating Inference Server's inference model(s)
+  - Comprehensive Inference Server testing and benchmarking
+  - Comprehensive Client-Inference Server-Training Server network testing and benchmarking on common gym environments
 
----
-
-## Running Benchmarks
-
-Benchmarks are provided in the `benches/` directory:
-
-```sh
-cargo bench
-```
-
-You can also use the provided shell scripts in `scripts/` for profiling and release builds.
-
----
-
-## Development Notes
-
-- **Python Bindings:**  
-  Expose `RelayRLAction`, `RelayRLTrajectory`, `ConfigLoader`, and agent/server classes to Python.
-- **Configuration:**  
-  Use JSON files to specify experiment parameters, network settings, and logging options.
-- **Algorithm Integration:**  
-  Custom algorithms must be properly structured with TorchScript exports and inherit from the base algorithm class.
-
----
-
-## Limitations
-
-- **Single-Agent Focus:**  
-  The framework is designed for single-agent RL. Multi-agent support is not natively implemented, but you may launch multiple agent and training server processes for experimentation.
-- **Prototype Status:**  
-  The framework is unstable during training and is under active development. Expect breaking changes and incomplete features.
-- **Python Algorithm Requirement:**  
-  The framework requires Python algorithms to be implemented and provided - it does not include built-in algorithms beyond the basic REINFORCE implementations.
-
----
+- ### **Beyond this crate:**
+  - `relayrl_algorithms` crate creation and publication for training workflows
+  - `relayrl_types` updates to minimize serialization overhead and to reduce tensor copy towards zero-copy (preferably)
+  - `relayrl_cli` for ease-of-use and language agnostic execution via a deployable gRPC pipeline for external CLI process interfacing
 
 ## Contributing
 
-Contributions are welcome! Please open issues or pull requests for bug reports, feature requests, or improvements.
-
----
+Contributions are welcomed! Please open issues or pull requests for bug reports, feature requests, or improvements. I'll be glad to work with you!
 
 ## License
 
-[Apache License 2.0](../LICENSE)
+[Apache License 2.0](../../LICENSE)
