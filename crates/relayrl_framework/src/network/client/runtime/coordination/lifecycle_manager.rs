@@ -2,16 +2,16 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::FormattedTrajectoryFileParams;
+use crate::network::client::agent::TrajectoryFileParams;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::prelude::config::TransportConfigParams;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::utilities::configuration::Algorithm;
+use crate::utilities::configuration::{ClientConfigLoader, LocalModelModuleParams};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
-use crate::utilities::configuration::{ClientConfigLoader, LocalModelModuleParams, TrajectoryFileOutputParams};
 
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use std::collections::HashMap;
@@ -83,18 +83,15 @@ pub(crate) fn construct_local_model_path(local_model_module: &LocalModelModulePa
 }
 
 pub(crate) fn construct_trajectory_file_output(
-    trajectory_file_output: &TrajectoryFileOutputParams,
-) -> FormattedTrajectoryFileParams {
+    trajectory_file_output: &TrajectoryFileParams,
+) -> TrajectoryFileParams {
     let cwd: PathBuf = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let path = cwd
-        .join(&trajectory_file_output.output.directory)
-        .join(&trajectory_file_output.output.file_name)
-        .join(format!(".{}", &trajectory_file_output.output.format));
+    let directory = cwd.join(&trajectory_file_output.directory);
 
-    FormattedTrajectoryFileParams {
+    TrajectoryFileParams {
         enabled: trajectory_file_output.enabled,
         encode: trajectory_file_output.encode,
-        path,
+        directory,
     }
 }
 
@@ -125,7 +122,7 @@ pub(crate) struct LifeCycleManager {
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
     local_model_path: Arc<RwLock<PathBuf>>,
-    trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
+    trajectory_file_output: Arc<RwLock<TrajectoryFileParams>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     transport_type: Arc<TransportType>,
     config_path: Arc<PathBuf>,
@@ -218,7 +215,7 @@ impl LifeCycleManager {
         self.local_model_path.clone()
     }
 
-    pub fn get_trajectory_file_output(&self) -> Arc<RwLock<FormattedTrajectoryFileParams>> {
+    pub fn get_trajectory_file_output(&self) -> Arc<RwLock<TrajectoryFileParams>> {
         self.trajectory_file_output.clone()
     }
 
@@ -275,7 +272,7 @@ impl LifeCycleManager {
 
     pub async fn set_trajectory_file_path(
         &self,
-        trajectory_file_output: &TrajectoryFileOutputParams,
+        trajectory_file_output: &TrajectoryFileParams,
     ) -> Result<(), LifeCycleManagerError> {
         let mut trajectory_file_output_guard = self.trajectory_file_output.write().await;
         *trajectory_file_output_guard = construct_trajectory_file_output(trajectory_file_output);
