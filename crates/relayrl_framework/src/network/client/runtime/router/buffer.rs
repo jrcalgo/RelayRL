@@ -1,7 +1,10 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::agent::ActorServerModelMode;
+use crate::network::client::agent::ClientCapabilities;
 #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
 use crate::network::client::agent::DatabaseTypeParams;
-use crate::network::client::agent::FormattedTrajectoryFileParams;
+use crate::network::client::agent::TrajectoryFileParams;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
@@ -9,12 +12,11 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::data::transport::{TransportClient, TransportError};
 
-use relayrl_types::prelude::{BackendMatcher, CodecConfig};
-use relayrl_types::types::data::action::RelayRLAction;
+use relayrl_types::prelude::BackendMatcher;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use relayrl_types::prelude::CodecConfig;
 use relayrl_types::types::data::tensor::{DType, NdArrayDType, TchDType, TensorData};
-use relayrl_types::types::data::trajectory::{
-    EncodedTrajectory, RelayRLTrajectory, TrajectoryError,
-};
+use relayrl_types::types::data::trajectory::{RelayRLTrajectory, TrajectoryError};
 
 use arrow::array::BinaryBuilder;
 use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
@@ -38,7 +40,7 @@ use uuid::Uuid;
 type PriorityRank = i64;
 
 #[derive(Debug, Clone)]
-struct SinkQueueEntry {
+pub(crate) struct SinkQueueEntry {
     priority: PriorityRank, // lower = sooner, higher = later
     actor_id: ActorUuid,
     traj_for_processing: Arc<RelayRLTrajectory>,
@@ -83,6 +85,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn new(
         associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
+        shared_client_capabilities: Arc<ClientCapabilities>,
         codec: CodecConfig,
     ) -> Self;
     #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
@@ -112,13 +115,14 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn new(
         associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
+        shared_client_capabilities: Arc<ClientCapabilities>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: CodecConfig,
     ) -> Self;
     #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     fn with_database(&mut self, database_params: DatabaseTypeParams) -> &mut Self;
     fn with_trajectory_writer(
         &mut self,
-        shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
+        shared_trajectory_file_output: Arc<RwLock<TrajectoryFileParams>>,
     ) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
     fn spawn_loop(&mut self) -> Result<(), RouterError>;
@@ -154,18 +158,19 @@ trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
 }
 
 #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
+pub(crate) trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
     DatabaseTrajectorySinkTrait<B> + LocalTrajectorySinkTrait<B>
 {
 }
 
 #[cfg(not(any(feature = "postgres_db", feature = "sqlite_db")))]
-trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
+pub(crate) trait PersistentTrajectoryDataSinkTrait<B: Backend + BackendMatcher<Backend = B>>:
     LocalTrajectorySinkTrait<B>
 {
 }
 
-trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
+#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+pub(crate) trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn write_database_trajectory(
         entry: &SinkQueueEntry,
         actor_last_processed: &DashMap<Uuid, i64>,
@@ -176,26 +181,30 @@ trait DatabaseTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     ) -> Result<(), TrajectorySinkError>;
 }
 
-trait LocalTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
+pub(crate) trait LocalTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn write_local_trajectory(
         entry: &SinkQueueEntry,
         actor_last_processed: &DashMap<Uuid, i64>,
+        output_directory: &std::path::Path,
     ) -> Result<(), TrajectorySinkError>;
 }
 
 pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
+    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     associated_router_id: RouterUuid,
     active: AtomicBool,
-    rx_from_actor: Receiver<RoutedMessage>,
+    rx_from_actor: Option<Receiver<RoutedMessage>>,
     actor_last_processed: DashMap<Uuid, i64>,
+    #[allow(dead_code)]
     traj_queue_tx: Option<Sender<SinkQueueEntry>>,
+    shared_client_capabilities: Arc<ClientCapabilities>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_transport: Option<Arc<TransportClient<B>>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_server_addresses: Option<Arc<RwLock<ServerAddresses>>>,
     #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     database_params: Option<DatabaseTypeParams>,
-    shared_trajectory_file_output: Option<Arc<RwLock<FormattedTrajectoryFileParams>>>,
+    shared_trajectory_file_output: Option<Arc<RwLock<TrajectoryFileParams>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     codec: CodecConfig,
@@ -207,16 +216,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     for ClientTrajectoryBuffer<B>
 {
     fn new(
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         associated_router_id: RouterUuid,
+        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        _associated_router_id: RouterUuid,
         rx_from_actor: Receiver<RoutedMessage>,
+        shared_client_capabilities: Arc<ClientCapabilities>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: CodecConfig,
     ) -> Self {
         Self {
+            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             associated_router_id,
             active: AtomicBool::new(false),
-            rx_from_actor,
+            rx_from_actor: Some(rx_from_actor),
             actor_last_processed: DashMap::new(),
             traj_queue_tx: None,
+            shared_client_capabilities,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_transport: None,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -251,7 +266,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
     fn with_trajectory_writer(
         &mut self,
-        shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
+        shared_trajectory_file_output: Arc<RwLock<TrajectoryFileParams>>,
     ) -> &mut Self {
         self.shared_trajectory_file_output = Some(shared_trajectory_file_output);
         self
@@ -265,40 +280,97 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     fn spawn_loop(&mut self) -> Result<(), RouterError> {
         self.active.store(true, Ordering::SeqCst);
 
-        // Extract fields we need to avoid borrowing self
-        let trajectory_writer_enabled: bool = self.shared_trajectory_file_output.is_some();
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let transport_enabled: bool = self.shared_transport.is_some();
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let server_addresses_enabled: bool = self.shared_server_addresses.is_some();
-        let actor_last_processed: DashMap<Uuid, i64> = self.actor_last_processed.clone();
+        let mut rx_from_actor = self.rx_from_actor.take().ok_or_else(|| {
+            RouterError::TrajectorySinkError(TrajectorySinkError::EncodeTrajectoryError(
+                TrajectoryError::SerializationError("spawn_loop already called".to_string()),
+            ))
+        })?;
 
-        let (_traj_queue_tx, mut traj_queue_rx) =
+        let (traj_queue_tx, mut traj_queue_rx) =
             tokio::sync::mpsc::unbounded_channel::<SinkQueueEntry>();
 
-        let worker_priority_queue: Arc<Mutex<BinaryHeap<SinkQueueEntry>>> =
-            Arc::new(Mutex::new(BinaryHeap::new()));
+        let actor_last_processed = self.actor_last_processed.clone();
+        let shared_client_capabilities = self.shared_client_capabilities.clone();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        let identity = self.associated_router_id;
 
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_transport = self.shared_transport.clone();
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let codec: CodecConfig = self.codec.clone();
-        let identity: RouterUuid = self.associated_router_id;
+        let shared_server_addresses = self.shared_server_addresses.clone();
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        let codec = self.codec.clone();
 
-        // Clone for worker async tasks
-        let worker_queue: Arc<Mutex<BinaryHeap<SinkQueueEntry>>> = worker_priority_queue.clone();
-        let worker_actor_last_processed: DashMap<Uuid, i64> = actor_last_processed.clone();
+        let shared_trajectory_file_output = self.shared_trajectory_file_output.clone();
+
+        let worker_priority_queue: Arc<Mutex<BinaryHeap<SinkQueueEntry>>> =
+            Arc::new(Mutex::new(BinaryHeap::new()));
+
+        let mut receiver_shutdown_rx = self.shutdown.take();
+        let mut worker_shutdown_rx = receiver_shutdown_rx.as_mut().map(|rx| rx.resubscribe());
+        let receiver_active = Arc::new(AtomicBool::new(true));
+        let worker_active = receiver_active.clone();
+
+        let receiver_actor_last_processed = actor_last_processed.clone();
+        let _receiver_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = async {
+                        if let Some(rx) = &mut receiver_shutdown_rx {
+                            let _ = rx.recv().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        break;
+                    }
+
+                    msg_opt = rx_from_actor.recv() => {
+                        match msg_opt {
+                            Some(msg) => {
+                                // Only process SendTrajectory payloads
+                                if let RoutedPayload::SendTrajectory { timestamp, trajectory } = msg.payload {
+                                    let priority = Self::_compute_priority(
+                                        &msg.actor_id,
+                                        &receiver_actor_last_processed,
+                                        timestamp,
+                                    );
+
+                                    let entry = SinkQueueEntry {
+                                        priority,
+                                        actor_id: msg.actor_id,
+                                        traj_for_processing: Arc::new(trajectory),
+                                    };
+
+                                    if traj_queue_tx.send(entry).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            receiver_active.store(false, Ordering::SeqCst);
+        });
+
+        let worker_queue = worker_priority_queue.clone();
+        let worker_actor_last_processed = actor_last_processed.clone();
+        let worker_caps = shared_client_capabilities.clone();
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let worker_transport: Option<Arc<TransportClient<B>>> = shared_transport.clone();
+        let worker_transport = shared_transport.clone();
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let worker_codec: CodecConfig = codec.clone();
-        let worker_identity: Uuid = identity;
-        let worker_trajectory_writer_enabled: bool = trajectory_writer_enabled;
+        let worker_server_addresses = shared_server_addresses.clone();
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let worker_transport_enabled: bool = transport_enabled;
+        let worker_codec = codec.clone();
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let worker_server_addresses_enabled: bool = server_addresses_enabled;
-        let worker_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+        let worker_identity = identity;
+        let worker_trajectory_file_output = shared_trajectory_file_output.clone();
 
         let _worker_handle = tokio::spawn(async move {
             const BATCH_SIZE: usize = 10;
@@ -306,17 +378,37 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
             loop {
                 tokio::select! {
-                    job_opt = traj_queue_rx.recv() => {
-                        if let Some(job) = job_opt {
-                            let mut queue = worker_queue.lock().await;
-                            queue.push(job);
+                    biased;
+
+                    _ = async {
+                        if let Some(rx) = &mut worker_shutdown_rx {
+                            let _ = rx.recv().await;
                         } else {
-                            break;
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        break;
+                    }
+
+                    job_opt = traj_queue_rx.recv() => {
+                        match job_opt {
+                            Some(job) => {
+                                let mut queue = worker_queue.lock().await;
+                                queue.push(job);
+                            }
+                            None => {
+                                break;
+                            }
                         }
                     }
+
                     _ = worker_tick.tick() => {
                         if !worker_active.load(Ordering::SeqCst) {
-                            break;
+                            let queue = worker_queue.lock().await;
+                            if queue.is_empty() {
+                                break;
+                            }
+                            drop(queue);
                         }
 
                         let mut jobs_to_process = Vec::with_capacity(BATCH_SIZE);
@@ -331,35 +423,159 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             }
                         }
 
-                        for _job in jobs_to_process {
-                            let _job_identity = worker_identity;
+                        // Dispatch each job to enabled sinks
+                        for job in jobs_to_process {
                             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                            let _job_codec = worker_codec.clone();
-                            let _job_actor_last_processed = worker_actor_last_processed.clone();
-                            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                            let _job_transport = worker_transport.clone();
-                            let _job_trajectory_writer_enabled = worker_trajectory_writer_enabled;
-                            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                            let _job_transport_enabled = worker_transport_enabled;
-                            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                            let _job_server_addresses_enabled = worker_server_addresses_enabled;
+                            if worker_caps.training_server_mode != ActorServerModelMode::Disabled {
+                                if let (Some(transport), Some(server_addrs)) =
+                                    (&worker_transport, &worker_server_addresses)
+                                {
+                                    let transport_job = job.clone();
+                                    let transport_codec = worker_codec.clone();
+                                    let transport_client = transport.clone();
+                                    let transport_addrs = server_addrs.clone();
+                                    let transport_actor_last = worker_actor_last_processed.clone();
+                                    let transport_identity = worker_identity;
 
-                            // TODO: IO task implementation
+                                    tokio::spawn(async move {
+                                        // Encode trajectory for transport
+                                        let encoded = match transport_job
+                                            .traj_for_processing
+                                            .encode(&transport_codec)
+                                        {
+                                            Ok(enc) => enc,
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "[TrajectoryBuffer] Encode error: {:?}",
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                        let addrs = transport_addrs.read().await;
+                                        if let Err(e) = Self::send_trajectory(
+                                            &transport_identity,
+                                            &transport_job.actor_id,
+                                            &transport_job.priority,
+                                            &encoded,
+                                            &addrs.model_server_address,
+                                            &addrs.trajectory_server_address,
+                                            &Some(transport_client),
+                                            &transport_actor_last,
+                                        )
+                                        .await
+                                        {
+                                            eprintln!(
+                                                "[TrajectoryBuffer] Transport send error: {:?}",
+                                                e
+                                            );
+                                        }
+                                    });
+                                }
+                            }
+
+                            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+                            if worker_caps.database_trajectory_persistence {
+                                let db_job = job.clone();
+                                let db_actor_last = worker_actor_last_processed.clone();
+
+                                tokio::spawn(async move {
+                                    if let Err(e) =
+                                        Self::write_database_trajectory(&db_job, &db_actor_last)
+                                            .await
+                                    {
+                                        eprintln!(
+                                            "[TrajectoryBuffer] Database write error: {:?}",
+                                            e
+                                        );
+                                    }
+                                });
+                            }
+
+                            if worker_caps.local_trajectory_persistence {
+                                if let Some(ref traj_output) = worker_trajectory_file_output {
+                                    let local_job = job.clone();
+                                    let local_actor_last = worker_actor_last_processed.clone();
+                                    let traj_output_clone = traj_output.clone();
+
+                                    tokio::spawn(async move {
+                                        let params = traj_output_clone.read().await;
+                                        if params.enabled {
+                                            // Ensure directory exists
+                                            if let Err(e) = resolve_trajectory_directory(&params.directory) {
+                                                eprintln!(
+                                                    "[TrajectoryBuffer] Directory resolve error: {:?}",
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                            if let Err(e) = Self::write_local_trajectory(
+                                                &local_job,
+                                                &local_actor_last,
+                                                &params.directory,
+                                            )
+                                            .await
+                                            {
+                                                eprintln!(
+                                                    "[TrajectoryBuffer] Local write error: {:?}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            // Drain remaining jobs on shutdown
+            // Process remaining jobs synchronously for graceful shutdown
             let mut queue = worker_queue.lock().await;
-            while let Some(_job) = queue.pop() {
-                // TODO: Process remaining jobs
+            while let Some(job) = queue.pop() {
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                if worker_caps.training_server_mode != ActorServerModelMode::Disabled {
+                    let _ = Self::send_trajectory(
+                        &worker_identity,
+                        &job.actor_id,
+                        &job.priority,
+                        &job.traj_for_processing,
+                        &worker_transport,
+                        &worker_server_addresses,
+                    )
+                    .await;
+                }
+
+                #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+                if worker_caps.database_trajectory_persistence {
+                    let _ =
+                        Self::write_database_trajectory(&job, &worker_actor_last_processed).await;
+                }
+
+                if worker_caps.local_trajectory_persistence {
+                    if let Some(ref traj_output) = worker_trajectory_file_output {
+                        let params = traj_output.read().await;
+                        if params.enabled {
+                            if let Err(e) = resolve_trajectory_directory(&params.directory) {
+                                eprintln!(
+                                    "[TrajectoryBuffer] Directory resolve error during shutdown: {:?}",
+                                    e
+                                );
+                                continue;
+                            }
+                            let _ = Self::write_local_trajectory(
+                                &job,
+                                &worker_actor_last_processed,
+                                &params.directory,
+                            )
+                            .await;
+                        }
+                    }
+                }
             }
         });
 
-        // TODO: Implement message receive loop
-        // For now, just mark as inactive
-        self.active.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -692,12 +908,29 @@ fn build_binary_array(data: Vec<Option<Vec<u8>>>) -> arrow::array::ArrayRef {
     Arc::new(builder.finish())
 }
 
+/// Resolves the trajectory output directory, creating it if it doesn't exist.
+fn resolve_trajectory_directory(directory: &std::path::Path) -> Result<(), TrajectorySinkError> {
+    if !directory.exists() {
+        std::fs::create_dir_all(directory).map_err(|e| {
+            TrajectorySinkError::EncodeTrajectoryError(TrajectoryError::SerializationError(
+                format!(
+                    "Failed to create trajectory directory '{}': {}",
+                    directory.display(),
+                    e
+                ),
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 impl<B: Backend + BackendMatcher<Backend = B>> LocalTrajectorySinkTrait<B>
     for ClientTrajectoryBuffer<B>
 {
     async fn write_local_trajectory(
         entry: &SinkQueueEntry,
         actor_last_processed: &DashMap<Uuid, i64>,
+        output_directory: &std::path::Path,
     ) -> Result<(), TrajectorySinkError> {
         let trajectory = entry.traj_for_processing.clone();
         let actor_id = entry.actor_id;
@@ -789,8 +1022,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> LocalTrajectorySinkTrait<B>
             }
         }
 
-        let file_path = std::path::PathBuf::from(format!(
-            "trajectories/trajectory_{}_{}.arrow",
+        let file_path = output_directory.join(format!(
+            "trajectory_{}_{}.arrow",
             actor_id, trajectory.timestamp
         ));
 
