@@ -13,7 +13,7 @@
 
 With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `relayrl_framework` crate now provides a **multi-actor native** client runtime for deep reinforcement learning experiments. The training server (and new inference server) are under development and remain unavailable in this update.
 
-As of now, the only way to perform inference is to provide your own `LibTorch` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
+As of now, the only way to perform inference is to provide your own `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
 
 All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
 
@@ -23,6 +23,7 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 - Local Arrow file sink for **offline trajectory data collection** and training
 - **Scalable** router-based message dispatching for actor runtimes
 - **Ergonomic builder pattern** API for agent construction
+- **Multiple device type support** via `NdArray` for CPU exclusively and `Tch` for CPU/CUDA/MPS
 
 **Current Limitations:**
 
@@ -34,7 +35,7 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 - **Architecture Redesign:** Monolithic design of v0.4.5 abstracted into a decoupled layered architecture, enhancing modularity, maintainability, and testability.
 - **Rust-First Design Philosophy:** Complete removal of PyO3 and its Python code dependencies from framework; all core components written entirely in Rust.
-- **Backend Independence:** Replacement of direct `Tch` crate dependency with `Burn`, enabling generic Tensor interfacing with the framework (currently supports Burn's `Tch` and `NdArray` Tensor backends, as well as `LibTorch` and `ONNX` model inference).
+- **Backend Independence:** Replacement of direct `Tch` crate dependency with `Burn`, enabling generic Tensor interfacing with the framework (currently supports Burn's `Tch` and `NdArray` Tensor backends, as well as `TorchScript` and `ONNX` model inference).
 - **Improved Error Handling:** Near complete removal of panics and replacement with proper error handling (retries, branches, etc.) and upstream propagation.
 - **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building a strong `ZMQ` transport implementation.
 - **Type System:** Moved to a separate crate (`relayrl_types`).
@@ -45,7 +46,7 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 ```rust
 // the following instructions assume that the `client` feature flag is the only one enabled;
-// parameters for start()/restart() may change depending on if `transport_layer` is enabled or not.
+// parameters for start()/restart()/AgentBuilder will change if `transport_layer` or `database_layer` is enabled.
 use relayrl_framework::prelude::network::{RelayRLAgent, AgentBuilder, RelayRLAgentActors};
 use relayrl_framework::prelude::types::{ModelModule, DeviceType};
 use burn_ndarray::NdArray;
@@ -83,10 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let versions = agent.get_model_version(ids.clone()).await?;
 
     // 3. Actor Runtime Management
-    agent.new_actor(DeviceType::Default, None).await?;
+    agent.new_actor(DeviceType::Cpu, None).await?;
     
     let new_actor_count: u32 = 10;
-    agent.new_actors(new_actor_count, DeviceType::Default, None).await?;
+    agent.new_actors(new_actor_count, DeviceType::Mps, None).await?;
     
     let ids = agent.get_actor_ids()?;
     if ids.len() >= 2 {
@@ -99,7 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ids = agent.get_actor_ids()?;
     agent.flag_last_action(ids.clone(), last_reward).await?;
     
-    agent.scale_throughput(2).await?;
+    agent.scale_throughput(2).await?; 
+    agent.scale_throughput(-2).await?;
     
     agent.shutdown().await?;
     
@@ -116,21 +118,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - ### **v0.5.0:**
   - Client `ZMQ` transport interface completion
   - Client `PostgreSQL` and `SQLite` database interface completion
-  - Comprehensive Client testing and benchmarking on common gym environments
+  - Comprehensive Client testing and benchmarking on common RL environments
   - Short Client stabilization period to enable focused server-side development
 
 - ### **v0.6.0:**
   - Training Server implementation with support for Online/Offline training workflows
   - `relayrl_algorithms` crate integration to enable deep RL algorithmic training and Client `ModelModule` acquisition
   - Comprehensive Training Server testing and benchmarking
-  - Comprehensive Client-Training Server network testing and benchmarking on common gym environments
+  - Comprehensive Client-Training Server network testing and benchmarking on common RL environments
   - Momentary Training Server stabilization
 
 - ### **v0.7.0:**
   - Inference Server implementation to provide client with remote inference capabilities
   - Inference Server and Training Server communication for updating Inference Server's inference model(s)
   - Comprehensive Inference Server testing and benchmarking
-  - Comprehensive Client-Inference Server-Training Server network testing and benchmarking on common gym environments
+  - Comprehensive Client-Inference Server-Training Server network testing and benchmarking on common RL environments
+
+- ### **v0.8.0:**
+  - Full Client-Training Server-Inference Server integration
+  - Performance optimizations
+  - API stabilization
+  - Possibly breaking changes
+
+- ### **v0.9.0 / v1.0.0:**
+  - **v0.9.0** if still refining APIs and features
+  - **v1.0.0** if ready for production stability guarantees
+  - The version bump choice between these two depends on API stability and feature completeness
 
 - ### **Beyond this crate:**
   - `relayrl_algorithms` crate creation and publication for training workflows
