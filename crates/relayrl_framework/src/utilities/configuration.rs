@@ -5,6 +5,7 @@ use std::{fs, fs::File, io::Read, path::PathBuf};
 
 use crate::get_or_create_client_config_json_path;
 use crate::network::HyperparameterArgs;
+use crate::network::client::agent::TrajectoryFileParams;
 
 #[macro_use]
 pub mod client_config_macros {
@@ -809,40 +810,6 @@ pub struct TensorboardConfig {
     pub training_tensorboard: Option<TensorboardParams>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TrajectoryFileOutput {
-    pub directory: String,
-    pub file_name: String,
-    pub format: String,
-}
-
-impl Default for TrajectoryFileOutput {
-    fn default() -> Self {
-        Self {
-            directory: "data".to_string(),
-            file_name: "experiment_data".to_string(),
-            format: "json".to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TrajectoryFileOutputParams {
-    pub enabled: bool,
-    pub encode: bool,
-    pub output: TrajectoryFileOutput,
-}
-
-impl Default for TrajectoryFileOutputParams {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            encode: true,
-            output: TrajectoryFileOutput::default(),
-        }
-    }
-}
-
 /// Parameters for Training Tensorboard Writer, used for real-time plotting.
 ///
 /// The scalar_tags field is deserialized from a semicolon-separated string.
@@ -877,7 +844,7 @@ pub struct ClientConfigParams {
     pub config_path: PathBuf,
     pub config_update_polling_seconds: f32,
     pub init_hyperparameters: HyperparameterConfig,
-    pub trajectory_file_output: TrajectoryFileOutputParams,
+    pub trajectory_file_output: TrajectoryFileParams,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -932,7 +899,7 @@ impl ClientConfigLoader {
                             config_path: PathBuf::from("client_config.json"),
                             config_update_polling_seconds: 10.0,
                             init_hyperparameters: HyperparameterConfig::default(),
-                            trajectory_file_output: TrajectoryFileOutputParams::default(),
+                            trajectory_file_output: TrajectoryFileParams::default(),
                         },
                         transport_config: TransportConfigBuilder::build_default()
                     }
@@ -966,7 +933,7 @@ impl ClientConfigLoader {
         self.client_config.init_hyperparameters.to_args(algorithm)
     }
 
-    pub fn get_trajectory_file_output(&self) -> &TrajectoryFileOutputParams {
+    pub fn get_trajectory_file_output(&self) -> &TrajectoryFileParams {
         &self.client_config.trajectory_file_output
     }
 
@@ -982,7 +949,7 @@ pub trait ClientConfigBuildParams {
     -> &mut Self;
     fn set_trajectory_file_output(
         &mut self,
-        trajectory_file_output: TrajectoryFileOutputParams,
+        trajectory_file_output: TrajectoryFileParams,
     ) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
     fn build(&self) -> ClientConfigLoader;
@@ -995,7 +962,7 @@ pub struct ClientConfigBuilder {
     config_update_polling_seconds: Option<f32>,
     init_hyperparameters: Option<HyperparameterConfig>,
     transport_config: Option<TransportConfigParams>,
-    trajectory_file_output: Option<TrajectoryFileOutputParams>,
+    trajectory_file_output: Option<TrajectoryFileParams>,
 }
 
 impl ClientConfigBuildParams for ClientConfigBuilder {
@@ -1019,7 +986,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
 
     fn set_trajectory_file_output(
         &mut self,
-        trajectory_file_output: TrajectoryFileOutputParams,
+        trajectory_file_output: TrajectoryFileParams,
     ) -> &mut Self {
         self.trajectory_file_output = Some(trajectory_file_output);
         self
@@ -1051,7 +1018,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
             trajectory_file_output: self
                 .trajectory_file_output
                 .clone()
-                .unwrap_or_else(|| TrajectoryFileOutputParams::default()),
+                .unwrap_or_else(|| TrajectoryFileParams::default()),
         };
 
         let transport_config: TransportConfigParams = match &self.transport_config {
@@ -1080,7 +1047,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 config_path: PathBuf::from("client_config.json"),
                 config_update_polling_seconds: 10.0,
                 init_hyperparameters: HyperparameterConfig::default(),
-                trajectory_file_output: TrajectoryFileOutputParams::default(),
+                trajectory_file_output: TrajectoryFileParams::default(),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }
