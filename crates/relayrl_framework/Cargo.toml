@@ -5,7 +5,7 @@ authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "A distributed, system-oriented multi-agent reinforcement learning framework."
 readme = "README.md"
-keywords = ['reinforcement-learning', 'multi-agent', 'framework', 'client-server', 'system-integration']
+keywords = ['machine-learning', 'multi-agent', 'framework', 'client-server', 'system-integration']
 categories = ['science', 'simulation', 'asynchronous', 'network-programming']
 license = "Apache-2.0"
 
