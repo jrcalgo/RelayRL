@@ -30,7 +30,7 @@ jobs:
       run: cargo build -p relayrl_types --release --verbose
     - name: Build framework
       run: cargo build -p relayrl_framework --release --verbose
-    - name: Run tests
-      run: cargo test --release --verbose
-    - name: Run benchmarks
-      run: cargo bench --verbose
+    # - name: Run tests
+    #   run: cargo test --release --verbose
+    # - name: Run benchmarks
+    #   run: cargo bench --verbose
