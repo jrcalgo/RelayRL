@@ -413,6 +413,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let mut sender: ClientTrajectoryBuffer<B> = ClientTrajectoryBuffer::new(
                 router_id,
                 trajectory_buffer_rx,
+                self.shared_client_capabilities.clone(),
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 self.codec.clone(),
             );
@@ -468,7 +469,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .await;
             #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
             return Err(ScaleManagerError::ScalingOperationNotSupportedError(
-                "Scale out operation not supported".to_string(),
+                "Scale out operation failed; created routers were not properly initialized".to_string(),
             ));
         }
 
@@ -570,7 +571,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     return result;
                     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
                     return Err(ScaleManagerError::ScalingOperationNotSupportedError(
-                        "Scale in operation not supported".to_string(),
+                        format!("Cannot remove routers: only {} routers exist", initial_router_count),
                     ));
                 }
 
@@ -623,7 +624,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
                     return Err(ScaleManagerError::ScalingOperationNotSupportedError(
-                        "Scale in operation not supported".to_string(),
+                        "Scale in operation failed; removal of routers was not successful".to_string(),
                     ));
                 }
 
