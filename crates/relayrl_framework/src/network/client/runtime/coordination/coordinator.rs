@@ -382,7 +382,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-        if let Err(e) = scaling.__scale_in(router_scale).await {
+        if let Err(e) = scaling.__scale_out(router_scale).await {
             return Err(CoordinatorError::ScaleManagerError(e));
         }
 
