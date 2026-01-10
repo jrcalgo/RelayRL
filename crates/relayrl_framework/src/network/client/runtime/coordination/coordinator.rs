@@ -2,7 +2,7 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::ClientCapabilities;
+use crate::network::client::agent::{ClientModes, ClientCapabilities};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -98,6 +98,8 @@ impl From<String> for ClientConfigError {
 
 #[derive(Debug, Error)]
 pub enum CoordinatorError {
+    #[error("Client modes are invalid: {0}")]
+    InvalidClientModesError(String),
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
@@ -133,7 +135,7 @@ pub trait ClientInterface<
     fn new(
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         transport_type: TransportType,
-        client_capabilities: ClientCapabilities,
+        client_modes: ClientModes,
     ) -> Result<Self, CoordinatorError>
     where
         Self: Sized;
@@ -227,6 +229,7 @@ pub struct ClientCoordinator<
 > {
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     transport_type: TransportType,
+    client_modes: Arc<ClientModes>,
     client_capabilities: Arc<ClientCapabilities>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
 }
@@ -257,11 +260,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     fn new(
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         transport_type: TransportType,
-        client_capabilities: ClientCapabilities,
+        client_modes: ClientModes,
     ) -> Result<Self, CoordinatorError> {
+        let client_capabilities = client_modes.capabilities().map_err(|e| CoordinatorError::InvalidClientModesError(e.to_string()))?;
+
         Ok(Self {
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             transport_type,
+            client_modes: Arc::new(client_modes),
             client_capabilities: Arc::new(client_capabilities),
             runtime_params: None,
         })
@@ -310,6 +316,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         );
         lifecycle.spawn_loop();
 
+        let shared_client_modes = self.client_modes.clone();
         let shared_client_capabilities = self.client_capabilities.clone();
         let shared_max_traj_length = lifecycle.get_max_traj_length();
 
@@ -357,6 +364,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         ));
 
         let mut scaling = ScaleManager::new(
+            shared_client_modes,
             shared_client_capabilities,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_algorithm_args,

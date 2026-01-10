@@ -1,6 +1,6 @@
 use crate::network::HyperparameterArgs;
-use crate::network::client::agent::ClientCapabilities;
-use crate::network::client::agent::FormattedTrajectoryFileParams;
+use crate::network::client::agent::{ClientModes, ClientCapabilities};
+use crate::network::client::agent::{TrajectoryFileParams, TrajectoryPersistenceMode};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
@@ -119,6 +119,7 @@ pub(crate) struct ScaleManager<
     const D_OUT: usize,
 > {
     pub(crate) scaling_id: ScaleManagerUuid,
+    shared_client_modes: Arc<ClientModes>,
     shared_client_capabilities: Arc<ClientCapabilities>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_algorithm_args: Arc<AlgorithmArgs>,
@@ -127,7 +128,7 @@ pub(crate) struct ScaleManager<
     shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     shared_init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
-    shared_trajectory_file_output: Arc<RwLock<FormattedTrajectoryFileParams>>,
+    shared_trajectory_file_output: Arc<RwLock<TrajectoryFileParams>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     pub(crate) scaling_dispatcher: Arc<ScalingDispatcher<B>>,
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -147,6 +148,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ScaleManager<B, D_IN, D_OUT>
 {
     pub(crate) fn new(
+        shared_client_modes: Arc<ClientModes>,
         shared_client_capabilities: Arc<ClientCapabilities>,
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         shared_algorithm_args: Arc<AlgorithmArgs>,
@@ -197,10 +199,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_init_hyperparameters = lifecycle.get_init_hyperparameters();
-        let shared_trajectory_file_output = lifecycle.get_trajectory_file_output();
+
+        // If parameters are provided in the client modes, use them. Otherwise, use the ones from the lifecycle manager's config loader.
+        let shared_trajectory_file_output: Arc<RwLock<TrajectoryFileParams>> = match &shared_client_modes.trajectory_persistence_mode {
+            TrajectoryPersistenceMode::Local(Some(trajectory_file_output)) => Arc::new(RwLock::new(trajectory_file_output.clone())),
+            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
+            TrajectoryPersistenceMode::Hybrid(_, Some(trajectory_file_output)) => Arc::new(RwLock::new(trajectory_file_output)),
+            _ => {
+                lifecycle.get_trajectory_file_output()
+            },
+        };
 
         Ok(Self {
             scaling_id,
+            shared_client_modes,
             shared_client_capabilities,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             shared_algorithm_args,
@@ -410,7 +422,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             add("trajectory_buffer", router_id).map_err(ScaleManagerError::from)?;
             // Create Sender - receives from actors via sender_rx
-            let mut sender: ClientTrajectoryBuffer<B> = ClientTrajectoryBuffer::new(
+            let mut buffer: ClientTrajectoryBuffer<B> = ClientTrajectoryBuffer::new(
                 router_id,
                 trajectory_buffer_rx,
                 self.shared_client_capabilities.clone(),
@@ -418,10 +430,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 self.codec.clone(),
             );
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            sender.with_transport(self.transport.clone(), self.shared_server_addresses.clone());
-            sender.with_trajectory_writer(self.shared_trajectory_file_output.clone());
+            buffer.with_transport(self.transport.clone(), self.shared_server_addresses.clone());
+            buffer.with_trajectory_writer(self.shared_trajectory_file_output.clone());
             if let Some(lc) = &self.lifecycle {
-                sender.with_shutdown(
+                buffer.with_shutdown(
                     lc.subscribe_shutdown()
                         .map_err(ScaleManagerError::SubscribeShutdownError)?,
                 );
@@ -430,7 +442,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             let receiver_loop: JoinHandle<()> = Self::_spawn_transport_receiver(receiver).await;
             let filter_loop: JoinHandle<()> = Self::_spawn_central_filter(filter).await;
-            let trajectory_buffer_loop: JoinHandle<()> = Self::_spawn_trajectory_buffer(sender);
+            let trajectory_buffer_loop: JoinHandle<()> = Self::_spawn_trajectory_buffer(buffer);
 
             let runtime_params = RouterRuntimeParams {
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -469,7 +481,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .await;
             #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
             return Err(ScaleManagerError::ScalingOperationNotSupportedError(
-                "Scale out operation failed; created routers were not properly initialized".to_string(),
+                "Scale out operation failed; created routers were not properly initialized"
+                    .to_string(),
             ));
         }
 
@@ -571,7 +584,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     return result;
                     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
                     return Err(ScaleManagerError::ScalingOperationNotSupportedError(
-                        format!("Cannot remove routers: only {} routers exist", initial_router_count),
+                        format!(
+                            "Cannot remove routers: only {} routers exist",
+                            initial_router_count
+                        ),
                     ));
                 }
 
@@ -624,7 +640,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
                     return Err(ScaleManagerError::ScalingOperationNotSupportedError(
-                        "Scale in operation failed; removal of routers was not successful".to_string(),
+                        "Scale in operation failed; removal of routers was not successful"
+                            .to_string(),
                     ));
                 }
 
@@ -635,7 +652,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     router_params.trajectory_buffer_loop.abort();
                     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                     remove("transport_receiver", *router_id).map_err(ScaleManagerError::from)?;
-                    remove("filter", *router_id).map_err(ScaleManagerError::from)?;
+                    remove("router", *router_id).map_err(ScaleManagerError::from)?;
                     remove("trajectory_buffer", *router_id).map_err(ScaleManagerError::from)?;
                     println!("Router with ID {} has been removed.", router_id);
                 }
@@ -746,15 +763,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = receiver.spawn_loop().await {
-                eprintln!("[ScaleManager] External receiver error: {}", e);
+                eprintln!("[ScaleManager] Transport receiver error: {}", e);
             }
         })
     }
 
-    fn _spawn_trajectory_buffer(mut sender: ClientTrajectoryBuffer<B>) -> JoinHandle<()> {
+    fn _spawn_trajectory_buffer(mut buffer: ClientTrajectoryBuffer<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            if let Err(e) = sender.spawn_loop() {
-                eprintln!("[ScaleManager] External sender error: {}", e);
+            if let Err(e) = buffer.spawn_loop() {
+                eprintln!("[ScaleManager] Trajectory buffer error: {}", e);
             }
         })
     }

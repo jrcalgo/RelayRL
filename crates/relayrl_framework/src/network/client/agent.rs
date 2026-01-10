@@ -35,6 +35,7 @@ use relayrl_types::types::data::tensor::{NdArrayDType, TchDType};
 use relayrl_types::types::model::ModelModule;
 
 use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
+use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
 use std::collections::HashMap;
 use std::future::Future;
@@ -68,6 +69,8 @@ pub enum ClientError {
     NoopActorCount(String),
     #[error("Invalid inference mode: {0}")]
     InvalidInferenceMode(String),
+    #[error("Invalid trajectory file directory: {0}")]
+    InvalidTrajectoryFileDirectory(String),
 }
 
 /// Output target for runtime statistics collection.
@@ -106,20 +109,33 @@ impl Default for ActorInferenceMode {
 }
 
 /// File-based trajectory recording parameters.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FormattedTrajectoryFileParams {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrajectoryFileParams {
     pub enabled: bool,
     pub encode: bool,
-    pub path: PathBuf,
+    pub directory: PathBuf,
 }
 
-impl Default for FormattedTrajectoryFileParams {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            encode: false,
-            path: PathBuf::from("./trajectories"),
+impl TrajectoryFileParams {
+    pub fn new(enabled: bool, encode: bool, directory: PathBuf) -> Result<Self, ClientError> {
+        if directory.extension().is_some() {
+            return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
+                "Path '{}' appears to be a file, not a directory",
+                directory.display()
+            )));
         }
+
+        Ok(Self {
+            enabled,
+            encode,
+            directory,
+        })
+    }
+}
+
+impl Default for TrajectoryFileParams {
+    fn default() -> Self {
+        Self::new(false, false, PathBuf::from(".")).unwrap() // this will never fail
     }
 }
 
@@ -148,17 +164,17 @@ pub struct PostgreSQLParams {
 /// Trajectory recording mode for each router buffer
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
-pub enum TrajectoryRecordMode {
+pub enum TrajectoryPersistenceMode {
     /// Trajectories are recorded to file on local device.
-    Local(FormattedTrajectoryFileParams),
+    Local(Option<TrajectoryFileParams>),
     /// Trajectories are recorded to a supported database (SQLite, PostgreSQL).
     #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "postgres_db", feature = "sqlite_db"))))]
-    Database(DatabaseTypeParams),
+    Database(Option<DatabaseTypeParams>),
     /// Trajectories are recorded to a supported database and file on local device.
     #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "postgres_db", feature = "sqlite_db"))))]
-    Hybrid(DatabaseTypeParams, FormattedTrajectoryFileParams),
+    Hybrid(Option<DatabaseTypeParams>, Option<TrajectoryFileParams>),
     /// Trajectory recording/persistence is disabled.
     #[cfg(any(
         feature = "postgres_db",
@@ -178,7 +194,7 @@ pub enum TrajectoryRecordMode {
     Disabled,
 }
 
-impl Default for TrajectoryRecordMode {
+impl Default for TrajectoryPersistenceMode {
     fn default() -> Self {
         #[cfg(any(
             feature = "postgres_db",
@@ -193,7 +209,7 @@ impl Default for TrajectoryRecordMode {
             feature = "async_transport",
             feature = "sync_transport"
         )))]
-        return Self::Local(FormattedTrajectoryFileParams::default());
+        return Self::Local(Some(TrajectoryFileParams::default()));
     }
 }
 
@@ -237,11 +253,11 @@ pub struct ClientCapabilities {
     )]
     pub inference_server_mode: ActorServerModelMode,
     /// Whether local trajectory recording is enabled
-    pub local_trajectory_recording: bool,
+    pub local_trajectory_persistence: bool,
     /// Whether database trajectory recording is enabled
     #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "postgres_db", feature = "sqlite_db"))))]
-    pub database_trajectory_recording: bool,
+    pub database_trajectory_persistence: bool,
     /// Training server allocation mode (when training server is enabled)
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[cfg_attr(
@@ -259,11 +275,11 @@ impl ClientCapabilities {
     /// Returns `true` if either local or database trajectory recording is enabled.
     pub fn trajectory_recording_enabled(&self) -> bool {
         #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-        let database_trajectory_recording = self.database_trajectory_recording;
+        let database_trajectory_persistence = self.database_trajectory_persistence;
         #[cfg(not(any(feature = "postgres_db", feature = "sqlite_db")))]
-        let database_trajectory_recording = false;
+        let database_trajectory_persistence = false;
 
-        self.local_trajectory_recording || database_trajectory_recording
+        self.local_trajectory_persistence || database_trajectory_persistence
     }
 }
 
@@ -288,7 +304,7 @@ pub struct ClientModes {
     )]
     pub training_server_mode: ActorServerModelMode,
     /// Trajectory recording mode (local vs database vs hybrid vs disabled)
-    pub trajectory_recording_mode: TrajectoryRecordMode,
+    pub trajectory_persistence_mode: TrajectoryPersistenceMode,
 }
 
 impl Default for ClientModes {
@@ -301,16 +317,14 @@ impl Default for ClientModes {
                 feature = "async_transport",
                 feature = "sync_transport"
             ))]
-            trajectory_recording_mode: TrajectoryRecordMode::Disabled,
+            trajectory_persistence_mode: TrajectoryPersistenceMode::Disabled,
             #[cfg(not(any(
                 feature = "postgres_db",
                 feature = "sqlite_db",
                 feature = "async_transport",
                 feature = "sync_transport"
             )))]
-            trajectory_recording_mode: TrajectoryRecordMode::Local(
-                FormattedTrajectoryFileParams::default(),
-            ),
+            trajectory_persistence_mode: TrajectoryPersistenceMode::Local(Some(TrajectoryFileParams::default())),
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             inference_server_mode: ActorServerModelMode::Disabled,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -358,26 +372,26 @@ impl ClientModes {
             ActorInferenceMode::Server => (false, true),
         };
 
-        let (local_trajectory_recording, _database_trajectory_recording) =
-            match &self.trajectory_recording_mode {
-                TrajectoryRecordMode::Local(_) => (true, false),
+        let (local_trajectory_persistence, _database_trajectory_persistence) =
+            match &self.trajectory_persistence_mode {
+                TrajectoryPersistenceMode::Local(_) => (true, false),
                 #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-                TrajectoryRecordMode::Database(_) => (false, true),
+                TrajectoryPersistenceMode::Database(_) => (false, true),
                 #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-                TrajectoryRecordMode::Hybrid(_, _) => (true, true),
+                TrajectoryPersistenceMode::Hybrid(_, _) => (true, true),
                 #[cfg(any(
                     feature = "postgres_db",
                     feature = "sqlite_db",
                     feature = "async_transport",
                     feature = "sync_transport"
                 ))]
-                TrajectoryRecordMode::Disabled => (false, false),
+                TrajectoryPersistenceMode::Disabled => (false, false),
             };
 
         #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-        let db_params: Option<DatabaseTypeParams> = match &self.trajectory_recording_mode {
-            TrajectoryRecordMode::Database(params) => Some(params.clone()),
-            TrajectoryRecordMode::Hybrid(params, _) => Some(params.clone()),
+        let db_params: Option<DatabaseTypeParams> = match &self.trajectory_persistence_mode {
+            TrajectoryPersistenceMode::Database(params) => Some(params.clone()),
+            TrajectoryPersistenceMode::Hybrid(params, _) => Some(params.clone()),
             _ => None,
         };
 
@@ -387,9 +401,9 @@ impl ClientModes {
             server_inference: _server_inference,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             inference_server_mode: self.inference_server_mode.clone(),
-            local_trajectory_recording,
+            local_trajectory_persistence,
             #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-            database_trajectory_recording: _database_trajectory_recording,
+            database_trajectory_persistence: _database_trajectory_persistence,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             training_server_mode: self.training_server_mode.clone(),
             #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
@@ -412,10 +426,7 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub router_scale: u32,
     pub default_device: DeviceType,
     #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "tch-model", feature = "onnx-model")))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "tch-model", feature = "onnx-model"))))]
     pub default_model: Option<ModelModule<B>>,
     #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
     #[cfg_attr(
@@ -501,12 +512,12 @@ impl<
     }
 
     #[must_use]
-    pub fn trajectory_recording_mode(
+    pub fn trajectory_persistence_mode(
         mut self,
-        trajectory_recording_mode: TrajectoryRecordMode,
+        trajectory_persistence_mode: TrajectoryPersistenceMode,
     ) -> Self {
         if let Some(ref mut modes) = self.client_modes {
-            modes.trajectory_recording_mode = trajectory_recording_mode;
+            modes.trajectory_persistence_mode = trajectory_persistence_mode;
         }
         self
     }
@@ -730,7 +741,6 @@ impl<
         transport_type: TransportType,
         client_modes: ClientModes,
     ) -> Result<Self, ClientError> {
-        let capabilities = client_modes.capabilities()?;
         let supported_backend = if B::matches_backend(&SupportedTensorBackend::NdArray) {
             SupportedTensorBackend::NdArray
         } else if B::matches_backend(&SupportedTensorBackend::Tch) {
@@ -743,7 +753,7 @@ impl<
             coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 transport_type,
-                capabilities,
+                client_modes,
             )?,
             supported_backend,
             input_dtype: None,

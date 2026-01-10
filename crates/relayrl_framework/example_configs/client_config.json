@@ -62,12 +62,7 @@
         "trajectory_file_output": {
             "enabled": true,
             "encode": true,
-            "output": {
-                "directory": "data",
-                "file_name": "experiment_data",
-                "_comment": "csv, txt, json are supported.",
-                "format": "json"
-            }
+            "directory": "experiment_data"
         }
     },
     "transport_config": {
