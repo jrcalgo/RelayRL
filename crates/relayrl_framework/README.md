@@ -13,6 +13,8 @@
 
 With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `relayrl_framework` crate now provides a **multi-actor native** client runtime for deep reinforcement learning experiments. The training server (and new inference server) are under development and remain unavailable in this update.
 
+Without transport or database functionality being implemented yet, the client can only write data to an `arrow` file on your local device.
+
 As of now, the only way to perform inference is to provide your own `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
 
 All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
@@ -111,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Usage Instructions
 
-[View this guide for agent usage :)](CLIENT_GUIDE)
+[View this guide for agent usage :)](../../CLIENT_GUIDE.md)
 
 ## Roadmap
 
