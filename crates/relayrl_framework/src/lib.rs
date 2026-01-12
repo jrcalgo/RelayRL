@@ -1,3 +1,6 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, deny(rustdoc::broken_intra_doc_links))]
+
 //! # RelayRL Framework
 //!
 //! **Version:** 0.5.0-alpha  
