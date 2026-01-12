@@ -42,9 +42,10 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 
 | Platform | Status |
 |----------|--------|
-| macOS (Apple Silicon) | ✅ Tested |
-| Linux (Ubuntu) | ✅ Tested |
-| Windows 10 (x86_64) | ✅ Tested |
+| macOS (Apple Silicon) | Tested |
+| Linux (Ubuntu) | Tested |
+| Windows 10 (x86_64) | Tested |
+| Windows 11 (x86_64) | Not tested (yet) |
 
 ## Quick Start
 
