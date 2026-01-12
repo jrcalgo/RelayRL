@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-01-12
+
+### Added
+- **Acquire Loaded Backend Fn** - `BackendMatcher` trait now provides a function for acquiring current `SupportedTensorBackend`
+  - `get_supported_backend()` returns internal `Backend` value as a `SupportedTensorBackend` enum value
+
+### Changed
+- **Hyperparams Enum to HyperparameterArgs Enum** - Changed name and altered accepted enum values
+  - Removal of DashMap `Map` value, replaced with HashMap
+  - `Args(Vec<String>)` changed to `List(Vec<String>)`
+  - Enum now uses `serde::Serialize` and `serde::Deserialize` attributes
+
 ## [0.3.2] - 2025-11-27
 
 ### Changed
