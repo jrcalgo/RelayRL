@@ -1,5 +1,3 @@
-use dashmap::DashMap;
-
 pub mod types {
     pub mod data;
     #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
@@ -42,9 +40,11 @@ pub mod prelude {
     pub use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
 }
 
+use std::collections::HashMap;
+
 /// Hyperparams enum represents hyperparameter inputs
-#[derive(Clone, Debug)]
-pub enum Hyperparams {
-    Map(DashMap<String, String>),
-    Args(Vec<String>),
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum HyperparameterArgs {
+    Map(HashMap<String, String>),
+    List(Vec<String>),
 }
