@@ -79,6 +79,7 @@ pub trait BackendMatcher {
     type Backend: Backend + 'static;
 
     fn matches_backend(supported: &SupportedTensorBackend) -> bool;
+    fn get_supported_backend() -> SupportedTensorBackend;
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError>;
 }
 
@@ -90,6 +91,10 @@ impl BackendMatcher for NdArray {
         *supported == SupportedTensorBackend::NdArray
     }
 
+    fn get_supported_backend() -> SupportedTensorBackend {
+        SupportedTensorBackend::NdArray
+    }
+        
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
         match device {
             DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),
@@ -106,6 +111,10 @@ impl BackendMatcher for Tch {
 
     fn matches_backend(supported: &SupportedTensorBackend) -> bool {
         *supported == SupportedTensorBackend::Tch
+    }
+
+    fn get_supported_backend() -> SupportedTensorBackend {
+        SupportedTensorBackend::Tch
     }
 
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
