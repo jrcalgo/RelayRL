@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_framework"
-version = "0.5.0-alpha"
+version = "0.5.0-alpha.1"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "A distributed, system-oriented multi-agent reinforcement learning framework."
@@ -14,7 +14,7 @@ license = "Apache-2.0"
 [package.metadata.docs.rs]
 all-features = false
 no-default-features = true
-features = ["client"]
+features = ["client", "tch-backend"]
 rustdoc-args = ["--cfg", "docsrs"]
 rustc-args = ["--cfg", "docsrs"]
 
@@ -24,6 +24,8 @@ crate-type = ["rlib"]
 
 [features]
 default = ["client"]
+
+tch-backend = ["relayrl_types/tch-backend"]
 
 network = ["client", "inference_server", "training_server"]
 client = []
@@ -45,7 +47,7 @@ profile = ["flamegraph", "console-subscriber"]
 
 [dependencies]
 # Crates built by me
-relayrl_types = { version = "0.3.21", features = ["ndarray-backend", "tch-backend", "codec-full", "inference-models"] }
+relayrl_types = { version = "0.4.0", features = ["ndarray-backend", "codec-full", "inference-models"] }
 active-uuid-registry = { version = "0.3.0", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
