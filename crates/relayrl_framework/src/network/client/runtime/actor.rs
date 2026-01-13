@@ -63,6 +63,7 @@ impl InferenceKind {
         if capabilities.local_inference && !server_inference {
             return match device {
                 DeviceType::Cpu => Self::Local,
+                #[cfg(feature = "tch-backend")]
                 DeviceType::Cuda(_) | DeviceType::Mps => Self::Local,
             };
         }

@@ -803,6 +803,7 @@ fn tensor_to_arrow_data(tensor: &TensorData) -> TensorArrowData {
                 binary_data: None,
             }
         }
+        #[cfg(feature = "tch-backend")]
         DType::Tch(TchDType::F32) => {
             let floats: Vec<f32> = tensor
                 .data
@@ -817,6 +818,7 @@ fn tensor_to_arrow_data(tensor: &TensorData) -> TensorArrowData {
                 binary_data: None,
             }
         }
+        #[cfg(feature = "tch-backend")]
         DType::Tch(TchDType::F64) => {
             let floats: Vec<f64> = tensor
                 .data

@@ -741,14 +741,8 @@ impl<
         transport_type: TransportType,
         client_modes: ClientModes,
     ) -> Result<Self, ClientError> {
-        let supported_backend = if B::matches_backend(&SupportedTensorBackend::NdArray) {
-            SupportedTensorBackend::NdArray
-        } else if B::matches_backend(&SupportedTensorBackend::Tch) {
-            SupportedTensorBackend::Tch
-        } else {
-            SupportedTensorBackend::None
-        };
-
+        let supported_backend = B::get_supported_backend();
+        
         Ok(Self {
             coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
