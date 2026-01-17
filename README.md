@@ -59,7 +59,6 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 In your Cargo.toml:
 ```toml
 relayrl_framework = "0.5.0-alpha"
-relayrl_types = "0.3.21"
 ```
 
 ### Basic Usage
