@@ -2,6 +2,14 @@
 //! These traits provide a common interface for building observations, running the environment loop,
 //! and (in the case of training) calculating performance metrics during model training.
 
+use std::any::Any;
+
+#[derive(Debug, Error, Clone)]
+pub enum EnvironmentError {
+    #[error("Environment error: {0}")]
+    EnvironmentError(String),
+}
+
 pub mod environment_traits {
     /// The `EnvironmentTrainingTrait` defines the interface that must be implemented by any
     /// environment where a model is trained. Implementing this trait allows an environment to
@@ -16,9 +24,9 @@ pub mod environment_traits {
     /// * `calculate_performance_return(&self)` - Computes a performance metric (e.g., total reward) for the
     ///   current episode or training iteration, which is used to evaluate and improve the model.
     pub trait EnvironmentTrainingTrait {
-        fn run_environment(&self);
-        fn build_observation(&self);
-        fn calculate_performance_return(&self);
+        fn run_environment(&self) -> Result<(), EnvironmentError>;
+        fn build_observation(&self) -> Result<Any, EnvironmentError>;
+        fn calculate_performance_return(&self) -> Result<Any, EnvironmentError>;
     }
 
     /// The `EnvironmentTestingTrait` defines the interface that must be implemented by any
@@ -32,8 +40,8 @@ pub mod environment_traits {
     /// * `build_observation(&self)` - Constructs an observation from the environment, preparing it for
     ///   input into the trained model.
     pub trait EnvironmentTestingTrait {
-        fn run_environment(&self);
-        fn build_observation(&self);
+        fn run_environment(&self) -> Result<(), EnvironmentError>;
+        fn build_observation(&self) -> Result<Any, EnvironmentError>;
     }
 }
 
