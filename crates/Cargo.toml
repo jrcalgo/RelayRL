@@ -1,3 +1,0 @@
-[workspace]
-members = ["relayrl_framework", "relayrl_python", "relayrl_cli", "relayrl_types", "relayrl_algorithms"]
-resolver = "2"
