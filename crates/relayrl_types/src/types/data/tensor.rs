@@ -448,7 +448,7 @@ pub struct FloatBurnTensor<B: Backend + 'static, const D: usize> {
 
 impl<B: Backend + 'static, const D: usize> FloatBurnTensor<B, D> {
     pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
-        let tensor = Arc::new(Tensor::<B, D, Float>::empty(shape.clone(), &device));
+        let tensor = Arc::new(Tensor::<B, D, Float>::empty(shape.clone(), device));
         Self {
             tensor,
             dtype: dtype.clone(),
@@ -465,7 +465,7 @@ pub struct IntBurnTensor<B: Backend + 'static, const D: usize> {
 
 impl<B: Backend + 'static, const D: usize> IntBurnTensor<B, D> {
     pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
-        let tensor = Arc::new(Tensor::<B, D, Int>::empty(shape.clone(), &device));
+        let tensor = Arc::new(Tensor::<B, D, Int>::empty(shape.clone(), device));
         Self {
             tensor,
             dtype: dtype.clone(),
@@ -482,7 +482,7 @@ pub struct BoolBurnTensor<B: Backend + 'static, const D: usize> {
 
 impl<B: Backend + 'static, const D: usize> BoolBurnTensor<B, D> {
     pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
-        let tensor = Arc::new(Tensor::<B, D, Bool>::empty(shape.clone(), &device));
+        let tensor = Arc::new(Tensor::<B, D, Bool>::empty(shape.clone(), device));
         Self {
             tensor,
             dtype: dtype.clone(),
@@ -522,7 +522,7 @@ impl TensorData {
     }
 
     pub fn get_backend_from_dtype(dtype: &DType) -> SupportedTensorBackend {
-        match dtype {
+        match *dtype {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(_) => SupportedTensorBackend::NdArray,
             #[cfg(feature = "tch-backend")]
