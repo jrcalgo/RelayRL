@@ -219,10 +219,10 @@ pub mod prelude {
 
     pub mod tensor {
         pub mod burn {
-            pub use burn_tensor::*;
+            pub use relayrl_types::prelude::tensor::burn::*;
         }
         pub mod relayrl {
-            pub use relayrl_types::prelude::tensor::*;
+            pub use relayrl_types::prelude::tensor::relayrl::*;
         }
     }
 
@@ -240,7 +240,7 @@ pub mod prelude {
 
     pub mod templates {
         pub use crate::templates::environment_traits::{
-            EnvironmentTestingTrait, EnvironmentTrainingTrait, EnvironmentError
+            EnvironmentError, EnvironmentTestingTrait, EnvironmentTrainingTrait,
         };
     }
 }
