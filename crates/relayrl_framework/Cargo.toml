@@ -23,7 +23,7 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["client", "transport_layer"]
+default = ["client", "sync_transport"]
 
 tch-backend = ["relayrl_types/tch-backend"]
 
@@ -33,9 +33,10 @@ inference_server = ["transport_layer"]
 training_server = ["transport_layer"]
 
 transport_layer = ["async_transport", "sync_transport"]
-async_transport = []  # TODO: Add async networking modules here.
+async_transport = ["nats_transport"]
 sync_transport = ["zmq_transport"]
 zmq_transport = ["zmq"]
+nats_transport = ["async-nats"]
 
 database_layer = ["postgres_db", "sqlite_db"]
 postgres_db = ["postgres"]
@@ -76,6 +77,7 @@ arrow-array = "57.1.0"
 
 # Optional dependencies
 zmq = { version = "0.10.0", optional = true }
+async-nats = { version = "0.46.0", optional = true }
 postgres = { version = "0.19.12", optional = true }
 sqlite = { version = "0.37.0", optional = true }
 prometheus = { version = "0.14.0", features = ["process"], optional = true }
