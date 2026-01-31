@@ -17,6 +17,16 @@ burn-tensor = "0.20.0"
 burn-ndarray = "0.20.0"
 burn-tch = "0.20.0"
 
+tokio = "1.49.0"
+serde = "1.0.228"
+
+dashmap = "6.1.0"
+
+ndarray = "0.17.2"
+
+thiserror = "2.0.18"
+async_trait = "0.1.89"
+
 [profile.dev]
 opt-level = 0
 debug = true
