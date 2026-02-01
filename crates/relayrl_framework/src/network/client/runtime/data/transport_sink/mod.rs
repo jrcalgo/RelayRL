@@ -1,10 +1,12 @@
+use crate::network::TransportType;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
+use crate::network::client::runtime::data::transport_sink::zmq::interface::ZmqInterface;
 use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
-use crate::network::{HyperparameterArgs, TransportType};
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
 
 use active_uuid_registry::UuidPoolError;
-use relayrl_types::Hyperparams;
+use relayrl_types::HyperparameterArgs;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::BackendMatcher;
 use relayrl_types::types::data::trajectory::EncodedTrajectory;
@@ -19,14 +21,12 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
+#[cfg(feature = "nats_transport")]
+pub(crate) mod nats;
 #[cfg(feature = "zmq_transport")]
-pub mod zmq;
+pub(crate) mod zmq;
 
-pub mod transport_dispatcher;
-pub use transport_dispatcher::{
-    BackpressureController, CircuitBreaker, CircuitState, DispatcherConfig, DispatcherError,
-    InferenceDispatcher, RetryPolicy, ScalingDispatcher, TrainingDispatcher,
-};
+pub(crate) mod transport_dispatcher;
 
 type TransportUuid = Uuid;
 
@@ -54,39 +54,53 @@ pub enum TransportError {
     SendShutdownSignalError(String),
     #[error("Send algorithm init request failed: {0}")]
     SendAlgorithmInitRequestError(String),
+    #[cfg(feature = "zmq_transport")]
+    #[error("ZMQ transport error: {0}")]
+    ZmqClientError(String),
+    #[cfg(feature = "nats_transport")]
+    #[error("NATS transport error: {0}")]
+    NatsClientError(String),
 }
 
 pub(crate) enum TransportClient<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(feature = "sync_transport")]
-    Sync(Box<dyn SyncClientTransport<B>>),
+    Sync(Box<dyn SyncClientTransportInterface<B>>),
     #[cfg(feature = "async_transport")]
-    Async(Box<dyn AsyncClientTransport<B>>),
+    Async(Box<dyn AsyncClientTransportInterface<B>>),
 }
 
 #[cfg(feature = "async_transport")]
-pub(crate) trait AsyncClientTransport<B: Backend + BackendMatcher<Backend = B>>:
-    AsyncInferenceServerTransport<B> + AsyncTrainingServerTransport<B>
+pub(crate) trait AsyncClientTransportInterface<B: Backend + BackendMatcher<Backend = B>>:
+    AsyncInferenceTransportOps<B> + AsyncTrainingTransportOps<B>
 {
+    async fn new() -> Result<Self, TransportError>
+    where
+        Self: Sized;
+    async fn shutdown(&self, shared_server_addresses: Arc<RwLock<ServerAddresses>>) -> Result<(), TransportError>;
 }
 
 #[cfg(feature = "sync_transport")]
-pub(crate) trait SyncClientTransport<B: Backend + BackendMatcher<Backend = B>>:
-    SyncInferenceServerTransport<B> + SyncTrainingServerTransport<B>
+pub(crate) trait SyncClientTransportInterface<B: Backend + BackendMatcher<Backend = B>>:
+    SyncInferenceTransportOps<B> + SyncTrainingTransportOps<B>
 {
+    fn new() -> Result<Self, TransportError>
+    where
+        Self: Sized;
+    fn shutdown(&self, shared_server_addresses: Arc<RwLock<ServerAddresses>>) -> Result<(), TransportError>;
 }
 
 #[cfg(feature = "async_transport")]
 #[async_trait]
-pub(crate) trait AsyncInferenceServerTransport<B: Backend + BackendMatcher<Backend = B>>:
-    Send + Sync
+pub(crate) trait AsyncInferenceTransportOps<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync + AsyncScalingTransportOps<B>
 {
-    async fn send_action_request(
+    async fn send_inference_request(
         &self,
         actor_id: &Uuid,
         obs_bytes: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError>;
-    async fn send_flag_last_action(
+    async fn send_flag_last_inference(
         &self,
         actor_id: &Uuid,
         reward: f32,
@@ -95,16 +109,16 @@ pub(crate) trait AsyncInferenceServerTransport<B: Backend + BackendMatcher<Backe
 }
 
 #[cfg(feature = "sync_transport")]
-pub(crate) trait SyncInferenceServerTransport<B: Backend + BackendMatcher<Backend = B>>:
-    Send + Sync
+pub(crate) trait SyncInferenceTransportOps<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync + SyncScalingTransportOps<B>
 {
-    fn send_action_request(
+    fn send_inference_request(
         &self,
         actor_id: &Uuid,
         obs_bytes: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError>;
-    fn send_flag_last_action(
+    fn send_flag_last_inference(
         &self,
         actor_id: &Uuid,
         reward: f32,
@@ -114,15 +128,9 @@ pub(crate) trait SyncInferenceServerTransport<B: Backend + BackendMatcher<Backen
 
 #[cfg(feature = "async_transport")]
 #[async_trait]
-pub(crate) trait AsyncTrainingServerTransport<B: Backend + BackendMatcher<Backend = B>>:
-    Send + Sync
+pub(crate) trait AsyncTrainingTransportOps<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync + AsyncScalingTransportOps<B>
 {
-    async fn send_client_ids_to_server(
-        &self,
-        scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError>;
     async fn send_algorithm_init_request(
         &self,
         scaling_id: &Uuid,
@@ -136,7 +144,7 @@ pub(crate) trait AsyncTrainingServerTransport<B: Backend + BackendMatcher<Backen
         model_server_address: &str,
         agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
-    async fn send_traj_to_server(
+    async fn send_trajectory(
         &self,
         sender_id: &Uuid,
         encoded_trajectory: EncodedTrajectory,
@@ -149,36 +157,12 @@ pub(crate) trait AsyncTrainingServerTransport<B: Backend + BackendMatcher<Backen
         agent_listener_address: &str,
         global_dispatcher_tx: Sender<RoutedMessage>,
     ) -> Result<(), TransportError>;
-    async fn send_scaling_warning(
-        &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError>;
-    async fn send_scaling_complete(
-        &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError>;
-    async fn send_shutdown_signal_to_server(
-        &self,
-        scaling_id: &Uuid,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError>;
-    async fn shutdown(&self) -> Result<(), TransportError>;
 }
 
 #[cfg(feature = "sync_transport")]
-pub(crate) trait SyncTrainingServerTransport<B: Backend + BackendMatcher<Backend = B>>:
-    Send + Sync
+pub(crate) trait SyncTrainingTransportOps<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync + SyncScalingTransportOps<B>
 {
-    fn send_client_ids_to_server(
-        &self,
-        scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError>;
     fn send_algorithm_init_request(
         &self,
         scaling_id: &Uuid,
@@ -192,7 +176,7 @@ pub(crate) trait SyncTrainingServerTransport<B: Backend + BackendMatcher<Backend
         model_server_address: &str,
         agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
-    fn send_traj_to_server(
+    fn send_trajectory(
         &self,
         sender_id: &Uuid,
         encoded_trajectory: EncodedTrajectory,
@@ -205,33 +189,79 @@ pub(crate) trait SyncTrainingServerTransport<B: Backend + BackendMatcher<Backend
         agent_listener_address: &str,
         global_dispatcher_tx: Sender<RoutedMessage>,
     ) -> Result<(), TransportError>;
+}
+
+#[cfg(feature = "async_transport")]
+pub(crate) trait AsyncScalingTransportOps<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync
+{
+    async fn send_client_ids(
+        &self,
+        scaling_id: &Uuid,
+        client_ids: &[(String, Uuid)],
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    ) -> Result<(), TransportError>;
+    async fn send_scaling_warning(
+        &self,
+        scaling_id: &Uuid,
+        operation: ScalingOperation,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    ) -> Result<(), TransportError>;
+    async fn send_scaling_complete(
+        &self,
+        scaling_id: &Uuid,
+        operation: ScalingOperation,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    ) -> Result<(), TransportError>;
+    async fn send_shutdown_signal(
+        &self,
+        scaling_id: &Uuid,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    ) -> Result<(), TransportError>;
+}
+
+#[cfg(feature = "sync_transport")]
+pub(crate) trait SyncScalingTransportOps<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync
+{
+    fn send_client_ids(
+        &self,
+        scaling_id: &Uuid,
+        client_ids: &[(String, Uuid)],
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    ) -> Result<(), TransportError>;
     fn send_scaling_warning(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        scaling_server_address: &str,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError>;
     fn send_scaling_complete(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        scaling_server_address: &str,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError>;
-    fn send_shutdown_signal_to_server(
+    fn send_shutdown_signal(
         &self,
         scaling_id: &Uuid,
-        scaling_server_address: &str,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError>;
-    fn shutdown(&self) -> Result<(), TransportError>;
 }
 
 pub(crate) fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
     transport_type: TransportType,
+    shared_client_capabilities: Arc<ClientCapabilities>,
 ) -> Result<TransportClient<B>, TransportError> {
     match transport_type {
-        #[cfg(feature = "sync_transport")]
+        #[cfg(feature = "zmq_transport")]
         TransportType::ZMQ => Ok(TransportClient::<B>::Sync(Box::new(
-            zmq::ZmqClient::new()
+            ZmqInterface::<B>::new(shared_client_capabilities)
+                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
+        ))),
+        #[cfg(feature = "nats_transport")]
+        TransportType::NATS => Ok(TransportClient::<B>::Async(Box::new(
+            NatsInterface::<B>::new(shared_client_capabilities)
                 .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
         ))),
     }
