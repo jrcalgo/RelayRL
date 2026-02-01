@@ -2,8 +2,19 @@
 name = "relayrl_algorithms"
 version = "0.1.0"
 edition = "2024"
+description = "A collection of Deep Reinforcement Learning Algorithms"
+repository = "https://github.com/jrcalgo/relayrl"
+documentation = "https://docs.rs/crate/relayrl_algorithms"
+keywords = ['reinforcement-learning', 'deep-learning', 'algorithms']
+categories = ['science', 'algorithms', 'simulation', 'concurrency', 'mathematics']
+license = "Apache-2.0"
 
 [dependencies]
-# tch = { version = "0.18.1", features = ["download-libtorch", "python-extension"] }
-# burn = "0.18.0"
-# burn-ndarray = "0.18.0"
+relayrl_types = { workspace = true }
+
+dashmap = { workspace = true }
+ndarray = { workspace = true }
+
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async_trait = { workspace = true }
