@@ -139,54 +139,20 @@ impl Default for TrajectoryFileParams {
     }
 }
 
-/// Supported database backends for trajectory recording.
-#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-#[derive(Debug, Clone, PartialEq)]
-pub enum DatabaseTypeParams {
-    Sqlite(SqliteParams),
-    PostgreSQL(PostgreSQLParams),
-}
-
-// TODO: Add actual Sqlite params
-#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-#[derive(Debug, Clone, PartialEq)]
-pub struct SqliteParams {
-    pub path: PathBuf,
-}
-
-// TODO: Add actual PostgreSQL params
-#[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-#[derive(Debug, Clone, PartialEq)]
-pub struct PostgreSQLParams {
-    pub connection: String,
-}
-
 /// Trajectory recording mode for each router buffer
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrajectoryPersistenceMode {
     /// Trajectories are recorded to file on local device.
     Local(Option<TrajectoryFileParams>),
-    /// Trajectories are recorded to a supported database (SQLite, PostgreSQL).
-    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "postgres_db", feature = "sqlite_db"))))]
-    Database(Option<DatabaseTypeParams>),
-    /// Trajectories are recorded to a supported database and file on local device.
-    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "postgres_db", feature = "sqlite_db"))))]
-    Hybrid(Option<DatabaseTypeParams>, Option<TrajectoryFileParams>),
     /// Trajectory recording/persistence is disabled.
     #[cfg(any(
-        feature = "postgres_db",
-        feature = "sqlite_db",
         feature = "async_transport",
         feature = "sync_transport"
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(
-            feature = "postgres_db",
-            feature = "sqlite_db",
             feature = "async_transport",
             feature = "sync_transport"
         )))
@@ -197,15 +163,11 @@ pub enum TrajectoryPersistenceMode {
 impl Default for TrajectoryPersistenceMode {
     fn default() -> Self {
         #[cfg(any(
-            feature = "postgres_db",
-            feature = "sqlite_db",
             feature = "async_transport",
             feature = "sync_transport"
         ))]
         return Self::Disabled;
         #[cfg(not(any(
-            feature = "postgres_db",
-            feature = "sqlite_db",
             feature = "async_transport",
             feature = "sync_transport"
         )))]
@@ -254,10 +216,6 @@ pub struct ClientCapabilities {
     pub inference_server_mode: ActorServerModelMode,
     /// Whether local trajectory recording is enabled
     pub local_trajectory_persistence: bool,
-    /// Whether database trajectory recording is enabled
-    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "postgres_db", feature = "sqlite_db"))))]
-    pub database_trajectory_persistence: bool,
     /// Training server allocation mode (when training server is enabled)
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[cfg_attr(
@@ -265,22 +223,6 @@ pub struct ClientCapabilities {
         doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
     )]
     pub training_server_mode: ActorServerModelMode,
-    /// Database parameters (when database trajectory recording is enabled)
-    #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "postgres_db", feature = "sqlite_db"))))]
-    pub db_params: Option<DatabaseTypeParams>,
-}
-
-impl ClientCapabilities {
-    /// Returns `true` if either local or database trajectory recording is enabled.
-    pub fn trajectory_recording_enabled(&self) -> bool {
-        #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-        let database_trajectory_persistence = self.database_trajectory_persistence;
-        #[cfg(not(any(feature = "postgres_db", feature = "sqlite_db")))]
-        let database_trajectory_persistence = false;
-
-        self.local_trajectory_persistence || database_trajectory_persistence
-    }
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
@@ -303,7 +245,7 @@ pub struct ClientModes {
         doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
     )]
     pub training_server_mode: ActorServerModelMode,
-    /// Trajectory recording mode (local vs database vs hybrid vs disabled)
+    /// Trajectory recording mode (local vs disabled)
     pub trajectory_persistence_mode: TrajectoryPersistenceMode,
 }
 
@@ -312,19 +254,17 @@ impl Default for ClientModes {
         Self {
             actor_inference_mode: ActorInferenceMode::Local,
             #[cfg(any(
-                feature = "postgres_db",
-                feature = "sqlite_db",
                 feature = "async_transport",
                 feature = "sync_transport"
             ))]
             trajectory_persistence_mode: TrajectoryPersistenceMode::Disabled,
             #[cfg(not(any(
-                feature = "postgres_db",
-                feature = "sqlite_db",
                 feature = "async_transport",
                 feature = "sync_transport"
             )))]
-            trajectory_persistence_mode: TrajectoryPersistenceMode::Local(Some(TrajectoryFileParams::default())),
+            trajectory_persistence_mode: TrajectoryPersistenceMode::Local(Some(
+                TrajectoryFileParams::default(),
+            )),
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             inference_server_mode: ActorServerModelMode::Disabled,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -372,28 +312,12 @@ impl ClientModes {
             ActorInferenceMode::Server => (false, true),
         };
 
-        let (local_trajectory_persistence, _database_trajectory_persistence) =
+        let local_trajectory_persistence =
             match &self.trajectory_persistence_mode {
-                TrajectoryPersistenceMode::Local(_) => (true, false),
-                #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-                TrajectoryPersistenceMode::Database(_) => (false, true),
-                #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-                TrajectoryPersistenceMode::Hybrid(_, _) => (true, true),
-                #[cfg(any(
-                    feature = "postgres_db",
-                    feature = "sqlite_db",
-                    feature = "async_transport",
-                    feature = "sync_transport"
-                ))]
-                TrajectoryPersistenceMode::Disabled => (false, false),
+                TrajectoryPersistenceMode::Local(_) => true,
+                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                TrajectoryPersistenceMode::Disabled => false,
             };
-
-        #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-        let db_params: Option<DatabaseTypeParams> = match &self.trajectory_persistence_mode {
-            TrajectoryPersistenceMode::Database(params) => Some(params.clone()),
-            TrajectoryPersistenceMode::Hybrid(params, _) => Some(params.clone()),
-            _ => None,
-        };
 
         Ok(ClientCapabilities {
             local_inference,
@@ -402,12 +326,8 @@ impl ClientModes {
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             inference_server_mode: self.inference_server_mode.clone(),
             local_trajectory_persistence,
-            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-            database_trajectory_persistence: _database_trajectory_persistence,
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
             training_server_mode: self.training_server_mode.clone(),
-            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-            db_params,
         })
     }
 }
@@ -742,7 +662,7 @@ impl<
         client_modes: ClientModes,
     ) -> Result<Self, ClientError> {
         let supported_backend = B::get_supported_backend();
-        
+
         Ok(Self {
             coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
