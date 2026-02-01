@@ -1,3 +1,4 @@
+use relayrl_types::HyperparameterArgs;
 use std::collections::HashMap;
 
 /// **Client Modules**: Handles client-side runtime coordination and actor management.
@@ -35,6 +36,8 @@ pub mod server;
 pub enum TransportType {
     #[cfg(feature = "zmq_transport")]
     ZMQ,
+    #[cfg(feature = "nats_transport")]
+    NATS,
 }
 
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -43,12 +46,6 @@ impl Default for TransportType {
         #[cfg(feature = "zmq_transport")]
         TransportType::ZMQ
     }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum HyperparameterArgs {
-    Map(HashMap<String, String>),
-    List(Vec<String>),
 }
 
 /// Parses hyperparameter arguments into a HashMap.
