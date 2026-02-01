@@ -8,7 +8,7 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
 };
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport::TransportClient;
+use crate::network::client::runtime::data::transport_sink::TransportClient;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::ClientConfigLoader;
 
