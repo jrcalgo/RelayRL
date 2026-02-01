@@ -3,14 +3,14 @@ use crate::network::client::agent::ClientCapabilities;
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport::TransportClient;
+use crate::network::client::runtime::data::transport_sink::TransportClient;
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
 use crate::utilities::configuration::ClientConfigLoader;
 use crate::utilities::tokio::get_or_init_tokio_runtime;
 
-use relayrl_types::prelude::AnyBurnTensor;
+use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 use relayrl_types::types::data::action::RelayRLAction;
 use relayrl_types::types::data::tensor::{BackendMatcher, ConversionBurnTensor, DeviceType};
 use relayrl_types::types::data::trajectory::RelayRLTrajectory;
@@ -232,16 +232,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let r4sa = match &**transport {
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
-                // Choose the correct server endpoint for your implementation.
-                async_tr
-                    .send_action_request(&actor_id, &obs_bytes, &inference_address)
-                    .await
-                    .map_err(|e| ActorError::InferenceRequestError(format!("{e:?}")))?
-            }
+            TransportClient::Async(async_tr) => async_tr
+                .send_inference_request(&actor_id, &obs_bytes, &inference_address)
+                .await
+                .map_err(|e| ActorError::InferenceRequestError(format!("{e:?}")))?,
             #[cfg(feature = "sync_transport")]
             TransportClient::Sync(sync_tr) => sync_tr
-                .send_action_request(&actor_id, &obs_bytes, &inference_address)
+                .send_inference_request(&actor_id, &obs_bytes, &inference_address)
                 .map_err(|e| ActorError::InferenceRequestError(format!("{e:?}")))?,
         };
 
