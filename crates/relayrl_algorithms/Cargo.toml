@@ -9,12 +9,27 @@ keywords = ['reinforcement-learning', 'deep-learning', 'algorithms']
 categories = ['science', 'algorithms', 'simulation', 'concurrency', 'mathematics']
 license = "Apache-2.0"
 
+[features]
+default = ["ndarray-backend"]
+ndarray-backend = ["burn-ndarray", "relayrl_types/ndarray-backend"]
+tch-backend = ["burn-tch", "relayrl_types/tch-backend"]
+
 [dependencies]
 relayrl_types = { workspace = true }
 
+burn-core = { workspace = true }
+burn-tensor = { workspace = true }
+burn-nn = { workspace = true }
+burn-ndarray = { workspace = true, optional = true }
+burn-tch = { workspace = true, optional = true }
+
 dashmap = { workspace = true }
 ndarray = { workspace = true }
+rand = { workspace = true }
 
 tokio = { workspace = true }
 thiserror = { workspace = true }
-async_trait = { workspace = true }
+async-trait = { workspace = true }
+
+arrow = { workspace = true }
+csv = { workspace = true }
