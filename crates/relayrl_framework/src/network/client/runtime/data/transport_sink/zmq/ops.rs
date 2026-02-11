@@ -1,9 +1,8 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
-use crate::network::client::runtime::data::transport::{
-    SyncClientTransport, SyncInferenceServerTransport, SyncTrainingServerTransport, TransportError,
-    TransportUuid,
+use crate::network::client::runtime::data::transport_sink::{
+    SyncInferenceServerTransportOps, SyncTrainingServerTransportOps, TransportError, TransportUuid,
 };
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
@@ -38,11 +37,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ZmqClientError {
     #[error(transparent)]
-    TransportError(#[from] TransportError),
+    SocketError(#[from] zmq::Error),
     #[error(transparent)]
-    ZmqClientError(#[from] zmq::Error),
-    #[error(transparent)]
-    FailedToGenerateUniqueUuidError(#[from] UuidPoolError),
+    UuidPoolError(#[from] UuidPoolError),
 }
 
 type SocketUuid = Uuid;
@@ -55,7 +52,7 @@ pub(crate) struct ZmqSocketPool {
     pub(crate) scaling_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
 }
 
-/// Raw ZMQ transport client.
+/// Raw ZMQ transport operations.
 ///
 /// This struct handles only ZMQ-specific concerns:
 /// - Socket creation and caching
@@ -64,9 +61,7 @@ pub(crate) struct ZmqSocketPool {
 ///
 /// Application-level state (model version, algorithm initialization) is managed
 /// by the dispatcher layer (see `transport_dispatcher.rs`).
-pub(crate) struct ZmqClient {
-    /// Transport identifier used in ZMQ message framing for server-side routing.
-    transport_id: TransportUuid,
+pub(crate) struct ZmqPool {
     pub(crate) context: Context,
     cached_addresses: Option<DashMap<Uuid, Arc<RwLock<ServerAddresses>>>>,
     cached_sockets: Arc<ZmqSocketPool>,
@@ -90,13 +85,9 @@ enum SocketPoolType {
     ScalingDealer,
 }
 
-impl ZmqClient {
+impl ZmqPool {
     pub fn new() -> Result<Self, ZmqClientError> {
-        let transport_id =
-            reserve_with("zmq_transport_client", 42, 100).map_err(ZmqClientError::from)?;
-
         Ok(Self {
-            transport_id,
             context: Context::new(),
             cached_addresses: None,
             cached_sockets: Arc::new(ZmqSocketPool {
@@ -315,6 +306,7 @@ enum ServerResponse {
     Success = 0,
     Failure = 1,
 }
+
 impl ServerResponse {
     fn from_i64(value: i64) -> Self {
         match value {
@@ -325,10 +317,27 @@ impl ServerResponse {
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransport<B> for ZmqClient {}
+pub(crate) struct ZmqInferenceOps {
+    transport_id: TransportUuid,
+    zmq_pool: Arc<RwLock<ZmqPool>>,
+}
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceServerTransport<B> for ZmqClient {
-    fn send_action_request(
+impl ZmqInferenceOps {
+    pub fn new(
+        transport_id: TransportUuid,
+        zmq_pool: Arc<RwLock<ZmqPool>>,
+    ) -> Result<Self, ZmqClientError> {
+        Ok(Self {
+            transport_id,
+            zmq_pool,
+        })
+    }
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceServerTransportOps<B>
+    for ZmqInferenceOps
+{
+    fn send_inference_request(
         &self,
         actor_id: &Uuid,
         action_request: &[u8],
@@ -336,7 +345,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceServerTransport<B> f
     ) -> Result<RelayRLAction, TransportError> {
         Ok(RelayRLAction::minimal(0.0, false))
     }
-    fn send_flag_last_action(
+    fn send_flag_last_inference(
         &self,
         actor_id: &Uuid,
         reward: f32,
@@ -346,11 +355,95 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceServerTransport<B> f
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> for ZmqClient {
-    fn send_client_ids_to_server(
+pub(crate) struct ZmqTrainingOps {
+    transport_id: TransportUuid,
+    zmq_pool: Arc<RwLock<ZmqPool>>,
+}
+
+impl ZmqTrainingOps {
+    pub fn new(
+        transport_id: TransportUuid,
+        zmq_pool: Arc<RwLock<ZmqPool>>,
+    ) -> Result<Self, ZmqClientError> {
+        Ok(Self {
+            transport_id,
+            zmq_pool,
+        })
+    }
+
+    fn shutdown(&self) -> Result<(), TransportError> {
+        if let Some(sockets) = &self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .cached_sockets
+            .model_dealer_socket
+        {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        if let Some(sockets) = &self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .cached_sockets
+            .model_sub_socket
+        {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                remove("zmq_sub_socket", socket_id.clone()).map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        if let Some(sockets) = &self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .cached_sockets
+            .traj_push_socket
+        {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                remove("zmq_push_socket", socket_id.clone()).map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        if let Some(sockets) = &self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .cached_sockets
+            .scaling_dealer_socket
+        {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        remove("zmq_transport_client", self.transport_id.clone()).map_err(TransportError::from)?;
+        Ok(())
+    }
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
+    for ZmqTrainingOps
+{
+    fn send_client_ids(
         &self,
         scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
+        client_ids: &[(String, Uuid)],
         scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         if scaling_id.is_nil() {
@@ -365,12 +458,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
             ));
         }
 
-        let _ = self.update_cache(
-            scaling_id,
-            scaling_server_address,
-            CacheAddressType::ScalingServer,
-            SocketPoolType::ScalingDealer,
-        );
+        let _ = self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .update_cache(
+                scaling_id,
+                scaling_server_address,
+                CacheAddressType::ScalingServer,
+                SocketPoolType::ScalingDealer,
+            );
 
         // TODO: Send client IDs to server for caching, validation, and routing
         let transport_id_string = self.transport_id.to_string();
@@ -487,12 +584,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
             ));
         }
 
-        let _ = self.update_cache(
-            scaling_id,
-            agent_listener_address,
-            CacheAddressType::ScalingServer,
-            SocketPoolType::ScalingDealer,
-        );
+        let _ = self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .update_cache(
+                scaling_id,
+                agent_listener_address,
+                CacheAddressType::ScalingServer,
+                SocketPoolType::ScalingDealer,
+            );
 
         let transport_id_string = self.transport_id.to_string();
         let scaling_id_string = scaling_id.to_string();
@@ -564,12 +665,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
             ));
         }
 
-        let _ = self.update_cache(
-            actor_id,
-            agent_listener_address,
-            CacheAddressType::AgentListener,
-            SocketPoolType::ModelDealer,
-        );
+        let _ = self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .update_cache(
+                actor_id,
+                agent_listener_address,
+                CacheAddressType::AgentListener,
+                SocketPoolType::ModelDealer,
+            );
 
         println!("[ZmqClient] Starting initial model handshake...");
 
@@ -685,7 +790,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         }
     }
 
-    fn send_traj_to_server(
+    fn send_trajectory(
         &self,
         sender_id: &Uuid,
         encoded_trajectory: EncodedTrajectory,
@@ -704,12 +809,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
             ));
         }
 
-        let _ = self.update_cache(
-            sender_id,
-            trajectory_server_address,
-            CacheAddressType::TrajectoryServer,
-            SocketPoolType::TrajPush,
-        );
+        let _ = self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .update_cache(
+                sender_id,
+                trajectory_server_address,
+                CacheAddressType::TrajectoryServer,
+                SocketPoolType::TrajPush,
+            );
 
         // Serialize the trajectory
         let serialized_traj: Vec<u8> = serde_json::to_vec(&encoded_trajectory).map_err(|e| {
@@ -723,12 +832,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         );
 
         let socket = self
+            .zmq_pool
+            .read()
+            .map_err(ZmqClientError::from)?
             .cached_sockets
             .traj_push_socket
             .as_ref()
             .unwrap()
             .get(sender_id)
-            .unwrap();
+            .unwrap()
+            .value()
+            .clone();
 
         // Send the trajectory
         match socket
@@ -776,14 +890,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
             ));
         }
 
-        let _ = self.update_cache(
-            receiver_id,
-            model_server_address,
-            CacheAddressType::ModelServer,
-            SocketPoolType::ModelSub,
-        );
+        let _ = self
+            .zmq_pool
+            .read()
+            .map_err(ZmqClientError::from)?
+            .update_cache(
+                receiver_id,
+                model_server_address,
+                CacheAddressType::ModelServer,
+                SocketPoolType::ModelSub,
+            );
 
         let socket = self
+            .zmq_pool
+            .read()
+            .map_err(ZmqClientError::from)?
             .cached_sockets
             .model_sub_socket
             .as_ref()
@@ -864,12 +985,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         );
 
         // TODO: In a full implementation, this would send a ZMQ message to the training server
-        let _ = self.update_cache(
-            scaling_id,
-            scaling_server_address,
-            CacheAddressType::ScalingServer,
-            SocketPoolType::ScalingDealer,
-        );
+        let _ = self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
+            .update_cache(
+                scaling_id,
+                scaling_server_address,
+                CacheAddressType::ScalingServer,
+                SocketPoolType::ScalingDealer,
+            );
 
         println!(
             "[ZmqClient] Sending scaling warning to {}",
@@ -885,12 +1010,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         let scaling_warning_payload: &[u8] = b"ROUTER_SCALE_WARNING";
 
         let socket = self
+            .zmq_pool
+            .read()
+            .map_err(|e| ZmqClientError::from(e))?
             .cached_sockets
             .scaling_dealer_socket
             .as_ref()
             .unwrap()
             .get(scaling_id)
-            .unwrap();
+            .unwrap()
+            .value()
+            .clone();
 
         match socket
             .try_lock()
@@ -1013,12 +1143,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         );
 
         // TODO: In a full implementation, this would send a ZMQ message to the training server
-        let _ = self.update_cache(
-            scaling_id,
-            scaling_server_address,
-            CacheAddressType::ScalingServer,
-            SocketPoolType::ScalingDealer,
-        );
+        let _ = self
+            .zmq_pool
+            .read()
+            .map_err(TransportError::from)?
+            .update_cache(
+                scaling_id,
+                scaling_server_address,
+                CacheAddressType::ScalingServer,
+                SocketPoolType::ScalingDealer,
+            );
 
         println!(
             "[ZmqClient] Sending scaling complete to {}",
@@ -1034,12 +1168,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         let scaling_complete_payload: &[u8] = b"ROUTER_SCALE_COMPLETE";
 
         let socket = self
+            .zmq_pool
+            .read()
+            .map_err(TransportError::from)?
             .cached_sockets
             .scaling_dealer_socket
             .as_ref()
             .unwrap()
             .get(scaling_id)
-            .unwrap();
+            .unwrap()
+            .value();
 
         match socket
             .try_lock()
@@ -1133,7 +1271,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         Ok(())
     }
 
-    fn send_shutdown_signal_to_server(
+    fn send_shutdown_signal(
         &self,
         scaling_id: &Uuid,
         scaling_server_address: &str,
@@ -1156,6 +1294,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         );
 
         let _ = self
+            .zmq_pool
+            .read()
+            .map_err(TransportError::from)?
             .update_cache(
                 scaling_id,
                 scaling_server_address,
@@ -1173,12 +1314,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
         let shutdown_payload: &[u8] = b"CLIENT_SHUTDOWN";
 
         let socket = self
+            .zmq_pool
+            .read()
+            .map_err(TransportError::from)?
             .cached_sockets
             .scaling_dealer_socket
             .as_ref()
             .unwrap()
             .get(scaling_id)
-            .unwrap();
+            .unwrap()
+            .value()
+            .clone();
 
         match socket
             .try_lock()
@@ -1257,46 +1403,5 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransport<B> fo
                 )));
             }
         }
-    }
-
-    fn shutdown(&self) -> Result<(), TransportError> {
-        if let Some(sockets) = &self.cached_sockets.model_dealer_socket {
-            for entry in sockets.iter() {
-                let socket_id = *entry.key();
-                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
-
-                sockets.remove(&socket_id);
-            }
-        }
-
-        if let Some(sockets) = &self.cached_sockets.model_sub_socket {
-            for entry in sockets.iter() {
-                let socket_id = *entry.key();
-                remove("zmq_sub_socket", socket_id.clone()).map_err(TransportError::from)?;
-
-                sockets.remove(&socket_id);
-            }
-        }
-
-        if let Some(sockets) = &self.cached_sockets.traj_push_socket {
-            for entry in sockets.iter() {
-                let socket_id = *entry.key();
-                remove("zmq_push_socket", socket_id.clone()).map_err(TransportError::from)?;
-
-                sockets.remove(&socket_id);
-            }
-        }
-
-        if let Some(sockets) = &self.cached_sockets.scaling_dealer_socket {
-            for entry in sockets.iter() {
-                let socket_id = *entry.key();
-                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
-
-                sockets.remove(&socket_id);
-            }
-        }
-
-        remove("zmq_transport_client", self.transport_id.clone()).map_err(TransportError::from)?;
-        Ok(())
     }
 }

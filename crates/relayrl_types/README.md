@@ -3,7 +3,11 @@ relayrl_types
 
 Core data types and encoding/decoding utilities for the RelayRL framework.
 
+<<<<<<< HEAD
 [![Changelog](https://img.shields.io/badge/Changelog-0.4.0-blue.svg)](CHANGELOG.md)
+=======
+[![Changelog](https://img.shields.io/badge/Changelog-0.4.1-blue.svg)](CHANGELOG.md)
+>>>>>>> fb1e2f4eb040e80f68bba24c43f463c350a9b849
 
 ## Features
 

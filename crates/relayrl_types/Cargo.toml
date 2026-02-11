@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_types"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
@@ -43,21 +43,18 @@ dashmap = "6.1.0"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
 # TODO: Add support for these dependencies and remove tch entirely from relayrl_types
-burn-tensor = "0.18.0"
-burn-ndarray = { version = "0.18.0", optional = true}
-burn-tch = { version = "0.18.0", optional = true}
-# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.3.0)
-# burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda (probably 0.3.0)
-# burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu (probably 0.3.0)
+burn-tensor = { workspace = true }
+burn-ndarray = { workspace = true, optional = true}
+burn-tch = { workspace = true, optional = true}
+# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.6.0)
+# burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda (probably 0.6.0)
+# burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu (probably 0.6.0)
 
-tch = { version = "0.19.0", features = ["download-libtorch"], default-features = false, optional = true }
-ort = { version = "2.0.0-rc.10", features = ["load-dynamic"], default-features = false, optional = true }
-tokio = { version = "1.35.1", features = ["full"], optional = true }
+tch = { version = "0.22.0", features = ["download-libtorch"], default-features = false, optional = true }
+ort = { version = "2.0.0-rc.11", features = ["load-dynamic"], default-features = false, optional = true }
+tokio = { version = "1.49.0", features = ["full"], optional = true }
 tempfile = { version = "3.9.0", optional = true }
-ndarray = { version = "0.15.6", optional = true }
-
-[patch.crates-io]
-torch-sys = "=0.19.0"
+ndarray = { version = "0.17.2", optional = true }
 
 [dependencies.blake3]
 version = "1.8.2"

@@ -3,7 +3,7 @@ use super::{RoutedMessage, RouterError};
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport::{TransportClient, TransportError};
+use crate::network::client::runtime::data::transport_sink::{TransportClient, TransportError};
 
 use burn_tensor::backend::Backend;
 use relayrl_types::types::data::tensor::BackendMatcher;
