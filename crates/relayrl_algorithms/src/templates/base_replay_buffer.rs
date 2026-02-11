@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
 use dashmap::DashMap;
 use thiserror::Error;
-use async_trait::*;
+use async_trait::async_trait;
 
 #[derive(Clone, Debug, Error)]
 pub enum ReplayBufferError {
