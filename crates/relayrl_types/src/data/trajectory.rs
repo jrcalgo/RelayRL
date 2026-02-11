@@ -18,7 +18,7 @@ use crate::types::data::utilities::compress::{CompressedData, CompressionScheme}
 #[cfg(feature = "encryption")]
 use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 #[cfg(feature = "integrity")]
-use crate::types::data::utilities::integrity::{Checksum, compute_checksum};
+use crate::types::data::utilities::integrity::{compute_checksum, Checksum};
 #[cfg(feature = "metadata")]
 use crate::types::data::utilities::metadata::TensorMetadata;
 
@@ -42,6 +42,20 @@ pub struct RelayRLTrajectory {
     pub timestamp: u64,
     pub episode: Option<u64>,
     pub training_step: Option<u64>,
+}
+
+impl Default for RelayRLTrajectory {
+    fn default() -> Self {
+        let default_length: usize = 1000;
+        Self {
+            actions: Vec::with_capacity(default_length),
+            max_length: default_length,
+            agent_id: None,
+            timestamp: current_timestamp(),
+            episode: None,
+            training_step: None,
+        }
+    }
 }
 
 impl RelayRLTrajectory {

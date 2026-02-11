@@ -1,22 +1,21 @@
-pub mod types {
-    pub mod data;
-    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-    pub mod model;
-}
+pub mod data;
+#[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+pub mod model;
+pub mod records;
 
 pub mod prelude {
     pub mod action {
-        pub use crate::types::data::action::{
+        pub use crate::data::action::{
             ActionError, CodecConfig, EncodedAction, RelayRLAction, RelayRLData,
-        };    
+        };
     }
-    
+
     pub mod tensor {
         pub mod relayrl {
-            pub use crate::types::data::tensor::{
+            pub use crate::data::tensor::{
                 AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
                 IntBurnTensor, SupportedTensorBackend, TensorData, TensorError,
-            };   
+            };
         }
 
         pub mod burn {
@@ -25,34 +24,43 @@ pub mod prelude {
     }
 
     pub mod trajectory {
-        pub use crate::types::data::trajectory::{
+        pub use crate::data::trajectory::{
             EncodedTrajectory, RelayRLTrajectory, RelayRLTrajectoryTrait, TrajectoryError,
-        };    
+        };
+    }
+
+    pub mod records {
+        pub use crate::data::records::csv::{
+            CsvTrajectory, CsvTrajectoryError
+        };
+        pub use crate::data::records::arrow::{
+            ArrowTrajectory, ArrowTrajectoryError
+        };
     }
 
     pub mod model {
         #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-        pub use crate::types::model::{HotReloadableModel, ModelError, ModelModule};   
+        pub use crate::model::{HotReloadableModel, ModelError, ModelModule};
     }
-    
+
     pub mod codec {
         #[cfg(feature = "compression")]
-        pub use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
+        pub use crate::data::utilities::compress::{CompressedData, CompressionScheme};
 
         #[cfg(feature = "integrity")]
-        pub use crate::types::data::utilities::integrity::{VerifiedData, compute_checksum};
+        pub use crate::data::utilities::integrity::{compute_checksum, VerifiedData};
 
         #[cfg(feature = "encryption")]
-        pub use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
+        pub use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 
         #[cfg(feature = "metadata")]
-        pub use crate::types::data::utilities::metadata::TensorMetadata;
+        pub use crate::data::utilities::metadata::TensorMetadata;
 
         #[cfg(feature = "quantization")]
-        pub use crate::types::data::utilities::quantize::{QuantizationScheme, QuantizedData};
+        pub use crate::data::utilities::quantize::{QuantizationScheme, QuantizedData};
 
         #[cfg(feature = "integrity")]
-        pub use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
+        pub use crate::data::utilities::chunking::{ChunkedTensor, TensorChunk};
     }
 }
 

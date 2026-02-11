@@ -36,11 +36,14 @@ codec-full = ["codec-secure", "metadata", "quantization"]
 serde = { version = "1.0.228", features = ["derive"]}
 serde_json = "1.0.145"
 
-thiserror = "2.0.17"
+thiserror = { workspace = true }
 
 bytemuck = "1.20.0"
 dashmap = "6.1.0"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
+
+csv = { workspace = true }
+arrow = { workspace = true }
 
 # TODO: Add support for these dependencies and remove tch entirely from relayrl_types
 burn-tensor = { workspace = true }
