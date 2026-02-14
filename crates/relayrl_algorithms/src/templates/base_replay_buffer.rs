@@ -45,7 +45,7 @@ pub enum SampleScalars {
 pub type Batch = HashMap<BatchKey, BufferSample>;
 
 #[async_trait]
-pub async trait GenericReplayBuffer: Send + Sync {
+pub trait GenericReplayBuffer: Send + Sync {
     async fn insert_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(), ReplayBufferError>;
     async fn sample_buffer(&self) -> Result<Batch, ReplayBufferError>;
 }
