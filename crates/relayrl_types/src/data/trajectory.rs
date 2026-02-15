@@ -3,24 +3,24 @@
 //! Trajectories are sequences of actions that form episodes in reinforcement learning.
 //! Supports batching, compression, and network transmission optimizations.
 
-use crate::types::data::action::{ActionError, RelayRLAction};
+use crate::data::action::{ActionError, RelayRLAction};
 use bincode::config;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(feature = "metadata")]
-use crate::types::data::action::CodecConfig;
+use crate::data::action::CodecConfig;
 
 #[cfg(feature = "integrity")]
-use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
+use crate::data::utilities::chunking::{ChunkedTensor, TensorChunk};
 #[cfg(feature = "compression")]
-use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
+use crate::data::utilities::compress::{CompressedData, CompressionScheme};
 #[cfg(feature = "encryption")]
-use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
+use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 #[cfg(feature = "integrity")]
-use crate::types::data::utilities::integrity::{compute_checksum, Checksum};
+use crate::data::utilities::integrity::{compute_checksum, Checksum};
 #[cfg(feature = "metadata")]
-use crate::types::data::utilities::metadata::TensorMetadata;
+use crate::data::utilities::metadata::TensorMetadata;
 
 /// Get current Unix timestamp
 fn current_timestamp() -> u64 {

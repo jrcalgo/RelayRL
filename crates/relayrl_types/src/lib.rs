@@ -1,7 +1,6 @@
 pub mod data;
 #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
 pub mod model;
-pub mod records;
 
 pub mod prelude {
     pub mod action {
@@ -30,12 +29,8 @@ pub mod prelude {
     }
 
     pub mod records {
-        pub use crate::data::records::csv::{
-            CsvTrajectory, CsvTrajectoryError
-        };
-        pub use crate::data::records::arrow::{
-            ArrowTrajectory, ArrowTrajectoryError
-        };
+        pub use crate::data::records::arrow::{ArrowTrajectory, ArrowTrajectoryError};
+        pub use crate::data::records::csv::{CsvTrajectory, CsvTrajectoryError};
     }
 
     pub mod model {
