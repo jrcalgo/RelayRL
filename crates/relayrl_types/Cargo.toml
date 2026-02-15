@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_types"
-version = "0.4.1"
+version = "0.5.0"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
@@ -44,7 +44,6 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
 csv = { workspace = true }
 arrow = { workspace = true }
-
 
 # TODO: Add support for these dependencies and remove tch entirely from relayrl_types
 burn-tensor = { workspace = true }
