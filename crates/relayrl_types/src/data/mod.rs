@@ -2,6 +2,8 @@ pub mod action;
 pub mod tensor;
 pub mod trajectory;
 
+pub mod records;
+
 pub mod utilities {
     #[cfg(feature = "compression")]
     pub mod compress;

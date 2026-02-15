@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
-use crate::types::data::action::RelayRLData;
-use crate::types::data::tensor::{
+use crate::data::action::RelayRLData;
+use crate::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, NdArrayDType, TchDType,
 };
-use burn_tensor::{Shape, Tensor, backend::Backend};
+use burn_tensor::{backend::Backend, Shape, Tensor};
 
-use crate::types::model::{ModelError, ModelModule};
+use crate::model::{ModelError, ModelModule};
 
 /// Converts a dictionary of auxiliary data into a HashMap with String keys and RelayRLData values.
 ///

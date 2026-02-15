@@ -1,43 +1,62 @@
-pub mod types {
-    pub mod data;
-    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-    pub mod model;
-}
+pub mod data;
+#[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+pub mod model;
 
 pub mod prelude {
-    pub use crate::types::data::action::{
-        ActionError, CodecConfig, EncodedAction, RelayRLAction, RelayRLData,
-    };
+    pub mod action {
+        pub use crate::data::action::{
+            ActionError, CodecConfig, EncodedAction, RelayRLAction, RelayRLData,
+        };
+    }
 
-    pub use crate::types::data::tensor::{
-        AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-        IntBurnTensor, SupportedTensorBackend, TensorData, TensorError,
-    };
+    pub mod tensor {
+        pub mod relayrl {
+            pub use crate::data::tensor::{
+                AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
+                IntBurnTensor, SupportedTensorBackend, TensorData, TensorError,
+            };
+        }
 
-    pub use crate::types::data::trajectory::{
-        EncodedTrajectory, RelayRLTrajectory, RelayRLTrajectoryTrait, TrajectoryError,
-    };
+        pub mod burn {
+            pub use burn_tensor::*;
+        }
+    }
 
-    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-    pub use crate::types::model::{HotReloadableModel, ModelError, ModelModule};
+    pub mod trajectory {
+        pub use crate::data::trajectory::{
+            EncodedTrajectory, RelayRLTrajectory, RelayRLTrajectoryTrait, TrajectoryError,
+        };
+    }
 
-    #[cfg(feature = "compression")]
-    pub use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
+    pub mod records {
+        pub use crate::data::records::arrow::{ArrowTrajectory, ArrowTrajectoryError};
+        pub use crate::data::records::csv::{CsvTrajectory, CsvTrajectoryError};
+    }
 
-    #[cfg(feature = "integrity")]
-    pub use crate::types::data::utilities::integrity::{VerifiedData, compute_checksum};
+    pub mod model {
+        #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+        pub use crate::model::{HotReloadableModel, ModelError, ModelModule};
+    }
 
-    #[cfg(feature = "encryption")]
-    pub use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
+    pub mod codec {
+        #[cfg(feature = "compression")]
+        pub use crate::data::utilities::compress::{CompressedData, CompressionScheme};
 
-    #[cfg(feature = "metadata")]
-    pub use crate::types::data::utilities::metadata::TensorMetadata;
+        #[cfg(feature = "integrity")]
+        pub use crate::data::utilities::integrity::{compute_checksum, VerifiedData};
 
-    #[cfg(feature = "quantization")]
-    pub use crate::types::data::utilities::quantize::{QuantizationScheme, QuantizedData};
+        #[cfg(feature = "encryption")]
+        pub use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 
-    #[cfg(feature = "integrity")]
-    pub use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
+        #[cfg(feature = "metadata")]
+        pub use crate::data::utilities::metadata::TensorMetadata;
+
+        #[cfg(feature = "quantization")]
+        pub use crate::data::utilities::quantize::{QuantizationScheme, QuantizedData};
+
+        #[cfg(feature = "integrity")]
+        pub use crate::data::utilities::chunking::{ChunkedTensor, TensorChunk};
+    }
 }
 
 use std::collections::HashMap;

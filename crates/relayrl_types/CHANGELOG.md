@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-01-22
+
+### Changed
+- **Burn dependency updates** - Version change from 0.18.0 to 0.20.0 for the following Burn-related dependencies:
+  - `burn-tensor`
+  - `burn-ndarray`
+  - `burn-tch`
+- **Prelude namespace exports** - Nested segments of lib into categorized prelude namespaces for:
+  - `action`
+  - `tensor`
+  - `trajectory`
+  - `model`
+  - `codec`
+
 ## [0.4.0] - 2026-01-12
 
 ### Added

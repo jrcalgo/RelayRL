@@ -1,5 +1,5 @@
 use crate::network::HyperparameterArgs;
-use crate::network::client::agent::{ClientModes, ClientCapabilities};
+use crate::network::client::agent::{ClientCapabilities, ClientModes};
 use crate::network::client::agent::{TrajectoryFileParams, TrajectoryPersistenceMode};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -8,15 +8,16 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
 use crate::network::client::runtime::coordination::state_manager::StateManager;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+    ScalingDispatcher, TrainingDispatcher,
+};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport_sink::{TransportClient, TransportError};
 use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, TrajectorySinkError};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::router::receiver::{
     ClientTransportModelReceiver, TransportReceiverError,
-};
-
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport::{
-    DispatcherError, ScalingDispatcher, TrainingDispatcher, TransportClient, TransportError,
 };
 use crate::network::client::runtime::router::{
     RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
@@ -50,9 +51,6 @@ pub enum ScaleManagerError {
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    #[error(transparent)]
-    DispatcherError(#[from] DispatcherError),
     #[error("Scaling operation not supported: {0}")]
     ScalingOperationNotSupportedError(String),
     #[error("Failed to subscribe to shutdown: {0}")]
@@ -83,7 +81,7 @@ pub enum ScaleManagerError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScalingOperation {
     ScaleOut,
-    ScaleIn,
+    ScaleIn
 }
 
 pub(crate) struct RouterRuntimeParams {
@@ -201,14 +199,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let shared_init_hyperparameters = lifecycle.get_init_hyperparameters();
 
         // If parameters are provided in the client modes, use them. Otherwise, use the ones from the lifecycle manager's config loader.
-        let shared_trajectory_file_output: Arc<RwLock<TrajectoryFileParams>> = match &shared_client_modes.trajectory_persistence_mode {
-            TrajectoryPersistenceMode::Local(Some(trajectory_file_output)) => Arc::new(RwLock::new(trajectory_file_output.clone())),
-            #[cfg(any(feature = "postgres_db", feature = "sqlite_db"))]
-            TrajectoryPersistenceMode::Hybrid(_, Some(trajectory_file_output)) => Arc::new(RwLock::new(trajectory_file_output)),
-            _ => {
-                lifecycle.get_trajectory_file_output()
-            },
-        };
+        let shared_trajectory_file_output: Arc<RwLock<TrajectoryFileParams>> =
+            match &shared_client_modes.trajectory_persistence_mode {
+                TrajectoryPersistenceMode::Local(Some(trajectory_file_output)) => {
+                    Arc::new(RwLock::new(trajectory_file_output.clone()))
+                },
+                TrajectoryPersistenceMode::Local(None) => Arc::new(RwLock::new(TrajectoryFileParams::default())),
+                TrajectoryPersistenceMode::Disabled => lifecycle.get_trajectory_file_output(),
+            };
 
         Ok(Self {
             scaling_id,
@@ -271,7 +269,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .clone();
 
         self.scaling_dispatcher
-            .send_client_ids_to_server(&self.scaling_id, client_ids, &scaling_server_address)
+            .send_client_ids(&self.scaling_id, client_ids, &scaling_server_address)
             .await
             .map_err(ScaleManagerError::from)
     }
@@ -288,7 +286,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .clone();
 
         self.scaling_dispatcher
-            .send_shutdown_signal_to_server(&self.scaling_id, &scaling_server_address)
+            .send_shutdown_signal(&self.scaling_id, &scaling_server_address)
             .await
             .map_err(ScaleManagerError::from)
     }

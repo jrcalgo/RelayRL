@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::{fs, fs::File, io::Read, path::PathBuf};
 
 use crate::get_or_create_client_config_json_path;
-use crate::network::HyperparameterArgs;
 use crate::network::client::agent::TrajectoryFileParams;
+
+use relayrl_types::HyperparameterArgs;
 
 #[macro_use]
 pub mod client_config_macros {

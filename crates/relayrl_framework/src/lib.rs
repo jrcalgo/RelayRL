@@ -185,48 +185,62 @@ pub mod utilities {
 ///
 /// ```rust
 /// use relayrl_framework::prelude::network::*;  // Agent API
-/// use relayrl_framework::prelude::config::*;   // Configuration
-/// use relayrl_framework::prelude::templates::*; // Environment traits
+/// use relayrl_framework::prelude::config::*;  // Configuration
+/// use relayrl_framework::prelude::config::network_codec::*;  // Codec types
+/// use relayrl_framework::prelude::tensor::burn::*;  // Burn tensor types
+/// use relayrl_framework::prelude::tensor::relayrl::*;  // RelayRL tensor types
+/// use relayrl_framework::prelude::action::*;  // Action types
+/// use relayrl_framework::prelude::trajectory::*;  // Trajectory types
+/// use relayrl_framework::prelude::model::*;  // Model types
+/// use relayrl_framework::prelude::templates::*;  // Environment types
 /// ```
 pub mod prelude {
-    /// Configuration types and builders.
-    ///
-    /// Includes client and server configuration loaders, builders, and parameter types.
+    pub mod network {
+        pub use crate::network::client::agent::*;
+        // pub use crate::network::server::inference_server::*;
+        // pub use crate::network::server::training_server::*;
+    }
+
     pub mod config {
         pub use crate::utilities::configuration::{
             ClientConfigBuilder, ClientConfigLoader, ClientConfigParams, ServerConfigBuilder,
             ServerConfigLoader, ServerConfigParams, TransportConfigBuilder, TransportConfigParams,
         };
+        pub use relayrl_types::HyperparameterArgs;
+        pub mod network_codec {
+            pub use relayrl_types::types::data::utilities::chunking::*;
+            pub use relayrl_types::types::data::utilities::compress::*;
+            pub use relayrl_types::types::data::utilities::encrypt::*;
+            pub use relayrl_types::types::data::utilities::integrity::*;
+            pub use relayrl_types::types::data::utilities::metadata::*;
+            pub use relayrl_types::types::data::utilities::quantize::*;
+        }
     }
 
-    /// Network client API.
-    ///
-    /// Re-exports all public agent API types including:
-    /// - `RelayRLAgent`: Main agent interface
-    /// - `AgentBuilder`: Builder pattern for agent construction
-    /// - `ClientModes`, `ClientCapabilities`: Runtime mode configuration
-    /// - `TrajectoryRecordMode`, `ActorInferenceMode`: Operational modes
-    /// - Actor management traits and types
-    pub mod network {
-        pub use crate::network::client::agent::*;
-        // Server APIs are not yet stabilized in v0.5.0-alpha
-        // pub use crate::network::server::inference_server::*;
-        // pub use crate::network::server::training_server::*;
+    pub mod tensor {
+        pub mod burn {
+            pub use relayrl_types::prelude::tensor::burn::*;
+        }
+        pub mod relayrl {
+            pub use relayrl_types::prelude::tensor::relayrl::*;
+        }
     }
 
-    /// Type definitions for the RelayRL framework.
-    ///
-    /// Re-exports commonly used types and traits for easier access
-    pub mod types {
-        pub use relayrl_types::prelude::*;
+    pub mod action {
+        pub use relayrl_types::prelude::action::*;
     }
 
-    /// Environment trait definitions.
-    ///
-    /// Re-exports training and testing environment traits for custom environment implementations.
+    pub mod trajectory {
+        pub use relayrl_types::prelude::trajectory::*;
+    }
+
+    pub mod model {
+        pub use relayrl_types::prelude::model::*;
+    }
+
     pub mod templates {
         pub use crate::templates::environment_traits::{
-            EnvironmentTestingTrait, EnvironmentTrainingTrait,
+            EnvironmentError, EnvironmentTestingTrait, EnvironmentTrainingTrait,
         };
     }
 }

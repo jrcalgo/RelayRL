@@ -3,6 +3,15 @@
 //! and (in the case of training) calculating performance metrics during model training.
 
 pub mod environment_traits {
+    use std::any::Any;
+    pub use thiserror::Error;
+
+    #[derive(Debug, Error, Clone)]
+    pub enum EnvironmentError {
+        #[error("Environment error: {0}")]
+        EnvironmentError(String),
+    }
+
     /// The `EnvironmentTrainingTrait` defines the interface that must be implemented by any
     /// environment where a model is trained. Implementing this trait allows an environment to
     /// interact with the RelayRL framework's training pipeline.
@@ -16,9 +25,9 @@ pub mod environment_traits {
     /// * `calculate_performance_return(&self)` - Computes a performance metric (e.g., total reward) for the
     ///   current episode or training iteration, which is used to evaluate and improve the model.
     pub trait EnvironmentTrainingTrait {
-        fn run_environment(&self);
-        fn build_observation(&self);
-        fn calculate_performance_return(&self);
+        fn run_environment(&self) -> Result<(), EnvironmentError>;
+        fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError>;
+        fn calculate_performance_return(&self) -> Result<Box<dyn Any>, EnvironmentError>;
     }
 
     /// The `EnvironmentTestingTrait` defines the interface that must be implemented by any
@@ -32,8 +41,8 @@ pub mod environment_traits {
     /// * `build_observation(&self)` - Constructs an observation from the environment, preparing it for
     ///   input into the trained model.
     pub trait EnvironmentTestingTrait {
-        fn run_environment(&self);
-        fn build_observation(&self);
+        fn run_environment(&self) -> Result<(), EnvironmentError>;
+        fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError>;
     }
 }
 

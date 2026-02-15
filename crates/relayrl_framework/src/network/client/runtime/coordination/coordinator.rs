@@ -2,7 +2,7 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::{ClientModes, ClientCapabilities};
+use crate::network::client::agent::{ClientCapabilities, ClientModes};
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -18,9 +18,14 @@ use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport::{
-    DispatcherConfig, DispatcherError, ScalingDispatcher, TrainingDispatcher, TransportClient,
-    TransportError, client_transport_factory,
+use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+    InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
+};
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport_sink::zmq::policies::ZmqPolicyConfig;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::network::client::runtime::data::transport_sink::{
+    TransportClient, TransportError, client_transport_factory,
 };
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
@@ -38,10 +43,10 @@ use thiserror::Error;
 use burn_tensor::backend::Backend;
 
 use active_uuid_registry::UuidPoolError;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use active_uuid_registry::interface::get;
 use active_uuid_registry::interface::{clear_all, remove, reserve_with};
-use relayrl_types::prelude::DeviceType;
+#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use active_uuid_registry::interface::{get, get_all};
+use relayrl_types::prelude::tensor::relayrl::DeviceType;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 use relayrl_types::types::data::action::CodecConfig;
 use relayrl_types::types::data::action::RelayRLAction;
@@ -103,9 +108,6 @@ pub enum CoordinatorError {
     #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    #[error(transparent)]
-    DispatcherError(#[from] DispatcherError),
     #[error(transparent)]
     ScaleManagerError(#[from] ScaleManagerError),
     #[error(transparent)]
@@ -262,7 +264,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         transport_type: TransportType,
         client_modes: ClientModes,
     ) -> Result<Self, CoordinatorError> {
-        let client_capabilities = client_modes.capabilities().map_err(|e| CoordinatorError::InvalidClientModesError(e.to_string()))?;
+        let client_capabilities = client_modes
+            .capabilities()
+            .map_err(|e| CoordinatorError::InvalidClientModesError(e.to_string()))?;
 
         Ok(Self {
             #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -347,21 +351,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Create transport and wrap in Arc for sharing across dispatchers
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let transport: TransportClient<B> = client_transport_factory(self.transport_type)
+        let transport: TransportClient<B> = client_transport_factory(self.transport_type, shared_client_capabilities.clone())
             .map_err(|e| CoordinatorError::TransportError(e))?;
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let shared_transport: Arc<TransportClient<B>> = Arc::new(transport);
 
-        // Create dispatchers with reliability layer (retry, circuit breaker, backpressure)
+        // Create dispatchers
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let scaling_dispatcher = Arc::new(
-            ScalingDispatcher::with_default_config(shared_transport.clone())
-                .map_err(CoordinatorError::DispatcherError)?,
-        );
+        let inference_dispatcher = Arc::new(InferenceDispatcher::new(shared_transport.clone()));
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let training_dispatcher = Arc::new(TrainingDispatcher::with_default_config(
-            shared_transport.clone(),
-        ));
+        let scaling_dispatcher = Arc::new(ScalingDispatcher::new(shared_transport.clone()));
+        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        let training_dispatcher = Arc::new(TrainingDispatcher::new(shared_transport.clone()));
 
         let mut scaling = ScaleManager::new(
             shared_client_modes,
@@ -424,36 +425,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
         let client_ids: Vec<(String, Uuid)> = {
-            let actor_pairs = get("actor").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get actor pairs: {}",
-                    e
-                ))
-            })?;
-            let scale_manager_pairs = get("scale_manager").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get scale manager pairs: {}",
-                    e
-                ))
-            })?;
-            let external_sender_pairs = get("external_sender").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get external sender pairs: {}",
-                    e
-                ))
-            })?;
-            let zmq_transport_client_pairs = get("zmq_transport_client").map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to get zmq transport client pairs: {}",
-                    e
-                ))
-            })?;
-            actor_pairs
+            let all_pairs: Vec<(String, Uuid)> =
+                get_all().map_err(|e| CoordinatorError::UuidPoolError(e))?;
+            all_pairs
                 .iter()
-                .chain(scale_manager_pairs.iter())
-                .chain(external_sender_pairs.iter())
-                .chain(zmq_transport_client_pairs.iter())
-                .map(|(id, name)| (id.clone(), name.clone()))
+                .filter_map(|(name, id)| match name.as_str() {
+                    "actor" => Some((name.to_string(), id.clone())),
+                    "scale_manager" => Some((name.to_string(), id.clone())),
+                    "trajectory_buffer" => Some((name.to_string(), id.clone())),
+                    #[cfg(feature = "zmq_transport")]
+                    "zmq_transport_client" => Some((name.to_string(), id.clone())),
+                    #[cfg(feature = "nats_transport")]
+                    "nats_transport_client" => Some((name.to_string(), id.clone())),
+                    _ => None,
+                })
                 .collect::<Vec<(String, Uuid)>>()
         };
 
@@ -493,10 +478,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
                 match &*params.scaling.transport {
                     #[cfg(feature = "async_transport")]
-                    TransportClient::Async(async_tr) => async_tr.shutdown().await?,
+                    TransportClient::Async(async_tr) => async_tr.shutdown(params.lifecycle.get_server_addresses()).await?,
                     #[cfg(feature = "sync_transport")]
                     TransportClient::Sync(sync_tr) => sync_tr
-                        .shutdown()
+                        .shutdown(params.lifecycle.get_server_addresses())
                         .map_err(|e| CoordinatorError::TransportError(e))?,
                 }
 
