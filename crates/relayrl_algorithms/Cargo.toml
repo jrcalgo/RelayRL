@@ -17,4 +17,4 @@ ndarray = { workspace = true }
 
 tokio = { workspace = true }
 thiserror = { workspace = true }
-async_trait = { workspace = true }
+async-trait = { workspace = true }
