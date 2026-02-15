@@ -1,6 +1,12 @@
 pub mod csv;
 pub mod arrow;
 
+use crate::data::action::RelayRLAction;
+use crate::data::tensor::{DType, NdArrayDType, TensorData};
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
+use crate::data::trajectory::RelayRLTrajectory;
+
 pub(super) struct TensorDataFrame {
     dtype_str: String,
     shape: Vec<u64>,
@@ -9,7 +15,7 @@ pub(super) struct TensorDataFrame {
     binary_data: Option<Vec<u8>>,
 }
 
-pub(super) fn tensor_to_data_frame(tensor: &TensorDataFrame) -> TensorDataFrame {
+pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
     let dtype_str = tensor.dtype.to_string();
     let shape: Vec<u64> = tensor.shape.iter().map(|&s| s as u64).collect();
 
@@ -71,6 +77,8 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorDataFrame) -> TensorDataFrame 
 }
 
 pub(super) fn get_backend_str(trajectory: &RelayRLTrajectory) -> String {
-    trajectory.actions.iter().find_map(|a| a.get_obs().map(|t| format!("{:?}", t.supported_backend)))
+    trajectory.actions.iter().find_map(|a: &RelayRLAction| {
+        a.get_obs().map(|t| format!("{:?}", t.supported_backend))
+    })
         .unwrap_or_else(|| "None".to_string())
 }
