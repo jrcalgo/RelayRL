@@ -33,7 +33,7 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 | Crate | Version | Description |
 |-------|---------|-------------|
 | [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-alpha` | Core library with client runtime, server scaffolding, and utilities |
-| [`relayrl_types`](crates/relayrl_types/) | `0.4.0` | Data types, tensor containers, and codec pipeline (compression, encryption, integrity) |
+| [`relayrl_types`](crates/relayrl_types/) | `0.5.0` | Data types, tensor containers, inference models, and codec pipeline (compression, encryption, integrity) |
 | [`relayrl_algorithms`](crates/relayrl_algorithms/) | `0.1.0` | Deep RL algorithms (PPO, REINFORCE) — *scaffolding only* |
 | [`relayrl_python`](crates/relayrl_python/) | `0.1.0` | Python bindings via PyO3 — *scaffolding only* |
 | [`relayrl_cli`](crates/relayrl_cli/) | `0.1.0` | Command-line interface with gRPC — *scaffolding only* |
