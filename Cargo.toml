@@ -25,7 +25,12 @@ dashmap = "6.1.0"
 ndarray = "0.17.2"
 
 thiserror = "2.0.18"
-async_trait = "0.1.89"
+async-trait = "0.1.89"
+
+arrow = "57.3.0"
+arrow-schema = "57.3.0"
+arrow-array = "57.3.0"
+csv = "1.4.0"
 
 [profile.dev]
 opt-level = 0
