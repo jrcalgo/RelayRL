@@ -1,7 +1,7 @@
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::data::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::{
-    RoutedMessage, TransportClient, TransportError,
+    ClientTransportInterface, RoutedMessage, TransportError,
 };
 use crate::utilities::configuration::Algorithm;
 
@@ -19,11 +19,11 @@ use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 pub(crate) struct InferenceDispatcher<B: Backend + BackendMatcher<Backend = B>> {
-    transport: Arc<TransportClient<B>>,
+    transport: Arc<ClientTransportInterface<B>>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
-    pub fn new(transport: Arc<TransportClient<B>>) -> Self {
+    pub fn new(transport: Arc<ClientTransportInterface<B>>) -> Self {
         Self { transport }
     }
 
@@ -33,15 +33,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
         obs_bytes: &[u8],
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<RelayRLAction, TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.send_inference_request(actor_id, obs_bytes, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.send_inference_request(actor_id, obs_bytes, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .send_inference_request(actor_id, obs_bytes, inference_server_address)
+                    .send_inference_request(actor_id, obs_bytes, server_addresses)
                     .await
             }
         }
@@ -49,11 +51,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
 }
 
 pub(crate) struct TrainingDispatcher<B: Backend + BackendMatcher<Backend = B>> {
-    transport: Arc<TransportClient<B>>,
+    transport: Arc<ClientTransportInterface<B>>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
-    pub fn new(transport: Arc<TransportClient<B>>) -> Self {
+    pub fn new(transport: Arc<ClientTransportInterface<B>>) -> Self {
         Self { transport }
     }
 
@@ -64,22 +66,24 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => sync_tr.send_algorithm_init_request(
+            ClientTransportInterface::Sync(sync_tr) => sync_tr.send_algorithm_init_request(
                 scaling_id,
                 algorithm,
                 hyperparams,
-                shared_server_addresses,
+                server_addresses,
             ),
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_algorithm_init_request(
                         scaling_id,
                         algorithm,
                         hyperparams,
-                        shared_server_addresses,
+                        server_addresses,
                     )
                     .await
             }
@@ -91,15 +95,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         actor_id: &Uuid,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.initial_model_handshake(actor_id, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.initial_model_handshake(actor_id, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .initial_model_handshake(actor_id, shared_server_addresses)
+                    .initial_model_handshake(actor_id, server_addresses)
                     .await
             }
         }
@@ -111,15 +117,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         global_dispatcher_tx: Sender<RoutedMessage>,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.listen_for_model(receiver_id, global_dispatcher_tx, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.listen_for_model(receiver_id, global_dispatcher_tx, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .listen_for_model(receiver_id, global_dispatcher_tx, shared_server_addresses)
+                    .listen_for_model(receiver_id, global_dispatcher_tx, server_addresses)
                     .await
             }
         }
@@ -131,15 +139,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         encoded_trajectory: EncodedTrajectory,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.send_trajectory(sender_id, encoded_trajectory, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.send_trajectory(sender_id, encoded_trajectory, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .send_trajectory(sender_id, encoded_trajectory, shared_server_addresses)
+                    .send_trajectory(sender_id, encoded_trajectory, server_addresses)
                     .await
             }
         }
@@ -147,11 +157,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
 }
 
 pub(crate) struct ScalingDispatcher<B: Backend + BackendMatcher<Backend = B>> {
-    transport: Arc<TransportClient<B>>,
+    transport: Arc<ClientTransportInterface<B>>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
-    pub fn new(transport: Arc<TransportClient<B>>) -> Self {
+    pub fn new(transport: Arc<ClientTransportInterface<B>>) -> Self {
         Self { transport }
     }
 
@@ -161,15 +171,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         client_ids: Vec<(String, Uuid)>,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.send_client_ids(scaling_id, &client_ids, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.send_client_ids(scaling_id, &client_ids, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .send_client_ids(scaling_id, client_ids, shared_server_addresses)
+                    .send_client_ids(scaling_id, client_ids, server_addresses)
                     .await
             }
         }
@@ -181,15 +193,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         operation: ScalingOperation,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.send_scaling_warning(scaling_id, operation, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.send_scaling_warning(scaling_id, operation, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .send_scaling_warning(scaling_id, operation, shared_server_addresses)
+                    .send_scaling_warning(scaling_id, operation, server_addresses)
                     .await
             }
         }
@@ -201,15 +215,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         operation: ScalingOperation,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.send_scaling_complete(scaling_id, operation, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.send_scaling_complete(scaling_id, operation, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .send_scaling_complete(scaling_id, operation, shared_server_addresses)
+                    .send_scaling_complete(scaling_id, operation, server_addresses)
                     .await
             }
         }
@@ -220,26 +236,33 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         scaling_id: &Uuid,
         shared_server_addresses: Arc<RwLock<ServerAddresses>>,
     ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => {
-                sync_tr.send_shutdown_signal(scaling_id, shared_server_addresses)
-            },
+            ClientTransportInterface::Sync(sync_tr) => {
+                sync_tr.send_shutdown_signal(scaling_id, server_addresses)
+            }
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => {
+            ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .send_shutdown_signal(scaling_id, shared_server_addresses)
+                    .send_shutdown_signal(scaling_id, server_addresses)
                     .await
             }
         }
     }
 
-    pub async fn shutdown_transport(&self, shared_server_addresses: Arc<RwLock<ServerAddresses>>) -> Result<(), TransportError> {
+    pub async fn shutdown_transport(
+        &self,
+        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    ) -> Result<(), TransportError> {
+        let server_addresses = shared_server_addresses.read().await.clone();
+
         match &*self.transport {
             #[cfg(feature = "sync_transport")]
-            TransportClient::Sync(sync_tr) => sync_tr.shutdown(shared_server_addresses),
+            ClientTransportInterface::Sync(sync_tr) => sync_tr.shutdown(server_addresses),
             #[cfg(feature = "async_transport")]
-            TransportClient::Async(async_tr) => async_tr.shutdown(shared_server_addresses).await,
+            ClientTransportInterface::Async(async_tr) => async_tr.shutdown(server_addresses).await,
         }
     }
 }
