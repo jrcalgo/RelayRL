@@ -1,6 +1,6 @@
 pub(crate) mod interface;
-pub(crate) mod ops;
-pub(crate) mod policies;
+pub(super) mod ops;
+pub(super) mod policies;
 
 use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
 use crate::network::client::runtime::data::transport_sink::ScalingOperation;
@@ -39,85 +39,84 @@ pub enum ZmqClientError {
     JoinError(String),
 }
 
-pub(crate) trait ZmqInferenceExecution {
+pub(super) trait ZmqInferenceExecution {
     fn execute_send_inference_request(
         &self,
         actor_id: &Uuid,
         obs_bytes: &[u8],
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError>;
     fn execute_send_flag_last_inference(
         &self,
         actor_id: &Uuid,
         reward: f32,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        inference_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
         &self,
         scaling_id: &Uuid,
         client_ids: &Vec<(String, Uuid)>,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_warning(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
         &self,
         scaling_id: &Uuid,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
 }
 
-pub(crate) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> {
+pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> {
     fn execute_send_algorithm_init_request(
         &self,
         scaling_id: &Uuid,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        agent_listener_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_initial_model_handshake(
         &self,
         actor_id: &Uuid,
-        model_server_address: &str,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     fn execute_send_trajectory(
         &self,
-        sender_id: &Uuid,
+        buffer_id: &Uuid,
         encoded_trajectory: EncodedTrajectory,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        trajectory_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
         &self,
         scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        client_ids: &[(String, Uuid)],
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_warning(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
         &self,
         scaling_id: &Uuid,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
 }
