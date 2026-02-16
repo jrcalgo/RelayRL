@@ -27,11 +27,11 @@ use thiserror::Error;
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
 #[derive(Debug, Clone)]
 pub(crate) struct ServerAddresses {
-    pub(crate) inference_server_address: String,
-    pub(crate) agent_listener_address: String,
-    pub(crate) model_server_address: String,
-    pub(crate) trajectory_server_address: String,
-    pub(crate) scaling_server_address: String,
+    pub(crate) inference_server_address: Arc<str>,
+    pub(crate) agent_listener_address: Arc<str>,
+    pub(crate) model_server_address: Arc<str>,
+    pub(crate) trajectory_server_address: Arc<str>,
+    pub(crate) scaling_server_address: Arc<str>,
 }
 
 #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
@@ -39,15 +39,18 @@ pub(crate) fn construct_server_addresses(
     transport_config: &TransportConfigParams,
     transport_type: &TransportType,
 ) -> ServerAddresses {
-    fn construct_address(transport_type: &TransportType, network_params: &NetworkParams) -> String {
+    fn construct_address(
+        transport_type: &TransportType,
+        network_params: &NetworkParams,
+    ) -> Arc<str> {
         match *transport_type {
             #[cfg(feature = "zmq_transport")]
-            TransportType::ZMQ => {
+            TransportType::ZMQ => Arc::<str>::from(
                 network_params.prefix.clone()
                     + &network_params.host.clone()
                     + ":"
-                    + &network_params.port.clone()
-            }
+                    + &network_params.port.clone(),
+            ),
         }
     }
 
