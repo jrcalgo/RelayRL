@@ -114,6 +114,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
     }
 }
 
+fn combine_scaling_results(result1: Option<Result<(), TransportError>>, result2: Option<Result<(), TransportError>>) -> Result<(), TransportError> {
+    match (result1, result2) {
+        (None, None) => Err(TransportError::InvalidState("Inference and Training servers not initialized. This should never happen.".to_string()))
+    }
+}
+
 impl<B: Backend + BackendMatcher<Backend = B>> SyncScalingTransportOps<B> for ZmqInterface<B> {
     fn send_client_ids(
         &self,
@@ -122,22 +128,107 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncScalingTransportOps<B> for Zm
         server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
         if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
-            let _permit = scaling_protocol.backpressure.acquire();
 
-            if scaling_protocol.circuit_breaker.is_open() {
-                return Err(TransportError::CircuitOpen);
-            }
+            std::thread::scope(|s| {
+                let inference_thread = if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = inference_protocol.backpressure.acquire();
 
-            if let Some(inference_protocol) = self.inference_protocol.as_ref() {
-                let _permit = inference_protocol.backpressure.acquire();
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
 
-                if inference_protocol.circuit_breaker.is_open() {
-                    return Err(TransportError::CircuitOpen);
-                }
+                        let inference_server_address: &str = server_addresses.inference_server_address.as_ref();
 
-                let inference_server_address: &str =
-                    server_addresses.inference_server_address.as_ref();
-            }
+                        let mut attempts = 0;
+                        loop {
+                            let result = self.execute_send_inference_request(
+                                actor_id,
+                                obs_bytes,
+                                inference_server_address,
+                            );
+
+                            match result {
+                                Ok(action) => {
+                                    inference_protocol.circuit_breaker.record_success();
+                                    return Ok(action);
+                                }
+                                Err(e) if attempts < inference_protocol.config.retry_policy.max_attempts => {
+                                    attempts += 1;
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    let delay = inference_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                    sleep(delay);
+                                }
+                                Err(e) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                                }
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let training_thread = if let Some(training_protocol) = self.training_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = training_protocol.backpressure.acquire();
+
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
+
+                        let training_server_address: &str = server_addresses.training_server_address.as_ref();
+
+                        let mut attempts = 0;
+                        loop {
+                            let result = self.execute_send_training_request(
+                                actor_id,
+                                obs_bytes,
+                                training_server_address,
+                            );
+
+                            match result {
+                                Ok(()) => {
+                                    training_protocol.circuit_breaker.record_success();
+                                    return Ok(());
+                                }
+                                Err(e) if attempts < training_protocol.config.retry_policy.max_attempts => {
+                                    attempts += 1;
+                                    training_protocol.circuit_breaker.record_failure();
+                                    let delay = training_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                    sleep(delay);
+                                }
+                                Err(e) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                                }
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let inference_result = inference_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+                let training_result = training_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+
+                combine_scaling_results(inference_result, training_result)
+            })
+        } else {
+            return Err(TransportError::InvalidState(
+                "Scaling protocol not initialized".to_string(),
+            ));
         }
     }
 
@@ -147,6 +238,95 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncScalingTransportOps<B> for Zm
         operation: ScalingOperation,
         server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
+        if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
+
+            std::thread::scope(|s| {
+                let inference_thread = if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = inference_protocol.backpressure.acquire();
+
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
+
+                        let inference_server_address: &str = server_addresses.inference_server_address.as_ref();
+
+                        let result = self.execute_send_scaling_warning(scaling_id, operation, inference_server_address);
+
+                        match result {
+                            Ok(()) => {
+                                inference_protocol.circuit_breaker.record_success();
+                                return Ok(());
+                            }
+                            Err(e) if attempts < inference_protocol.config.retry_policy.max_attempts => {
+                                attempts += 1;
+                                inference_protocol.circuit_breaker.record_failure();
+                                let delay = inference_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                sleep(delay);
+                            }
+                            Err(e) => {
+                                inference_protocol.circuit_breaker.record_failure();
+                                return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let training_thread = if let Some(training_protocol) = self.training_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = training_protocol.backpressure.acquire();
+
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
+
+                        let training_server_address: &str = server_addresses.training_server_address.as_ref();
+
+                        let result = self.execute_send_scaling_warning(scaling_id, operation, training_server_address);
+
+                        match result {
+                            Ok(()) => {
+                                training_protocol.circuit_breaker.record_success();
+                                return Ok(());
+                            }
+                            Err(e) if attempts < training_protocol.config.retry_policy.max_attempts => {
+                                attempts += 1;
+                                training_protocol.circuit_breaker.record_failure();
+                                let delay = training_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                sleep(delay);
+                            }
+                            Err(e) => {
+                                training_protocol.circuit_breaker.record_failure();
+                                return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let inference_result = inference_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+                let training_result = training_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+
+                combine_scaling_results(inference_result, training_result)
+            })
+        } else {
+            return Err(TransportError::InvalidState(
+                "Scaling protocol not initialized".to_string(),
+            ));
+        }
     }
 
     fn send_scaling_complete(
@@ -155,6 +335,95 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncScalingTransportOps<B> for Zm
         operation: ScalingOperation,
         server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
+        if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
+
+            std::thread::scope(|s| {
+                let inference_thread = if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = inference_protocol.backpressure.acquire();
+
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
+
+                        let inference_server_address: &str = server_addresses.inference_server_address.as_ref();
+
+                        let result = self.execute_send_scaling_complete(scaling_id, operation, inference_server_address);
+
+                        match result {
+                            Ok(()) => {
+                                inference_protocol.circuit_breaker.record_success();
+                                return Ok(());
+                            }
+                            Err(e) if attempts < inference_protocol.config.retry_policy.max_attempts => {
+                                attempts += 1;
+                                inference_protocol.circuit_breaker.record_failure();
+                                let delay = inference_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                sleep(delay);
+                            }
+                            Err(e) => {
+                                inference_protocol.circuit_breaker.record_failure();
+                                return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let training_thread = if let Some(training_protocol) = self.training_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = training_protocol.backpressure.acquire();
+
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
+
+                        let training_server_address: &str = server_addresses.training_server_address.as_ref();
+
+                        let result = self.execute_send_scaling_complete(scaling_id, operation, training_server_address);
+
+                        match result {
+                            Ok(()) => {
+                                training_protocol.circuit_breaker.record_success();
+                                return Ok(());
+                            }
+                            Err(e) if attempts < training_protocol.config.retry_policy.max_attempts => {
+                                attempts += 1;
+                                training_protocol.circuit_breaker.record_failure();
+                                let delay = training_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                sleep(delay);
+                            }
+                            Err(e) => {
+                                training_protocol.circuit_breaker.record_failure();
+                                return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let inference_result = inference_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+                let training_result = training_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+
+                combine_scaling_results(inference_result, training_result)
+            })
+        } else {
+            return Err(TransportError::InvalidState(
+                "Scaling protocol not initialized".to_string(),
+            ));
+        }
     }
 
     fn send_shutdown_signal(
@@ -162,6 +431,95 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncScalingTransportOps<B> for Zm
         scaling_id: &Uuid,
         server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
+        if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
+
+            std::thread::scope(|s| {
+                let inference_thread = if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = inference_protocol.backpressure.acquire();
+
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
+
+                        let inference_server_address: &str = server_addresses.inference_server_address.as_ref();
+
+                        let result = self.execute_send_shutdown_signal(scaling_id, inference_server_address);
+
+                        match result {
+                            Ok(()) => {
+                                inference_protocol.circuit_breaker.record_success();
+                                return Ok(());
+                            }
+                            Err(e) if attempts < inference_protocol.config.retry_policy.max_attempts => {
+                                attempts += 1;
+                                inference_protocol.circuit_breaker.record_failure();
+                                let delay = inference_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                sleep(delay);
+                            }
+                            Err(e) => {
+                                inference_protocol.circuit_breaker.record_failure();
+                                return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let training_thread = if let Some(training_protocol) = self.training_protocol.as_ref() {
+                    s.spawn(|| {
+                        let _permit = training_protocol.backpressure.acquire();
+
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
+
+                        let training_server_address: &str = server_addresses.training_server_address.as_ref();
+
+                        let result = self.execute_send_shutdown_signal(scaling_id, training_server_address);
+
+                        match result {
+                            Ok(()) => {
+                                training_protocol.circuit_breaker.record_success();
+                                return Ok(());
+                            }
+                            Err(e) if attempts < training_protocol.config.retry_policy.max_attempts => {
+                                attempts += 1;
+                                training_protocol.circuit_breaker.record_failure();
+                                let delay = training_protocol.config.retry_policy.delay_for_attempt(attempts);
+                                sleep(delay);
+                            }
+                            Err(e) => {
+                                training_protocol.circuit_breaker.record_failure();
+                                return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                            }
+                        }
+                    });
+                } else {
+                    None
+                };
+
+                let inference_result = inference_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+                let training_result = training_thread.map(|handle| {
+                    match handle {
+                        Some(thread) => Some(thread.join().map_err(|e| TransportError::JoinError(e.to_string()))),
+                        None => None,
+                    }
+                });
+
+                combine_scaling_results(inference_result, training_result)
+            })
+        } else {
+            return Err(TransportError::InvalidState(
+                "Scaling protocol not initialized".to_string(),
+            ));
+        }
     }
 }
 
