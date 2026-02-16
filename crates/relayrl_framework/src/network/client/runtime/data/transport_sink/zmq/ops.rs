@@ -44,12 +44,12 @@ pub enum ZmqClientError {
 
 type SocketUuid = Uuid;
 
-pub(crate) struct ZmqSocketPool {
-    pub(crate) inference_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) model_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) model_sub_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) traj_push_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) scaling_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+pub(super) struct ZmqSocketPool {
+    pub(super) inference_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) model_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) model_sub_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) traj_push_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) scaling_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
 }
 
 /// Raw ZMQ transport operations.
@@ -61,8 +61,8 @@ pub(crate) struct ZmqSocketPool {
 ///
 /// Application-level state (model version, algorithm initialization) is managed
 /// by the dispatcher layer (see `transport_dispatcher.rs`).
-pub(crate) struct ZmqPool {
-    pub(crate) context: Context,
+pub(super) struct ZmqPool {
+    pub(super) context: Context,
     cached_addresses: Option<DashMap<Uuid, Arc<RwLock<ServerAddresses>>>>,
     cached_sockets: Arc<ZmqSocketPool>,
 }
@@ -317,13 +317,13 @@ impl ServerResponse {
     }
 }
 
-pub(crate) struct ZmqInferenceOps {
+pub(super) struct ZmqInferenceOps {
     transport_id: TransportUuid,
     zmq_pool: Arc<RwLock<ZmqPool>>,
 }
 
 impl ZmqInferenceOps {
-    pub fn new(
+    pub(super) fn new(
         transport_id: TransportUuid,
         zmq_pool: Arc<RwLock<ZmqPool>>,
     ) -> Result<Self, ZmqClientError> {
@@ -332,36 +332,74 @@ impl ZmqInferenceOps {
             zmq_pool,
         })
     }
+
+    pub(super) fn shutdown(&self) -> Result<(), TransportError> {
+        unimplemented!();
+    }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceServerTransportOps<B>
-    for ZmqInferenceOps
-{
-    fn send_inference_request(
+impl<B: Backend + BackendMatcher<Backend = B>> ZmqInferenceExecution<B> for ZmqInferenceOps {
+    fn execute_send_inference_request(
         &self,
         actor_id: &Uuid,
         action_request: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
-        Ok(RelayRLAction::minimal(0.0, false))
+        unimplemented!();
     }
-    fn send_flag_last_inference(
+
+    fn execute_send_flag_last_inference(
         &self,
         actor_id: &Uuid,
         reward: f32,
         inference_server_address: &str,
     ) -> Result<(), TransportError> {
-        Ok(())
+        unimplemented!();
+    }
+
+    fn execute_send_client_ids(
+        &self,
+        scaling_id: &Uuid,
+        client_ids: &[(String, Uuid)],
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+    
+    fn execute_send_scaling_warning(
+        &self,
+        scaling_id: &Uuid,
+        operation: ScalingOperation,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+
+    fn execute_send_scaling_complete(
+        &self,
+        scaling_id: &Uuid,
+        operation: ScalingOperation,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+
+    fn execute_send_shutdown_signal(
+        &self,
+        scaling_id: &Uuid,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
     }
 }
 
-pub(crate) struct ZmqTrainingOps {
+pub(super) struct ZmqTrainingOps {
     transport_id: TransportUuid,
     zmq_pool: Arc<RwLock<ZmqPool>>,
 }
 
 impl ZmqTrainingOps {
-    pub fn new(
+    pub(super) fn new(
         transport_id: TransportUuid,
         zmq_pool: Arc<RwLock<ZmqPool>>,
     ) -> Result<Self, ZmqClientError> {
@@ -371,7 +409,7 @@ impl ZmqTrainingOps {
         })
     }
 
-    fn shutdown(&self) -> Result<(), TransportError> {
+    pub(super) fn shutdown(&self) -> Result<(), TransportError> {
         if let Some(sockets) = &self
             .zmq_pool
             .read()
@@ -435,142 +473,96 @@ impl ZmqTrainingOps {
         remove("zmq_transport_client", self.transport_id.clone()).map_err(TransportError::from)?;
         Ok(())
     }
-}
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
-    for ZmqTrainingOps
-{
-    fn send_client_ids(
-        &self,
-        scaling_id: &Uuid,
-        client_ids: &[(String, Uuid)],
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
-        if scaling_id.is_nil() {
-            return Err(TransportError::SendClientIdsToServerError(
-                "Coordinator ID is nil".to_string(),
+    pub(super) fn execute_listen_for_model(&self, receiver_id: &Uuid, global_dispatcher_tx: Sender<RoutedMessage>, model_server_address: &str) -> Result<(), TransportError> {
+        if receiver_id.is_nil() {
+            return Err(TransportError::ListenForModelError(
+                "Receiver ID is nil".to_string(),
             ));
         }
 
-        if scaling_server_address.is_empty() {
-            return Err(TransportError::SendClientIdsToServerError(
-                "Agent listener address is empty".to_string(),
+        if model_server_address.is_empty() {
+            return Err(TransportError::ListenForModelError(
+                "Model server address is empty".to_string(),
+            ));
+        }
+
+        if global_dispatcher_tx.is_closed() {
+            return Err(TransportError::ListenForModelError(
+                "Global dispatcher is closed".to_string(),
             ));
         }
 
         let _ = self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(ZmqClientError::from)?
             .update_cache(
-                scaling_id,
-                scaling_server_address,
-                CacheAddressType::ScalingServer,
-                SocketPoolType::ScalingDealer,
+                receiver_id,
+                model_server_address,
+                CacheAddressType::ModelServer,
+                SocketPoolType::ModelSub,
             );
 
-        // TODO: Send client IDs to server for caching, validation, and routing
-        let transport_id_string = self.transport_id.to_string();
-        let scaling_id_string = scaling_id.to_string();
-
-        let empty_frame: Vec<u8> = vec![];
-        let transport_id_frame: &[u8] = transport_id_string.as_bytes();
-        let scaling_id_frame: &[u8] = scaling_id_string.as_bytes();
-        let pairs_payload = client_ids
-            .iter()
-            .map(|(name, id)| name.to_string() + " " + id.to_string().as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-
         let socket = self
+            .zmq_pool
+            .read()
+            .map_err(ZmqClientError::from)?
             .cached_sockets
-            .scaling_dealer_socket
+            .model_sub_socket
             .as_ref()
             .unwrap()
-            .get(scaling_id)
-            .unwrap();
+            .get(receiver_id)
+            .unwrap()
+            .clone();
 
-        match socket
-            .try_lock()
-            .map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to lock scaling dealer socket: {}",
-                    e
-                ))
-            })?
-            .send_multipart(
-                [
-                    &empty_frame,
-                    transport_id_frame,
-                    scaling_id_frame,
-                    pairs_payload.as_bytes(),
-                ],
-                0,
-            ) {
-            Ok(_) => println!("[ZmqClient] Sent client IDs to server"),
-            Err(e) => {
-                return Err(TransportError::SendClientIdsToServerError(format!(
-                    "Failed to send client IDs to server: {}",
-                    e
-                )));
-            }
-        }
+        let model_server_address = model_server_address.to_string();
+        let global_dispatcher_tx = global_dispatcher_tx.clone();
 
-        match socket
-            .try_lock()
-            .map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to lock scaling dealer socket: {}",
-                    e
-                ))
-            })?
-            .recv_multipart(0)
-        {
-            Ok(message_parts) => {
-                if message_parts.len() < 2 {
-                    return Err(TransportError::SendClientIdsToServerError(
-                        "Malformed response".to_string(),
-                    ));
-                }
+        task::spawn_blocking(move || {
+            println!(
+                "[ZmqClient] Listening for model updates at {}",
+                model_server_address
+            );
 
-                let message_bytes: Vec<u8> = message_parts[1].to_vec();
-
-                match String::from_utf8_lossy(&message_bytes).parse::<i64>() {
-                    Ok(value) => match ServerResponse::from_i64(value) {
-                        ServerResponse::Success => {
-                            println!("[ZmqClient] Server updated cache with client IDs");
-                            return Ok(());
-                        }
-                        ServerResponse::Failure => {
-                            return Err(TransportError::SendClientIdsToServerError(
-                                "Server failed to acknowledge client IDs".to_string(),
-                            ));
-                        }
-                    },
-                    Err(e) => {
-                        return Err(TransportError::SendClientIdsToServerError(format!(
-                            "Failed to parse server response: {}",
+            loop {
+                match socket
+                    .try_lock()
+                    .map_err(|e| {
+                        TransportError::ListenForModelError(format!(
+                            "Failed to lock sub socket: {}",
                             e
-                        )));
+                        ))
+                    })?
+                    .recv_bytes(0)
+                {
+                    Ok(model_bytes) => {
+                        let msg = RoutedMessage {
+                            actor_id: Uuid::nil(), // broadcast placeholder
+                            protocol: RoutingProtocol::ModelUpdate,
+                            payload: RoutedPayload::ModelUpdate {
+                                model_bytes,
+                                version: 0,
+                            },
+                        };
+                        let _ = global_dispatcher_tx.blocking_send(msg);
+                    }
+                    Err(e) => {
+                        eprintln!("[ZmqClient] SUB socket recv error: {}", e);
+                        return Err::<(), TransportError>(TransportError::ListenForModelError(
+                            format!("SUB socket recv error: {}", e),
+                        ));
                     }
                 }
             }
-            Err(e) => {
-                return Err(TransportError::SendClientIdsToServerError(format!(
-                    "Failed to receive client IDs from server: {}",
-                    e
-                )));
-            }
-        }
-    }
+        });
 
-    fn send_algorithm_init_request(
-        &self,
-        scaling_id: &Uuid,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
-        agent_listener_address: &str,
-    ) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTrainingOps {
+    fn execute_send_algorithm_init_request(&self, scaling_id: &Uuid, algorithm: Algorithm, hyperparams: HashMap<Algorithm, HyperparameterArgs>, agent_listener_address: &str) -> Result<(), TransportError> {
         // TODO: Reqeust that the server initializes a shared algorithm OR individual algorithms per actor (must be the same algorithm for now)
         if scaling_id.is_nil() {
             return Err(TransportError::SendAlgorithmInitRequestError(
@@ -647,12 +639,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         Ok(())
     }
 
-    fn initial_model_handshake(
-        &self,
-        actor_id: &Uuid,
-        _model_server_address: &str,
-        agent_listener_address: &str,
-    ) -> Result<Option<ModelModule<B>>, TransportError> {
+    fn execute_initial_model_handshake(&self, actor_id: &Uuid, agent_listener_address: &str) -> Result<Option<ModelModule<B>>, TransportError> {
         if actor_id.is_nil() {
             return Err(TransportError::ModelHandshakeError(
                 "Actor ID is nil".to_string(),
@@ -790,13 +777,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         }
     }
 
-    fn send_trajectory(
-        &self,
-        sender_id: &Uuid,
-        encoded_trajectory: EncodedTrajectory,
-        _model_server_address: &str,
-        trajectory_server_address: &str,
-    ) -> Result<(), TransportError> {
+    fn execute_send_trajectory(&self, sender_id: &Uuid, encoded_trajectory: EncodedTrajectory, trajectory_server_address: &str) -> Result<(), TransportError> {
         if sender_id.is_nil() {
             return Err(TransportError::SendTrajError(
                 "Sender ID is nil".to_string(),
@@ -865,103 +846,127 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
             }
         }
     }
-
-    fn listen_for_model(
-        &self,
-        receiver_id: &Uuid,
-        model_server_address: &str,
-        global_dispatcher_tx: tokio::sync::mpsc::Sender<RoutedMessage>,
-    ) -> Result<(), TransportError> {
-        if receiver_id.is_nil() {
-            return Err(TransportError::ListenForModelError(
-                "Receiver ID is nil".to_string(),
+    
+    fn execute_send_client_ids(&self, scaling_id: &Uuid, client_ids: &[(String, Uuid)], scaling_server_address: &str) -> Result<(), TransportError> {
+        if scaling_id.is_nil() {
+            return Err(TransportError::SendClientIdsToServerError(
+                "Coordinator ID is nil".to_string(),
             ));
         }
 
-        if model_server_address.is_empty() {
-            return Err(TransportError::ListenForModelError(
-                "Model server address is empty".to_string(),
-            ));
-        }
-
-        if global_dispatcher_tx.is_closed() {
-            return Err(TransportError::ListenForModelError(
-                "Global dispatcher is closed".to_string(),
+        if scaling_server_address.is_empty() {
+            return Err(TransportError::SendClientIdsToServerError(
+                "Agent listener address is empty".to_string(),
             ));
         }
 
         let _ = self
             .zmq_pool
             .read()
-            .map_err(ZmqClientError::from)?
+            .map_err(|e| ZmqClientError::from(e))?
             .update_cache(
-                receiver_id,
-                model_server_address,
-                CacheAddressType::ModelServer,
-                SocketPoolType::ModelSub,
+                scaling_id,
+                scaling_server_address,
+                CacheAddressType::ScalingServer,
+                SocketPoolType::ScalingDealer,
             );
+
+        // TODO: Send client IDs to server for caching, validation, and routing
+        let transport_id_string = self.transport_id.to_string();
+        let scaling_id_string = scaling_id.to_string();
+
+        let empty_frame: Vec<u8> = vec![];
+        let transport_id_frame: &[u8] = transport_id_string.as_bytes();
+        let scaling_id_frame: &[u8] = scaling_id_string.as_bytes();
+        let pairs_payload = client_ids
+            .iter()
+            .map(|(name, id)| name.to_string() + " " + id.to_string().as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let socket = self
-            .zmq_pool
-            .read()
-            .map_err(ZmqClientError::from)?
             .cached_sockets
-            .model_sub_socket
+            .scaling_dealer_socket
             .as_ref()
             .unwrap()
-            .get(receiver_id)
-            .unwrap()
-            .clone();
+            .get(scaling_id)
+            .unwrap();
 
-        let model_server_address = model_server_address.to_string();
-        let global_dispatcher_tx = global_dispatcher_tx.clone();
+        match socket
+            .try_lock()
+            .map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to lock scaling dealer socket: {}",
+                    e
+                ))
+            })?
+            .send_multipart(
+                [
+                    &empty_frame,
+                    transport_id_frame,
+                    scaling_id_frame,
+                    pairs_payload.as_bytes(),
+                ],
+                0,
+            ) {
+            Ok(_) => println!("[ZmqClient] Sent client IDs to server"),
+            Err(e) => {
+                return Err(TransportError::SendClientIdsToServerError(format!(
+                    "Failed to send client IDs to server: {}",
+                    e
+                )));
+            }
+        }
 
-        task::spawn_blocking(move || {
-            println!(
-                "[ZmqClient] Listening for model updates at {}",
-                model_server_address
-            );
+        match socket
+            .try_lock()
+            .map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to lock scaling dealer socket: {}",
+                    e
+                ))
+            })?
+            .recv_multipart(0)
+        {
+            Ok(message_parts) => {
+                if message_parts.len() < 2 {
+                    return Err(TransportError::SendClientIdsToServerError(
+                        "Malformed response".to_string(),
+                    ));
+                }
 
-            loop {
-                match socket
-                    .try_lock()
-                    .map_err(|e| {
-                        TransportError::ListenForModelError(format!(
-                            "Failed to lock sub socket: {}",
-                            e
-                        ))
-                    })?
-                    .recv_bytes(0)
-                {
-                    Ok(model_bytes) => {
-                        let msg = RoutedMessage {
-                            actor_id: Uuid::nil(), // broadcast placeholder
-                            protocol: RoutingProtocol::ModelUpdate,
-                            payload: RoutedPayload::ModelUpdate {
-                                model_bytes,
-                                version: 0,
-                            },
-                        };
-                        let _ = global_dispatcher_tx.blocking_send(msg);
-                    }
+                let message_bytes: Vec<u8> = message_parts[1].to_vec();
+
+                match String::from_utf8_lossy(&message_bytes).parse::<i64>() {
+                    Ok(value) => match ServerResponse::from_i64(value) {
+                        ServerResponse::Success => {
+                            println!("[ZmqClient] Server updated cache with client IDs");
+                            return Ok(());
+                        }
+                        ServerResponse::Failure => {
+                            return Err(TransportError::SendClientIdsToServerError(
+                                "Server failed to acknowledge client IDs".to_string(),
+                            ));
+                        }
+                    },
                     Err(e) => {
-                        eprintln!("[ZmqClient] SUB socket recv error: {}", e);
-                        return Err::<(), TransportError>(TransportError::ListenForModelError(
-                            format!("SUB socket recv error: {}", e),
-                        ));
+                        return Err(TransportError::SendClientIdsToServerError(format!(
+                            "Failed to parse server response: {}",
+                            e
+                        )));
                     }
                 }
             }
-        });
-        Ok(())
+            Err(e) => {
+                return Err(TransportError::SendClientIdsToServerError(format!(
+                    "Failed to receive client IDs from server: {}",
+                    e
+                )));
+            }
+        }
     }
 
-    fn send_scaling_warning(
-        &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
+    fn execute_send_scaling_warning(&self, scaling_id: &Uuid, operation: ScalingOperation, scaling_server_address: &str) -> Result<(), TransportError> {
         if scaling_id.is_nil() {
             return Err(TransportError::SendScalingWarningError(
                 "Scaling ID is nil".to_string(),
@@ -1113,13 +1118,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
 
         Ok(())
     }
-
-    fn send_scaling_complete(
-        &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
+    
+    fn execute_send_scaling_complete(&self, scaling_id: &Uuid, operation: ScalingOperation, scaling_server_address: &str) -> Result<(), TransportError> {
         if scaling_id.is_nil() {
             return Err(TransportError::SendScalingCompleteError(
                 "Scaling ID is nil".to_string(),
@@ -1271,11 +1271,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         Ok(())
     }
 
-    fn send_shutdown_signal(
-        &self,
-        scaling_id: &Uuid,
-        scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
+    fn execute_send_shutdown_signal(&self, scaling_id: &Uuid, scaling_server_address: &str) -> Result<(), TransportError> {
         if scaling_id.is_nil() {
             return Err(TransportError::SendShutdownSignalError(
                 "Scaling ID is nil".to_string(),
