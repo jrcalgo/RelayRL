@@ -5,7 +5,7 @@ use crate::network::client::runtime::data::transport_sink::transport_dispatcher:
 };
 use crate::network::client::runtime::data::transport_sink::{
     ScalingOperation, SyncClientTransportInterface, SyncInferenceTransportOps,
-    SyncTrainingTransportOps, SyncScalingTransportOps, TransportError, TransportUuid,
+    SyncScalingTransportOps, SyncTrainingTransportOps, TransportError, TransportUuid,
 };
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
@@ -26,7 +26,9 @@ use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 use super::ops::{ZmqInferenceOps, ZmqPool, ZmqTrainingOps};
-use super::policies::{BackpressureController, CircuitBreaker, CircuitState, RetryPolicy, ZmqPolicyConfig};
+use super::policies::{
+    BackpressureController, CircuitBreaker, CircuitState, RetryPolicy, ZmqPolicyConfig,
+};
 use super::{ZmqInferenceServerExecution, ZmqTrainingServerExecution};
 
 struct ZmqProtocol {
@@ -55,7 +57,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
         let inference_protocol = if shared_client_capabilities.server_inference {
             let config = ZmqPolicyConfig::for_inference();
             Some(ZmqProtocol {
-                circuit_breaker: CircuitBreaker::new(config.circuit_breaker_threshold, config.circuit_breaker_duration),
+                circuit_breaker: CircuitBreaker::new(
+                    config.circuit_breaker_threshold,
+                    config.circuit_breaker_duration,
+                ),
                 backpressure: BackpressureController::new(config.max_concurrent_requests),
                 config: config,
             })
@@ -63,21 +68,30 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
             None
         };
 
-        let training_protocol = if !shared_client_capabilities.training_server_mode == ActorServerModelMode::Disabled {
-            let config = ZmqPolicyConfig::for_training();
-            Some(ZmqProtocol {
-                circuit_breaker: CircuitBreaker::new(config.circuit_breaker_threshold, config.circuit_breaker_duration),
-                backpressure: BackpressureController::new(config.max_concurrent_requests),
-                config: config,
-            })
-        } else {
-            None
-        };
+        let training_protocol =
+            if shared_client_capabilities.training_server_mode != ActorServerModelMode::Disabled {
+                let config = ZmqPolicyConfig::for_training();
+                Some(ZmqProtocol {
+                    circuit_breaker: CircuitBreaker::new(
+                        config.circuit_breaker_threshold,
+                        config.circuit_breaker_duration,
+                    ),
+                    backpressure: BackpressureController::new(config.max_concurrent_requests),
+                    config: config,
+                })
+            } else {
+                None
+            };
 
-        let scaling_protocol = if shared_client_capabilities.server_inference || shared_client_capabilities.training_server_mode == ActorServerModelMode::Disabled {
+        let scaling_protocol = if shared_client_capabilities.server_inference
+            || shared_client_capabilities.training_server_mode != ActorServerModelMode::Disabled
+        {
             let config = ZmqPolicyConfig::for_scaling();
             Some(ZmqProtocol {
-                circuit_breaker: CircuitBreaker::new(config.circuit_breaker_threshold, config.circuit_breaker_duration),
+                circuit_breaker: CircuitBreaker::new(
+                    config.circuit_breaker_threshold,
+                    config.circuit_breaker_duration,
+                ),
                 backpressure: BackpressureController::new(config.max_concurrent_requests),
                 config: config,
             })
@@ -96,8 +110,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
     }
 
     fn shutdown(&self) -> Result<(), TransportError> {
-        let client_id = get()
-        self.send_shutdown_signal
+        unimplemented!()
     }
 }
 
@@ -106,54 +119,145 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncScalingTransportOps<B> for Zm
         &self,
         scaling_id: &Uuid,
         client_ids: &Vec<(String, Uuid)>,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
+        if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
+            let _permit = scaling_protocol.backpressure.acquire();
+
+            if scaling_protocol.circuit_breaker.is_open() {
+                return Err(TransportError::CircuitOpen);
+            }
+
+            if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                let _permit = inference_protocol.backpressure.acquire();
+
+                if inference_protocol.circuit_breaker.is_open() {
+                    return Err(TransportError::CircuitOpen);
+                }
+
+                let inference_server_address: &str =
+                    server_addresses.inference_server_address.as_ref();
+            }
+        }
     }
 
     fn send_scaling_warning(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
-
     }
 
     fn send_scaling_complete(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
-
     }
 
     fn send_shutdown_signal(
         &self,
         scaling_id: &Uuid,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
-
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceTransportOps<B>
-    for ZmqInterface<B>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceTransportOps<B> for ZmqInterface<B> {
     fn send_inference_request(
         &self,
         actor_id: &Uuid,
         obs_bytes: &[u8],
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<RelayRLAction, TransportError> {
+        if let Some(protocol) = self.inference_protocol.as_ref() {
+            let _permit = protocol.backpressure.acquire();
+
+            if protocol.circuit_breaker.is_open() {
+                return Err(TransportError::CircuitOpen);
+            }
+
+            let inference_server_address: &str = server_addresses.inference_server_address.as_ref();
+
+            let mut attempts = 0;
+            loop {
+                let result = self.execute_send_inference_request(
+                    actor_id,
+                    obs_bytes,
+                    inference_server_address,
+                );
+
+                match result {
+                    Ok(action) => {
+                        protocol.circuit_breaker.record_success();
+                        return Ok(action);
+                    }
+                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                        attempts += 1;
+                        protocol.circuit_breaker.record_failure();
+                        let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
+                        sleep(delay);
+                    }
+                    Err(e) => {
+                        protocol.circuit_breaker.record_failure();
+                        return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                    }
+                }
+            }
+        } else {
+            return Err(TransportError::InvalidState(
+                "Inference protocol not initialized".to_string(),
+            ));
+        }
     }
 
     fn send_flag_last_inference(
         &self,
         actor_id: &Uuid,
         reward: f32,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
+        if let Some(protocol) = self.inference_protocol.as_ref() {
+            let _permit = protocol.backpressure.acquire();
+
+            if protocol.circuit_breaker.is_open() {
+                return Err(TransportError::CircuitOpen);
+            }
+
+            let inference_server_address: &str = server_addresses.inference_server_address.as_ref();
+
+            let mut attempts = 0;
+            loop {
+                let result = self.execute_send_flag_last_inference(
+                    actor_id,
+                    reward,
+                    inference_server_address,
+                );
+
+                match result {
+                    Ok(()) => {
+                        protocol.circuit_breaker.record_success();
+                        return Ok(());
+                    }
+                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                        attempts += 1;
+                        protocol.circuit_breaker.record_failure();
+                        let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
+                        sleep(delay);
+                    }
+                    Err(e) => {
+                        protocol.circuit_breaker.record_failure();
+                        return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                    }
+                }
+            }
+        } else {
+            return Err(TransportError::InvalidState(
+                "Inference protocol not initialized".to_string(),
+            ));
+        }
     }
 }
 
@@ -162,84 +266,229 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqInferenceExecution for ZmqInte
         &self,
         actor_id: &Uuid,
         obs_bytes: &[u8],
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
+        self.zmq_inference_ops
+            .send_inference_request(actor_id, obs_bytes, inference_server_address)
     }
 
     fn execute_send_flag_last_inference(
         &self,
         actor_id: &Uuid,
         reward: f32,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        inference_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_inference_ops
+            .send_flag_last_inference(actor_id, reward, inference_server_address)
     }
 
     fn execute_send_client_ids(
         &self,
         scaling_id: &Uuid,
         client_ids: &Vec<(String, Uuid)>,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_inference_ops.send_client_ids(
+            scaling_id,
+            client_ids,
+            inference_scaling_server_address,
+        )
     }
 
     fn execute_send_scaling_warning(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_inference_ops.send_scaling_warning(
+            scaling_id,
+            operation,
+            inference_scaling_server_address,
+        )
     }
 
     fn execute_send_scaling_complete(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_inference_ops.send_scaling_complete(
+            scaling_id,
+            operation,
+            inference_scaling_server_address,
+        )
     }
 
     fn execute_send_shutdown_signal(
         &self,
         scaling_id: &Uuid,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_inference_ops
+            .send_shutdown_signal(scaling_id, inference_scaling_server_address)
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingTransportOps<B>
-    for ZmqInterface<B>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingTransportOps<B> for ZmqInterface<B> {
     fn send_algorithm_init_request(
         &self,
         scaling_id: &Uuid,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
+        if let Some(protocol) = self.training_protocol.as_ref() {
+            let _permit = protocol.backpressure.acquire();
+
+            if protocol.circuit_breaker.is_open() {
+                return Err(TransportError::CircuitOpen);
+            }
+
+            let agent_listener_address: &str = server_addresses.agent_listener_address.as_ref();
+
+            let mut attempts = 0;
+            loop {
+                let result = self.execute_send_algorithm_init_request(
+                    scaling_id,
+                    algorithm,
+                    hyperparams,
+                    agent_listener_address,
+                );
+
+                match result {
+                    Ok(()) => {
+                        protocol.circuit_breaker.record_success();
+                        return Ok(());
+                    }
+                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                        attempts += 1;
+                        protocol.circuit_breaker.record_failure();
+                        let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
+                        sleep(delay);
+                    }
+                    Err(e) => {
+                        protocol.circuit_breaker.record_failure();
+                        return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                    }
+                }
+            }
+        } else {
+            return Err(TransportError::InvalidState(
+                "Training protocol not initialized".to_string(),
+            ));
+        }
     }
 
     fn initial_model_handshake(
         &self,
-        sender_id: &Uuid,
-        shared_server_address: Arc<RwLock<ServerAddresses>>,
+        actor_id: &Uuid,
+        server_addresses: ServerAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
+        if let Some(protocol) = self.training_protocol.as_ref() {
+            let _premit = protocol.backpressure.acquire();
+
+            if protocol.circuit_breaker.is_open() {
+                return Err(TransportError::CircuitOpen);
+            }
+
+            let agent_listener_address: &str = server_addresses.agent_listener_address.as_ref();
+
+            let mut attempts = 0;
+            loop {
+                let result = self.execute_initial_model_handshake(actor_id, agent_listener_address);
+
+                match result {
+                    Ok(model) => {
+                        protocol.circuit_breaker.record_success();
+                        return Ok(model);
+                    }
+                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                        attempts += 1;
+                        protocol.circuit_breaker.record_failure();
+                        let delay = protocol.config.retry_policy.delay_for_attempts(attempts);
+                        sleep(delay);
+                    }
+                    Err(e) => {
+                        protocol.circuit_breaker.record_failure();
+                        return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                    }
+                }
+            }
+        } else {
+            return Err(TransportError::InvalidState(
+                "Training protocol not initialized".to_string(),
+            ));
+        }
     }
 
     fn send_trajectory(
         &self,
-        sender_id: &Uuid,
+        buffer_id: &Uuid,
         encoded_trajectory: EncodedTrajectory,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
-        let _permit = self.training_protocol.as_ref().unwrap().backpressure.acquire().await?;
+        if let Some(protocol) = self.training_protocol.as_ref() {
+            let _permit = protocol.backpressure.acquire();
+
+            if protocol.circuit_breaker.is_open() {
+                return Err(TransportError::CircuitOpen);
+            }
+
+            let trajectory_server_address: &str =
+                server_addresses.trajectory_server_address.as_ref();
+
+            let mut attempts = 0;
+            loop {
+                let result = self.execute_send_trajectory(
+                    buffer_id,
+                    encoded_trajectory.clone(),
+                    trajectory_server_address,
+                );
+
+                match result {
+                    Ok(()) => {
+                        protocol.circuit_breaker.record_success();
+                        return Ok(());
+                    }
+                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                        attempts += 1;
+                        protocol.circuit_breaker.record_failure();
+                        let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
+                        sleep(delay);
+                    }
+                    Err(e) => {
+                        protocol.circuit_breaker.record_failure();
+                        return Err(TransportError::MaxRetriesExceeded { cause: e, attempts });
+                    }
+                }
+            }
+        } else {
+            return Err(TransportError::InvalidState(
+                "Training protocol not initialized".to_string(),
+            ));
+        }
     }
 
     fn listen_for_model(
         &self,
         receiver_id: &Uuid,
         global_dispatcher_tx: Sender<RoutedMessage>,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        server_addresses: ServerAddresses,
     ) -> Result<(), TransportError> {
+        if let Some(_) = self.training_protocol.as_ref() {
+            let model_server_address: &str = server_addresses.model_server_address.as_ref();
+            self.zmq_training_ops.execute_listen_for_model(
+                receiver_id,
+                global_dispatcher_tx,
+                model_server_address,
+            )
+        } else {
+            return Err(TransportError::InvalidState(
+                "Training protocol not initialized".to_string(),
+            ));
+        }
     }
 }
 
@@ -249,56 +498,83 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
         scaling_id: &Uuid,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        agent_listener_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_training_ops.send_algorithm_init_request(
+            scaling_id,
+            algorithm,
+            hyperparams,
+            agent_listener_address,
+        )
     }
 
     fn execute_initial_model_handshake(
         &self,
         actor_id: &Uuid,
-        model_server_address: &str,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
+        self.zmq_training_ops
+            .initial_model_handshake(actor_id, agent_listener_address)
     }
 
     fn execute_send_trajectory(
         &self,
-        sender_id: &Uuid,
+        buffer_id: &Uuid,
         encoded_trajectory: EncodedTrajectory,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_training_ops.send_trajectory(
+            buffer_id,
+            encoded_trajectory,
+            trajectory_server_address,
+        )
     }
 
     fn execute_send_client_ids(
         &self,
         scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        client_ids: &[(String, Uuid)],
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_training_ops.send_client_ids(
+            scaling_id,
+            client_ids,
+            training_scaling_server_address,
+        )
     }
 
     fn execute_send_scaling_warning(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_training_ops.send_scaling_warning(
+            scaling_id,
+            operation,
+            training_scaling_server_address,
+        )
     }
 
     fn execute_send_scaling_complete(
         &self,
         scaling_id: &Uuid,
         operation: ScalingOperation,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_training_ops.send_scaling_complete(
+            scaling_id,
+            operation,
+            training_scaling_server_address,
+        )
     }
 
     fn execute_send_shutdown_signal(
         &self,
         scaling_id: &Uuid,
-        shared_server_addresses: Arc<TokioRwLock<ServerAddresses>>,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
+        self.zmq_training_ops
+            .send_shutdown_signal(scaling_id, training_scaling_server_address)
     }
 }
-
-
