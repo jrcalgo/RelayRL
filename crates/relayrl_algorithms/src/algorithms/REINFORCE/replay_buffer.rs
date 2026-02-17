@@ -68,9 +68,7 @@ impl ReinforceReplayBuffer {
 
     }
 
-    async fn compute_path_end(&self, final_value: Option<f32>) {
-        let buffer_lock = self.buffers.lock().await;
-
+    async fn compute_path_end(&self, locked_buffer: , final_value: Option<f32>) {
         let final_value = final_value.unwrap_or(0.0);
 
         let start = self.metadata.buffer_path_start_idx.load(Ordering::SeqCst);
@@ -103,9 +101,13 @@ impl ReinforceReplayBuffer {
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> GenericReplayBuffer<B> for ReinforceReplayBuffer {
-    async fn insert_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(), ReplayBufferError> {
+    async fn insert_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(i64, u64), ReplayBufferError> {
         let buffer_lock = self.buffer.lock().await?;
+        let (mut episode_return, mut episode_length) = 0, 0;
+
         for action in trajectory.actions.iter() {
+            episode_length += 1;
+
             match action.get_obs() {
                 Some(obs) => {
                     buffer_lock.observations.push(Some(obs));
@@ -127,7 +129,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> GenericReplayBuffer<B> for Reinfo
                 None => buffer_lock.masks.push(None),
             };
 
-            buffer_lock.rewards.push(action.get_rew());
+            let reward = action.get_rew();
+            if !action.get_done() {
+                buffer_lock.rewards.push(reward);
+            } else {
+                self.compute_path_end(reward).await
+            };
+            episode_return += reward;
 
             match action.get_data() {
                 Some(data_map) => {
@@ -169,10 +177,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> GenericReplayBuffer<B> for Reinfo
             self.metadata.buffer_pointer.store((self.metadata.buffer_lock.load(Ordering::SeqCst) + 1) as usize, Ordering::SeqCst);
         }
 
-        Ok(())
+        Ok((episode_return, episode_length))
     }
 
-    async fn sample_buffer<const N: usize>(&self) -> Result<Batch, ReplayBufferError> {
+    async fn sample_buffer(&self) -> Result<Batch, ReplayBufferError> {
         assert!(self.metadata.buffer_pointer < self.metadata.buffer_size);
 
         let buffer_lock = self.buffers.lock().await;
