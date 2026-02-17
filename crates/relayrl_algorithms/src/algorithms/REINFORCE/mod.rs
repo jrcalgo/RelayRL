@@ -34,7 +34,7 @@ pub struct ReinforceAlgorithm<B: Backend + BackendMatcher> {
 }
 
 impl ReinforceAlgorithm {
-    pub fn new(hyperparams: Option<REINFORCEParams>, env_dir: Path, save_model_path: Path, obs_dim: u32, act_dim: u32, buffer_size: usize) -> Self {
+    pub fn new(hyperparams: Option<REINFORCEParams>, env_dir: Path, save_model_path: Path, obs_dim: u32, act_dim: u32, buffer_size: usize) -> Result<Self, AlgorithmError> {
         let hyperparams = match hyperparams {
             Some(params) => params,
             None => REINFORCEParams::default()
@@ -54,7 +54,9 @@ impl ReinforceAlgorithm {
 
         let policy_optimizer: OptimizerAdaptor<Adam, M, B> = AdamConfig::new().init<M, B>();
 
-        Self {
+        let epoch_logger = EpochLogger::new();
+
+        let algorithm = ReinforceAlgorithm {
             runtime: {
                 args: RuntimeArgs {
                     env_dir,
@@ -75,6 +77,11 @@ impl ReinforceAlgorithm {
             },
             hyperparams
         }
+
+        let session_logger = SessionLogger::new();
+        session_logger.log_session(&algorithm).map_err(AlgorithmError::from)?;
+
+        Ok(algorithm)
     }
 
     fn compute_policy_loss(&self, batch: &Batch) {
@@ -111,15 +118,7 @@ impl<B: Backend + BackendMatcher> AlgorithmTrait<B> for ReinforceAlgorithm<B> {
     async fn receive_trajectoy<T: TrajectoryData>(&self, trajectory: T) -> Result<bool, AlgorithmError> {
         self.runtime.components.trajectory_count += 1;
 
-        let extracted_traj: RelayRLTrajectory = match trajectory::get_trajectory() {
-            TrajectoryType::RelayRL(relayrl_traj) => relayrl_traj,
-            TrajectoryType::Csv(csv_traj) => {
-                csv_traj.trajectory
-            },
-            TrajectoryType::Arrow(arrow_traj) => {
-                arrow_traj.trajectory
-            }
-        };
+        let extracted_traj: RelayRLTrajectory = T::into_relayrl(trajectory);
 
         let (episode_return, episode_length) = self.runtime.components.replay_buffer.insert_trajectory(extracted_traj).await.map_error(AlgorithmError::from)?;
 
@@ -176,6 +175,19 @@ impl<B: Backend + BackendMatcher> AlgorithmTrait<B> for ReinforceAlgorithm<B> {
     }
 
     fn log_epoch(&self) {
+        // epoch
+        // epoch return
+        // epoch length
+        // policy loss
+        // policy loss delta
 
+        // value
+        // value loss
+        // value loss delta
+
+        // kl divergence
+        // entropy
+
+        // write file from buffer
     }
 }

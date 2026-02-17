@@ -6,7 +6,8 @@
 use burn_tensor::backend::Backend;
 use burn_tensor::Int;
 use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, Tensor, TensorData, TensorError};
-use relayrl_types::prelude::trajectory::RelayRLTrajectoryTrait;
+use relayrl_types::prelude::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
+use relayrl_types::prelude::records::{CsvTrajectory, ArrowTrajectory};
 use std::collections::HashMap;
 
 pub enum TrajectoryType {
@@ -16,9 +17,26 @@ pub enum TrajectoryType {
 }
 
 pub trait TrajectoryData {
-    type Data = TrajectoryType;
+    fn into_relayrl(self) -> RelayRLTrajectory;
+}
 
-    fn get_trajectory(&self) -> Self::Data;
+impl TrajectoryData for RelayRLTrajectory {
+    fn into_relayrl(self) -> RelayRLTrajectory {
+        self
+    }
+}
+
+impl TrajectoryData for CsvTrajectory {
+    fn into_relayrl(self) -> RelayRLTrajectory {
+        self.trajectory
+    }
+}
+
+impl TrajectoryData for ArrowTrajectory {
+    fn into_relayrl(self) -> RelayRLTrajectory {
+        self.trajectory
+    }
+}
 
 /// The `AlgorithmTrait` defines the interface that every algorithm implementation must fulfill.
 ///
