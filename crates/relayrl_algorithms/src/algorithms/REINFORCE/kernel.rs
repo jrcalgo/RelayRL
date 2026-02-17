@@ -1,4 +1,6 @@
-use crate::templates::base_algorithm::{ForwardOutput, StepAction, ForwardKernelTrait, StepKernelTrait};
+use crate::templates::base_algorithm::{
+    ForwardKernelTrait, ForwardOutput, StepAction, StepKernelTrait,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -7,8 +9,8 @@ use burn_nn::{Linear, LinearConfig, Relu, Tanh};
 use burn_tensor::activation::{log_softmax, softmax};
 use burn_tensor::backend::Backend;
 use burn_tensor::{Distribution, Int, Tensor};
-use rand::distr::Distribution as RandDistribution;
 use rand::distr::weighted::WeightedIndex;
+use rand::distr::Distribution as RandDistribution;
 
 use relayrl_types::types::data::tensor::{
     BackendMatcher, ConversionBurnTensor, DType, SupportedTensorBackend, TensorData, TensorError,
@@ -116,7 +118,11 @@ impl<B: Backend + BackendMatcher> DiscretePolicyNetwork<B> {
         }
     }
 
-    pub fn distribution(&self, obs: Tensor<B, 2>, mask: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    pub fn distribution(
+        &self,
+        obs: Tensor<B, 2>,
+        mask: Tensor<B, 2>,
+    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let logits_raw = self.pi_network.forward(obs);
         let masked_logits = logits_raw + (mask - 1.0f32) * 1e8f32;
         let probs = softmax(masked_logits.clone(), 1);
@@ -202,7 +208,11 @@ impl<B: Backend + BackendMatcher> ContinuousPolicyNetwork<B> {
         }
     }
 
-    pub fn distribution(&self, obs: Tensor<B, 2>, mask: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    pub fn distribution(
+        &self,
+        obs: Tensor<B, 2>,
+        mask: Tensor<B, 2>,
+    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let mean_raw = self.pi_network.forward(obs);
         let mean = mean_raw + (mask - 1.0f32) * 1e8f32;
         let std = self.log_std.val().exp().unsqueeze_dim::<2>(0);
@@ -273,8 +283,8 @@ enum PolicyHead<B: Backend + BackendMatcher> {
 }
 
 pub struct PolicyWithBaseline<B: Backend + BackendMatcher> {
-    policy: PolicyHead<B>,
-    baseline: BaselineValueNetwork<B>,
+    pub policy: PolicyHead<B>,
+    pub baseline: BaselineValueNetwork<B>,
     input_dim: usize,
     output_dim: usize,
 }
@@ -289,7 +299,12 @@ impl<B: Backend + BackendMatcher> PolicyWithBaseline<B> {
         device: &B::Device,
     ) -> Self {
         let policy = if discrete {
-            PolicyHead::Discrete(DiscretePolicyNetwork::new(obs_dim, hidden_sizes, act_dim, device))
+            PolicyHead::Discrete(DiscretePolicyNetwork::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                device,
+            ))
         } else {
             PolicyHead::Continuous(ContinuousPolicyNetwork::new(
                 obs_dim,
@@ -325,7 +340,10 @@ impl<B: Backend + BackendMatcher> StepKernelTrait<B> for PolicyWithBaseline<B> {
                 data.insert("logp_a".to_string(), float_tensor_to_data(logp_a)?);
                 data.insert("v".to_string(), float_tensor_to_data(v.clone())?);
                 data.insert("val".to_string(), float_tensor_to_data(v)?);
-                data.insert("act_tensor".to_string(), float_tensor_to_data(act.clone().float())?);
+                data.insert(
+                    "act_tensor".to_string(),
+                    float_tensor_to_data(act.clone().float())?,
+                );
                 Ok((StepAction::Discrete(act), data))
             }
             PolicyHead::Continuous(policy) => {
@@ -353,7 +371,7 @@ impl<B: Backend + BackendMatcher> StepKernelTrait<B> for PolicyWithBaseline<B> {
 }
 
 pub struct PolicyWithoutBaseline<B: Backend + BackendMatcher> {
-    policy: PolicyHead<B>,
+    pub policy: PolicyHead<B>,
     input_dim: usize,
     output_dim: usize,
 }
@@ -367,7 +385,12 @@ impl<B: Backend + BackendMatcher> PolicyWithoutBaseline<B> {
         device: &B::Device,
     ) -> Self {
         let policy = if discrete {
-            PolicyHead::Discrete(DiscretePolicyNetwork::new(obs_dim, hidden_sizes, act_dim, device))
+            PolicyHead::Discrete(DiscretePolicyNetwork::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                device,
+            ))
         } else {
             PolicyHead::Continuous(ContinuousPolicyNetwork::new(
                 obs_dim,
@@ -398,7 +421,10 @@ impl<B: Backend + BackendMatcher> StepKernelTrait<B> for PolicyWithoutBaseline<B
                 let logp_a = policy.log_prob_from_distribution(logits, act.clone());
 
                 data.insert("logp_a".to_string(), float_tensor_to_data(logp_a)?);
-                data.insert("act_tensor".to_string(), float_tensor_to_data(act.clone().float())?);
+                data.insert(
+                    "act_tensor".to_string(),
+                    float_tensor_to_data(act.clone().float())?,
+                );
                 Ok((StepAction::Discrete(act), data))
             }
             PolicyHead::Continuous(policy) => {
