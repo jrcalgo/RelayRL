@@ -3,11 +3,22 @@
 //! specifies the required functionality for saving models, receiving trajectories,
 //! training the model, and logging training epochs.
 
-use relayrl_types::prelude::trajectory::RelayRLTrajectoryTrait;
-use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, TensorData, TensorError, Tensor};
 use burn_tensor::backend::Backend;
 use burn_tensor::Int;
+use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, Tensor, TensorData, TensorError};
+use relayrl_types::prelude::trajectory::RelayRLTrajectoryTrait;
 use std::collections::HashMap;
+
+pub enum TrajectoryType {
+    RelayRL(RelayRLTrajectory),
+    Csv(CsvTrajectory),
+    Arrow(ArrowTrajectory),
+}
+
+pub trait TrajectoryData {
+    type Data = TrajectoryType;
+
+    fn get_trajectory(&self) -> Self::Data;
 
 /// The `AlgorithmTrait` defines the interface that every algorithm implementation must fulfill.
 ///
@@ -35,9 +46,7 @@ use std::collections::HashMap;
 /// * `log_epoch(&self)`:
 ///   Log the training status or results for the current epoch. This may include metrics such as loss,
 ///   reward averages, etc.
-pub trait AlgorithmTrait {
-    type TrajectoryData: RelayRLTrajectoryTrait;
-
+pub trait AlgorithmTrait<T: TrajectoryData> {
     /// Saves the current model to a file specified by `filename`.
     ///
     /// # Arguments
@@ -50,7 +59,8 @@ pub trait AlgorithmTrait {
     /// # Arguments
     ///
     /// * `trajectory` - A trajectory containing a sequence of actions experienced by the agent.
-    fn receive_trajectory(&self, trajectory: Self::TrajectoryData);
+    fn receive_trajectory(&self, trajectory: T) - > bool;
+
 
     /// Triggers the training process of the model.
     ///
