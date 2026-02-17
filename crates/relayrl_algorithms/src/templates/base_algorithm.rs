@@ -61,7 +61,6 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     /// * `trajectory` - A trajectory containing a sequence of actions experienced by the agent.
     fn receive_trajectory(&self, trajectory: T) - > bool;
 
-
     /// Triggers the training process of the model.
     ///
     /// This function should implement the logic to update the model based on received trajectories.
