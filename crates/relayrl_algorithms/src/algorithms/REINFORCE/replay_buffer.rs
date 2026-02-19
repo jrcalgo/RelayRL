@@ -6,6 +6,7 @@ use relayrl_types::prelude::tensor::relayrl::{TensorData, BackendMatcher};
 
 use burn_tensor::backend::Backend;
 use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -68,12 +69,13 @@ impl ReinforceReplayBuffer {
 
     }
 
-    async fn compute_path_end(&self, locked_buffer: , final_value: Option<f32>) {
+    async fn compute_path_end(&self, buffer_lock: MutexGuard<Buffers>, final_value: Option<f32>) {
         let final_value = final_value.unwrap_or(0.0);
 
         let start = self.metadata.buffer_path_start_idx.load(Ordering::SeqCst);
         let end = self.metadata.buffer_pointer.load(Ordering::SeqCst);
 
+        let slice = start..end;
         let slice = start..end;
 
         if self.metadata.with_vf_baseline {
@@ -102,8 +104,8 @@ impl ReinforceReplayBuffer {
 
 impl<B: Backend + BackendMatcher<Backend = B>> GenericReplayBuffer<B> for ReinforceReplayBuffer {
     async fn insert_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(i64, u64), ReplayBufferError> {
-        let buffer_lock = self.buffer.lock().await?;
-        let (mut episode_return, mut episode_length) = 0, 0;
+        let buffer_lock = self.buffers.lock().await?;
+        let (mut episode_return, mut episode_length) = (0, 0);
 
         for action in trajectory.actions.iter() {
             episode_length += 1;
