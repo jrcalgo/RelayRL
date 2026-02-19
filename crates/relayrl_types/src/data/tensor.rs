@@ -18,6 +18,7 @@ pub enum TensorError {
     DeserializationError(String),
     BackendError(String),
     DTypeError(String),
+    ShapeError(String),
 }
 
 impl std::fmt::Display for TensorError {
