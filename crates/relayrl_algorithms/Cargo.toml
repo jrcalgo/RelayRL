@@ -19,6 +19,7 @@ relayrl_types = { workspace = true }
 
 burn-core = { workspace = true }
 burn-tensor = { workspace = true }
+burn-optim = { workspace = true }
 burn-nn = { workspace = true }
 burn-ndarray = { workspace = true, optional = true }
 burn-tch = { workspace = true, optional = true }
@@ -30,6 +31,3 @@ rand = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-
-arrow = { workspace = true }
-csv = { workspace = true }
