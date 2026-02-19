@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-02-19
+
+### Added
+- **TensorError variant added** - New variant added
+  - `ShapeError(String)` added
+
+## [0.5.1] - 2026-02-14
+
+### Fixed
+- **README formatting issues resolved** - Removed merge conflict text lol
+
 ## [0.5.0] - 2026-02-14
 
 ### Added
