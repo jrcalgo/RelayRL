@@ -4,11 +4,21 @@
 //! training the model, and logging training epochs.
 
 use burn_tensor::backend::Backend;
-use burn_tensor::Int;
-use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, Tensor, TensorData, TensorError};
-use relayrl_types::prelude::trajectory::{RelayRLTrajectory, RelayRLTrajectoryTrait};
+use burn_tensor::{Float, Int, TensorKind};
+use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, TensorData, TensorError};
+use relayrl_types::prelude::tensor::burn::Tensor;
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
 use relayrl_types::prelude::records::{CsvTrajectory, ArrowTrajectory};
 use std::collections::HashMap;
+use thiserror::Error;
+
+#[derive(Clone, Debug, Error)]
+pub enum AlgorithmError {
+    #[error("Insertion of trajectory failed: {0}")]
+    TrajectoryInsertionError(String),
+    #[error("Buffer sampling failed: {0}")]
+    BufferSamplingError(String),
+}
 
 pub enum TrajectoryType {
     RelayRL(RelayRLTrajectory),
@@ -77,7 +87,7 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     /// # Arguments
     ///
     /// * `trajectory` - A trajectory containing a sequence of actions experienced by the agent.
-    fn receive_trajectory(&self, trajectory: T) - > bool;
+    async fn receive_trajectory(&self, trajectory: T) -> Result<bool, AlgorithmError>;
 
     /// Triggers the training process of the model.
     ///
@@ -90,38 +100,38 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     fn log_epoch(&self);
 }
 
-pub enum ForwardOutput<B: Backend + BackendMatcher> {
+pub enum ForwardOutput<B: Backend + BackendMatcher, const OUT_D: usize> {
     Discrete {
-        probs: Tensor<B, 2>,
-        logits: Tensor<B, 2>,
-        logp_a: Option<Tensor<B, 2>>,
+        probs: Tensor<B, OUT_D, Float>,
+        logits: Tensor<B, OUT_D, Float>,
+        logp_a: Option<Tensor<B, OUT_D, Float>>,
     },
     Continuous {
-        mean: Tensor<B, 2>,
-        std: Tensor<B, 2>,
-        logp_a: Option<Tensor<B, 2>>,
+        mean: Tensor<B, OUT_D, Float>,
+        std: Tensor<B, 2, Float>,
+        logp_a: Option<Tensor<B, OUT_D, Float>>,
     },
 }
 
 pub enum StepAction<B: Backend + BackendMatcher> {
     Discrete(Tensor<B, 2, Int>),
-    Continuous(Tensor<B, 2>),
+    Continuous(Tensor<B, 2, Float>),
 }
 
-pub trait ForwardKernelTrait<B: Backend + BackendMatcher> {
-    fn forward(
+pub trait ForwardKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
+    fn forward<const IN_D: usize, const OUT_D: usize>(
         &self,
-        obs: Tensor<B, 2>,
-        mask: Tensor<B, 2>,
-        act: Option<Tensor<B, 2>>,
-    ) -> ForwardOutput<B>;
+        obs: Tensor<B, IN_D, InK>,
+        mask: Tensor<B, OUT_D, OutK>,
+        act: Option<Tensor<B, OUT_D, OutK>>,
+    ) -> ForwardOutput<B, OUT_D>;
 }
 
-pub trait StepKernelTrait<B: Backend + BackendMatcher> {
-    fn step(
+pub trait StepKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
+    fn step<const IN_D: usize, const OUT_D: usize>(
         &self,
-        obs: Tensor<B, 2>,
-        mask: Tensor<B, 2>,
+        obs: Tensor<B, IN_D, InK>,
+        mask: Tensor<B, OUT_D, OutK>,
     ) -> Result<(StepAction<B>, HashMap<String, TensorData>), TensorError>;
 
     fn get_input_dim(&self) -> usize;
