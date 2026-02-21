@@ -1,4 +1,4 @@
-use crate::types::data::tensor::DeviceType;
+use crate::data::tensor::DeviceType;
 use std::arch::is_aarch64_feature_detected;
 use std::path::Path;
 use std::path::PathBuf;
@@ -10,15 +10,15 @@ use uuid::Uuid;
 use burn_tensor::Tensor;
 use burn_tensor::backend::Backend;
 
-use crate::types::data::action::{RelayRLAction, RelayRLData};
-use crate::types::data::tensor::{
+use crate::data::action::{RelayRLAction, RelayRLData};
+use crate::data::tensor::{
     AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData, TensorError,
 };
-use crate::types::data::tensor::{
+use crate::data::tensor::{
     BoolBurnTensor, DType, FloatBurnTensor, IntBurnTensor, NdArrayDType, TchDType,
 };
-use crate::types::model::utils::validate_module;
-use crate::types::model::{ModelError, ModelModule};
+use crate::model::utils::validate_module;
+use crate::model::{ModelError, ModelModule};
 
 /// Wrapper that lets us swap the underlying model at runtime and run inference
 /// in an async-safe way.

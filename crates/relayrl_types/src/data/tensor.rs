@@ -18,6 +18,7 @@ pub enum TensorError {
     DeserializationError(String),
     BackendError(String),
     DTypeError(String),
+    ShapeError(String),
 }
 
 impl std::fmt::Display for TensorError {
@@ -29,6 +30,7 @@ impl std::fmt::Display for TensorError {
             }
             Self::BackendError(e) => write!(f, "[TensorError] Backend error: {}", e),
             Self::DTypeError(e) => write!(f, "[TensorError] DType error: {}", e),
+            Self::ShapeError(e) => write!(f, "[TensorError] Shape error: {}", e),
         }
     }
 }

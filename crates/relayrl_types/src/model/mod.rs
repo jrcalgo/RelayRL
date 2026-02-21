@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
 
-use crate::types::data::action::RelayRLData;
-use crate::types::data::tensor::{
+use crate::data::action::RelayRLData;
+use crate::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, ConversionBurnTensor, DType, DeviceType,
     FloatBurnTensor, IntBurnTensor, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
 };

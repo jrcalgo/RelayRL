@@ -13,18 +13,18 @@ use uuid::Uuid;
 use burn_ndarray::NdArray;
 #[cfg(feature = "tch-backend")]
 use burn_tch::LibTorch as Tch;
-use burn_tensor::{Bool, Float, Int, Tensor, backend::Backend};
+use burn_tensor::{backend::Backend, Bool, Float, Int, Tensor};
 
 #[cfg(feature = "integrity")]
-use crate::types::data::utilities::chunking::{ChunkedTensor, TensorChunk};
+use crate::data::utilities::chunking::{ChunkedTensor, TensorChunk};
 #[cfg(feature = "compression")]
-use crate::types::data::utilities::compress::{CompressedData, CompressionScheme};
+use crate::data::utilities::compress::{CompressedData, CompressionScheme};
 #[cfg(feature = "encryption")]
-use crate::types::data::utilities::encrypt::{EncryptedData, EncryptionKey};
+use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 #[cfg(feature = "integrity")]
-use crate::types::data::utilities::integrity::{Checksum, compute_checksum};
+use crate::data::utilities::integrity::{compute_checksum, Checksum};
 #[cfg(feature = "metadata")]
-use crate::types::data::utilities::metadata::TensorMetadata;
+use crate::data::utilities::metadata::TensorMetadata;
 
 use super::tensor::{
     BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
