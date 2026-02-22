@@ -7,6 +7,11 @@ pub mod PPO;
 #[allow(non_snake_case)]
 pub mod TD3;
 
+pub use DDPG::DDPGAlgorithm;
+pub use PPO::PPOAlgorithm;
+pub use REINFORCE::ReinforceAlgorithm;
+pub use TD3::TD3Algorithm;
+
 pub(crate) fn discounted_cumsum(x: &[f32], discount: f32) -> Vec<f32> {
     let n = x.len();
     let mut result = vec![0.0f32; n];

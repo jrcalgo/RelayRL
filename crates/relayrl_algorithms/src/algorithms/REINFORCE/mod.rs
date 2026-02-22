@@ -57,6 +57,18 @@ struct RuntimeArgs {
     buffer_size: usize
 }
 
+impl Default for RuntimeArgs {
+    fn default() -> Self {
+        Self {
+            env_dir: PathBuf::from(""),
+            save_model_path: PathBuf::from(""),
+            obs_dim: 1,
+            act_dim: 1,
+            buffer_size: 1_000_000,
+        }
+    }
+}
+
 struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> {
     epoch_logger: EpochLogger,
     trajectory_count: u64,
@@ -67,15 +79,45 @@ struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
     _phantom: PhantomData<(B, InK, OutK)>,
 }
 
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for RuntimeComponents<B, InK, OutK, KN> {
+    fn default() -> Self {
+        Self {
+            epoch_logger: EpochLogger::new(),
+            trajectory_count: 0,
+            epoch_count: 0,
+            kernel: Default::default(),
+            replay_buffer: Default::default(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 struct RuntimeParams<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> {
     #[allow(dead_code)]
     args: RuntimeArgs,
     components: RuntimeComponents<B, InK, OutK, KN>
 }
 
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for RuntimeParams<B, InK, OutK, KN> {
+    fn default() -> Self {
+        Self {
+            args: Default::default(),
+            components: Default::default(),
+        }
+    }
+}
 pub struct ReinforceAlgorithm<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> {
     runtime: RuntimeParams<B, InK, OutK, KN>,
     hyperparams: REINFORCEParams,
+}
+
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for ReinforceAlgorithm<B, InK, OutK, KN> {
+    fn default() -> Self {
+        Self {
+            runtime: Default::default(),
+            hyperparams: Default::default(),
+        }
+    }
 }
 
 impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> ReinforceAlgorithm<B, InK, OutK, KN> {
