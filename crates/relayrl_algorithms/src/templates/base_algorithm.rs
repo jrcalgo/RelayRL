@@ -20,6 +20,7 @@ pub enum AlgorithmError {
     BufferSamplingError(String),
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum TrajectoryType {
     RelayRL(RelayRLTrajectory),
     Csv(CsvTrajectory),
@@ -27,23 +28,23 @@ pub enum TrajectoryType {
 }
 
 pub trait TrajectoryData {
-    fn into_relayrl(self) -> RelayRLTrajectory;
+    fn into_relayrl(self) -> Option<RelayRLTrajectory>;
 }
 
 impl TrajectoryData for RelayRLTrajectory {
-    fn into_relayrl(self) -> RelayRLTrajectory {
-        self
+    fn into_relayrl(self) -> Option<RelayRLTrajectory> {
+        Some(self)
     }
 }
 
 impl TrajectoryData for CsvTrajectory {
-    fn into_relayrl(self) -> RelayRLTrajectory {
+    fn into_relayrl(self) -> Option<RelayRLTrajectory> {
         self.trajectory
     }
 }
 
 impl TrajectoryData for ArrowTrajectory {
-    fn into_relayrl(self) -> RelayRLTrajectory {
+    fn into_relayrl(self) -> Option<RelayRLTrajectory> {
         self.trajectory
     }
 }
@@ -62,7 +63,6 @@ impl TrajectoryData for ArrowTrajectory {
 ///
 /// * `save(&self, filename: &str)`:
 ///   Save the current model to the specified file. This allows persistence of model state.
-/// w
 /// * `receive_trajectory(&self, trajectory: Self::Trajectory)`:
 ///   Process a received trajectory for training. This method is called when new experience data
 ///   is available.
@@ -87,17 +87,18 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     /// # Arguments
     ///
     /// * `trajectory` - A trajectory containing a sequence of actions experienced by the agent.
-    async fn receive_trajectory(&self, trajectory: T) -> Result<bool, AlgorithmError>;
+    #[allow(async_fn_in_trait)]
+    async fn receive_trajectory(&mut self, trajectory: T) -> Result<bool, AlgorithmError>;
 
     /// Triggers the training process of the model.
     ///
     /// This function should implement the logic to update the model based on received trajectories.
-    fn train_model(&self);
+    fn train_model(&mut self);
 
     /// Logs the training progress for the current epoch.
     ///
     /// This method can be used to print or store metrics such as loss, accuracy, rewards, etc.
-    fn log_epoch(&self);
+    fn log_epoch(&mut self);
 }
 
 pub enum ForwardOutput<B: Backend + BackendMatcher, const OUT_D: usize> {
