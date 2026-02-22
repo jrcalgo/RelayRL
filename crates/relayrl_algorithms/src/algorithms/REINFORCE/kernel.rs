@@ -1,3 +1,5 @@
+#![allow(non_upper_case_globals)]
+
 use crate::templates::base_algorithm::{
     ForwardKernelTrait, ForwardOutput, StepAction, StepKernelTrait,
 };
@@ -8,25 +10,21 @@ use burn_core::module::Param;
 use burn_nn::{Linear, LinearConfig, Relu, Tanh};
 use burn_tensor::activation::{log_softmax, softmax};
 use burn_tensor::backend::Backend;
-use burn_tensor::{BasicOps, Distribution, Float, Int, Tensor, TensorKind};
+use burn_tensor::{BasicOps, Float, Int, Tensor, TensorKind};
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution as RandDistribution;
 use std::marker::PhantomData;
+use burn_tensor::Distribution;
 
-use relayrl_types::types::data::tensor::{
+use relayrl_types::data::tensor::{
     BackendMatcher, ConversionBurnTensor, DType, SupportedTensorBackend, TensorData, TensorError,
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum ActivationKind {
+    #[default]
     ReLU,
     Tanh,
-}
-
-impl Default for ActivationKind {
-    fn default() -> Self {
-        Self::ReLU
-    }
 }
 
 #[derive(Debug)]
@@ -62,16 +60,19 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>> Mlp<B, InK> {
             relu: Relu::new(),
             tanh: Tanh::new(),
             activation,
-            _in_k: PhantomData::<InK>::default(),
+            _in_k: PhantomData,
         }
     }
 
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D, InK>) -> Tensor<B, D, Float> where InK: BasicOps<B> {
+    pub fn forward<const D: usize>(&self, input: Tensor<B, D, InK>) -> Tensor<B, D, Float>
+    where
+        InK: BasicOps<B>,
+    {
         let device = input.device();
         let mut x: Tensor<B, D, Float> = Tensor::from_data(input.into_data().convert::<f32>(), &device);
 
         for (idx, layer) in self.layers.iter().enumerate() {
-            x = layer.forward::<B, D>(x);
+            x = layer.forward(x);
             if idx < self.layers.len() - 1 {
                 x = match self.activation {
                     ActivationKind::ReLU => self.relu.forward(x),
@@ -87,11 +88,11 @@ fn backend_f32_dtype<B: Backend + BackendMatcher>() -> Result<DType, TensorError
     match B::get_supported_backend() {
         #[cfg(feature = "ndarray-backend")]
         SupportedTensorBackend::NdArray => Ok(DType::NdArray(
-            relayrl_types::types::data::tensor::NdArrayDType::F32,
+            relayrl_types::data::tensor::NdArrayDType::F32,
         )),
         #[cfg(feature = "tch-backend")]
         SupportedTensorBackend::Tch => Ok(DType::Tch(
-            relayrl_types::types::data::tensor::TchDType::F32,
+            relayrl_types::data::tensor::TchDType::F32,
         )),
         _ => Err(TensorError::BackendError(
             "Unsupported backend for f32 TensorData conversion".to_string(),
@@ -115,13 +116,18 @@ pub struct DiscretePolicyNetwork<B: Backend + BackendMatcher, InK: TensorKind<B>
     _out_k: PhantomData<OutK>,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> DiscretePolicyNetwork<B, InK, OutK> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    DiscretePolicyNetwork<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, device: &B::Device) -> Self {
         Self {
             pi_network: Mlp::new(obs_dim, hidden_sizes, act_dim, ActivationKind::ReLU, device),
             input_dim: obs_dim,
             output_dim: act_dim,
-            _out_k: PhantomData::<OutK>::default(),
+            _out_k: PhantomData,
         }
     }
 
@@ -131,7 +137,9 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Discr
         mask: Tensor<B, OutD, OutK>,
     ) -> (Tensor<B, OutD, Float>, Tensor<B, OutD, Float>) {
         let logits_raw = self.pi_network.forward(obs).reshape(mask.dims());
-        let masked_logits = logits_raw + (mask - 1.0f32) * 1e8f32;
+        let mask_f: Tensor<B, OutD, Float> =
+            Tensor::from_data(mask.into_data().convert::<f32>(), &logits_raw.device());
+        let masked_logits = logits_raw + (mask_f - 1.0f32) * 1e8f32;
         let probs = softmax(masked_logits.clone(), 1);
         (probs, masked_logits)
     }
@@ -177,7 +185,12 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Discr
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> ForwardKernelTrait<B, InK, OutK> for DiscretePolicyNetwork<B, InK, OutK> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    ForwardKernelTrait<B, InK, OutK> for DiscretePolicyNetwork<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     fn forward<const InD: usize, const OutD: usize>(
         &self,
         obs: Tensor<B, InD, InK>,
@@ -185,7 +198,11 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Forwa
         act: Option<Tensor<B, OutD, OutK>>,
     ) -> ForwardOutput<B, OutD> {
         let (probs, logits) = self.distribution(obs, mask);
-        let logp_a = act.map(|a| self.log_prob_from_distribution(logits.clone(), a.int()));
+        let logp_a = act.map(|a| {
+            let a_int: Tensor<B, OutD, Int> =
+                Tensor::from_data(a.into_data().convert::<i32>(), &logits.device());
+            self.log_prob_from_distribution(logits.clone(), a_int)
+        });
         ForwardOutput::Discrete {
             probs,
             logits,
@@ -202,7 +219,12 @@ pub struct ContinuousPolicyNetwork<B: Backend + BackendMatcher, InK: TensorKind<
     _out_k: PhantomData<OutK>,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> ContinuousPolicyNetwork<B, InK, OutK> where OutK: BasicOps<B> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    ContinuousPolicyNetwork<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, device: &B::Device) -> Self {
         let log_std_tensor = Tensor::<B, 1, Float>::from_data(
             burn_tensor::TensorData::new(vec![-0.5f32; act_dim], [act_dim]),
@@ -213,7 +235,7 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Conti
             log_std: Param::from_tensor(log_std_tensor),
             input_dim: obs_dim,
             output_dim: act_dim,
-            _out_k: PhantomData::<OutK>::default(),
+            _out_k: PhantomData,
         }
     }
 
@@ -223,7 +245,9 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Conti
         mask: Tensor<B, OutD, OutK>,
     ) -> (Tensor<B, OutD, Float>, Tensor<B, 2, Float>) {
         let mean_raw = self.pi_network.forward(obs).reshape(mask.dims());
-        let mean = mean_raw + (mask - 1.0f32) * 1e8f32;
+        let mask_f: Tensor<B, OutD, Float> =
+            Tensor::from_data(mask.into_data().convert::<f32>(), &mean_raw.device());
+        let mean = mean_raw + (mask_f - 1.0f32) * 1e8f32;
         let std = self.log_std.val().exp().unsqueeze_dim::<2>(0);
         (mean, std)
     }
@@ -233,12 +257,20 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Conti
         mean: Tensor<B, OutD, Float>,
         std: Tensor<B, 2, Float>,
     ) -> Tensor<B, OutD, Float> {
-        let eps = Tensor::<B, OutD, Float>::random(
+        let mean_dims = mean.dims();
+        let batch_size = mean_dims[0];
+        let act_dim = mean_dims[OutD - 1];
+
+        let epsilon = Tensor::<B, OutD, Float>::random(
             mean.shape(),
             Distribution::Normal(0.0, 1.0),
-            &mean.device(),
+            &mean.device()
         );
-        mean + std * eps
+        
+        let std_rank2 = std.reshape([batch_size, act_dim]);
+        let std_broadcast = Tensor::from_data(std_rank2.into_data().convert::<f32>(), &mean.device());
+        
+        mean.mul(std_broadcast).add(epsilon)
     }
 
     pub fn log_prob_from_distribution<const OutD: usize>(
@@ -247,15 +279,32 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Conti
         std: Tensor<B, 2, Float>,
         act: Tensor<B, OutD, Float>,
     ) -> Tensor<B, OutD, Float> {
-        let var = std.clone().powf_scalar(2.0f32);
-        let squared_err = (act - mean).powf_scalar(2.0f32);
+        let mean_dims = mean.dims();
+        let batch_size = mean_dims[0];
+        let act_dim = mean_dims[OutD - 1];
+
+        let std_rank2 = std.reshape([batch_size, act_dim]);
+        let std_broadcast: Tensor<B, OutD, Float> =
+            Tensor::from_data(std_rank2.into_data().convert::<f32>(), &mean.device());
+    
+        let variance = std_broadcast.clone().powf_scalar(2.0);
+        let squared_error = (act - mean).powf_scalar(2.0);
+    
         let log_prob = -0.5f32
-            * (squared_err / var + 2.0f32 * std.log() + (2.0f32 * core::f32::consts::PI).ln());
-        log_prob.sum_dim(OutD - 1)
+            * (squared_error / variance
+                + 2.0f32 * std_broadcast.log()
+                + (2.0f32 * core::f32::consts::PI).ln());
+    
+        log_prob.sum_dim(OutD - 1).unsqueeze_dim::<OutD>(OutD - 1)
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> ForwardKernelTrait<B, InK, OutK> for ContinuousPolicyNetwork<B, InK, OutK> where OutK: BasicOps<B> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    ForwardKernelTrait<B, InK, OutK> for ContinuousPolicyNetwork<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     fn forward<const InD: usize, const OutD: usize>(
         &self,
         obs: Tensor<B, InD, InK>,
@@ -277,7 +326,12 @@ pub struct BaselineValueNetwork<B: Backend + BackendMatcher, InK: TensorKind<B>,
     _out_k: PhantomData<OutK>,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> BaselineValueNetwork<B, InK, OutK> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    BaselineValueNetwork<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     pub fn new(
         obs_dim: usize,
         hidden_sizes: &[usize],
@@ -286,8 +340,8 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Basel
     ) -> Self {
         Self {
             v_network: Mlp::new(obs_dim, hidden_sizes, 1, activation, device),
-            _in_k: PhantomData::<InK>::default(),
-            _out_k: PhantomData::<OutK>::default(),
+            _in_k: PhantomData,
+            _out_k: PhantomData,
         }
     }
 
@@ -303,24 +357,31 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Basel
             "Float" => Tensor::from_data(v.into_data().convert::<f32>(), &device),
             "Int" => Tensor::from_data(v.into_data().convert::<i32>(), &device),
             "Bool" => Tensor::from_data(v.into_data().convert::<bool>(), &device),
+            _ => Tensor::from_data(v.into_data().convert::<f32>(), &device),
         };
         out_k_tensor
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PolicyHead<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> where OutK: BasicOps<B> {
     Discrete(DiscretePolicyNetwork<B, InK, OutK>),
     Continuous(ContinuousPolicyNetwork<B, InK, OutK>),
 }
 
 pub struct PolicyWithBaseline<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> where OutK: BasicOps<B> {
-    pub policy: PolicyHead<B, InK, OutK>,
+    policy: PolicyHead<B, InK, OutK>,
     pub baseline: BaselineValueNetwork<B, InK, OutK>,
     input_dim: usize,
     output_dim: usize,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> PolicyWithBaseline<B, InK, OutK> where OutK: BasicOps<B> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    PolicyWithBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     pub fn new(
         obs_dim: usize,
         act_dim: usize,
@@ -354,7 +415,12 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Polic
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> StepKernelTrait<B, InK, OutK> for PolicyWithBaseline<B, InK, OutK> where OutK: BasicOps<B> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    StepKernelTrait<B, InK, OutK> for PolicyWithBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     fn step<const InD: usize, const OutD: usize>(
         &self,
         obs: Tensor<B, InD, InK>,
@@ -416,14 +482,19 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> StepK
 }
 
 pub struct PolicyWithoutBaseline<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> where OutK: BasicOps<B> {
-    pub policy: PolicyHead<B, InK, OutK>,
+    policy: PolicyHead<B, InK, OutK>,
     input_dim: usize,
     output_dim: usize,
     _in_k: PhantomData<InK>,
     _out_k: PhantomData<OutK>,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> PolicyWithoutBaseline<B, InK, OutK> where OutK: BasicOps<B> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    PolicyWithoutBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     pub fn new(
         obs_dim: usize,
         act_dim: usize,
@@ -450,13 +521,18 @@ impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> Polic
             policy,
             input_dim: obs_dim,
             output_dim: act_dim,
-            _in_k: PhantomData::<InK>::default(),
-            _out_k: PhantomData::<OutK>::default(),
+            _in_k: PhantomData,
+            _out_k: PhantomData,
         }
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> StepKernelTrait<B, InK, OutK> for PolicyWithoutBaseline<B, InK, OutK> where OutK: BasicOps<B> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    StepKernelTrait<B, InK, OutK> for PolicyWithoutBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
     fn step<const InD: usize, const OutD: usize>(
         &self,
         obs: Tensor<B, InD, InK>,
