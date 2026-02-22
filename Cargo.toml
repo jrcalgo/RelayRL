@@ -10,7 +10,7 @@ resolver = "2"
 
 [workspace.dependencies]
 relayrl_framework = { version = "0.5.0-alpha.1", path = "crates/relayrl_framework"}
-relayrl_types = { version = "0.4.1", path = "crates/relayrl_types"}
+relayrl_types = { version = "0.5.2", path = "crates/relayrl_types"}
 relayrl_algorithms = { version = "0.1.0", path = "crates/relayrl_algorithms"}
 
 burn-core = "0.20.0"
@@ -22,7 +22,9 @@ burn-tch = "0.20.0"
 burn-optim = "0.20.0"
 
 tokio = "1.49.0"
+
 serde = "1.0.228"
+bytemuck = "1.25.0"
 
 dashmap = "6.1.0"
 

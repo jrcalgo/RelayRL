@@ -17,6 +17,8 @@ tch-backend = ["burn-tch", "relayrl_types/tch-backend"]
 [dependencies]
 relayrl_types = { workspace = true }
 
+bytemuck = { workspace = true }
+
 burn-core = { workspace = true }
 burn-tensor = { workspace = true }
 burn-optim = { workspace = true }
