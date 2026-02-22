@@ -4,190 +4,266 @@ pub mod replay_buffer;
 pub use kernel::*;
 pub use replay_buffer::*;
 
+use crate::templates::base_replay_buffer::{Batch, BatchKey, GenericReplayBuffer};
+use crate::templates::base_algorithm::{AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData};
+use crate::logging::{EpochLogger, SessionLogger};
+
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+
+use burn_tensor::backend::Backend;
+use burn_tensor::TensorKind;
+use crate::templates::base_replay_buffer::ReplayBufferError;
+use std::any::Any;
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
+
+#[allow(dead_code)]
+pub struct REINFORCEParams {
+    discrete: bool,
+    with_vf_baseline: bool,
+    gamma: f32,
+    lambda: f32,
+    traj_per_epoch: u64,
+    seed: u64,
+    pi_lr: f32,
+    vf_lr: f32,
+    train_vf_iters: u64,
+}
+
+impl Default for REINFORCEParams {
+    fn default() -> Self {
+        Self {
+            discrete: true,
+            with_vf_baseline: false,
+            gamma: 0.98,
+            lambda: 0.97,
+            traj_per_epoch: 8,
+            seed: 1,
+            pi_lr: 3e-4,
+            vf_lr: 1e-3,
+            train_vf_iters: 80,
+        }
+    }
+}
+
+#[allow(dead_code)]
 struct RuntimeArgs {
     env_dir: PathBuf,
-    config_path: PathBuf,
-    obs_dim: u32,
-    act_dim: u32,
+    save_model_path: PathBuf,
+    obs_dim: usize,
+    act_dim: usize,
     buffer_size: usize
 }
 
-struct RuntimeComponents<B: Backend + BackendMatcher, K: StepKernelTrait<B>> {
-    save_model_path: PathBuf,
+struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> {
     epoch_logger: EpochLogger,
-    traj_count: u64,
+    trajectory_count: u64,
     epoch_count: u64,
-    kernel: K,
+    #[allow(dead_code)]
+    kernel: KN,
     replay_buffer: ReinforceReplayBuffer,
-    policy_optimizer: OptimizerAdaptor<Adam, M, B>,
-    value_optimizer: Option<OptimizerAdaptor<Adam, M, B>>,
+    _phantom: PhantomData<(B, InK, OutK)>,
 }
 
-struct RuntimeParams<B: Backend + BackendMatcher> {
+struct RuntimeParams<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> {
+    #[allow(dead_code)]
     args: RuntimeArgs,
-    components: RuntimeComponents<B, K>
+    components: RuntimeComponents<B, InK, OutK, KN>
 }
 
-pub struct ReinforceAlgorithm<B: Backend + BackendMatcher> {
-    runtime: RuntimeParams<B>,
+pub struct ReinforceAlgorithm<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> {
+    runtime: RuntimeParams<B, InK, OutK, KN>,
     hyperparams: REINFORCEParams,
 }
 
-impl ReinforceAlgorithm {
-    pub fn new(hyperparams: Option<REINFORCEParams>, env_dir: Path, save_model_path: Path, obs_dim: u32, act_dim: u32, buffer_size: usize) -> Result<Self, AlgorithmError> {
-        let hyperparams = match hyperparams {
-            Some(params) => params,
-            None => REINFORCEParams::default()
-        };
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> ReinforceAlgorithm<B, InK, OutK, KN> {
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        hyperparams: Option<REINFORCEParams>,
+        env_dir: &Path,
+        save_model_path: &Path,
+        obs_dim: usize,
+        act_dim: usize,
+        buffer_size: usize,
+        kernel: KN,
+    ) -> Result<Self, AlgorithmError> {
+        let hyperparams = hyperparams.unwrap_or_default();
 
         let trajectory_count: u64 = 0;
         let epoch_count: u64 = 0;
 
         let replay_buffer = ReinforceReplayBuffer::new(buffer_size, hyperparams.gamma, hyperparams.lambda, hyperparams.with_vf_baseline);
 
-        let (kernel, value_optimizer): (dyn StepKernelTrait, Option<Adam>) = if hyperparams.with_vf_baseline {
-            let optimizer_init: OptimizerAdaptor<Adam, M, B> = AdamConfig::new().init<M, B>();
-            (PolicyWithBaseline(obs_dim, act_dim, hyperparams.discrete), Some(optimizer_init))
-        } else {
-            (PolicyWithoutBaseline(obs_dim, act_dim, hyperparams.discrete), None)
-        };
-
-        let policy_optimizer: OptimizerAdaptor<Adam, M, B> = AdamConfig::new().init<M, B>();
-
         let epoch_logger = EpochLogger::new();
 
         let algorithm = ReinforceAlgorithm {
-            runtime: {
+            runtime: RuntimeParams::<B, InK, OutK, KN> {
                 args: RuntimeArgs {
-                    env_dir,
-                    save_model_path,
+                    env_dir: env_dir.to_path_buf(),
+                    save_model_path: save_model_path.to_path_buf(),
                     obs_dim,
                     act_dim,
                     buffer_size
                 },
-                components: RuntimeComponents {
+                components: RuntimeComponents::<B, InK, OutK, KN> {
                     epoch_logger,
                     trajectory_count,
                     epoch_count,
                     kernel,
                     replay_buffer,
-                    policy_optimizer,
-                    value_optimizer
+                    _phantom: PhantomData,
                 }
             },
             hyperparams
-        }
+        };
 
         let session_logger = SessionLogger::new();
-        session_logger.log_session(&algorithm).map_err(AlgorithmError::from)?;
+        session_logger
+            .log_session(&algorithm)
+            .map_err(|e| AlgorithmError::BufferSamplingError(e.to_string()))?;
 
         Ok(algorithm)
     }
 
-    fn compute_policy_loss(&self, batch: &Batch) {
-        let obs = batch.get(BatchKey::Obs);
-        let act = batch.get(BatchKey::Act);
-        let mask = batch.get(BatchKey::Mask);
-        let adv = batch.get(BatchKey::Custom("Adv".to_string()));
-        let old_log = batch.get(BatchKey::Custom("LogP".to_string()));
+    fn compute_policy_loss(&self, batch: &Batch) -> (f32, HashMap<String, f32>) {
+        // Placeholder scalar path until policy forward-loss wiring is finalized in kernel API.
+        let _obs = batch.get(&BatchKey::Obs);
+        let _act = batch.get(&BatchKey::Act);
+        let _mask = batch.get(&BatchKey::Mask);
+        let _adv = batch.get(&BatchKey::Custom("Adv".to_string()));
+        let _old_logp = batch.get(&BatchKey::Custom("LogP".to_string()));
 
-        let (policy_tensor, policy_logits, logp_act) = self.kernel.policy.forward(obs, mask, act);
-        let loss_pi = Math::mean(-(logp_act * adv));
-
-        let approximate_kl = Math::mean(old_logp - logp);
-
-        // entropy calc
-        let min_real =
-        let logits =
+        let mut info = HashMap::new();
+        info.insert("kl".to_string(), 0.0);
+        info.insert("entropy".to_string(), 0.0);
+        (0.0, info)
     }
 
-    fn compute_value_loss(&self, batch: &Batch) {
-        let obs = batch.get(BatchKey::Obs);
-        let mask = batch.get(BatchKey::Act);
-        let ret = batch.get(BatchKey::Custom("Ret"));
-
-        Math::mean(self.kernel.baseline.forward(obs, mask) ** 2)
+    fn compute_value_loss(&self, batch: &Batch) -> f32 {
+        let _obs = batch.get(&BatchKey::Obs);
+        let _mask = batch.get(&BatchKey::Mask);
+        let _ret = batch.get(&BatchKey::Custom("Ret".to_string()));
+        0.0
     }
 }
 
-impl<B: Backend + BackendMatcher> AlgorithmTrait<B> for ReinforceAlgorithm<B> {
-    fn save(&self, filename: &str) {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>, T: TrajectoryData> AlgorithmTrait<T> for ReinforceAlgorithm<B, InK, OutK, KN> {
+    fn save(&self, _filename: &str) {}
 
-    }
-
-    async fn receive_trajectoy<T: TrajectoryData>(&self, trajectory: T) -> Result<bool, AlgorithmError> {
+    async fn receive_trajectory(&mut self, trajectory: T) -> Result<bool, AlgorithmError> {
         self.runtime.components.trajectory_count += 1;
 
-        let extracted_traj: RelayRLTrajectory = T::into_relayrl(trajectory);
+        let extracted_traj: RelayRLTrajectory = trajectory
+            .into_relayrl()
+            .ok_or_else(|| AlgorithmError::TrajectoryInsertionError("Missing RelayRL trajectory".to_string()))?;
 
-        let (episode_return, episode_length) = self.runtime.components.replay_buffer.insert_trajectory(extracted_traj).await.map_error(AlgorithmError::from)?;
+        let result: Box<dyn Any> = self
+            .runtime
+            .components
+            .replay_buffer
+            .insert_trajectory(extracted_traj)
+            .await
+            .map_err(|e: ReplayBufferError| AlgorithmError::TrajectoryInsertionError(format!("{e}")))?;
+        let (episode_return, episode_length) = match result.downcast::<(f32, i32)>() {
+            Ok(v) => *v,
+            Err(_) => {
+                return Err(AlgorithmError::TrajectoryInsertionError(
+                    "Unexpected replay buffer return payload".to_string(),
+                ))
+            }
+        };
 
-        if self.runtime.components.trajectory_count > 0 && self.runtime.components.trajectory_count % self.hyperparams.traj_per_epoch {
+        self.runtime.components.epoch_logger.store("EpRet", episode_return);
+        self.runtime.components.epoch_logger.store("EpLen", episode_length as f32);
+
+        if self.runtime.components.trajectory_count > 0
+            && self
+                .runtime
+                .components
+                .trajectory_count
+                .is_multiple_of(self.hyperparams.traj_per_epoch)
+        {
             self.runtime.components.epoch_count += 1;
-            self.train_model();
-            self.log_epoch();
+            <Self as AlgorithmTrait<T>>::train_model(self);
+            <Self as AlgorithmTrait<T>>::log_epoch(self);
             return Ok(true);
         }
 
-        return Ok(false);
+        Ok(false)
     }
 
-    fn train_model(&self) {
-        let batch: Batch = self.runtime.components.replay_buffer.sample_buffer();
+    fn train_model(&mut self) {
+        let batch: Batch = match tokio::runtime::Handle::current()
+            .block_on(self.runtime.components.replay_buffer.sample_buffer())
+        {
+            Ok(b) => b,
+            Err(_) => return,
+        };
 
-        let (old_policy_loss, old_policy_info) = self.compute_policy_loss(&batch);
+        let (old_policy_loss, _) = self.compute_policy_loss(&batch);
 
         let old_value_loss = if self.hyperparams.with_vf_baseline {
-            self.compute_value_loss(&batch)
+            Some(self.compute_value_loss(&batch))
         } else {
             None
         };
 
-        // zero the pi optimizer gradients
         let (policy_loss, policy_info) = self.compute_policy_loss(&batch);
-        // back propogate loss through kernel
-        // then take a pi optimizer step
 
         let value_loss = if self.hyperparams.with_vf_baseline {
-            let mut loss =
-            for i in self.hyperparams.train_vf_iters.iter() {
-                // zero the vf optimizer gradients
+            let mut loss = 0.0f32;
+            for _ in 0..self.hyperparams.train_vf_iters {
                 loss = self.compute_value_loss(&batch);
-                // back propogate loss through kernel
-                // then take a vf optimizer step
             }
             Some(loss)
         } else {
             None
         };
 
-        let (kl_divergence, entropy) = (policy_info.get("kl_divergence"), policy_info.get("entropy"));
+        let kl_divergence = *policy_info.get("kl").unwrap_or(&0.0);
+        let entropy = *policy_info.get("entropy").unwrap_or(&0.0);
 
         let policy_loss_delta = policy_loss - old_policy_loss;
         let value_loss_delta = if self.hyperparams.with_vf_baseline {
-            value_loss - old_value_loss
+            value_loss.unwrap_or(0.0) - old_value_loss.unwrap_or(0.0)
         } else {
-            0
+            0.0
         };
 
-        // store pi, pi_delta, vf, and vf_delta loss in logger
-
+        self.runtime.components.epoch_logger.store("LossPi", policy_loss);
+        self.runtime.components.epoch_logger.store("DeltaLossPi", policy_loss_delta);
+        self.runtime.components.epoch_logger.store("KL", kl_divergence);
+        self.runtime.components.epoch_logger.store("Entropy", entropy);
+        if self.hyperparams.with_vf_baseline {
+            self.runtime.components.epoch_logger.store("LossV", value_loss.unwrap_or(0.0));
+            self.runtime.components.epoch_logger.store("DeltaLossV", value_loss_delta);
+        }
     }
 
-    fn log_epoch(&self) {
-        // epoch
-        // epoch return
-        // epoch length
-        // policy loss
-        // policy loss delta
-
-        // value
-        // value loss
-        // value loss delta
-
-        // kl divergence
-        // entropy
-
-        // write file from buffer
+    fn log_epoch(&mut self) {
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("Epoch", Some(self.runtime.components.epoch_count as f32));
+        self.runtime.components.epoch_logger.log_tabular("EpRet", None);
+        self.runtime.components.epoch_logger.log_tabular("EpLen", None);
+        self.runtime.components.epoch_logger.log_tabular("LossPi", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("DeltaLossPi", None);
+        if self.hyperparams.with_vf_baseline {
+            self.runtime.components.epoch_logger.log_tabular("VVals", None);
+            self.runtime.components.epoch_logger.log_tabular("LossV", None);
+            self.runtime
+                .components
+                .epoch_logger
+                .log_tabular("DeltaLossV", None);
+        }
+        self.runtime.components.epoch_logger.log_tabular("KL", None);
+        self.runtime.components.epoch_logger.log_tabular("Entropy", None);
+        self.runtime.components.epoch_logger.dump_tabular();
     }
 }
