@@ -18,6 +18,7 @@ pub enum TensorError {
     DeserializationError(String),
     BackendError(String),
     DTypeError(String),
+    ShapeError(String),
 }
 
 impl std::fmt::Display for TensorError {
@@ -29,6 +30,7 @@ impl std::fmt::Display for TensorError {
             }
             Self::BackendError(e) => write!(f, "[TensorError] Backend error: {}", e),
             Self::DTypeError(e) => write!(f, "[TensorError] DType error: {}", e),
+            Self::ShapeError(e) => write!(f, "[TensorError] Shape error: {}", e),
         }
     }
 }
@@ -94,7 +96,7 @@ impl BackendMatcher for NdArray {
     fn get_supported_backend() -> SupportedTensorBackend {
         SupportedTensorBackend::NdArray
     }
-
+        
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
         match device {
             DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),

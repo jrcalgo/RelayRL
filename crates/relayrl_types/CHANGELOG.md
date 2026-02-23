@@ -2,6 +2,52 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-02-19
+
+### Added
+- **TensorError variant added** - New variant added
+  - `ShapeError(String)` added
+
+## [0.5.1] - 2026-02-14
+
+### Fixed
+- **README formatting issues resolved** - Removed merge conflict text lol
+
+## [0.5.0] - 2026-02-14
+
+### Added
+- **CSV Trajectory Serialization** - Complete CSV file support for trajectory data
+  - `CsvTrajectory` struct with `to_csv()` and `from_csv()` methods
+  - JSON-encoded tensor data with dtype, shape, and payload columns
+  - Smart writer caching with append support and duplicate prevention
+  - Validation cache for ensuring data consistency (backend, actor_id, timestamp)
+  - Support for all tensor backends (NdArray, Tch) and data types
+  - Auxiliary data serialization via JSON
+- **Arrow Trajectory Serialization** - Apache Arrow IPC format support for trajectory data
+  - `ArrowTrajectory` struct with `to_arrow()` and `from_arrow()` methods
+  - Columnar binary format for efficient storage and querying
+  - Schema-validated data with typed columns for all fields
+  - Nested list support for tensor shapes and float arrays
+  - Binary column support for integer and bool tensor data
+  - Better compression and performance than CSV for large datasets
+- **Data Records Module** - New `data::records` module structure
+  - Shared helper functions for tensor data frame conversion
+  - Backend string extraction utilities
+  - Exported in prelude as `prelude::records`
+
+### Changed
+- **Error Types** - Added comprehensive error handling for data serialization
+  - `CsvDataError` with variants for CSV failures, validation, and cache errors
+  - `ArrowDataError` with variants for Arrow schema, batch, and IO errors
+  - Type aliases (`CsvTrajectoryError`, `ArrowTrajectoryError`) for backwards compatibility
+
+### Breaking
+- **Namespace Reorganization** - Internal module paths were changed from `crate::types::data` to split module roots:
+  - Data modules now live under `crate::data`
+  - Model modules now live under `crate::model`
+  - Update imports that referenced old `crate::types::data::*` paths to the new module locations
+  - Recommended migration path is via stable prelude exports under `crate::prelude::*`
+
 ## [0.4.1] - 2026-01-22
 
 ### Changed

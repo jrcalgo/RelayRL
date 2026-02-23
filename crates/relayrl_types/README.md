@@ -3,12 +3,14 @@ relayrl_types
 
 Core data types and encoding/decoding utilities for the RelayRL framework.
 
-[![Changelog](https://img.shields.io/badge/Changelog-0.4.1-blue.svg)](CHANGELOG.md)
+
+[![Changelog](https://img.shields.io/badge/Changelog-0.5.0-blue.svg)](CHANGELOG.md)
 
 ## Features
 
 - **`RelayRLAction`**: Serializable action container (obs, act, mask, reward, data, done) with UUID agent tracking
 - **`RelayRLTrajectory`**: In-memory trajectory buffer with metadata and provenance tracking
+- **`Records`**: Records for converting trajectories to and from CSV and Arrow files
 - **Burn backend support**: Compatible with both `burn-ndarray` (CPU) and `burn-tch` (GPU) backends
 - **Codec pipeline**: Compression, encryption, integrity verification, and chunking
 - **Utilities**: Metadata tracking, quantization, and network transport optimizations
