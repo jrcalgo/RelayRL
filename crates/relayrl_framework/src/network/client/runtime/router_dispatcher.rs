@@ -6,7 +6,7 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol};
 use thiserror::Error;
 
 use burn_tensor::backend::Backend;
-use relayrl_types::types::data::tensor::BackendMatcher;
+use relayrl_types::data::tensor::BackendMatcher;
 
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -147,7 +147,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
 
             RoutingProtocol::ModelUpdate | RoutingProtocol::Shutdown => Duration::from_secs(60),
-            _ => Duration::from_secs(30),
         }
     }
 
@@ -303,6 +302,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
         }
     }
+
     /// Dispatch a single message to the appropriate router
     ///
     /// Messages for unassigned actors are queued for retry instead of being dropped.
@@ -353,3 +353,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 }
+
+#[cfg(test)]
+mod tests {}
