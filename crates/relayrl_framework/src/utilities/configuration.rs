@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::{fs, fs::File, io::Read, path::PathBuf};
 
 use crate::get_or_create_client_config_json_path;
-use crate::network::client::agent::TrajectoryFileParams;
+use crate::network::client::agent::LocalTrajectoryFileParams;
 
 use relayrl_types::HyperparameterArgs;
 
@@ -66,22 +66,22 @@ pub static DEFAULT_CLIENT_CONFIG_PATH: Lazy<Option<PathBuf>> =
 pub mod server_config_macros {
     /// Resolves config json file between argument and default value.
     #[macro_export]
-    macro_rules! resolve_server_config_json_path {
+    macro_rules! resolve_training_server_config_json_path {
         ($path: expr) => {
             match $path {
-                Some(p) => get_or_create_server_config_json_path!(p.clone()),
-                None => DEFAULT_SERVER_CONFIG_PATH.clone(),
+                Some(p) => get_or_create_training_server_config_json_path!(p.clone()),
+                None => DEFAULT_TRAINING_SERVER_CONFIG_PATH.clone(),
             }
         };
         ($path: literal) => {
-            get_or_create_server_config_json_path!(std::path::PathBuf::from($path))
+            get_or_create_training_server_config_json_path!(std::path::PathBuf::from($path))
         };
     }
 
     /// Will write config file if not found in provided path.
     /// Reads file if found, writes new file if not
     #[macro_export]
-    macro_rules! get_or_create_server_config_json_path {
+    macro_rules! get_or_create_training_server_config_json_path {
         ($path: expr) => {
             if $path.exists() {
                 println!(
@@ -90,7 +90,50 @@ pub mod server_config_macros {
                 );
                 Some($path)
             } else {
-                match fs::write($path, DEFAULT_SERVER_CONFIG_CONTENT) {
+                match fs::write($path, DEFAULT_TRAINING_SERVER_CONFIG_CONTENT) {
+                    Ok(_) => {
+                        println!(
+                            "[ConfigLoader - load_config] Created new config at: {:?}",
+                            $path
+                        );
+                        Some($path)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[ConfigLoader - load_config] Failed to create config file: {}",
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! resolve_inference_server_config_json_path {
+        ($path: expr) => {
+            match $path {
+                Some(p) => get_or_create_inference_server_config_json_path!(p.clone()),
+                None => DEFAULT_INFERENCE_SERVER_CONFIG_PATH.clone(),
+            }
+        };
+        ($path: literal) => {
+            get_or_create_inference_server_config_json_path!(std::path::PathBuf::from($path))
+        };
+    }
+
+    #[macro_export]
+    macro_rules! get_or_create_inference_server_config_json_path {
+        ($path: expr) => {
+            if $path.exists() {
+                println!(
+                    "[ConfigLoader - load_config] Found config.json in current directory: {:?}",
+                    $path
+                );
+                Some($path)
+            } else {
+                match fs::write($path, DEFAULT_INFERENCE_SERVER_CONFIG_CONTENT) {
                     Ok(_) => {
                         println!(
                             "[ConfigLoader - load_config] Created new config at: {:?}",
@@ -111,8 +154,11 @@ pub mod server_config_macros {
     }
 }
 
-pub static DEFAULT_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> =
-    Lazy::new(|| get_or_create_server_config_json_path!(PathBuf::from("server_config.json")));
+pub static DEFAULT_TRAINING_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> =
+    Lazy::new(|| get_or_create_training_server_config_json_path!(PathBuf::from("training_server_config.json")));
+
+pub static DEFAULT_INFERENCE_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> =
+    Lazy::new(|| get_or_create_inference_server_config_json_path!(PathBuf::from("inference_server_config.json")));
 
 pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
     "client_config": {
@@ -168,49 +214,45 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
                 "learning_starts": 25000,
                 "policy_frequency": 2
             },
-            "_comment": "Add custom algorithm hyperparams here",
-            "_comment2": "Make sure to add the algorithm name to the algorithm_name field",
-            "_comment3": "These key-values will be sent to the server for initialization"
+            "CUSTOM": {
+                "_comment": "Add custom algorithm hyperparams here formatted just like the other algorithms. i.e. \"MAPPO\": {...}",
+                "_comment2": "Make sure to add the algorithm name to the algorithm_name field",
+                "_comment3": "These key-values will be sent to the server for initialization"
+            }
+
         },
         "trajectory_file_output": {
-            "enabled": true,
-            "encode": true,
-            "output": {
-                "directory": "data",
-                "file_name": "action_data",
-                "_comment": "csv, txt, json are supported.",
-                "format": "json"
-            }
+            "directory": "experiment_data",
+            "file_type": "json"
         }
     },
     "transport_config": {
-        "addresses": {
-            "_comment": "gRPC uses only this address (prefix is unused).",
+        "inference_addresses": {
+            "inference_server": {
+                "host": "127.0.0.1",
+                "port": "7800"
+            },
+            "inference_scaling_server": {
+                "host": "127.0.0.1",
+                "port": "7801"
+            }
+        },
+        "training_addresses": {
             "model_server": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "50051"
             },
             "trajectory_server": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7776"
             },
             "agent_listener": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7777"
             },
-            "scaling_server": {
-                "prefix": "tcp://",
+            "training_scaling_server": {
                 "host": "127.0.0.1",
                 "port": "7778"
-            },
-            "_comment2": "Only used when client-side inference is disabled or when client-side inference is used as fallback.",
-            "inference_server": {
-                "prefix": "tcp://",
-                "host": "127.0.0.1",
-                "port": "7779"
             }
         },
         "local_model_module": {
@@ -218,12 +260,12 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
             "model_name": "client_model",
             "format": "pt"
         },
-        "max_traj_length": 1000
+        "max_traj_length": 100000000
     }
 }"#;
 
-pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
-    "server_config": {
+pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_CONTENT: &str = r#"{
+    "training_server_config": {
         "config_update_polling_seconds": 10.0,
         "default_hyperparameters": {
             "DDPG": {
@@ -286,64 +328,84 @@ pub(crate) const DEFAULT_SERVER_CONFIG_CONTENT: &str = r#"{
         }
     },
     "transport_config": {
-        "addresses": {
-            "_comment1": "gRPC uses only this address (prefix is unused).",
+        "inference_addresses": {
+            "inference_server": {
+                "host": "127.0.0.1",
+                "port": "7800"
+            },
+            "inference_scaling_server": {
+                "host": "127.0.0.1",
+                "port": "7801"
+            }
+        },
+        "training_addresses": {
             "model_server": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "50051"
             },
             "trajectory_server": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7776"
             },
             "agent_listener": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7777"
             },
-            "scaling_server": {
-                "prefix": "tcp://",
+            "training_scaling_server": {
                 "host": "127.0.0.1",
                 "port": "7778"
-            },
-            "_comment2": "Only available when client-side inference is disabled or when client-side inference is used as fallback.",
-            "inference_server": {
-                "prefix": "tcp://",
-                "host": "127.0.0.1",
-                "port": "7779"
             }
         },
         "local_model_module": {
-            "directory_name": "model_module",
-            "model_name": "server_model"
+            "directory": "model_module",
+            "model_name": "client_model",
+            "format": "pt"
         },
-        "max_traj_length": 1000
+        "max_traj_length": 100000000
     }
 }"#;
 
 /// TODO: Implement infernece server configuration file and builder components.
 pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_CONTENT: &str = r#"{
-    "server_config": {
-        "
-    },
-    "transport_config": {
-        "addresses": {
-            "inference_server": {
-                "prefix": "tcp://",
-                "host": "127.0.0.1",
-                "port": "7779"
-            }
-        },
-        "config_update_polling": 10,
-        "grpc_idle_timeout": 30,
-        "local_model_module": {
-            "directory_name": "model_module",
-            "model_name": "inference_model.pt"
-        },
-        "max_traj_length": 1000
-    },
+    "inference_server_config": {
+        "config_update_polling_seconds": 10.0,
+        "transport_config": {
+            "inference_addresses": {
+                "inference_server": {
+                    "host": "127.0.0.1",
+                    "port": "7800"
+                },
+                "inference_scaling_server": {
+                    "host": "127.0.0.1",
+                    "port": "7801"
+                }
+            },
+            "training_addresses": {
+                "model_server": {
+                    "host": "127.0.0.1",
+                    "port": "50051"
+                },
+                "trajectory_server": {
+                    "host": "127.0.0.1",
+                    "port": "7776"
+                },
+                "agent_listener": {
+                    "host": "127.0.0.1",
+                    "port": "7777"
+                },
+                "training_scaling_server": {
+                    "host": "127.0.0.1",
+                    "port": "7778"
+                }
+            },
+            "local_model_module": {
+                "directory": "model_module",
+                "model_name": "client_model",
+                "format": "pt"
+            },
+            "max_traj_length": 100000000
+        }
+    }
 }"#;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -796,9 +858,8 @@ impl Default for CustomAlgorithmParams {
 /// Server address parameters.
 ///
 /// Each server parameter includes a prefix, host, and port.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct NetworkParams {
-    pub prefix: String,
     pub host: String,
     pub port: String,
 }
@@ -845,7 +906,7 @@ pub struct ClientConfigParams {
     pub config_path: PathBuf,
     pub config_update_polling_seconds: f32,
     pub init_hyperparameters: HyperparameterConfig,
-    pub trajectory_file_output: TrajectoryFileParams,
+    pub trajectory_file_output: LocalTrajectoryFileParams,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -900,7 +961,7 @@ impl ClientConfigLoader {
                             config_path: PathBuf::from("client_config.json"),
                             config_update_polling_seconds: 10.0,
                             init_hyperparameters: HyperparameterConfig::default(),
-                            trajectory_file_output: TrajectoryFileParams::default(),
+                            trajectory_file_output: LocalTrajectoryFileParams::default(),
                         },
                         transport_config: TransportConfigBuilder::build_default()
                     }
@@ -934,7 +995,7 @@ impl ClientConfigLoader {
         self.client_config.init_hyperparameters.to_args(algorithm)
     }
 
-    pub fn get_trajectory_file_output(&self) -> &TrajectoryFileParams {
+    pub fn get_trajectory_file_output(&self) -> &LocalTrajectoryFileParams {
         &self.client_config.trajectory_file_output
     }
 
@@ -950,7 +1011,7 @@ pub trait ClientConfigBuildParams {
     -> &mut Self;
     fn set_trajectory_file_output(
         &mut self,
-        trajectory_file_output: TrajectoryFileParams,
+        trajectory_file_output: LocalTrajectoryFileParams,
     ) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
     fn build(&self) -> ClientConfigLoader;
@@ -963,7 +1024,7 @@ pub struct ClientConfigBuilder {
     config_update_polling_seconds: Option<f32>,
     init_hyperparameters: Option<HyperparameterConfig>,
     transport_config: Option<TransportConfigParams>,
-    trajectory_file_output: Option<TrajectoryFileParams>,
+    trajectory_file_output: Option<LocalTrajectoryFileParams>,
 }
 
 impl ClientConfigBuildParams for ClientConfigBuilder {
@@ -987,7 +1048,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
 
     fn set_trajectory_file_output(
         &mut self,
-        trajectory_file_output: TrajectoryFileParams,
+        trajectory_file_output: LocalTrajectoryFileParams,
     ) -> &mut Self {
         self.trajectory_file_output = Some(trajectory_file_output);
         self
@@ -1019,16 +1080,13 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
             trajectory_file_output: self
                 .trajectory_file_output
                 .clone()
-                .unwrap_or_else(|| TrajectoryFileParams::default()),
+                .unwrap_or_else(|| LocalTrajectoryFileParams::default()),
         };
 
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
-                inference_server_address: transport_config.inference_server_address.clone(),
-                agent_listener_address: transport_config.agent_listener_address.clone(),
-                model_server_address: transport_config.model_server_address.clone(),
-                trajectory_server_address: transport_config.trajectory_server_address.clone(),
-                scaling_server_address: transport_config.scaling_server_address.clone(),
+                inference_addresses: transport_config.inference_addresses.clone(),
+                training_addresses: transport_config.training_addresses.clone(),
                 max_traj_length: transport_config.max_traj_length,
                 local_model_module: transport_config.local_model_module.clone(),
             },
@@ -1048,7 +1106,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 config_path: PathBuf::from("client_config.json"),
                 config_update_polling_seconds: 10.0,
                 init_hyperparameters: HyperparameterConfig::default(),
-                trajectory_file_output: TrajectoryFileParams::default(),
+                trajectory_file_output: LocalTrajectoryFileParams::default(),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }
@@ -1056,7 +1114,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ServerConfigParams {
+pub struct TrainingServerConfigParams {
     pub config_path: PathBuf,
     pub default_hyperparameters: Option<HyperparameterConfig>,
     pub training_tensorboard: TensorboardParams,
@@ -1064,24 +1122,24 @@ pub struct ServerConfigParams {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ServerConfigLoader {
-    pub server_config: ServerConfigParams,
+pub struct TrainingServerConfigLoader {
+    pub server_config: TrainingServerConfigParams,
     pub transport_config: TransportConfigParams,
 }
 
-impl ServerConfigLoader {
+impl TrainingServerConfigLoader {
     pub fn new_config(config_path: Option<PathBuf>) -> Self {
         let _config_path: PathBuf = if config_path.is_none() {
-            DEFAULT_SERVER_CONFIG_PATH
+            DEFAULT_TRAINING_SERVER_CONFIG_PATH
                 .clone()
-                .expect("[ServerConfigParams - new] Invalid config path")
+                .expect("[TrainingServerConfigParams - new] Invalid config path")
         } else {
-            config_path.expect("[ServerConfigParams - new] Invalid config path")
+            config_path.expect("[TrainingServerConfigParams - new] Invalid config path")
         };
 
-        let config: ServerConfigLoader = Self::load_config(&_config_path);
+        let config: TrainingServerConfigLoader = Self::load_config(&_config_path);
 
-        let server_config: ServerConfigParams = config.server_config;
+        let server_config: TrainingServerConfigParams = config.server_config;
         let transport_config: TransportConfigParams = config.transport_config;
 
         Self {
@@ -1095,11 +1153,11 @@ impl ServerConfigLoader {
             Ok(mut file) => {
                 let mut contents: String = String::new();
                 file.read_to_string(&mut contents)
-                    .expect("[ServerConfigParams - load_config] Failed to read configuration file");
+                    .expect("[TrainingServerConfigParams - load_config] Failed to read configuration file");
                 serde_json::from_str(&contents).unwrap_or_else(|_| {
-                    eprintln!("[ServerConfigParams - load_config] Failed to parse configuration, loading empty defaults...");
-                    ServerConfigLoader {
-                        server_config: ServerConfigParams {
+                    eprintln!("[TrainingServerConfigParams - load_config] Failed to parse configuration, loading empty defaults...");
+                    TrainingServerConfigLoader {
+                        server_config: TrainingServerConfigParams {
                             config_path: PathBuf::from("server_config.json"),
                             default_hyperparameters: None,
                             training_tensorboard: TensorboardParams {
@@ -1115,7 +1173,7 @@ impl ServerConfigLoader {
             }
             Err(e) => {
                 panic!(
-                    "[ServerConfigParams - load_config] Failed to open configuration file: {}",
+                    "[TrainingServerConfigParams - load_config] Failed to open configuration file: {}",
                     e
                 );
             }
@@ -1143,7 +1201,7 @@ impl ServerConfigLoader {
     }
 }
 
-pub trait ServerConfigBuildParams {
+pub trait TrainingServerConfigBuildParams {
     fn set_config_path(&mut self, config_path: &str) -> &mut Self;
     fn set_hyperparameters(
         &mut self,
@@ -1158,11 +1216,11 @@ pub trait ServerConfigBuildParams {
     ) -> &mut Self;
     fn set_default_model_path(&mut self, initial_model: &str) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
-    fn build(&self) -> ServerConfigLoader;
-    fn build_default() -> ServerConfigLoader;
+    fn build(&self) -> TrainingServerConfigLoader;
+    fn build_default() -> TrainingServerConfigLoader;
 }
 
-pub struct ServerConfigBuilder {
+pub struct TrainingServerConfigBuilder {
     config_path: Option<PathBuf>,
     default_hyperparameters: Option<HyperparameterConfig>,
     training_tensorboard: Option<TensorboardParams>,
@@ -1170,7 +1228,7 @@ pub struct ServerConfigBuilder {
     transport_config: Option<TransportConfigParams>,
 }
 
-impl ServerConfigBuildParams for ServerConfigBuilder {
+impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
     fn set_config_path(&mut self, config_path: &str) -> &mut Self {
         self.config_path = Some(PathBuf::from(config_path));
         self
@@ -1432,8 +1490,8 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
         self
     }
 
-    fn build(&self) -> ServerConfigLoader {
-        let server_config: ServerConfigParams = ServerConfigParams {
+    fn build(&self) -> TrainingServerConfigLoader {
+        let server_config: TrainingServerConfigParams = TrainingServerConfigParams {
             config_path: self
                 .config_path
                 .clone()
@@ -1454,26 +1512,23 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
 
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
-                inference_server_address: transport_config.inference_server_address.clone(),
-                agent_listener_address: transport_config.agent_listener_address.clone(),
-                model_server_address: transport_config.model_server_address.clone(),
-                trajectory_server_address: transport_config.trajectory_server_address.clone(),
-                scaling_server_address: transport_config.scaling_server_address.clone(),
+                inference_addresses: transport_config.inference_addresses.clone(),
+                training_addresses: transport_config.training_addresses.clone(),
                 max_traj_length: transport_config.max_traj_length,
                 local_model_module: transport_config.local_model_module.clone(),
             },
             None => TransportConfigBuilder::build_default(),
         };
 
-        ServerConfigLoader {
+        TrainingServerConfigLoader {
             server_config,
             transport_config,
         }
     }
 
-    fn build_default() -> ServerConfigLoader {
-        ServerConfigLoader {
-            server_config: ServerConfigParams {
+    fn build_default() -> TrainingServerConfigLoader {
+        TrainingServerConfigLoader {
+            server_config: TrainingServerConfigParams {
                 config_path: PathBuf::from("server_config.json"),
                 default_hyperparameters: None,
                 training_tensorboard: TensorboardParams {
@@ -1489,44 +1544,60 @@ impl ServerConfigBuildParams for ServerConfigBuilder {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TransportConfigParams {
+pub struct TransportInferenceAddresses {
     pub inference_server_address: NetworkParams,
+    pub inference_scaling_server_address: NetworkParams,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TransportTrainingAddresses {
     pub agent_listener_address: NetworkParams,
     pub model_server_address: NetworkParams,
     pub trajectory_server_address: NetworkParams,
-    pub scaling_server_address: NetworkParams,
+    pub training_scaling_server_address: NetworkParams,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TransportConfigParams {
+    pub inference_addresses: TransportInferenceAddresses,
+    pub training_addresses: TransportTrainingAddresses,
     pub max_traj_length: u128,
     pub local_model_module: LocalModelModuleParams,
 }
 
 impl TransportConfigParams {
     pub fn get_inference_server_address(&self) -> &NetworkParams {
-        &self.inference_server_address
+        &self.inference_addresses.inference_server_address
     }
 
     pub fn get_agent_listener_address(&self) -> &NetworkParams {
-        &self.agent_listener_address
+        &self.training_addresses.agent_listener_address
     }
 
     pub fn get_model_server_address(&self) -> &NetworkParams {
-        &self.model_server_address
+        &self.training_addresses.model_server_address
     }
 
     pub fn get_trajectory_server_address(&self) -> &NetworkParams {
-        &self.trajectory_server_address
+        &self.training_addresses.trajectory_server_address
     }
 
-    pub fn get_scaling_server_address(&self) -> &NetworkParams {
-        &self.scaling_server_address
+    pub fn get_inference_scaling_server_address(&self) -> &NetworkParams {
+        &self.inference_addresses.inference_scaling_server_address
+    }
+
+    pub fn get_training_scaling_server_address(&self) -> &NetworkParams {
+        &self.training_addresses.training_scaling_server_address
     }
 }
 
 pub trait TransportConfigBuildParams {
-    fn set_inference_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
-    fn set_agent_listener_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
-    fn set_model_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
-    fn set_trajectory_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
-    fn set_scaling_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self;
+    fn set_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_model_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self;
     fn set_local_model_module(&mut self, directory_name: &str, model_name: &str) -> &mut Self;
     fn build(&self) -> TransportConfigParams;
@@ -1538,7 +1609,8 @@ pub struct TransportConfigBuilder {
     agent_listener_address: Option<NetworkParams>,
     model_server_address: Option<NetworkParams>,
     trajectory_server_address: Option<NetworkParams>,
-    scaling_server_address: Option<NetworkParams>,
+    inference_scaling_server_address: Option<NetworkParams>,
+    training_scaling_server_address: Option<NetworkParams>,
     max_traj_length: Option<u128>,
     local_model_module: Option<LocalModelModuleParams>,
 }
@@ -1551,45 +1623,48 @@ pub struct LocalModelModuleParams {
 }
 
 impl TransportConfigBuildParams for TransportConfigBuilder {
-    fn set_inference_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
+    fn set_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self {
         self.inference_server_address = Some(NetworkParams {
-            prefix: prefix.to_string(),
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_agent_listener_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
+    fn set_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self {
         self.agent_listener_address = Some(NetworkParams {
-            prefix: prefix.to_string(),
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_model_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
+    fn set_model_server_address(&mut self, host: &str, port: &str) -> &mut Self {
         self.model_server_address = Some(NetworkParams {
-            prefix: prefix.to_string(),
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_trajectory_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
+    fn set_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self {
         self.trajectory_server_address = Some(NetworkParams {
-            prefix: prefix.to_string(),
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_scaling_server_address(&mut self, prefix: &str, host: &str, port: &str) -> &mut Self {
-        self.scaling_server_address = Some(NetworkParams {
-            prefix: prefix.to_string(),
+    fn set_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.inference_scaling_server_address = Some(NetworkParams {
+            host: host.to_string(),
+            port: port.to_string(),
+        });
+        self
+    }
+
+    fn set_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.training_scaling_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
@@ -1614,7 +1689,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         let inference_server_address: NetworkParams = match &self.inference_server_address {
             Some(address) => address.clone(),
             None => NetworkParams {
-                prefix: "tcp://".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: "50050".to_string(),
             },
@@ -1622,7 +1696,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         let agent_listener_address: NetworkParams = match &self.agent_listener_address {
             Some(address) => address.clone(),
             None => NetworkParams {
-                prefix: "tcp://".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: "7778".to_string(),
             },
@@ -1631,7 +1704,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         let model_server_address: NetworkParams = match &self.model_server_address {
             Some(address) => address.clone(),
             None => NetworkParams {
-                prefix: "tcp://".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: "50051".to_string(),
             },
@@ -1640,20 +1712,28 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         let trajectory_server_address: NetworkParams = match &self.trajectory_server_address {
             Some(address) => address.clone(),
             None => NetworkParams {
-                prefix: "tcp://".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: "7776".to_string(),
             },
         };
 
-        let scaling_server_address: NetworkParams = match &self.scaling_server_address {
-            Some(address) => address.clone(),
-            None => NetworkParams {
-                prefix: "tcp://".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: "7777".to_string(),
-            },
-        };
+        let inference_scaling_server_address: NetworkParams =
+            match &self.inference_scaling_server_address {
+                Some(address) => address.clone(),
+                None => NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "7777".to_string(),
+                },
+            };
+
+        let training_scaling_server_address: NetworkParams =
+            match &self.training_scaling_server_address {
+                Some(address) => address.clone(),
+                None => NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "7778".to_string(),
+                },
+            };
 
         let max_traj_length: u128 = match &self.max_traj_length {
             Some(length) => *length,
@@ -1670,11 +1750,16 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         };
 
         TransportConfigParams {
-            inference_server_address,
-            agent_listener_address,
-            model_server_address,
-            trajectory_server_address,
-            scaling_server_address,
+            inference_addresses: TransportInferenceAddresses {
+                inference_server_address,
+                inference_scaling_server_address,
+            },
+            training_addresses: TransportTrainingAddresses {
+                agent_listener_address,
+                model_server_address,
+                trajectory_server_address,
+                training_scaling_server_address,
+            },
             max_traj_length,
             local_model_module,
         }
@@ -1682,30 +1767,33 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
 
     fn build_default() -> TransportConfigParams {
         TransportConfigParams {
-            inference_server_address: NetworkParams {
-                prefix: "tcp://".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: "50050".to_string(),
+            inference_addresses: TransportInferenceAddresses {
+                inference_server_address: NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "50050".to_string(),
+                },
+                inference_scaling_server_address: NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "7777".to_string(),
+                },
             },
-            agent_listener_address: NetworkParams {
-                prefix: "tcp://".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: "7778".to_string(),
-            },
-            model_server_address: NetworkParams {
-                prefix: "tcp://".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: "50051".to_string(),
-            },
-            trajectory_server_address: NetworkParams {
-                prefix: "tcp://".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: "7776".to_string(),
-            },
-            scaling_server_address: NetworkParams {
-                prefix: "tcp://".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: "7777".to_string(),
+            training_addresses: TransportTrainingAddresses {
+                agent_listener_address: NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "7779".to_string(),
+                },
+                model_server_address: NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "50051".to_string(),
+                },
+                trajectory_server_address: NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "7776".to_string(),
+                },
+                training_scaling_server_address: NetworkParams {
+                    host: "127.0.0.1".to_string(),
+                    port: "7778".to_string(),
+                },
             },
             max_traj_length: 1000,
             local_model_module: LocalModelModuleParams {
@@ -1716,3 +1804,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {}
