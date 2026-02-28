@@ -203,8 +203,8 @@ pub mod prelude {
 
     pub mod config {
         pub use crate::utilities::configuration::{
-            ClientConfigBuilder, ClientConfigLoader, ClientConfigParams, ServerConfigBuilder,
-            ServerConfigLoader, ServerConfigParams, TransportConfigBuilder, TransportConfigParams,
+            ClientConfigBuilder, ClientConfigLoader, ClientConfigParams, TrainingServerConfigBuilder,
+            TrainingServerConfigLoader, TrainingServerConfigParams, TransportConfigBuilder, TransportConfigParams,
         };
         pub use relayrl_types::HyperparameterArgs;
         pub mod network_codec {
