@@ -60,39 +60,37 @@
 
         },
         "trajectory_file_output": {
-            "enabled": true,
-            "encode": true,
-            "directory": "experiment_data"
+            "directory": "experiment_data",
+            "file_type": "json"
         }
     },
     "transport_config": {
-        "addresses": {
-            "_comment": "gRPC uses only this address (prefix is unused).",
+        "inference_addresses": {
+            "inference_server": {
+                "host": "127.0.0.1",
+                "port": "7800"
+            },
+            "inference_scaling_server": {
+                "host": "127.0.0.1",
+                "port": "7801"
+            }
+        },
+        "training_addresses": {
             "model_server": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "50051"
             },
             "trajectory_server": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7776"
             },
             "agent_listener": {
-                "prefix": "tcp://",
                 "host": "127.0.0.1",
                 "port": "7777"
             },
-            "scaling_server": {
-                "prefix": "tcp://",
+            "training_scaling_server": {
                 "host": "127.0.0.1",
                 "port": "7778"
-            },
-            "_comment2": "Only used when client-side inference is disabled or when client-side inference is used as fallback.",
-            "inference_server": {
-                "prefix": "tcp://",
-                "host": "127.0.0.1",
-                "port": "7779"
             }
         },
         "local_model_module": {
