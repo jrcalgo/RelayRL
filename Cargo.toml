@@ -10,7 +10,7 @@ resolver = "2"
 
 [workspace.dependencies]
 relayrl_framework = { version = "0.5.0-alpha.1", path = "crates/relayrl_framework"}
-relayrl_types = { version = "0.4.1", path = "crates/relayrl_types"}
+relayrl_types = { version = "0.5.2", path = "crates/relayrl_types"}
 relayrl_algorithms = { version = "0.1.0", path = "crates/relayrl_algorithms"}
 
 burn-tensor = "0.20.0"
@@ -18,14 +18,22 @@ burn-ndarray = "0.20.0"
 burn-tch = "0.20.0"
 
 tokio = "1.49.0"
+
 serde = "1.0.228"
+serde_json = "1.0.149"
 
 dashmap = "6.1.0"
 
 ndarray = "0.17.2"
 
 thiserror = "2.0.18"
-async_trait = "0.1.89"
+async-trait = "0.1.89"
+
+arrow = "57.1.0"
+arrow-schema = "57.1.0"
+arrow-array = "57.1.0"
+
+csv = "1.4.0"
 
 [profile.dev]
 opt-level = 0
