@@ -1,14 +1,16 @@
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::HyperparameterArgs;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::{ClientCapabilities, ClientModes};
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
+use crate::network::client::agent::{
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::network::client::runtime::coordination::scale_manager::{
     ScaleManager, ScaleManagerError,
@@ -17,20 +19,19 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport_sink::zmq::policies::ZmqPolicyConfig;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::{
-    TransportClient, TransportError, client_transport_factory,
+    ClientTransportInterface, TransportError, client_transport_factory,
 };
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+use crate::prelude::config::TransportConfigParams;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 #[cfg(feature = "logging")]
@@ -43,18 +44,21 @@ use thiserror::Error;
 use burn_tensor::backend::Backend;
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{clear_all, remove, reserve_with};
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use active_uuid_registry::interface::{get, get_all};
+use active_uuid_registry::interface::{
+    clear_namespace, remove_id, remove_namespace, reserve_id_with, reserve_namespace,
+};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use active_uuid_registry::interface::{get_namespace_pairs, get_pairs};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use relayrl_types::data::action::CodecConfig;
+use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
+use relayrl_types::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use relayrl_types::types::data::action::CodecConfig;
-use relayrl_types::types::data::action::RelayRLAction;
-use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
-use relayrl_types::types::model::ModelModule;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio::sync::RwLock;
@@ -105,7 +109,7 @@ impl From<String> for ClientConfigError {
 pub enum CoordinatorError {
     #[error("Client modes are invalid: {0}")]
     InvalidClientModesError(String),
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
     #[error(transparent)]
@@ -135,44 +139,44 @@ pub trait ClientInterface<
 >
 {
     fn new(
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         transport_type: TransportType,
         client_modes: ClientModes,
-    ) -> Result<Self, CoordinatorError>
+    ) -> Self
     where
         Self: Sized;
     async fn _start(
         &mut self,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
             ModelModule<B>,
         >,
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError>;
     async fn _shutdown(&mut self) -> Result<(), CoordinatorError>;
     async fn _restart(
         &mut self,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
             ModelModule<B>,
         >,
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError>;
@@ -180,7 +184,7 @@ pub trait ClientInterface<
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] send_id: bool,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_id: bool,
     ) -> Result<(), CoordinatorError>;
     async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError>;
     async fn _set_actor_id(
@@ -215,6 +219,7 @@ pub struct CoordinatorParams<
     const D_IN: usize,
     const D_OUT: usize,
 > {
+    pub(crate) client_namespace: Arc<str>,
     #[cfg(feature = "logging")]
     pub(crate) logger: LoggingBuilder,
     #[cfg(feature = "metrics")]
@@ -229,17 +234,16 @@ pub struct ClientCoordinator<
     const D_IN: usize,
     const D_OUT: usize,
 > {
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_type: TransportType,
     client_modes: Arc<ClientModes>,
-    client_capabilities: Arc<ClientCapabilities>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ClientCoordinator<B, D_IN, D_OUT>
 {
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn _send_client_ids_to_server(
         &self,
         client_ids: Vec<(String, Uuid)>,
@@ -252,6 +256,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .map_err(CoordinatorError::from),
             None => Err(CoordinatorError::NoRuntimeInstanceError),
         }?;
+
         Ok(())
     }
 }
@@ -260,42 +265,47 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
 {
     fn new(
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         transport_type: TransportType,
         client_modes: ClientModes,
-    ) -> Result<Self, CoordinatorError> {
-        let client_capabilities = client_modes
-            .capabilities()
-            .map_err(|e| CoordinatorError::InvalidClientModesError(e.to_string()))?;
-
-        Ok(Self {
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    ) -> Self {
+        Self {
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_type,
             client_modes: Arc::new(client_modes),
-            client_capabilities: Arc::new(client_capabilities),
             runtime_params: None,
-        })
+        }
     }
 
     async fn _start(
         &mut self,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
             ModelModule<B>,
         >,
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError> {
+        let client_namespace: Arc<str> = Arc::from(format!("client-{}", uuid::Uuid::new_v4()));
+
+        clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
+        reserve_namespace(client_namespace.as_ref());
+
         #[cfg(feature = "logging")]
         let logger = LoggingBuilder::new();
+
+        #[cfg(feature = "metrics")]
+        let metrics: MetricsManager = observability::init_observability();
+
+        let shared_client_modes: Arc<ClientModes> = self.client_modes.clone();
 
         let config_path: PathBuf = match config_path {
             Some(path) => path,
@@ -308,100 +318,268 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             },
         };
 
-        let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
+        let mut config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             algorithm_args.to_owned(),
-            config_loader.to_owned(),
+            &config_loader,
             config_path,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             self.transport_type,
         );
+
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        /// if args are set in client mode init config, set lifecycle manager server addresses while keeping unchanged config values
+        {
+            let inference_address_args = if let ActorInferenceMode::Server(server_params) =
+                &shared_client_modes.actor_inference_mode
+            {
+                server_params.inference_addresses.clone()
+            } else {
+                None
+            };
+
+            let training_address_args = match &shared_client_modes.actor_training_data_mode {
+                ActorTrainingDataMode::Online(server_params) => {
+                    server_params.training_addresses.clone()
+                }
+                ActorTrainingDataMode::Hybrid(server_params, _) => {
+                    server_params.training_addresses.clone()
+                }
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::Offline(_) => None,
+            };
+
+            if inference_address_args.is_some() || training_address_args.is_some() {
+                let transport_params_for_packing: &mut TransportConfigParams =
+                    &mut config_loader.transport_config;
+
+                if let Some(inference_addresses) = inference_address_args {
+                    if let Some(inference_server_address) =
+                        inference_addresses.inference_server_address
+                    {
+                        transport_params_for_packing
+                            .inference_addresses
+                            .inference_server_address = inference_server_address;
+                    }
+                    if let Some(inference_scaling_server_address) =
+                        inference_addresses.inference_scaling_server_address
+                    {
+                        transport_params_for_packing
+                            .inference_addresses
+                            .inference_scaling_server_address = inference_scaling_server_address;
+                    }
+                }
+
+                if let Some(training_addresses) = training_address_args {
+                    if let Some(agent_listener_address) = training_addresses.agent_listener_address
+                    {
+                        transport_params_for_packing
+                            .training_addresses
+                            .agent_listener_address = agent_listener_address;
+                    }
+                    if let Some(model_server_address) = training_addresses.model_server_address {
+                        transport_params_for_packing
+                            .training_addresses
+                            .model_server_address = model_server_address;
+                    }
+                    if let Some(trajectory_server_address) =
+                        training_addresses.trajectory_server_address
+                    {
+                        transport_params_for_packing
+                            .training_addresses
+                            .trajectory_server_address = trajectory_server_address;
+                    }
+                    if let Some(training_scaling_server_address) =
+                        training_addresses.training_scaling_server_address
+                    {
+                        transport_params_for_packing
+                            .training_addresses
+                            .training_scaling_server_address = training_scaling_server_address;
+                    }
+                }
+
+                lifecycle
+                    .set_transport_addresses(&transport_params_for_packing, &self.transport_type)
+                    .await?;
+            }
+        }
+
+        {
+            /// if args are set in client mode init config, set lifecycle manager trajectory file path
+            let local_trajectory_file_params = match &shared_client_modes.actor_training_data_mode {
+                ActorTrainingDataMode::Offline(file_params) => match file_params {
+                    Some(params) => Some(params),
+                    None => None,
+                },
+                ActorTrainingDataMode::Hybrid(_, file_params) => match file_params {
+                    Some(params) => Some(params),
+                    None => None,
+                },
+                _ => None,
+            };
+
+            if let Some(file_params) = local_trajectory_file_params {
+                lifecycle.set_trajectory_file_path(&file_params).await?;
+            }
+        }
+
         lifecycle.spawn_loop();
 
-        let shared_client_modes = self.client_modes.clone();
-        let shared_client_capabilities = self.client_capabilities.clone();
-        let shared_max_traj_length = lifecycle.get_max_traj_length();
-
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let shared_state_server_addresses: Arc<RwLock<ServerAddresses>> =
-            lifecycle.get_server_addresses();
-        let shared_local_model_path: Arc<RwLock<PathBuf>> = lifecycle.get_local_model_path();
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let state_default_model = default_model.clone();
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-        let state_default_model: Option<ModelModule<B>> = Some(default_model.clone());
-
-        let (state, global_dispatcher_rx) = StateManager::new(
-            shared_client_capabilities.clone(),
-            shared_max_traj_length,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            shared_state_server_addresses,
-            shared_local_model_path,
-            state_default_model,
-        );
-
-        let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> = Arc::from(RwLock::new(state));
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let shared_scaling_server_addresses: Arc<RwLock<ServerAddresses>> =
-            lifecycle.get_server_addresses();
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let shared_algorithm_args: Arc<AlgorithmArgs> = lifecycle.get_algorithm_args();
-
-        // Create transport and wrap in Arc for sharing across dispatchers
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let transport: TransportClient<B> = client_transport_factory(self.transport_type, shared_client_capabilities.clone())
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        let (inference_dispatcher, scaling_dispatcher, training_dispatcher) = {
+            // Create transport and wrap in Arc for sharing across dispatchers
+            let transport: ClientTransportInterface<B> = client_transport_factory(
+                self.transport_type,
+                client_namespace.clone(),
+                shared_client_modes.clone(),
+            )
             .map_err(|e| CoordinatorError::TransportError(e))?;
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let shared_transport: Arc<TransportClient<B>> = Arc::new(transport);
 
-        // Create dispatchers
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let inference_dispatcher = Arc::new(InferenceDispatcher::new(shared_transport.clone()));
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let scaling_dispatcher = Arc::new(ScalingDispatcher::new(shared_transport.clone()));
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let training_dispatcher = Arc::new(TrainingDispatcher::new(shared_transport.clone()));
+            let shared_transport: Arc<ClientTransportInterface<B>> = Arc::new(transport);
 
-        let mut scaling = ScaleManager::new(
-            shared_client_modes,
-            shared_client_capabilities,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            shared_algorithm_args,
-            shared_state.clone(),
-            global_dispatcher_rx,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            shared_transport,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            scaling_dispatcher,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            training_dispatcher,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            shared_scaling_server_addresses,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            codec,
-            lifecycle.clone(),
-        )
-        .map_err(|e| CoordinatorError::ScaleManagerError(e))?;
+            let (inference_dispatcher, mut scaling_dispatcher) =
+                match shared_client_modes.actor_inference_mode {
+                    ActorInferenceMode::Server(_) => (
+                        Some(Arc::new(InferenceDispatcher::<B>::new(
+                            shared_transport.clone(),
+                        ))),
+                        Some(Arc::new(ScalingDispatcher::<B>::new(
+                            shared_transport.clone(),
+                        ))),
+                    ),
+                    ActorInferenceMode::Local(_) => (None, None),
+                };
 
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        if let Err(e) = scaling.__scale_out(router_scale, false).await {
+            let training_dispatcher = match shared_client_modes.actor_training_data_mode {
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::Offline(_) => None,
+                _ => {
+                    scaling_dispatcher = Some(Arc::new(ScalingDispatcher::<B>::new(
+                        shared_transport.clone(),
+                    )));
+                    Some(Arc::new(TrainingDispatcher::<B>::new(
+                        shared_transport.clone(),
+                    )))
+                }
+            };
+
+            (
+                inference_dispatcher,
+                scaling_dispatcher,
+                training_dispatcher,
+            )
+        };
+
+        {
+            let shared_max_traj_length = lifecycle.get_max_traj_length();
+
+            let shared_transport_addresses = if let ActorInferenceMode::Server(_) =
+                shared_client_modes.actor_inference_mode
+            {
+                Some(lifecycle.get_transport_addresses())
+            } else if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+                shared_client_modes.actor_training_data_mode
+            {
+                Some(lifecycle.get_transport_addresses())
+            } else {
+                None
+            };
+
+            let (state, global_dispatcher_rx) = {
+                let shared_local_model_path = lifecycle.get_local_model_path();
+
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                let state_default_model = default_model.clone();
+                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+                let state_default_model: Option<ModelModule<B>> = Some(default_model.clone());
+
+                StateManager::new(
+                    client_namespace.clone(),
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    inference_dispatcher.clone(),
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    training_dispatcher.clone(),
+                    shared_client_modes.clone(),
+                    shared_max_traj_length,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    shared_transport_addresses.clone(),
+                    shared_local_model_path,
+                    state_default_model,
+                )
+            };
+
+            let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
+                Arc::from(RwLock::new(state));
+
+            let mut scaling = {
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                let shared_algorithm_args = lifecycle.get_algorithm_args();
+
+                ScaleManager::new(
+                    client_namespace.clone(),
+                    shared_client_modes,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    shared_algorithm_args,
+                    shared_state.clone(),
+                    global_dispatcher_rx,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    scaling_dispatcher,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    training_dispatcher,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    shared_transport_addresses.clone(),
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    codec,
+                    lifecycle.clone(),
+                )
+                .map_err(|e| CoordinatorError::ScaleManagerError(e))?
+            };
+
+            self.runtime_params = Some(CoordinatorParams {
+                client_namespace,
+                #[cfg(feature = "logging")]
+                logger,
+                #[cfg(feature = "metrics")]
+                metrics,
+                lifecycle,
+                shared_state,
+                scaling,
+            });
+        }
+
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        if let Err(e) = self
+            .runtime_params
+            .as_mut()
+            .unwrap()
+            .scaling
+            .__scale_out(router_scale, false)
+            .await
+        {
+            // unwrap is safe because runtime params are set in the previous block
             return Err(CoordinatorError::ScaleManagerError(e));
         }
 
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-        if let Err(e) = scaling.__scale_out(router_scale).await {
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+        if let Err(e) = self
+            .runtime_params
+            .as_ref()
+            .unwrap()
+            .scaling
+            .__scale_out(router_scale)
+            .await
+        {
+            // unwrap is safe because runtime params are set in the previous block
             return Err(CoordinatorError::ScaleManagerError(e));
         }
 
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let actor_default_model: Option<ModelModule<B>> = default_model.clone();
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         let actor_default_model: Option<ModelModule<B>> = Some(default_model.clone());
         if actor_count > 0 {
             for _ in 1..=actor_count {
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 Self::_new_actor(
                     self,
                     default_device.clone(),
@@ -409,7 +587,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     false,
                 )
                 .await?;
-                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                 Self::_new_actor(self, default_device.clone(), actor_default_model.clone()).await?;
             }
         } else {
@@ -420,40 +598,39 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ));
         }
 
-        #[cfg(feature = "metrics")]
-        let metrics: MetricsManager = observability::init_observability();
-
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let client_ids: Vec<(String, Uuid)> = {
-            let all_pairs: Vec<(String, Uuid)> =
-                get_all().map_err(|e| CoordinatorError::UuidPoolError(e))?;
+            let all_pairs: Vec<(String, Uuid)> = get_namespace_pairs(
+                self.runtime_params
+                    .as_ref()
+                    .unwrap()
+                    .client_namespace
+                    .as_ref(),
+            )
+            .map_err(|e| CoordinatorError::UuidPoolError(e))?;
             all_pairs
                 .iter()
                 .filter_map(|(name, id)| match name.as_str() {
                     "actor" => Some((name.to_string(), id.clone())),
                     "scale_manager" => Some((name.to_string(), id.clone())),
                     "trajectory_buffer" => Some((name.to_string(), id.clone())),
-                    #[cfg(feature = "zmq_transport")]
+                    #[cfg(feature = "zmq-transport")]
                     "zmq_transport_client" => Some((name.to_string(), id.clone())),
-                    #[cfg(feature = "nats_transport")]
+                    #[cfg(feature = "nats-transport")]
                     "nats_transport_client" => Some((name.to_string(), id.clone())),
                     _ => None,
                 })
                 .collect::<Vec<(String, Uuid)>>()
         };
 
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        scaling._send_client_ids_to_server(client_ids).await?;
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        self.runtime_params
+            .as_ref()
+            .unwrap()
+            .scaling
+            ._send_client_ids_to_server(client_ids)
+            .await?; // unwrap is safe because runtime params are set in the previous block
 
-        self.runtime_params = Some(CoordinatorParams {
-            #[cfg(feature = "logging")]
-            logger,
-            #[cfg(feature = "metrics")]
-            metrics,
-            lifecycle,
-            shared_state,
-            scaling,
-        });
         Ok(())
     }
 
@@ -468,32 +645,32 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .__shutdown_all_actors()
                     .await?;
 
+                // inform server(s) that the client is being shutdown and to remove all actor-related data from server runtime
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                params.scaling._send_shutdown_signal_to_server().await?;
+
+                // shutdown transport client components (sockets, etc.)
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                match &params.scaling.scaling_dispatcher {
+                    Some(dispatcher) => {
+                        dispatcher
+                            .shutdown_transport(params.lifecycle.get_transport_addresses())
+                            .await?
+                    }
+                    None => (),
+                }
+
                 // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (router receivers, router senders, central filters)
                 // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes)
                 if let Err(e) = params.lifecycle._shutdown() {
                     return Err(CoordinatorError::LifeCycleManagerError(e));
                 }
 
-                // shutdown transport client components (sockets, etc.)
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                match &*params.scaling.transport {
-                    #[cfg(feature = "async_transport")]
-                    TransportClient::Async(async_tr) => async_tr.shutdown(params.lifecycle.get_server_addresses()).await?,
-                    #[cfg(feature = "sync_transport")]
-                    TransportClient::Sync(sync_tr) => sync_tr
-                        .shutdown(params.lifecycle.get_server_addresses())
-                        .map_err(|e| CoordinatorError::TransportError(e))?,
-                }
-
                 // joins router dispatcher and scales down all routers, pretty redundant but just in case
                 params.scaling.clear_runtime_components().await?;
 
-                // inform server that the client is being shutdown and to remove all actor-related data from server runtime
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                params.scaling._send_shutdown_signal_to_server().await?;
-
-                // drain the UUID pool to ensure all UUIDs are removed from the pool
-                clear_all().map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                // drain the UUID pool to ensure all UUIDs are removed from the pool for the client namespace
+                remove_namespace(params.client_namespace.as_ref());
 
                 params
                     .shared_state
@@ -516,31 +693,31 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn _restart(
         &mut self,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
             ModelModule<B>,
         >,
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError> {
         self._shutdown().await?;
         self._start(
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             algorithm_args,
             actor_count,
             router_scale,
             default_device,
             default_model,
             config_path,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec,
         )
         .await?;
@@ -551,12 +728,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] send_id: bool,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_id: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                let actor_id: Uuid = reserve_with("actor", 117, 100)
-                    .map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                let actor_id: Uuid =
+                    reserve_id_with(params.client_namespace.as_ref(), "actor", 117, 100)
+                        .map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
                 #[cfg(feature = "metrics")]
                 params.metrics.record_counter("actors_created", 1, &[]);
@@ -608,13 +786,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         router_id,
                         device,
                         default_model,
-                        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                        params.scaling.transport.clone(),
                         trajectory_buffer_tx,
                     )
                     .await?;
 
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if send_id {
                     params
                         .scaling
@@ -643,7 +819,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .__remove_actor(id)
                     .map_err(CoordinatorError::from)?;
-                remove("actor", id).map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                remove_id(params.client_namespace.as_ref(), "actor", id)
+                    .map_err(|e| CoordinatorError::UuidPoolError(e))?;
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
@@ -666,9 +843,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     current_id,
                     new_id,
                 )?;
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                let actor_ids = get("actor").map_err(CoordinatorError::from)?;
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                let actor_ids = get_pairs(params.client_namespace.as_ref(), "actor")
+                    .map_err(CoordinatorError::from)?;
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 params.scaling._send_client_ids_to_server(actor_ids).await?;
 
                 Ok(())
@@ -883,13 +1061,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 return params
                     .scaling
                     .__scale_out(router_add, true)
                     .await
                     .map_err(CoordinatorError::ScaleManagerError);
-                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                 return params
                     .scaling
                     .__scale_out(router_add)
@@ -907,9 +1085,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn _scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 params.scaling.__scale_in(router_remove, true).await?;
-                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                 params.scaling.__scale_in(router_remove).await?;
                 Ok(())
             }
@@ -948,3 +1126,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 }
+
+#[cfg(test)]
+mod tests {}
