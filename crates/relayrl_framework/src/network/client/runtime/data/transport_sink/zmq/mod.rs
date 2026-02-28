@@ -2,9 +2,12 @@ pub(crate) mod interface;
 pub(super) mod ops;
 pub(super) mod policies;
 
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
+use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::TransportError;
+use crate::network::client::runtime::data::transport_sink::zmq::ops::ZmqPoolError;
+use crate::network::client::runtime::router::RoutedMessage;
+use crate::network::client::agent::ModelMode;
 use crate::utilities::configuration::Algorithm;
 
 use relayrl_types::HyperparameterArgs;
@@ -19,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 #[derive(Debug, Error, Clone)]
@@ -37,6 +41,8 @@ pub enum ZmqClientError {
     InvalidState(String),
     #[error("Task join error: {0}")]
     JoinError(String),
+    #[error(transparent)]
+    ZmqPoolError(#[from] ZmqPoolError),
 }
 
 pub(super) trait ZmqInferenceExecution {
@@ -55,7 +61,7 @@ pub(super) trait ZmqInferenceExecution {
     fn execute_send_client_ids(
         &self,
         scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
+        client_ids: &[(String, Uuid)],
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_warning(
@@ -78,9 +84,16 @@ pub(super) trait ZmqInferenceExecution {
 }
 
 pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> {
+    fn execute_listen_for_model(
+        &self,
+        receiver_id: &Uuid,
+        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_server_address: &str,
+    ) -> Result<(), TransportError>;
     fn execute_send_algorithm_init_request(
         &self,
         scaling_id: &Uuid,
+        model_mode: ModelMode,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
         agent_listener_address: &str,
@@ -120,3 +133,6 @@ pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> 
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
 }
+
+#[cfg(test)]
+mod tests {}
