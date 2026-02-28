@@ -23,22 +23,26 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["client", "sync_transport"]
+default = ["client", "zmq-transport"]
 
 tch-backend = ["relayrl_types/tch-backend", "relayrl_types/tch-model"]
 
-full_network = ["client", "training_server", "inference_server"]
-training_network = ["client", "training_server"]
-inference_network = ["client", "inference_server"]
-client = []
-inference_server = ["transport_layer"]
-training_server = ["transport_layer"]
+full-zmq-network = ["client", "zmq-training-server", "zmq-inference-server"]
+zmq-training-network = ["client", "zmq-training-server"]
+zmq-inference-network = ["client", "zmq-inference-server"]
 
-transport_layer = ["async_transport", "sync_transport"]
-async_transport = ["nats_transport"]
-sync_transport = ["zmq_transport"]
-zmq_transport = ["zmq"]
-nats_transport = ["async-nats"]
+full-nats-network = ["client", "nats-training-server", "nats-inference-server"]
+nats-training-network = ["client", "nats-training-server"]
+nats-inference-network = ["client", "nats-inference-server"]
+
+client = []
+zmq-training-server = ["zmq-transport"]
+zmq-inference-server = ["zmq-transport"]
+nats-training-server = ["nats-transport"]
+nats-inference-server = ["nats-transport"]
+
+zmq-transport = ["zmq"]
+nats-transport = ["async-nats"]
 
 logging = ["log4rs"]
 metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]
@@ -47,7 +51,8 @@ profile = ["flamegraph", "console-subscriber"]
 [dependencies]
 # Crates built/maintained by me
 relayrl_types = { workspace = true, features = ["ndarray-backend", "codec-full", "onnx-model"] }
-active-uuid-registry = { version = "0.3.0", features = ["concurrent-map"]}
+# relayrl_algorithms = { workspace = true }
+active-uuid-registry = { version = "0.6.1", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
 tokio = { workspace = true, features = ["full"] }
@@ -62,7 +67,6 @@ burn-tensor = { workspace = true }
 once_cell = "1.19.0"
 tempfile = "3.9.0"
 serde_json = "1.0.111"
-serde-pickle = "1.1.1"
 bytemuck = "1.14.1"
 bincode = "2.0.1"
 # TODO: Add Redis support for training data storagen & querying
