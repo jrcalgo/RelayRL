@@ -89,7 +89,7 @@
 //!
 //! ```rust,no_run
 //! use relayrl_framework::prelude::network::*;
-//! use relayrl_types::types::data::tensor::DeviceType;
+//! use relayrl_types::data::tensor::DeviceType;
 //! use burn_ndarray::NdArray;
 //! use burn_tensor::{Tensor, Float};
 //! use std::path::PathBuf;
@@ -208,12 +208,12 @@ pub mod prelude {
         };
         pub use relayrl_types::HyperparameterArgs;
         pub mod network_codec {
-            pub use relayrl_types::types::data::utilities::chunking::*;
-            pub use relayrl_types::types::data::utilities::compress::*;
-            pub use relayrl_types::types::data::utilities::encrypt::*;
-            pub use relayrl_types::types::data::utilities::integrity::*;
-            pub use relayrl_types::types::data::utilities::metadata::*;
-            pub use relayrl_types::types::data::utilities::quantize::*;
+            pub use relayrl_types::data::utilities::chunking::*;
+            pub use relayrl_types::data::utilities::compress::*;
+            pub use relayrl_types::data::utilities::encrypt::*;
+            pub use relayrl_types::data::utilities::integrity::*;
+            pub use relayrl_types::data::utilities::metadata::*;
+            pub use relayrl_types::data::utilities::quantize::*;
         }
     }
 
