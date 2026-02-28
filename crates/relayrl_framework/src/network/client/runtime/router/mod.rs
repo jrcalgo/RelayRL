@@ -1,5 +1,5 @@
-use relayrl_types::types::data::action::RelayRLAction;
-use relayrl_types::types::data::trajectory::RelayRLTrajectory;
+use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 
 use crate::network::client::runtime::router::buffer::TrajectorySinkError;
 use crate::network::client::runtime::router::filter::FilterError;

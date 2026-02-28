@@ -3,7 +3,7 @@ use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 
 use burn_tensor::backend::Backend;
-use relayrl_types::types::data::tensor::BackendMatcher;
+use relayrl_types::data::tensor::BackendMatcher;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
@@ -120,3 +120,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 }
+
+#[cfg(test)]
+mod tests {}
