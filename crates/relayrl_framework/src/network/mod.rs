@@ -31,20 +31,24 @@ pub mod client;
 pub mod server;
 
 /// Extend for future utility with other transport protocols (extend transport.rs accordingly)
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Clone, Copy, Debug)]
 pub enum TransportType {
-    #[cfg(feature = "zmq_transport")]
+    #[cfg(feature = "zmq-transport")]
     ZMQ,
-    #[cfg(feature = "nats_transport")]
+    #[cfg(feature = "nats-transport")]
     NATS,
 }
 
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 impl Default for TransportType {
     fn default() -> Self {
-        #[cfg(feature = "zmq_transport")]
-        TransportType::ZMQ
+        #[cfg(all(feature = "zmq-transport", not(feature = "nats-transport")))]
+        return TransportType::ZMQ;
+        #[cfg(all(not(feature = "zmq-transport"), feature = "nats-transport"))]
+        return TransportType::NATS;
+        #[cfg(all(feature = "zmq-transport", feature = "nats-transport"))]
+        return TransportType::NATS;
     }
 }
 
