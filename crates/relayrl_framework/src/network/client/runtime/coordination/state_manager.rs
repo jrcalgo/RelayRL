@@ -1,14 +1,17 @@
-use crate::network::client::agent::ClientCapabilities;
+use crate::network::client::agent::ClientModes;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
 use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::data::transport_sink::TransportClient;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+    InferenceDispatcher, TrainingDispatcher,
+};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::ClientConfigLoader;
 
@@ -16,9 +19,9 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{remove, replace};
-use relayrl_types::types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
-use relayrl_types::types::model::{HotReloadableModel, ModelModule};
+use active_uuid_registry::interface::{remove_id, replace_id};
+use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
+use relayrl_types::model::{HotReloadableModel, ModelModule};
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -70,10 +73,15 @@ pub(crate) struct StateManager<
     const D_IN: usize,
     const D_OUT: usize,
 > {
-    shared_client_capabilities: Arc<ClientCapabilities>,
+    client_namespace: Arc<str>,
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
+    shared_client_modes: Arc<ClientModes>,
     shared_max_traj_length: Arc<RwLock<u128>>,
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    shared_server_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     default_model: Option<ModelModule<B>>,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
@@ -86,10 +94,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     StateManager<B, D_IN, D_OUT>
 {
     pub(crate) fn new(
-        shared_client_capabilities: Arc<ClientCapabilities>,
+        client_namespace: Arc<str>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
+        shared_client_modes: Arc<ClientModes>,
         shared_max_traj_length: Arc<RwLock<u128>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        shared_server_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         default_model: Option<ModelModule<B>>,
     ) -> (Self, Receiver<RoutedMessage>) {
@@ -97,9 +110,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT * 2);
         (
             Self {
-                shared_client_capabilities,
+                client_namespace,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                shared_inference_dispatcher,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                shared_training_dispatcher,
+                shared_client_modes,
                 shared_max_traj_length,
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_server_addresses,
                 shared_local_model_path,
                 default_model,
@@ -183,10 +201,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] shared_transport: Arc<
-            TransportClient<B>,
-        >,
-        tx_to_sender: Sender<RoutedMessage>,
+        tx_to_buffer: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&actor_id) {
             println!(
@@ -206,16 +221,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_inboxes.insert(actor_id, tx_to_actor.clone());
 
         let shared_local_model_path = self.shared_local_model_path.clone();
-
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let shared_server_addresses = self.shared_server_addresses.clone();
-
         let shared_max_traj_length = self.shared_max_traj_length.clone();
-
-        let shared_client_capabilities = self.shared_client_capabilities.clone();
-
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        let shared_transport_clone = shared_transport.clone();
+        let shared_client_modes = self.shared_client_modes.clone();
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        let shared_inference_dispatcher = self.shared_inference_dispatcher.clone();
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        let shared_training_dispatcher = self.shared_training_dispatcher.clone();
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        let shared_server_addresses = self.shared_server_addresses.clone();
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let (mut actor, handshake_flag): (Actor<B, D_IN, D_OUT>, bool) =
@@ -225,17 +238,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     reloadable_model,
                     shared_local_model_path,
                     shared_max_traj_length,
-                    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    shared_inference_dispatcher,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    shared_training_dispatcher,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                     shared_server_addresses,
                     actor_inbox_rx,
-                    tx_to_sender,
-                    shared_client_capabilities,
+                    tx_to_buffer,
+                    shared_client_modes,
                 )
                 .await;
-
-            // Set transport after creation
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            actor.with_transport(shared_transport_clone).await;
 
             if handshake_flag {
                 let model_handshake_ms = RoutedMessage {
@@ -253,6 +266,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         self.actor_handles.insert(actor_id, handle);
         self.actor_router_addresses.insert(actor_id, router_id);
+
         Ok(())
     }
 
@@ -262,22 +276,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         router_id: RouterUuid,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] shared_transport: Arc<
-            TransportClient<B>,
-        >,
-        tx_to_sender: Sender<RoutedMessage>,
+        tx_to_buffer: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         self.__remove_actor(actor_id)?;
-        self.__new_actor(
-            actor_id,
-            router_id,
-            device,
-            default_model,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            shared_transport,
-            tx_to_sender,
-        )
-        .await?;
+        self.__new_actor(actor_id, router_id, device, default_model, tx_to_buffer)
+            .await?;
         Ok(())
     }
 
@@ -301,13 +304,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     "[StateManager] Actor handle not found".to_string(),
                 ),
             );
+
             if let Ok(handle) = handle {
                 handle.abort();
             } else {
                 continue;
             }
-            remove("actor", actor_id).map_err(StateManagerError::from)?;
+
+            remove_id(self.client_namespace.as_ref(), "actor", actor_id)
+                .map_err(StateManagerError::from)?;
         }
+
         Ok(())
     }
 
@@ -325,7 +332,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         self.actor_inboxes.remove(&id);
-        remove("actor", id).map_err(StateManagerError::from)?;
+        remove_id(self.client_namespace.as_ref(), "actor", id).map_err(StateManagerError::from)?;
         Ok(())
     }
 
@@ -369,7 +376,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_inboxes.insert(new_id, current_id_inbox);
         self.actor_inboxes.remove(&current_id);
 
-        replace("actor", current_id, new_id).map_err(StateManagerError::from)?;
+        replace_id(self.client_namespace.as_ref(), "actor", current_id, new_id)
+            .map_err(StateManagerError::from)?;
 
         Ok(())
     }
@@ -419,3 +427,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_inboxes.get(&id).map(|tx| tx.value().clone())
     }
 }
+
+#[cfg(test)]
+mod tests {}
