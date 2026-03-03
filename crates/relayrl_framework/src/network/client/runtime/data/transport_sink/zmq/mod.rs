@@ -2,12 +2,12 @@ pub(crate) mod interface;
 pub(super) mod ops;
 pub(super) mod policies;
 
+use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::zmq::ops::ZmqPoolError;
 use crate::network::client::runtime::router::RoutedMessage;
-use crate::network::client::agent::ModelMode;
 use crate::utilities::configuration::Algorithm;
 
 use relayrl_types::HyperparameterArgs;
@@ -44,41 +44,40 @@ pub enum ZmqClientError {
     #[error(transparent)]
     ZmqPoolError(#[from] ZmqPoolError),
 }
-
 pub(super) trait ZmqInferenceExecution {
     fn execute_send_inference_request(
         &self,
-        actor_id: &Uuid,
+        actor_entry: &(String, String, Uuid),
         obs_bytes: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError>;
     fn execute_send_flag_last_inference(
         &self,
-        actor_id: &Uuid,
+        actor_entry: &(String, String, Uuid),
         reward: f32,
         inference_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
         &self,
-        scaling_id: &Uuid,
-        client_ids: &[(String, Uuid)],
+        scaling_entry: &(String, String, Uuid),
+        client_ids: &[(String, String, Uuid)],
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_warning(
         &self,
-        scaling_id: &Uuid,
+        scaling_entry: &(String, String, Uuid),
         operation: ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
-        scaling_id: &Uuid,
+        scaling_entry: &(String, String, Uuid),
         operation: ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
         &self,
-        scaling_id: &Uuid,
+        scaling_entry: &(String, String, Uuid),
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
 }
@@ -86,13 +85,14 @@ pub(super) trait ZmqInferenceExecution {
 pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> {
     fn execute_listen_for_model(
         &self,
-        receiver_id: &Uuid,
+        receiver_entry: &(String, String, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_algorithm_init_request(
         &self,
-        scaling_id: &Uuid,
+        scaling_entry: &(String, String, Uuid),
+        actor_entries: &[(String, String, Uuid)],
         model_mode: ModelMode,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
@@ -100,36 +100,36 @@ pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> 
     ) -> Result<(), TransportError>;
     fn execute_initial_model_handshake(
         &self,
-        actor_id: &Uuid,
+        actor_entry: &(String, String, Uuid),
         agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     fn execute_send_trajectory(
         &self,
-        buffer_id: &Uuid,
+        buffer_entry: &(String, String, Uuid),
         encoded_trajectory: EncodedTrajectory,
         trajectory_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
         &self,
-        scaling_id: &Uuid,
-        client_ids: &[(String, Uuid)],
+        scaling_entry: &(String, String, Uuid),
+        client_ids: &[(String, String, Uuid)],
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_warning(
         &self,
-        scaling_id: &Uuid,
+        scaling_entry: &(String, String, Uuid),
         operation: ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
-        scaling_id: &Uuid,
+        scaling_entry: &(String, String, Uuid),
         operation: ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
         &self,
-        scaling_id: &Uuid,
+        scaling_entry: &(String, String, Uuid),
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
 }
