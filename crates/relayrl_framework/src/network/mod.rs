@@ -1,6 +1,25 @@
 use relayrl_types::HyperparameterArgs;
 use std::collections::HashMap;
 
+/// **Client Constants**: Constants for client-side runtime coordination and actor management.
+pub(super) const CLIENT_NAMESPACE_PREFIX: &str = "client";
+pub(super) const ACTOR_CONTEXT: &str = "actor";
+pub(super) const SCALE_MANAGER_CONTEXT: &str = "scaler";
+pub(super) const ZMQ_CLIENT_CONTEXT: &str = "zmq-client";
+pub(super) const NATS_CLIENT_CONTEXT: &str = "nats-client";
+
+pub(super) const ROUTER_NAMESPACE_PREFIX: &str = "router";
+pub(super) const RECEIVER_CONTEXT: &str = "receiver";
+pub(super) const FILTER_CONTEXT: &str = "filter";
+pub(super) const BUFFER_CONTEXT: &str = "buffer";
+
+/// **Server Constants**: Constants for server-side runtime coordination and actor management.
+pub(super) const TRAINING_SERVER_NAMESPACE_PREFIX: &str = "training-server";
+pub(super) const INFERENCE_SERVER_NAMESPACE_PREFIX: &str = "inference-server";
+pub(super) const WORKER_CONTEXT: &str = "worker";
+pub(super) const ZMQ_SERVER_CONTEXT: &str = "zmq-server";
+pub(super) const NATS_SERVER_CONTEXT: &str = "nats-server";
+
 /// **Client Modules**: Handles client-side runtime coordination and actor management.
 ///
 /// The client module provides a comprehensive runtime system for managing RL agents:
