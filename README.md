@@ -102,11 +102,11 @@ For more usage details, see the [Framework README](crates/relayrl_framework/READ
 ## Framework Roadmap
 
 ### Near Term
-- **v0.5.0** — Client ZMQ transport, PostgreSQL/SQLite database layer, comprehensive testing
-- **v0.6.0** — Training Server with online/offline workflows, algorithm integration
+- **v0.5.0** — Client ZMQ transport, Client NATS transport, comprehensive testing
+- **v0.6.0** — Training Server for Online client workflows, algorithm integration
 
 ### Medium Term
-- **v0.7.0** — Inference Server for remote inference capabilities
+- **v0.7.0** — Inference Server for remote inference capabilities for clients
 - **v0.8.0** — Full system integration, performance optimizations, API stabilization
 
 ### Long Term
