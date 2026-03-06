@@ -10,8 +10,11 @@ use crate::network::client::runtime::coordination::lifecycle_manager::SharedTran
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
+use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
+use crate::network::client::runtime::coordination::scale_manager::{
+    AlgorithmArgs, ProcessInitFlag,
+};
 use crate::network::client::runtime::coordination::scale_manager::{
     ScaleManager, ScaleManagerError,
 };
@@ -45,10 +48,9 @@ use burn_tensor::backend::Backend;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{
-    clear_namespace, remove_id, remove_namespace, reserve_id_with, reserve_namespace,
+    clear_namespace, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
+    reserve_id_with, reserve_namespace,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use active_uuid_registry::interface::{get_namespace_pairs, get_pairs};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
@@ -185,8 +187,14 @@ pub trait ClientInterface<
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_id: bool,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        send_algorithm_init: bool,
+    ) -> Result<Uuid, CoordinatorError>;
+    async fn _remove_actor(
+        &mut self,
+        id: ActorUuid,
+        send_ids: bool,
     ) -> Result<(), CoordinatorError>;
-    async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError>;
     async fn _set_actor_id(
         &mut self,
         current_id: ActorUuid,
@@ -236,22 +244,67 @@ pub struct ClientCoordinator<
 > {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_type: TransportType,
-    client_modes: Arc<ClientModes>,
+    pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ClientCoordinator<B, D_IN, D_OUT>
 {
+    /// Transparent helper function used by the agent API for calling into the runtime to send client IDs to the server
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn _send_client_ids_to_server(
         &self,
-        client_ids: Vec<(String, Uuid)>,
+        client_entries: Vec<(String, String, Uuid)>,
+        replace_context: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => params
                 .scaling
-                ._send_client_ids_to_server(client_ids)
+                ._send_client_ids_to_server(client_entries, replace_context)
+                .await
+                .map_err(CoordinatorError::from),
+            None => Err(CoordinatorError::NoRuntimeInstanceError),
+        }?;
+
+        Ok(())
+    }
+
+    /// Transparent helper function used by the agent API for calling into the runtime to send an algorithm init request to the server
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub(crate) async fn _send_algorithm_init_request(
+        &mut self,
+        actor_entries: Vec<(String, String, Uuid)>,
+    ) -> Result<(), CoordinatorError> {
+        match self.runtime_params.as_mut() {
+            Some(params) => params
+                .scaling
+                ._send_process_init_request(
+                    actor_entries,
+                    ProcessInitFlag::<B>::TrainingAlgorithmInit,
+                )
+                .await
+                .map_err(CoordinatorError::from),
+            None => Err(CoordinatorError::NoRuntimeInstanceError),
+        }?;
+
+        Ok(())
+    }
+
+    /// Transparent helper function used by the agent API for calling into the runtime to send an inference model init request to the server
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub(crate) async fn _send_inference_model_init_request(
+        &mut self,
+        actor_entries: Vec<(String, String, Uuid)>,
+        default_model: Option<ModelModule<B>>,
+    ) -> Result<(), CoordinatorError> {
+        match self.runtime_params.as_mut() {
+            Some(params) => params
+                .scaling
+                ._send_process_init_request(
+                    actor_entries,
+                    ProcessInitFlag::<B>::InferenceModelInit(default_model),
+                )
                 .await
                 .map_err(CoordinatorError::from),
             None => Err(CoordinatorError::NoRuntimeInstanceError),
@@ -294,7 +347,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError> {
-        let client_namespace: Arc<str> = Arc::from(format!("client-{}", uuid::Uuid::new_v4()));
+        let client_namespace: Arc<str> = Arc::from(format!(
+            "{}-{}",
+            crate::network::CLIENT_NAMESPACE_PREFIX,
+            uuid::Uuid::new_v4()
+        ));
 
         clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
         reserve_namespace(client_namespace.as_ref());
@@ -547,30 +604,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             });
         }
 
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let Err(e) = self
-            .runtime_params
-            .as_mut()
-            .unwrap()
-            .scaling
-            .__scale_out(router_scale, false)
-            .await
-        {
-            // unwrap is safe because runtime params are set in the previous block
-            return Err(CoordinatorError::ScaleManagerError(e));
-        }
-
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        if let Err(e) = self
-            .runtime_params
-            .as_ref()
-            .unwrap()
-            .scaling
-            .__scale_out(router_scale)
-            .await
-        {
-            // unwrap is safe because runtime params are set in the previous block
-            return Err(CoordinatorError::ScaleManagerError(e));
+        if let Some(params) = self.runtime_params.as_mut() {
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            if let Err(e) = params.scaling._scale_out(router_scale, false).await {
+                return Err(CoordinatorError::ScaleManagerError(e));
+            }
+            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+            if let Err(e) = params.scaling._scale_out(router_scale).await {
+                return Err(CoordinatorError::ScaleManagerError(e));
+            }
         }
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -585,51 +627,40 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     default_device.clone(),
                     actor_default_model.clone(),
                     false,
+                    false,
                 )
                 .await?;
                 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                 Self::_new_actor(self, default_device.clone(), actor_default_model.clone()).await?;
             }
         } else {
-            return Err(CoordinatorError::StateManagerError(
-                StateManagerError::NewActorError(
-                    "[Coordinator] No actors to create...".to_string(),
-                ),
-            ));
+            println!(
+                "[Coordinator] RelayRLAgent started with no actors: either restart or add actors to the runtime!"
+            );
         }
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let client_ids: Vec<(String, Uuid)> = {
-            let all_pairs: Vec<(String, Uuid)> = get_namespace_pairs(
-                self.runtime_params
-                    .as_ref()
-                    .unwrap()
-                    .client_namespace
-                    .as_ref(),
-            )
-            .map_err(|e| CoordinatorError::UuidPoolError(e))?;
-            all_pairs
-                .iter()
-                .filter_map(|(name, id)| match name.as_str() {
-                    "actor" => Some((name.to_string(), id.clone())),
-                    "scale_manager" => Some((name.to_string(), id.clone())),
-                    "trajectory_buffer" => Some((name.to_string(), id.clone())),
-                    #[cfg(feature = "zmq-transport")]
-                    "zmq_transport_client" => Some((name.to_string(), id.clone())),
-                    #[cfg(feature = "nats-transport")]
-                    "nats_transport_client" => Some((name.to_string(), id.clone())),
-                    _ => None,
-                })
-                .collect::<Vec<(String, Uuid)>>()
-        };
+        if let Some(params) = self.runtime_params.as_mut() {
+            let client_entries: Vec<(String, String, Uuid)> =
+                get_namespace_entries(params.client_namespace.as_ref())
+                    .map_err(CoordinatorError::from)?;
+            params
+                .scaling
+                ._send_client_ids_to_server(client_entries, true)
+                .await?;
 
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        self.runtime_params
-            .as_ref()
-            .unwrap()
-            .scaling
-            ._send_client_ids_to_server(client_ids)
-            .await?; // unwrap is safe because runtime params are set in the previous block
+            let actor_entries = get_context_entries(
+                params.client_namespace.as_ref(),
+                crate::network::ACTOR_CONTEXT,
+            )?;
+            params
+                .scaling
+                ._send_process_init_request(
+                    actor_entries,
+                    ProcessInitFlag::<B>::TrainingAlgorithmInit,
+                )
+                .await?;
+        }
 
         Ok(())
     }
@@ -652,11 +683,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 // shutdown transport client components (sockets, etc.)
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 match &params.scaling.scaling_dispatcher {
-                    Some(dispatcher) => {
-                        dispatcher
-                            .shutdown_transport(params.lifecycle.get_transport_addresses())
-                            .await?
-                    }
+                    Some(dispatcher) => dispatcher.shutdown_transport().await?,
                     None => (),
                 }
 
@@ -729,12 +756,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_id: bool,
-    ) -> Result<(), CoordinatorError> {
-        match &self.runtime_params {
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        send_algorithm_init: bool,
+    ) -> Result<Uuid, CoordinatorError> {
+        match self.runtime_params.as_mut() {
             Some(params) => {
-                let actor_id: Uuid =
-                    reserve_id_with(params.client_namespace.as_ref(), "actor", 117, 100)
-                        .map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                let actor_id: Uuid = reserve_id_with(
+                    params.client_namespace.as_ref(),
+                    crate::network::ACTOR_CONTEXT,
+                    117,
+                    100,
+                )
+                .map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
                 #[cfg(feature = "metrics")]
                 params.metrics.record_counter("actors_created", 1, &[]);
@@ -751,9 +784,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     })?;
 
                 // Round-robin assignment
-                let router_ids: Vec<Uuid> =
-                    router_runtime_params.iter().map(|r| *r.key()).collect();
-                if router_ids.is_empty() {
+                let router_namespaces: Vec<RouterNamespace> = router_runtime_params
+                    .iter()
+                    .map(|r| r.key().clone())
+                    .collect();
+                if router_namespaces.is_empty() {
                     return Err(CoordinatorError::ScaleManagerError(
                         ScaleManagerError::GetRouterRuntimeParamsError(
                             "[Coordinator] No routers available".to_string(),
@@ -762,11 +797,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
 
                 let actor_count: usize = params.shared_state.read().await.actor_inboxes.len();
-                let router_id: Uuid = router_ids[actor_count % router_ids.len()];
+                let router_namespace: RouterNamespace =
+                    router_namespaces[actor_count % router_namespaces.len()].clone();
 
                 // Get the router's sender_tx
                 let trajectory_buffer_tx = router_runtime_params
-                    .get(&router_id)
+                    .get(&router_namespace)
                     .ok_or_else(|| {
                         CoordinatorError::ScaleManagerError(
                             ScaleManagerError::GetRouterRuntimeParamsError(
@@ -783,7 +819,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .__new_actor(
                         actor_id.clone(),
-                        router_id,
+                        router_namespace,
                         device,
                         default_model,
                         trajectory_buffer_tx,
@@ -791,14 +827,32 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await?;
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                if send_id {
-                    params
-                        .scaling
-                        ._send_client_ids_to_server(vec![("actor".to_string(), actor_id)])
-                        .await?;
+                {
+                    if send_id {
+                        let actor_entry = vec![(
+                            params.client_namespace.to_string(),
+                            crate::network::ACTOR_CONTEXT.to_string(),
+                            actor_id,
+                        )];
+
+                        params
+                            .scaling
+                            ._send_client_ids_to_server(actor_entry.clone(), false)
+                            .await?;
+
+                        if send_algorithm_init {
+                            params
+                                .scaling
+                                ._send_process_init_request(
+                                    actor_entry,
+                                    ProcessInitFlag::<B>::TrainingAlgorithmInit,
+                                )
+                                .await?;
+                        }
+                    }
                 }
 
-                Ok(())
+                Ok(actor_id)
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::NewActorError(
@@ -808,7 +862,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _remove_actor(&mut self, id: ActorUuid) -> Result<(), CoordinatorError> {
+    async fn _remove_actor(
+        &mut self,
+        id: ActorUuid,
+        send_ids: bool,
+    ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 #[cfg(feature = "metrics")]
@@ -819,8 +877,26 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .__remove_actor(id)
                     .map_err(CoordinatorError::from)?;
-                remove_id(params.client_namespace.as_ref(), "actor", id)
-                    .map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                // remove the actor id from the namespace/context since we're removing the actor
+                remove_id(
+                    params.client_namespace.as_ref(),
+                    crate::network::ACTOR_CONTEXT,
+                    id,
+                )
+                .map_err(|e| CoordinatorError::UuidPoolError(e))?;
+
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                if send_ids {
+                    let actor_entries = get_context_entries(
+                        params.client_namespace.as_ref(),
+                        crate::network::ACTOR_CONTEXT,
+                    )?;
+                    params
+                        .scaling
+                        ._send_client_ids_to_server(actor_entries, true)
+                        .await?;
+                }
+
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
@@ -843,11 +919,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     current_id,
                     new_id,
                 )?;
+
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                let actor_ids = get_pairs(params.client_namespace.as_ref(), "actor")
-                    .map_err(CoordinatorError::from)?;
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                params.scaling._send_client_ids_to_server(actor_ids).await?;
+                {
+                    let actor_ids = get_context_entries(
+                        params.client_namespace.as_ref(),
+                        crate::network::ACTOR_CONTEXT,
+                    )?;
+                    // send all actor ids to the server since all we do here is replace an id with another one
+                    params
+                        .scaling
+                        ._send_client_ids_to_server(actor_ids, true)
+                        .await?;
+                }
 
                 Ok(())
             }
@@ -874,7 +958,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 // Extract router runtime params with clear error messages
                 let router_runtime_params: &dashmap::DashMap<
-                    Uuid,
+                    RouterNamespace,
                     super::scale_manager::RouterRuntimeParams,
                 > = {
                     let runtime_params = self.runtime_params.as_ref().ok_or_else(|| {
@@ -907,7 +991,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .clone();
 
                 for id in ids {
-                    if !router_runtime_params.contains_key(&id) {
+                    let has_router = params
+                        .shared_state
+                        .read()
+                        .await
+                        .actor_router_addresses
+                        .contains_key(&id);
+                    if !has_router {
                         continue;
                     }
 
@@ -1064,13 +1154,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 return params
                     .scaling
-                    .__scale_out(router_add, true)
+                    ._scale_out(router_add, true)
                     .await
                     .map_err(CoordinatorError::ScaleManagerError);
                 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                 return params
                     .scaling
-                    .__scale_out(router_add)
+                    ._scale_out(router_add)
                     .await
                     .map_err(CoordinatorError::ScaleManagerError);
             }
@@ -1086,9 +1176,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         match &mut self.runtime_params {
             Some(params) => {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                params.scaling.__scale_in(router_remove, true).await?;
+                params.scaling._scale_in(router_remove, true).await?;
                 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                params.scaling.__scale_in(router_remove).await?;
+                params.scaling._scale_in(router_remove).await?;
                 Ok(())
             }
             None => Err(CoordinatorError::ScaleManagerError(
