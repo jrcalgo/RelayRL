@@ -154,11 +154,13 @@ pub mod server_config_macros {
     }
 }
 
-pub static DEFAULT_TRAINING_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> =
-    Lazy::new(|| get_or_create_training_server_config_json_path!(PathBuf::from("training_server_config.json")));
+pub static DEFAULT_TRAINING_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
+    get_or_create_training_server_config_json_path!(PathBuf::from("training_server_config.json"))
+});
 
-pub static DEFAULT_INFERENCE_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> =
-    Lazy::new(|| get_or_create_inference_server_config_json_path!(PathBuf::from("inference_server_config.json")));
+pub static DEFAULT_INFERENCE_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
+    get_or_create_inference_server_config_json_path!(PathBuf::from("inference_server_config.json"))
+});
 
 pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
     "client_config": {
@@ -1152,8 +1154,9 @@ impl TrainingServerConfigLoader {
         match File::open(config_path) {
             Ok(mut file) => {
                 let mut contents: String = String::new();
-                file.read_to_string(&mut contents)
-                    .expect("[TrainingServerConfigParams - load_config] Failed to read configuration file");
+                file.read_to_string(&mut contents).expect(
+                    "[TrainingServerConfigParams - load_config] Failed to read configuration file",
+                );
                 serde_json::from_str(&contents).unwrap_or_else(|_| {
                     eprintln!("[TrainingServerConfigParams - load_config] Failed to parse configuration, loading empty defaults...");
                     TrainingServerConfigLoader {
