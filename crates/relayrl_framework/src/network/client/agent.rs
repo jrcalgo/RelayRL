@@ -22,7 +22,7 @@ use crate::prelude::config::ClientConfigLoader;
 use crate::utilities::configuration::{Algorithm, NetworkParams};
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::get_pairs;
+use active_uuid_registry::interface::{get_context_entries, list_ids};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
@@ -596,15 +596,13 @@ impl<
         transport_type: TransportType,
         client_modes: ClientModes,
     ) -> Self {
-        let supported_backend = B::get_supported_backend();
-
         Self {
             coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 transport_type,
                 client_modes,
             ),
-            supported_backend,
+            supported_backend: B::get_supported_backend(),
             input_dtype: None,
             output_dtype: None,
             _phantom: PhantomData,
@@ -792,7 +790,8 @@ impl<
                 }
             }
             false => Err(ClientError::BackendMismatchError(
-                "Backend mismatch".to_string(),
+                "Backend mismatch; Tensor backends not (currently) supported by RelayRL"
+                    .to_string(),
             )),
         }
     }
@@ -815,8 +814,11 @@ impl<
     /// Retrieves the model version for each actor ID listed (if instance IDs exist)
     ///
     /// Returns `(ActorID, ModelVersion)` pairs.
-    pub async fn get_model_version(&self, ids: Vec<Uuid>) -> Result<Vec<(Uuid, i64)>, ClientError> {
-        Ok(self.coordinator._get_model_version(ids).await?)
+    pub async fn get_model_version(
+        &self,
+        actor_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, i64)>, ClientError> {
+        Ok(self.coordinator._get_model_version(actor_ids).await?)
     }
 
     /// Collect runtime statistics.
@@ -871,6 +873,10 @@ pub trait RelayRLAgentActors<
         &mut self,
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>>;
+    fn remove_actors(
+        &mut self,
+        ids: Vec<Uuid>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>>;
     fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError>;
     fn set_actor_id(
         &mut self,
@@ -896,11 +902,12 @@ impl<
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.coordinator
-                ._new_actor(device, default_model, true)
+            let _ = self
+                .coordinator
+                ._new_actor(device, default_model, true, true)
                 .await?;
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-            self.coordinator._new_actor(device, default_model).await?;
+            let _ = self.coordinator._new_actor(device, default_model).await?;
             Ok(())
         })
     }
@@ -918,45 +925,149 @@ impl<
                     "Noop actor count: `count` set to zero".to_string(),
                 ))
             });
-        }
-        Box::pin(async move {
-            for _ in 0..count {
+        } else if count == 1 {
+            return self.new_actor(device, default_model);
+        } else {
+            Box::pin(async move {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                self.coordinator
-                    ._new_actor(device.clone(), default_model.clone(), false)
-                    .await?;
-                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                self.coordinator
-                    ._new_actor(device.clone(), default_model.clone())
-                    .await?;
-            }
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let actor_ids = get_pairs("client", "actor").map_err(ClientError::from)?;
+                let mut actor_ids: Vec<Uuid> = Vec::new();
+                for _ in 0..count {
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    actor_ids.push(
+                        self.coordinator
+                            ._new_actor(device.clone(), default_model.clone(), false, false)
+                            .await?,
+                    );
+                    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+                    self.coordinator
+                        ._new_actor(device.clone(), default_model.clone())
+                        .await?;
+                }
 
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.coordinator
-                ._send_client_ids_to_server(actor_ids)
-                .await?;
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                if let (
+                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorInferenceMode::Server(_),
+                ) = (
+                    &self.coordinator.client_modes.actor_training_data_mode,
+                    &self.coordinator.client_modes.actor_inference_mode,
+                ) {
+                    /// sends all new actor ids to the server
+                    let actor_entries = {
+                        let client_namespace = self
+                            .coordinator
+                            .runtime_params
+                            .as_ref()
+                            .ok_or(ClientError::CoordinatorError(
+                                CoordinatorError::NoRuntimeInstanceError,
+                            ))?
+                            .client_namespace
+                            .as_ref();
+                        get_context_entries(client_namespace, crate::network::ACTOR_CONTEXT)?
+                    };
 
-            Ok(())
-        })
+                    self.coordinator
+                        ._send_client_ids_to_server(actor_entries.clone(), true)
+                        .await?;
+
+                    if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+                        &self.coordinator.client_modes.actor_training_data_mode
+                    {
+                        self.coordinator
+                            ._send_algorithm_init_request(actor_entries.clone())
+                            .await?;
+                    }
+
+                    if let ActorInferenceMode::Server(_) =
+                        &self.coordinator.client_modes.actor_inference_mode
+                    {
+                        self.coordinator
+                            ._send_inference_model_init_request(
+                                actor_entries,
+                                default_model.clone(),
+                            )
+                            .await?;
+                    }
+                }
+
+                Ok(())
+            })
+        }
     }
 
     /// Removes the actor instance with the specified ID from the current Agent instance
     fn remove_actor(
         &mut self,
-        id: ActorUuid,
+        actor_id: ActorUuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator._remove_actor(id).await?;
+            self.coordinator._remove_actor(actor_id, true).await?;
             Ok(())
         })
     }
 
+    fn remove_actors(
+        &mut self,
+        actor_ids: Vec<ActorUuid>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
+        if actor_ids.is_empty() {
+            return Box::pin(async move {
+                Err(ClientError::NoopActorCount(
+                    "Noop actor count: `actor_ids` is empty in `remove_actors()`".to_string(),
+                ))
+            });
+        } else if actor_ids.len() == 1 {
+            return self.remove_actor(actor_ids[0]);
+        } else {
+            Box::pin(async move {
+                for actor_id in actor_ids {
+                    self.coordinator._remove_actor(actor_id, false).await?;
+                }
+
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                if let (
+                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorInferenceMode::Server(_),
+                ) = (
+                    &self.coordinator.client_modes.actor_training_data_mode,
+                    &self.coordinator.client_modes.actor_inference_mode,
+                ) {
+                    let client_actor_ids = {
+                        let client_namespace = self
+                            .coordinator
+                            .runtime_params
+                            .as_ref()
+                            .ok_or(ClientError::CoordinatorError(
+                                CoordinatorError::NoRuntimeInstanceError,
+                            ))?
+                            .client_namespace
+                            .as_ref();
+                        get_context_entries(client_namespace, crate::network::ACTOR_CONTEXT)?
+                    };
+
+                    self.coordinator
+                        ._send_client_ids_to_server(client_actor_ids, true)
+                        .await?;
+                }
+
+                Ok(())
+            })
+        }
+    }
+
     /// Retrieves the current actor instance IDs
     fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError> {
-        let ids = get_pairs("client", "actor").map_err(ClientError::from)?;
-        Ok(ids.iter().map(|(_, id)| id.clone()).collect())
+        let client_namespace = self
+            .coordinator
+            .runtime_params
+            .as_ref()
+            .ok_or(ClientError::CoordinatorError(
+                CoordinatorError::NoRuntimeInstanceError,
+            ))?
+            .client_namespace
+            .as_ref();
+        let actor_ids = list_ids(client_namespace, "actor");
+        Ok(actor_ids)
     }
 
     /// Sets the ID of the actor instance with the specified current ID to the new ID
