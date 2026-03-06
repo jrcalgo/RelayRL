@@ -1,8 +1,14 @@
 use crate::network::HyperparameterArgs;
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
+use crate::network::client::agent::ModelMode;
+use crate::network::client::runtime::coordination::lifecycle_manager::{
+    SharedInferenceAddresses, SharedTrainingAddresses, SharedTransportAddresses,
+};
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+use crate::network::client::runtime::data::transport_sink::zmq::{
+    ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
+};
 use crate::network::client::runtime::data::transport_sink::{
-    SyncInferenceServerTransportOps, SyncTrainingServerTransportOps, TransportError, TransportUuid,
+    SyncClientInferenceTransportOps, SyncClientTrainingTransportOps, TransportError, TransportUuid,
 };
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
@@ -10,12 +16,12 @@ use crate::network::client::runtime::router::{
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{add, get, remove, reserve_with};
-use relayrl_types::types::data::action::RelayRLAction;
-use relayrl_types::types::data::tensor::BackendMatcher;
-use relayrl_types::types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
-use relayrl_types::types::model::utils::validate_module;
-use relayrl_types::types::model::{HotReloadableModel, ModelModule};
+use active_uuid_registry::interface::{add_id, remove_id, reserve_id_with};
+use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::tensor::BackendMatcher;
+use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
+use relayrl_types::model::utils::validate_module;
+use relayrl_types::model::{HotReloadableModel, ModelModule};
 
 use burn_tensor::backend::Backend;
 use std::io::Write;
@@ -28,28 +34,33 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use tempfile::NamedTempFile;
+use tokio::sync::mpsc::Sender;
 use tokio::task;
 use uuid::Uuid;
 use zmq::{Context, Socket, SocketType};
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub enum ZmqClientError {
+#[derive(Debug, Error, Clone)]
+pub enum ZmqPoolError {
     #[error(transparent)]
     SocketError(#[from] zmq::Error),
     #[error(transparent)]
     UuidPoolError(#[from] UuidPoolError),
+    #[error("Failed to read ZMQ pool: {0}")]
+    ReadError(String),
+    #[error("Failed to initialize ZMQ pool: {0}")]
+    InitializationError(String),
 }
 
 type SocketUuid = Uuid;
 
-pub(crate) struct ZmqSocketPool {
-    pub(crate) inference_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) model_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) model_sub_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) traj_push_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
-    pub(crate) scaling_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+pub(super) struct ZmqSocketPool {
+    pub(super) inference_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) model_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) model_sub_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) traj_push_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
+    pub(super) scaling_dealer_socket: Option<DashMap<SocketUuid, Arc<Mutex<Socket>>>>,
 }
 
 /// Raw ZMQ transport operations.
@@ -61,9 +72,10 @@ pub(crate) struct ZmqSocketPool {
 ///
 /// Application-level state (model version, algorithm initialization) is managed
 /// by the dispatcher layer (see `transport_dispatcher.rs`).
-pub(crate) struct ZmqPool {
-    pub(crate) context: Context,
-    cached_addresses: Option<DashMap<Uuid, Arc<RwLock<ServerAddresses>>>>,
+pub(super) struct ZmqPool {
+    client_namespace: Arc<str>,
+    pub(super) zmq_socket_context: Context,
+    cached_addresses: Option<DashMap<Uuid, Arc<RwLock<SharedTransportAddresses>>>>,
     cached_sockets: Arc<ZmqSocketPool>,
 }
 
@@ -73,7 +85,8 @@ enum CacheAddressType {
     AgentListener,
     ModelServer,
     TrajectoryServer,
-    ScalingServer,
+    InferenceScalingServer,
+    TrainingScalingServer,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,9 +99,10 @@ enum SocketPoolType {
 }
 
 impl ZmqPool {
-    pub fn new() -> Result<Self, ZmqClientError> {
-        Ok(Self {
-            context: Context::new(),
+    pub fn new(client_namespace: Arc<str>) -> Self {
+        Self {
+            client_namespace,
+            zmq_socket_context: Context::new(),
             cached_addresses: None,
             cached_sockets: Arc::new(ZmqSocketPool {
                 inference_dealer_socket: None,
@@ -97,19 +111,24 @@ impl ZmqPool {
                 traj_push_socket: None,
                 scaling_dealer_socket: None,
             }),
-        })
+        }
     }
 
     fn create_dealer_socket(
         &self,
-        context: &Context,
+        zmq_socket_context: &Context,
         address: &str,
-    ) -> Result<Socket, ZmqClientError> {
-        let socket = context.socket(zmq::DEALER)?;
+    ) -> Result<Socket, ZmqPoolError> {
+        let socket = zmq_socket_context.socket(zmq::DEALER)?;
 
         // Set socket identity
-        let identity: SocketUuid =
-            reserve_with("zmq_dealer_socket", 117, 100).map_err(ZmqClientError::from)?;
+        let identity: SocketUuid = reserve_id_with(
+            self.client_namespace.as_ref(),
+            crate::network::ZMQ_CLIENT_CONTEXT,
+            117,
+            100,
+        )
+        .map_err(ZmqPoolError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         // Set socket options for performance
@@ -126,13 +145,18 @@ impl ZmqPool {
 
     fn create_push_socket(
         &self,
-        context: &Context,
+        zmq_socket_context: &Context,
         address: &str,
-    ) -> Result<Socket, ZmqClientError> {
-        let socket = context.socket(zmq::PUSH)?;
+    ) -> Result<Socket, ZmqPoolError> {
+        let socket = zmq_socket_context.socket(zmq::PUSH)?;
 
-        let identity: SocketUuid =
-            reserve_with("zmq_push_socket", 67, 100).map_err(ZmqClientError::from)?;
+        let identity: SocketUuid = reserve_id_with(
+            self.client_namespace.as_ref(),
+            crate::network::ZMQ_CLIENT_CONTEXT,
+            67,
+            100,
+        )
+        .map_err(ZmqPoolError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         // Set send timeout to non-blocking
@@ -146,13 +170,18 @@ impl ZmqPool {
 
     fn create_sub_socket(
         &self,
-        context: &Context,
+        zmq_socket_context: &Context,
         address: &str,
-    ) -> Result<Socket, ZmqClientError> {
-        let socket = context.socket(zmq::SUB)?;
+    ) -> Result<Socket, ZmqPoolError> {
+        let socket = zmq_socket_context.socket(zmq::SUB)?;
 
-        let identity: SocketUuid =
-            reserve_with("zmq_sub_socket", 69, 100).map_err(ZmqClientError::from)?;
+        let identity: SocketUuid = reserve_id_with(
+            self.client_namespace.as_ref(),
+            crate::network::ZMQ_CLIENT_CONTEXT,
+            69,
+            100,
+        )
+        .map_err(ZmqPoolError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         socket.set_subscribe(b"")?;
@@ -169,35 +198,56 @@ impl ZmqPool {
         new_address: &str,
         address_type: CacheAddressType,
         socket_type: SocketPoolType,
-    ) -> Result<bool, ZmqClientError> {
-        let cached_addresses = self.cached_addresses.as_ref().ok_or_else(|| {
-            TransportError::TransportInitializationError(
-                "Cached addresses not available".to_string(),
-            )
-        })?;
+    ) -> Result<bool, ZmqPoolError> {
+        let cached_addresses = self
+            .cached_addresses
+            .as_ref()
+            .ok_or_else(|| ZmqPoolError::ReadError("Cached addresses not available".to_string()))?;
 
         // Check if we need to update the cache
         let needs_update: bool = match cached_addresses.get(identity) {
             Some(addresses) => {
                 let addr_guard = addresses.read().map_err(|e| {
-                    TransportError::TransportInitializationError(format!(
-                        "Failed to read cached addresses: {}",
-                        e
-                    ))
+                    ZmqPoolError::ReadError(format!("Failed to read cached addresses: {}", e))
                 })?;
                 match address_type {
                     CacheAddressType::InferenceServer => {
-                        addr_guard.inference_server_address != new_address
+                        addr_guard
+                            .inference_addresses
+                            .inference_server_address
+                            .as_ref()
+                            != new_address
                     }
                     CacheAddressType::AgentListener => {
-                        addr_guard.agent_listener_address != new_address
+                        addr_guard
+                            .training_addresses
+                            .agent_listener_address
+                            .as_ref()
+                            != new_address
                     }
-                    CacheAddressType::ModelServer => addr_guard.model_server_address != new_address,
+                    CacheAddressType::ModelServer => {
+                        addr_guard.training_addresses.model_server_address.as_ref() != new_address
+                    }
                     CacheAddressType::TrajectoryServer => {
-                        addr_guard.trajectory_server_address != new_address
+                        addr_guard
+                            .training_addresses
+                            .trajectory_server_address
+                            .as_ref()
+                            != new_address
                     }
-                    CacheAddressType::ScalingServer => {
-                        addr_guard.scaling_server_address != new_address
+                    CacheAddressType::TrainingScalingServer => {
+                        addr_guard
+                            .training_addresses
+                            .training_scaling_server_address
+                            .as_ref()
+                            != new_address
+                    }
+                    CacheAddressType::InferenceScalingServer => {
+                        addr_guard
+                            .inference_addresses
+                            .inference_scaling_server_address
+                            .as_ref()
+                            != new_address
                     }
                 }
             }
@@ -208,54 +258,176 @@ impl ZmqPool {
             return Ok(false);
         }
 
-        // Build updated ServerAddresses
-        let address_entry = cached_addresses.get(identity).ok_or_else(|| {
-            TransportError::TransportInitializationError(
-                "Cached addresses not available".to_string(),
-            )
-        })?;
+        // Build updated SharedTransportAddresses
+        let address_entry = cached_addresses
+            .get(identity)
+            .ok_or_else(|| ZmqPoolError::ReadError("Cached addresses not available".to_string()))?;
         let current_addresses = address_entry.read().map_err(|e| {
-            TransportError::TransportInitializationError(format!(
-                "Failed to read cached addresses: {}",
-                e
-            ))
+            ZmqPoolError::ReadError(format!("Failed to read cached addresses: {}", e))
         })?;
 
         let updated_addresses = match address_type {
-            CacheAddressType::InferenceServer => ServerAddresses {
-                inference_server_address: new_address.to_string(),
-                agent_listener_address: current_addresses.agent_listener_address.clone(),
-                model_server_address: current_addresses.model_server_address.clone(),
-                trajectory_server_address: current_addresses.trajectory_server_address.clone(),
-                scaling_server_address: current_addresses.scaling_server_address.clone(),
+            CacheAddressType::InferenceServer => SharedTransportAddresses {
+                inference_addresses: SharedInferenceAddresses {
+                    inference_server_address: Arc::from(new_address),
+                    inference_scaling_server_address: current_addresses
+                        .inference_addresses
+                        .inference_scaling_server_address
+                        .clone(),
+                },
+                training_addresses: SharedTrainingAddresses {
+                    agent_listener_address: current_addresses
+                        .training_addresses
+                        .agent_listener_address
+                        .clone(),
+                    model_server_address: current_addresses
+                        .training_addresses
+                        .model_server_address
+                        .clone(),
+                    trajectory_server_address: current_addresses
+                        .training_addresses
+                        .trajectory_server_address
+                        .clone(),
+                    training_scaling_server_address: current_addresses
+                        .training_addresses
+                        .training_scaling_server_address
+                        .clone(),
+                },
             },
-            CacheAddressType::AgentListener => ServerAddresses {
-                inference_server_address: current_addresses.inference_server_address.clone(),
-                agent_listener_address: new_address.to_string(),
-                model_server_address: current_addresses.model_server_address.clone(),
-                trajectory_server_address: current_addresses.trajectory_server_address.clone(),
-                scaling_server_address: current_addresses.scaling_server_address.clone(),
+            CacheAddressType::AgentListener => SharedTransportAddresses {
+                inference_addresses: SharedInferenceAddresses {
+                    inference_server_address: current_addresses
+                        .inference_addresses
+                        .inference_server_address
+                        .clone(),
+                    inference_scaling_server_address: current_addresses
+                        .inference_addresses
+                        .inference_scaling_server_address
+                        .clone(),
+                },
+                training_addresses: SharedTrainingAddresses {
+                    agent_listener_address: Arc::from(new_address),
+                    model_server_address: current_addresses
+                        .training_addresses
+                        .model_server_address
+                        .clone(),
+                    trajectory_server_address: current_addresses
+                        .training_addresses
+                        .trajectory_server_address
+                        .clone(),
+                    training_scaling_server_address: current_addresses
+                        .training_addresses
+                        .training_scaling_server_address
+                        .clone(),
+                },
             },
-            CacheAddressType::ModelServer => ServerAddresses {
-                inference_server_address: current_addresses.inference_server_address.clone(),
-                agent_listener_address: current_addresses.agent_listener_address.clone(),
-                model_server_address: new_address.to_string(),
-                trajectory_server_address: current_addresses.trajectory_server_address.clone(),
-                scaling_server_address: current_addresses.scaling_server_address.clone(),
+            CacheAddressType::ModelServer => SharedTransportAddresses {
+                inference_addresses: SharedInferenceAddresses {
+                    inference_server_address: current_addresses
+                        .inference_addresses
+                        .inference_server_address
+                        .clone(),
+                    inference_scaling_server_address: current_addresses
+                        .inference_addresses
+                        .inference_scaling_server_address
+                        .clone(),
+                },
+                training_addresses: SharedTrainingAddresses {
+                    agent_listener_address: current_addresses
+                        .training_addresses
+                        .agent_listener_address
+                        .clone(),
+                    model_server_address: Arc::from(new_address),
+                    trajectory_server_address: current_addresses
+                        .training_addresses
+                        .trajectory_server_address
+                        .clone(),
+                    training_scaling_server_address: current_addresses
+                        .training_addresses
+                        .training_scaling_server_address
+                        .clone(),
+                },
             },
-            CacheAddressType::TrajectoryServer => ServerAddresses {
-                inference_server_address: current_addresses.inference_server_address.clone(),
-                agent_listener_address: current_addresses.agent_listener_address.clone(),
-                model_server_address: current_addresses.model_server_address.clone(),
-                trajectory_server_address: new_address.to_string(),
-                scaling_server_address: current_addresses.scaling_server_address.clone(),
+            CacheAddressType::TrajectoryServer => SharedTransportAddresses {
+                inference_addresses: SharedInferenceAddresses {
+                    inference_server_address: current_addresses
+                        .inference_addresses
+                        .inference_server_address
+                        .clone(),
+                    inference_scaling_server_address: current_addresses
+                        .inference_addresses
+                        .inference_scaling_server_address
+                        .clone(),
+                },
+                training_addresses: SharedTrainingAddresses {
+                    agent_listener_address: current_addresses
+                        .training_addresses
+                        .agent_listener_address
+                        .clone(),
+                    model_server_address: current_addresses
+                        .training_addresses
+                        .model_server_address
+                        .clone(),
+                    trajectory_server_address: Arc::from(new_address),
+                    training_scaling_server_address: current_addresses
+                        .training_addresses
+                        .training_scaling_server_address
+                        .clone(),
+                },
             },
-            CacheAddressType::ScalingServer => ServerAddresses {
-                inference_server_address: current_addresses.inference_server_address.clone(),
-                agent_listener_address: current_addresses.agent_listener_address.clone(),
-                model_server_address: current_addresses.model_server_address.clone(),
-                trajectory_server_address: current_addresses.trajectory_server_address.clone(),
-                scaling_server_address: new_address.to_string(),
+            CacheAddressType::InferenceScalingServer => SharedTransportAddresses {
+                inference_addresses: SharedInferenceAddresses {
+                    inference_server_address: current_addresses
+                        .inference_addresses
+                        .inference_server_address
+                        .clone(),
+                    inference_scaling_server_address: Arc::from(new_address),
+                },
+                training_addresses: SharedTrainingAddresses {
+                    agent_listener_address: current_addresses
+                        .training_addresses
+                        .agent_listener_address
+                        .clone(),
+                    model_server_address: current_addresses
+                        .training_addresses
+                        .model_server_address
+                        .clone(),
+                    trajectory_server_address: current_addresses
+                        .training_addresses
+                        .trajectory_server_address
+                        .clone(),
+                    training_scaling_server_address: current_addresses
+                        .training_addresses
+                        .training_scaling_server_address
+                        .clone(),
+                },
+            },
+            CacheAddressType::TrainingScalingServer => SharedTransportAddresses {
+                inference_addresses: SharedInferenceAddresses {
+                    inference_server_address: current_addresses
+                        .inference_addresses
+                        .inference_server_address
+                        .clone(),
+                    inference_scaling_server_address: current_addresses
+                        .inference_addresses
+                        .inference_scaling_server_address
+                        .clone(),
+                },
+                training_addresses: SharedTrainingAddresses {
+                    agent_listener_address: current_addresses
+                        .training_addresses
+                        .agent_listener_address
+                        .clone(),
+                    model_server_address: current_addresses
+                        .training_addresses
+                        .model_server_address
+                        .clone(),
+                    trajectory_server_address: current_addresses
+                        .training_addresses
+                        .trajectory_server_address
+                        .clone(),
+                    training_scaling_server_address: Arc::from(new_address),
+                },
             },
         };
 
@@ -264,17 +436,22 @@ impl ZmqPool {
         // Create and cache the appropriate socket
         let socket_result = match socket_type {
             SocketPoolType::ModelDealer | SocketPoolType::ScalingDealer => {
-                self.create_dealer_socket(&self.context, new_address)
+                self.create_dealer_socket(&self.zmq_socket_context, new_address)
             }
+
             SocketPoolType::InferenceDealer => {
-                self.create_dealer_socket(&self.context, new_address)
+                self.create_dealer_socket(&self.zmq_socket_context, new_address)
             }
-            SocketPoolType::ModelSub => self.create_sub_socket(&self.context, new_address),
-            SocketPoolType::TrajPush => self.create_push_socket(&self.context, new_address),
+            SocketPoolType::ModelSub => {
+                self.create_sub_socket(&self.zmq_socket_context, new_address)
+            }
+            SocketPoolType::TrajPush => {
+                self.create_push_socket(&self.zmq_socket_context, new_address)
+            }
         };
 
         let socket = socket_result.map_err(|e| {
-            TransportError::TransportInitializationError(format!(
+            ZmqPoolError::InitializationError(format!(
                 "Failed to create {:?} socket: {}",
                 socket_type, e
             ))
@@ -290,15 +467,29 @@ impl ZmqPool {
 
         socket_pool
             .as_ref()
-            .ok_or_else(|| {
-                TransportError::TransportInitializationError(
-                    "Socket pool not initialized".to_string(),
-                )
-            })?
+            .ok_or_else(|| ZmqPoolError::ReadError("Socket pool not initialized".to_string()))?
             .insert(*identity, Arc::new(Mutex::new(socket)));
 
         Ok(true)
     }
+}
+
+fn validate_entry(
+    entry: &(String, String, Uuid),
+) -> Result<&(String, String, Uuid), TransportError> {
+    let (namespace, context, id) = entry;
+
+    if id.is_nil() {
+        return Err(TransportError::InvalidState("ID is nil".to_string()));
+    } else if context.is_empty() {
+        return Err(TransportError::InvalidState("Context is empty".to_string()));
+    } else if namespace.is_empty() {
+        return Err(TransportError::InvalidState(
+            "Namespace is empty".to_string(),
+        ));
+    }
+
+    Ok(entry)
 }
 
 #[repr(i64)]
@@ -317,71 +508,125 @@ impl ServerResponse {
     }
 }
 
-pub(crate) struct ZmqInferenceOps {
-    transport_id: TransportUuid,
+pub(super) struct ZmqInferenceOps {
+    transport_entry: (String, String, Uuid),
     zmq_pool: Arc<RwLock<ZmqPool>>,
 }
 
 impl ZmqInferenceOps {
-    pub fn new(
-        transport_id: TransportUuid,
+    pub(super) fn new(
+        transport_entry: (String, String, Uuid),
         zmq_pool: Arc<RwLock<ZmqPool>>,
-    ) -> Result<Self, ZmqClientError> {
-        Ok(Self {
-            transport_id,
+    ) -> Self {
+        Self {
+            transport_entry,
             zmq_pool,
-        })
+        }
+    }
+
+    pub(super) fn shutdown(&self) -> Result<(), TransportError> {
+        unimplemented!();
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncInferenceServerTransportOps<B>
-    for ZmqInferenceOps
-{
-    fn send_inference_request(
+impl ZmqInferenceExecution for ZmqInferenceOps {
+    fn execute_send_inference_request(
         &self,
-        actor_id: &Uuid,
+        actor_entry: &(String, String, Uuid),
         action_request: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
-        Ok(RelayRLAction::minimal(0.0, false))
+        unimplemented!();
     }
-    fn send_flag_last_inference(
+
+    fn execute_send_flag_last_inference(
         &self,
-        actor_id: &Uuid,
-        reward: f32,
+        actor_entry: &(String, String, Uuid),
+        reward: &f32,
         inference_server_address: &str,
     ) -> Result<(), TransportError> {
-        Ok(())
+        unimplemented!();
+    }
+
+    fn execute_send_client_ids(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        client_ids: &[(String, String, Uuid)],
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+
+    fn execute_send_inference_model_init_request<B: Backend + BackendMatcher<Backend = B>>(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        model_mode: &ModelMode,
+        model_module: &Option<ModelModule<B>>,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+
+    fn execute_send_scaling_warning(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        operation: &ScalingOperation,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+
+    fn execute_send_scaling_complete(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        operation: &ScalingOperation,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+
+    fn execute_send_shutdown_signal(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
     }
 }
 
-pub(crate) struct ZmqTrainingOps {
-    transport_id: TransportUuid,
+pub(super) struct ZmqTrainingOps {
+    transport_entry: (String, String, Uuid),
     zmq_pool: Arc<RwLock<ZmqPool>>,
 }
 
 impl ZmqTrainingOps {
-    pub fn new(
-        transport_id: TransportUuid,
+    pub(super) fn new(
+        transport_entry: (String, String, Uuid),
         zmq_pool: Arc<RwLock<ZmqPool>>,
-    ) -> Result<Self, ZmqClientError> {
-        Ok(Self {
-            transport_id,
+    ) -> Self {
+        Self {
+            transport_entry,
             zmq_pool,
-        })
+        }
     }
 
-    fn shutdown(&self) -> Result<(), TransportError> {
+    pub(super) fn shutdown(&self) -> Result<(), TransportError> {
         if let Some(sockets) = &self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during cache removal: {}",
+                    e
+                ))
+            })?
             .cached_sockets
             .model_dealer_socket
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
+                remove_id("client", "zmq_dealer_socket", socket_id.clone())
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -390,13 +635,19 @@ impl ZmqTrainingOps {
         if let Some(sockets) = &self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during cache removal: {}",
+                    e
+                ))
+            })?
             .cached_sockets
             .model_sub_socket
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_sub_socket", socket_id.clone()).map_err(TransportError::from)?;
+                remove_id("client", "zmq_sub_socket", socket_id.clone())
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -405,13 +656,19 @@ impl ZmqTrainingOps {
         if let Some(sockets) = &self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during cache removal: {}",
+                    e
+                ))
+            })?
             .cached_sockets
             .traj_push_socket
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_push_socket", socket_id.clone()).map_err(TransportError::from)?;
+                remove_id("client", "zmq_push_socket", socket_id.clone())
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -420,163 +677,148 @@ impl ZmqTrainingOps {
         if let Some(sockets) = &self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during cache removal: {}",
+                    e
+                ))
+            })?
             .cached_sockets
             .scaling_dealer_socket
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove("zmq_dealer_socket", socket_id.clone()).map_err(TransportError::from)?;
+                remove_id("client", "zmq_dealer_socket", socket_id.clone())
+                    .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
         }
 
-        remove("zmq_transport_client", self.transport_id.clone()).map_err(TransportError::from)?;
+        let (client_namspace, zmq_context, transport_id) = self.transport_entry.clone();
+        remove_id(
+            client_namspace.as_ref(),
+            zmq_context.as_ref(),
+            transport_id.clone(),
+        )
+        .map_err(TransportError::from)?;
+
         Ok(())
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
-    for ZmqTrainingOps
-{
-    fn send_client_ids(
+impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTrainingOps {
+    fn execute_listen_for_model(
         &self,
-        scaling_id: &Uuid,
-        client_ids: &[(String, Uuid)],
-        scaling_server_address: &str,
+        receiver_entry: &(String, String, Uuid),
+        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_server_address: &str,
     ) -> Result<(), TransportError> {
-        if scaling_id.is_nil() {
-            return Err(TransportError::SendClientIdsToServerError(
-                "Coordinator ID is nil".to_string(),
+        let validated_entry = validate_entry(receiver_entry)?;
+        let (client_namespace, router_context, receiver_id) = validated_entry.clone();
+
+        if model_server_address.is_empty() {
+            return Err(TransportError::ListenForModelError(
+                "Model server address is empty".to_string(),
             ));
         }
 
-        if scaling_server_address.is_empty() {
-            return Err(TransportError::SendClientIdsToServerError(
-                "Agent listener address is empty".to_string(),
+        if global_dispatcher_tx.is_closed() {
+            return Err(TransportError::ListenForModelError(
+                "Global dispatcher is closed".to_string(),
             ));
         }
 
         let _ = self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                scaling_id,
-                scaling_server_address,
-                CacheAddressType::ScalingServer,
-                SocketPoolType::ScalingDealer,
-            );
-
-        // TODO: Send client IDs to server for caching, validation, and routing
-        let transport_id_string = self.transport_id.to_string();
-        let scaling_id_string = scaling_id.to_string();
-
-        let empty_frame: Vec<u8> = vec![];
-        let transport_id_frame: &[u8] = transport_id_string.as_bytes();
-        let scaling_id_frame: &[u8] = scaling_id_string.as_bytes();
-        let pairs_payload = client_ids
-            .iter()
-            .map(|(name, id)| name.to_string() + " " + id.to_string().as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
+                &receiver_id,
+                model_server_address,
+                CacheAddressType::ModelServer,
+                SocketPoolType::ModelSub,
+            )
+            .map_err(ZmqClientError::from)?;
 
         let socket = self
+            .zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?
             .cached_sockets
-            .scaling_dealer_socket
+            .model_sub_socket
             .as_ref()
             .unwrap()
-            .get(scaling_id)
-            .unwrap();
+            .get(&receiver_id)
+            .unwrap()
+            .clone();
 
-        match socket
-            .try_lock()
-            .map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to lock scaling dealer socket: {}",
-                    e
-                ))
-            })?
-            .send_multipart(
-                [
-                    &empty_frame,
-                    transport_id_frame,
-                    scaling_id_frame,
-                    pairs_payload.as_bytes(),
-                ],
-                0,
-            ) {
-            Ok(_) => println!("[ZmqClient] Sent client IDs to server"),
-            Err(e) => {
-                return Err(TransportError::SendClientIdsToServerError(format!(
-                    "Failed to send client IDs to server: {}",
-                    e
-                )));
-            }
-        }
+        let model_server_address = model_server_address.to_string();
+        let global_dispatcher_tx = global_dispatcher_tx.clone();
 
-        match socket
-            .try_lock()
-            .map_err(|e| {
-                TransportError::SendClientIdsToServerError(format!(
-                    "Failed to lock scaling dealer socket: {}",
-                    e
-                ))
-            })?
-            .recv_multipart(0)
-        {
-            Ok(message_parts) => {
-                if message_parts.len() < 2 {
-                    return Err(TransportError::SendClientIdsToServerError(
-                        "Malformed response".to_string(),
-                    ));
-                }
+        task::spawn_blocking(move || {
+            println!(
+                "[ZmqClient] Listening for model updates at {}",
+                model_server_address
+            );
 
-                let message_bytes: Vec<u8> = message_parts[1].to_vec();
-
-                match String::from_utf8_lossy(&message_bytes).parse::<i64>() {
-                    Ok(value) => match ServerResponse::from_i64(value) {
-                        ServerResponse::Success => {
-                            println!("[ZmqClient] Server updated cache with client IDs");
-                            return Ok(());
-                        }
-                        ServerResponse::Failure => {
-                            return Err(TransportError::SendClientIdsToServerError(
-                                "Server failed to acknowledge client IDs".to_string(),
-                            ));
-                        }
-                    },
-                    Err(e) => {
-                        return Err(TransportError::SendClientIdsToServerError(format!(
-                            "Failed to parse server response: {}",
+            loop {
+                match socket
+                    .try_lock()
+                    .map_err(|e| {
+                        TransportError::ListenForModelError(format!(
+                            "Failed to lock sub socket: {}",
                             e
-                        )));
+                        ))
+                    })?
+                    .recv_bytes(0)
+                {
+                    Ok(model_bytes) => {
+                        let msg = RoutedMessage {
+                            actor_id: Uuid::nil(), // broadcast placeholder
+                            protocol: RoutingProtocol::ModelUpdate,
+                            payload: RoutedPayload::ModelUpdate {
+                                model_bytes,
+                                version: 0,
+                            },
+                        };
+                        let _ = global_dispatcher_tx.blocking_send(msg);
+                    }
+                    Err(e) => {
+                        eprintln!("[ZmqClient] SUB socket recv error: {}", e);
+                        return Err::<(), TransportError>(TransportError::ListenForModelError(
+                            format!("SUB socket recv error: {}", e),
+                        ));
                     }
                 }
             }
-            Err(e) => {
-                return Err(TransportError::SendClientIdsToServerError(format!(
-                    "Failed to receive client IDs from server: {}",
-                    e
-                )));
-            }
-        }
+        });
+
+        Ok(())
     }
 
-    fn send_algorithm_init_request(
+    fn execute_send_algorithm_init_request(
         &self,
-        scaling_id: &Uuid,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        scaling_entry: &(String, String, Uuid),
+        actor_entries: &[(String, String, Uuid)],
+        model_mode: &ModelMode,
+        algorithm: &Algorithm,
+        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         // TODO: Reqeust that the server initializes a shared algorithm OR individual algorithms per actor (must be the same algorithm for now)
-        if scaling_id.is_nil() {
-            return Err(TransportError::SendAlgorithmInitRequestError(
-                "Scaling ID is nil".to_string(),
-            ));
-        }
+        let validated_entry = validate_entry(scaling_entry)?;
+        let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
         if agent_listener_address.is_empty() {
             return Err(TransportError::SendAlgorithmInitRequestError(
@@ -587,33 +829,53 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         let _ = self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendAlgorithmInitRequestError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                scaling_id,
+                &scaling_id,
                 agent_listener_address,
-                CacheAddressType::ScalingServer,
+                CacheAddressType::TrainingScalingServer,
                 SocketPoolType::ScalingDealer,
-            );
+            )
+            .map_err(ZmqClientError::from)?;
 
-        let transport_id_string = self.transport_id.to_string();
-        let scaling_id_string = scaling_id.to_string();
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
+
         let algorithm_name_string = algorithm.as_str().to_string();
         let hyperparams_string = serde_json::to_string(&hyperparams).unwrap_or_default();
 
         let empty_frame: Vec<u8> = vec![];
-        let transport_id_frame: Vec<u8> = transport_id_string.as_bytes().to_vec();
-        let scaling_id_frame: Vec<u8> = scaling_id_string.as_bytes().to_vec();
+        let transport_entry_frame: Vec<u8> = transport_entry_string.as_bytes().to_vec();
+        let scaling_entry_frame: Vec<u8> = scaling_entry_string.as_bytes().to_vec();
         let algorithm_init_payload: Vec<u8> = b"ALGORITHM_INIT".to_vec();
         let algorithm_name_frame: Vec<u8> = algorithm_name_string.as_bytes().to_vec();
         let _hyperparams_payload: Vec<u8> = hyperparams_string.as_bytes().to_vec();
 
-        let socket = self
-            .cached_sockets
-            .scaling_dealer_socket
-            .as_ref()
-            .unwrap()
-            .get(scaling_id)
-            .unwrap();
+        let socket = {
+            let pool = self.zmq_pool.read().map_err(|e| {
+                TransportError::SendAlgorithmInitRequestError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?;
+            let socket_kv = pool
+                .cached_sockets
+                .scaling_dealer_socket
+                .as_ref()
+                .unwrap()
+                .get(&scaling_id)
+                .unwrap();
+            socket_kv.value().clone()
+        };
 
         match socket
             .try_lock()
@@ -626,8 +888,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
             .send_multipart(
                 [
                     empty_frame,
-                    transport_id_frame,
-                    scaling_id_frame,
+                    transport_entry_frame,
+                    scaling_entry_frame,
                     algorithm_init_payload,
                     algorithm_name_frame,
                 ],
@@ -647,17 +909,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         Ok(())
     }
 
-    fn initial_model_handshake(
+    fn execute_initial_model_handshake(
         &self,
-        actor_id: &Uuid,
-        _model_server_address: &str,
+        actor_entry: &(String, String, Uuid),
         agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
-        if actor_id.is_nil() {
-            return Err(TransportError::ModelHandshakeError(
-                "Actor ID is nil".to_string(),
-            ));
-        }
+        let validated_entry = validate_entry(actor_entry)?;
+        let (client_namespace, actor_context, actor_id) = validated_entry.clone();
 
         if agent_listener_address.is_empty() {
             return Err(TransportError::ModelHandshakeError(
@@ -668,31 +926,49 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         let _ = self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::ModelHandshakeError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                actor_id,
+                &actor_id,
                 agent_listener_address,
                 CacheAddressType::AgentListener,
                 SocketPoolType::ModelDealer,
-            );
+            )
+            .map_err(ZmqClientError::from)?;
 
         println!("[ZmqClient] Starting initial model handshake...");
 
-        let transport_id_string = self.transport_id.to_string();
-        let actor_id_string = actor_id.to_string();
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+
+        let actor_entry_string = format!("{}:{}:{}", client_namespace, actor_context, actor_id);
 
         let empty_frame: Vec<u8> = vec![];
-        let transport_id_frame: &[u8] = transport_id_string.as_bytes();
-        let actor_id_frame: &[u8] = actor_id_string.as_bytes();
+        let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
+        let actor_entry_frame: &[u8] = actor_entry_string.as_bytes();
         let get_model_payload: &[u8] = b"GET_MODEL";
 
-        let socket = self
-            .cached_sockets
-            .model_dealer_socket
-            .as_ref()
-            .unwrap()
-            .get(actor_id)
-            .unwrap();
+        let socket = {
+            let pool = self.zmq_pool.read().map_err(|e| {
+                TransportError::ModelHandshakeError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?;
+            let socket_kv = pool
+                .cached_sockets
+                .model_dealer_socket
+                .as_ref()
+                .unwrap()
+                .get(&actor_id)
+                .unwrap();
+            socket_kv.value().clone()
+        };
 
         match socket
             .try_lock()
@@ -702,8 +978,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
             .send_multipart(
                 [
                     &empty_frame,
-                    transport_id_frame,
-                    actor_id_frame,
+                    transport_entry_frame,
+                    actor_entry_frame,
                     get_model_payload,
                 ],
                 0,
@@ -790,18 +1066,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         }
     }
 
-    fn send_trajectory(
+    fn execute_send_trajectory(
         &self,
-        sender_id: &Uuid,
-        encoded_trajectory: EncodedTrajectory,
-        _model_server_address: &str,
+        buffer_entry: &(String, String, Uuid),
+        encoded_trajectory: &EncodedTrajectory,
         trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
-        if sender_id.is_nil() {
-            return Err(TransportError::SendTrajError(
-                "Sender ID is nil".to_string(),
-            ));
-        }
+        let validated_entry = validate_entry(buffer_entry)?;
+        let (client_namespace, router_context, buffer_id) = validated_entry.clone();
 
         if trajectory_server_address.is_empty() {
             return Err(TransportError::SendTrajError(
@@ -812,13 +1084,19 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         let _ = self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                sender_id,
+                &buffer_id,
                 trajectory_server_address,
                 CacheAddressType::TrajectoryServer,
                 SocketPoolType::TrajPush,
-            );
+            )
+            .map_err(ZmqClientError::from)?;
 
         // Serialize the trajectory
         let serialized_traj: Vec<u8> = serde_json::to_vec(&encoded_trajectory).map_err(|e| {
@@ -834,12 +1112,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         let socket = self
             .zmq_pool
             .read()
-            .map_err(ZmqClientError::from)?
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?
             .cached_sockets
             .traj_push_socket
             .as_ref()
             .unwrap()
-            .get(sender_id)
+            .get(&buffer_id)
             .unwrap()
             .value()
             .clone();
@@ -866,109 +1149,162 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         }
     }
 
-    fn listen_for_model(
+    fn execute_send_client_ids(
         &self,
-        receiver_id: &Uuid,
-        model_server_address: &str,
-        global_dispatcher_tx: tokio::sync::mpsc::Sender<RoutedMessage>,
+        scaling_entry: &(String, String, Uuid),
+        client_ids: &[(String, String, Uuid)],
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
-        if receiver_id.is_nil() {
-            return Err(TransportError::ListenForModelError(
-                "Receiver ID is nil".to_string(),
-            ));
-        }
+        let validated_entry = validate_entry(scaling_entry)?;
+        let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
-        if model_server_address.is_empty() {
-            return Err(TransportError::ListenForModelError(
-                "Model server address is empty".to_string(),
-            ));
-        }
-
-        if global_dispatcher_tx.is_closed() {
-            return Err(TransportError::ListenForModelError(
-                "Global dispatcher is closed".to_string(),
+        if training_scaling_server_address.is_empty() {
+            return Err(TransportError::SendClientIdsToServerError(
+                "Agent listener address is empty".to_string(),
             ));
         }
 
         let _ = self
             .zmq_pool
             .read()
-            .map_err(ZmqClientError::from)?
+            .map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                receiver_id,
-                model_server_address,
-                CacheAddressType::ModelServer,
-                SocketPoolType::ModelSub,
-            );
+                &scaling_id,
+                training_scaling_server_address,
+                CacheAddressType::TrainingScalingServer,
+                SocketPoolType::ScalingDealer,
+            )
+            .map_err(ZmqClientError::from)?;
 
-        let socket = self
-            .zmq_pool
-            .read()
-            .map_err(ZmqClientError::from)?
-            .cached_sockets
-            .model_sub_socket
-            .as_ref()
-            .unwrap()
-            .get(receiver_id)
-            .unwrap()
-            .clone();
+        // TODO: Send client IDs to server for caching, validation, and routing
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
 
-        let model_server_address = model_server_address.to_string();
-        let global_dispatcher_tx = global_dispatcher_tx.clone();
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
-        task::spawn_blocking(move || {
-            println!(
-                "[ZmqClient] Listening for model updates at {}",
-                model_server_address
-            );
+        let empty_frame: Vec<u8> = vec![];
+        let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
+        let scaling_entry_frame: &[u8] = scaling_entry_string.as_bytes();
+        let pairs_payload = client_ids
+            .iter()
+            .map(|(namespace, context, id)| {
+                namespace.to_string()
+                    + " "
+                    + context.to_string().as_str()
+                    + " "
+                    + id.to_string().as_str()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
 
-            loop {
-                match socket
-                    .try_lock()
-                    .map_err(|e| {
-                        TransportError::ListenForModelError(format!(
-                            "Failed to lock sub socket: {}",
-                            e
-                        ))
-                    })?
-                    .recv_bytes(0)
-                {
-                    Ok(model_bytes) => {
-                        let msg = RoutedMessage {
-                            actor_id: Uuid::nil(), // broadcast placeholder
-                            protocol: RoutingProtocol::ModelUpdate,
-                            payload: RoutedPayload::ModelUpdate {
-                                model_bytes,
-                                version: 0,
-                            },
-                        };
-                        let _ = global_dispatcher_tx.blocking_send(msg);
-                    }
+        let socket = {
+            let pool = self.zmq_pool.read().map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?;
+            let socket_kv = pool
+                .cached_sockets
+                .scaling_dealer_socket
+                .as_ref()
+                .unwrap()
+                .get(&scaling_id)
+                .unwrap();
+            socket_kv.value().clone()
+        };
+
+        match socket
+            .try_lock()
+            .map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to lock scaling dealer socket: {}",
+                    e
+                ))
+            })?
+            .send_multipart(
+                [
+                    &empty_frame,
+                    transport_entry_frame,
+                    scaling_entry_frame,
+                    pairs_payload.as_bytes(),
+                ],
+                0,
+            ) {
+            Ok(_) => println!("[ZmqClient] Sent client IDs to server"),
+            Err(e) => {
+                return Err(TransportError::SendClientIdsToServerError(format!(
+                    "Failed to send client IDs to server: {}",
+                    e
+                )));
+            }
+        }
+
+        match socket
+            .try_lock()
+            .map_err(|e| {
+                TransportError::SendClientIdsToServerError(format!(
+                    "Failed to lock scaling dealer socket: {}",
+                    e
+                ))
+            })?
+            .recv_multipart(0)
+        {
+            Ok(message_parts) => {
+                if message_parts.len() < 2 {
+                    return Err(TransportError::SendClientIdsToServerError(
+                        "Malformed response".to_string(),
+                    ));
+                }
+
+                let message_bytes: Vec<u8> = message_parts[1].to_vec();
+
+                match String::from_utf8_lossy(&message_bytes).parse::<i64>() {
+                    Ok(value) => match ServerResponse::from_i64(value) {
+                        ServerResponse::Success => {
+                            println!("[ZmqClient] Server updated cache with client IDs");
+                            return Ok(());
+                        }
+                        ServerResponse::Failure => {
+                            return Err(TransportError::SendClientIdsToServerError(
+                                "Server failed to acknowledge client IDs".to_string(),
+                            ));
+                        }
+                    },
                     Err(e) => {
-                        eprintln!("[ZmqClient] SUB socket recv error: {}", e);
-                        return Err::<(), TransportError>(TransportError::ListenForModelError(
-                            format!("SUB socket recv error: {}", e),
-                        ));
+                        return Err(TransportError::SendClientIdsToServerError(format!(
+                            "Failed to parse server response: {}",
+                            e
+                        )));
                     }
                 }
             }
-        });
-        Ok(())
+            Err(e) => {
+                return Err(TransportError::SendClientIdsToServerError(format!(
+                    "Failed to receive client IDs from server: {}",
+                    e
+                )));
+            }
+        }
     }
 
-    fn send_scaling_warning(
+    fn execute_send_scaling_warning(
         &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        scaling_server_address: &str,
+        scaling_entry: &(String, String, Uuid),
+        operation: &ScalingOperation,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
-        if scaling_id.is_nil() {
-            return Err(TransportError::SendScalingWarningError(
-                "Scaling ID is nil".to_string(),
-            ));
-        }
+        let validated_entry = validate_entry(scaling_entry)?;
+        let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
-        if scaling_server_address.is_empty() {
+        if training_scaling_server_address.is_empty() {
             return Err(TransportError::SendScalingWarningError(
                 "Scaling server address is empty".to_string(),
             ));
@@ -988,36 +1324,51 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         let _ = self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendScalingWarningError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                scaling_id,
-                scaling_server_address,
-                CacheAddressType::ScalingServer,
+                &scaling_id,
+                training_scaling_server_address,
+                CacheAddressType::TrainingScalingServer,
                 SocketPoolType::ScalingDealer,
-            );
+            )
+            .map_err(ZmqClientError::from)?;
 
         println!(
             "[ZmqClient] Sending scaling warning to {}",
-            scaling_server_address
+            training_scaling_server_address
         );
 
-        let transport_id_string = self.transport_id.to_string();
-        let scaling_id_string = scaling_id.to_string();
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let empty_frame: Vec<u8> = vec![];
-        let transport_id_frame: &[u8] = transport_id_string.as_bytes();
-        let scaling_id_frame: &[u8] = scaling_id_string.as_bytes();
+        let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
+        let scaling_entry_frame: &[u8] = scaling_entry_string.as_bytes();
         let scaling_warning_payload: &[u8] = b"ROUTER_SCALE_WARNING";
 
         let socket = self
             .zmq_pool
             .read()
-            .map_err(|e| ZmqClientError::from(e))?
+            .map_err(|e| {
+                TransportError::SendScalingWarningError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?
             .cached_sockets
             .scaling_dealer_socket
             .as_ref()
             .unwrap()
-            .get(scaling_id)
+            .get(&scaling_id)
             .unwrap()
             .value()
             .clone();
@@ -1033,8 +1384,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
             .send_multipart(
                 [
                     &empty_frame,
-                    transport_id_frame,
-                    scaling_id_frame,
+                    transport_entry_frame,
+                    scaling_entry_frame,
                     scaling_warning_payload,
                 ],
                 0,
@@ -1114,19 +1465,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         Ok(())
     }
 
-    fn send_scaling_complete(
+    fn execute_send_scaling_complete(
         &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        scaling_server_address: &str,
+        scaling_entry: &(String, String, Uuid),
+        operation: &ScalingOperation,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
-        if scaling_id.is_nil() {
-            return Err(TransportError::SendScalingCompleteError(
-                "Scaling ID is nil".to_string(),
-            ));
-        }
+        let validated_entry = validate_entry(scaling_entry)?;
+        let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
-        if scaling_server_address.is_empty() {
+        if training_scaling_server_address.is_empty() {
             return Err(TransportError::SendScalingCompleteError(
                 "Scaling server address is empty".to_string(),
             ));
@@ -1142,42 +1490,56 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
             operation_type
         );
 
-        // TODO: In a full implementation, this would send a ZMQ message to the training server
         let _ = self
             .zmq_pool
             .read()
-            .map_err(TransportError::from)?
+            .map_err(|e| {
+                TransportError::SendScalingCompleteError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                scaling_id,
-                scaling_server_address,
-                CacheAddressType::ScalingServer,
+                &scaling_id,
+                training_scaling_server_address,
+                CacheAddressType::TrainingScalingServer,
                 SocketPoolType::ScalingDealer,
-            );
+            )
+            .map_err(ZmqClientError::from)?;
 
         println!(
             "[ZmqClient] Sending scaling complete to {}",
-            scaling_server_address
+            training_scaling_server_address
         );
 
-        let transport_id_string = self.transport_id.to_string();
-        let scaling_id_string = scaling_id.to_string();
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let empty_frame: Vec<u8> = vec![];
-        let transport_id_frame: &[u8] = transport_id_string.as_bytes();
-        let scaling_id_frame: &[u8] = scaling_id_string.as_bytes();
+        let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
+        let scaling_entry_frame: &[u8] = scaling_entry_string.as_bytes();
         let scaling_complete_payload: &[u8] = b"ROUTER_SCALE_COMPLETE";
 
-        let socket = self
-            .zmq_pool
-            .read()
-            .map_err(TransportError::from)?
-            .cached_sockets
-            .scaling_dealer_socket
-            .as_ref()
-            .unwrap()
-            .get(scaling_id)
-            .unwrap()
-            .value();
+        let socket = {
+            let pool = self.zmq_pool.read().map_err(|e| {
+                TransportError::SendScalingCompleteError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?;
+            let socket_kv = pool
+                .cached_sockets
+                .scaling_dealer_socket
+                .as_ref()
+                .unwrap()
+                .get(&scaling_id)
+                .unwrap();
+            socket_kv.value().clone()
+        };
 
         match socket
             .try_lock()
@@ -1190,8 +1552,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
             .send_multipart(
                 [
                     &empty_frame,
-                    transport_id_frame,
-                    scaling_id_frame,
+                    transport_entry_frame,
+                    scaling_entry_frame,
                     scaling_complete_payload,
                 ],
                 0,
@@ -1271,18 +1633,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         Ok(())
     }
 
-    fn send_shutdown_signal(
+    fn execute_send_shutdown_signal(
         &self,
-        scaling_id: &Uuid,
-        scaling_server_address: &str,
+        scaling_entry: &(String, String, Uuid),
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
-        if scaling_id.is_nil() {
-            return Err(TransportError::SendShutdownSignalError(
-                "Scaling ID is nil".to_string(),
-            ));
-        }
+        let validated_entry = validate_entry(scaling_entry)?;
+        let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
-        if scaling_server_address.is_empty() {
+        if training_scaling_server_address.is_empty() {
             return Err(TransportError::SendShutdownSignalError(
                 "Scaling server address is empty".to_string(),
             ));
@@ -1290,38 +1649,52 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
 
         println!(
             "[ZmqClient] Sending shutdown signal to {}",
-            scaling_server_address
+            training_scaling_server_address
         );
 
         let _ = self
             .zmq_pool
             .read()
-            .map_err(TransportError::from)?
+            .map_err(|e| {
+                TransportError::SendShutdownSignalError(format!(
+                    "Failed to read ZMQ pool during cache update: {}",
+                    e
+                ))
+            })?
             .update_cache(
-                scaling_id,
-                scaling_server_address,
-                CacheAddressType::ScalingServer,
+                &scaling_id,
+                training_scaling_server_address,
+                CacheAddressType::TrainingScalingServer,
                 SocketPoolType::ScalingDealer,
             )
-            .map_err(|e| TransportError::SendShutdownSignalError(e.to_string()))?;
+            .map_err(ZmqClientError::from)?;
 
-        let transport_id_string = self.transport_id.to_string();
-        let scaling_id_string = scaling_id.to_string();
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let empty_frame: Vec<u8> = vec![];
-        let transport_id_frame: &[u8] = transport_id_string.as_bytes();
-        let scaling_id_frame: &[u8] = scaling_id_string.as_bytes();
+        let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
+        let scaling_entry_frame: &[u8] = scaling_entry_string.as_bytes();
         let shutdown_payload: &[u8] = b"CLIENT_SHUTDOWN";
 
         let socket = self
             .zmq_pool
             .read()
-            .map_err(TransportError::from)?
+            .map_err(|e| {
+                TransportError::SendShutdownSignalError(format!(
+                    "Failed to read ZMQ pool during socket retrieval: {}",
+                    e
+                ))
+            })?
             .cached_sockets
             .scaling_dealer_socket
             .as_ref()
             .unwrap()
-            .get(scaling_id)
+            .get(&scaling_id)
             .unwrap()
             .value()
             .clone();
@@ -1337,8 +1710,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
             .send_multipart(
                 [
                     &empty_frame,
-                    transport_id_frame,
-                    scaling_id_frame,
+                    transport_entry_frame,
+                    scaling_entry_frame,
                     shutdown_payload,
                 ],
                 0,
@@ -1405,3 +1778,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncTrainingServerTransportOps<B>
         }
     }
 }
+
+#[cfg(tests)]
+mod tests {}

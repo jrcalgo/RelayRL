@@ -1,6 +1,25 @@
 use relayrl_types::HyperparameterArgs;
 use std::collections::HashMap;
 
+/// **Client Constants**: Constants for client-side runtime coordination and actor management.
+pub(super) const CLIENT_NAMESPACE_PREFIX: &str = "client";
+pub(super) const ACTOR_CONTEXT: &str = "actor";
+pub(super) const SCALE_MANAGER_CONTEXT: &str = "scaler";
+pub(super) const ZMQ_CLIENT_CONTEXT: &str = "zmq-client";
+pub(super) const NATS_CLIENT_CONTEXT: &str = "nats-client";
+
+pub(super) const ROUTER_NAMESPACE_PREFIX: &str = "router";
+pub(super) const RECEIVER_CONTEXT: &str = "receiver";
+pub(super) const FILTER_CONTEXT: &str = "filter";
+pub(super) const BUFFER_CONTEXT: &str = "buffer";
+
+/// **Server Constants**: Constants for server-side runtime coordination and actor management.
+pub(super) const TRAINING_SERVER_NAMESPACE_PREFIX: &str = "training-server";
+pub(super) const INFERENCE_SERVER_NAMESPACE_PREFIX: &str = "inference-server";
+pub(super) const WORKER_CONTEXT: &str = "worker";
+pub(super) const ZMQ_SERVER_CONTEXT: &str = "zmq-server";
+pub(super) const NATS_SERVER_CONTEXT: &str = "nats-server";
+
 /// **Client Modules**: Handles client-side runtime coordination and actor management.
 ///
 /// The client module provides a comprehensive runtime system for managing RL agents:
@@ -31,20 +50,24 @@ pub mod client;
 pub mod server;
 
 /// Extend for future utility with other transport protocols (extend transport.rs accordingly)
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Clone, Copy, Debug)]
 pub enum TransportType {
-    #[cfg(feature = "zmq_transport")]
+    #[cfg(feature = "zmq-transport")]
     ZMQ,
-    #[cfg(feature = "nats_transport")]
+    #[cfg(feature = "nats-transport")]
     NATS,
 }
 
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 impl Default for TransportType {
     fn default() -> Self {
-        #[cfg(feature = "zmq_transport")]
-        TransportType::ZMQ
+        #[cfg(all(feature = "zmq-transport", not(feature = "nats-transport")))]
+        return TransportType::ZMQ;
+        #[cfg(all(not(feature = "zmq-transport"), feature = "nats-transport"))]
+        return TransportType::NATS;
+        #[cfg(all(feature = "zmq-transport", feature = "nats-transport"))]
+        return TransportType::NATS;
     }
 }
 

@@ -12,7 +12,7 @@ pub(crate) mod runtime {
 
     pub(crate) mod data {
         pub(crate) mod file_sink;
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         pub(crate) mod transport_sink;
     }
 }
