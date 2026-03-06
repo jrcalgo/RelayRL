@@ -143,7 +143,11 @@ impl ZmqPool {
         Ok(socket)
     }
 
-    fn create_push_socket(&self, zmq_socket_context: &Context, address: &str) -> Result<Socket, ZmqPoolError> {
+    fn create_push_socket(
+        &self,
+        zmq_socket_context: &Context,
+        address: &str,
+    ) -> Result<Socket, ZmqPoolError> {
         let socket = zmq_socket_context.socket(zmq::PUSH)?;
 
         let identity: SocketUuid = reserve_id_with(
@@ -164,7 +168,11 @@ impl ZmqPool {
         Ok(socket)
     }
 
-    fn create_sub_socket(&self, zmq_socket_context: &Context, address: &str) -> Result<Socket, ZmqPoolError> {
+    fn create_sub_socket(
+        &self,
+        zmq_socket_context: &Context,
+        address: &str,
+    ) -> Result<Socket, ZmqPoolError> {
         let socket = zmq_socket_context.socket(zmq::SUB)?;
 
         let identity: SocketUuid = reserve_id_with(
@@ -349,7 +357,7 @@ impl ZmqPool {
                     inference_scaling_server_address: current_addresses
                         .inference_addresses
                         .inference_scaling_server_address
-                        .clone()
+                        .clone(),
                 },
                 training_addresses: SharedTrainingAddresses {
                     agent_listener_address: current_addresses
@@ -434,8 +442,12 @@ impl ZmqPool {
             SocketPoolType::InferenceDealer => {
                 self.create_dealer_socket(&self.zmq_socket_context, new_address)
             }
-            SocketPoolType::ModelSub => self.create_sub_socket(&self.zmq_socket_context, new_address),
-            SocketPoolType::TrajPush => self.create_push_socket(&self.zmq_socket_context, new_address),
+            SocketPoolType::ModelSub => {
+                self.create_sub_socket(&self.zmq_socket_context, new_address)
+            }
+            SocketPoolType::TrajPush => {
+                self.create_push_socket(&self.zmq_socket_context, new_address)
+            }
         };
 
         let socket = socket_result.map_err(|e| {
@@ -470,9 +482,7 @@ fn validate_entry(
     if id.is_nil() {
         return Err(TransportError::InvalidState("ID is nil".to_string()));
     } else if context.is_empty() {
-        return Err(TransportError::InvalidState(
-            "Context is empty".to_string(),
-        ));
+        return Err(TransportError::InvalidState("Context is empty".to_string()));
     } else if namespace.is_empty() {
         return Err(TransportError::InvalidState(
             "Namespace is empty".to_string(),
@@ -532,7 +542,7 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_flag_last_inference(
         &self,
         actor_entry: &(String, String, Uuid),
-        reward: f32,
+        reward: &f32,
         inference_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
@@ -547,10 +557,20 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
         unimplemented!();
     }
 
+    fn execute_send_inference_model_init_request<B: Backend + BackendMatcher<Backend = B>>(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        model_mode: &ModelMode,
+        model_module: &Option<ModelModule<B>>,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        unimplemented!();
+    }
+
     fn execute_send_scaling_warning(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
@@ -559,7 +579,7 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_scaling_complete(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
@@ -676,9 +696,13 @@ impl ZmqTrainingOps {
         }
 
         let (client_namspace, zmq_context, transport_id) = self.transport_entry.clone();
-        remove_id(client_namspace.as_ref(), zmq_context.as_ref(), transport_id.clone())
-            .map_err(TransportError::from)?;
-        
+        remove_id(
+            client_namspace.as_ref(),
+            zmq_context.as_ref(),
+            transport_id.clone(),
+        )
+        .map_err(TransportError::from)?;
+
         Ok(())
     }
 }
@@ -687,7 +711,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
     fn execute_listen_for_model(
         &self,
         receiver_entry: &(String, String, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        global_dispatcher_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(receiver_entry)?;
@@ -787,15 +811,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         &self,
         scaling_entry: &(String, String, Uuid),
         actor_entries: &[(String, String, Uuid)],
-        model_mode: ModelMode,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        model_mode: &ModelMode,
+        algorithm: &Algorithm,
+        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         // TODO: Reqeust that the server initializes a shared algorithm OR individual algorithms per actor (must be the same algorithm for now)
         let validated_entry = validate_entry(scaling_entry)?;
         let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
-
 
         if agent_listener_address.is_empty() {
             return Err(TransportError::SendAlgorithmInitRequestError(
@@ -821,9 +844,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .map_err(ZmqClientError::from)?;
 
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
-        let transport_entry_string = format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
 
-        let scaling_entry_string = format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let algorithm_name_string = algorithm.as_str().to_string();
         let hyperparams_string = serde_json::to_string(&hyperparams).unwrap_or_default();
@@ -918,7 +943,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         println!("[ZmqClient] Starting initial model handshake...");
 
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
-        let transport_entry_string = format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
 
         let actor_entry_string = format!("{}:{}:{}", client_namespace, actor_context, actor_id);
 
@@ -1043,7 +1069,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
     fn execute_send_trajectory(
         &self,
         buffer_entry: &(String, String, Uuid),
-        encoded_trajectory: EncodedTrajectory,
+        encoded_trajectory: &EncodedTrajectory,
         trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(buffer_entry)?;
@@ -1157,9 +1183,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
         // TODO: Send client IDs to server for caching, validation, and routing
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
-        let transport_entry_string = format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
 
-        let scaling_entry_string = format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let empty_frame: Vec<u8> = vec![];
         let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
@@ -1270,7 +1298,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
     fn execute_send_scaling_warning(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(scaling_entry)?;
@@ -1316,9 +1344,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         );
 
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
-        let transport_entry_string = format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
 
-        let scaling_entry_string = format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let empty_frame: Vec<u8> = vec![];
         let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
@@ -1438,7 +1468,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
     fn execute_send_scaling_complete(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(scaling_entry)?;
@@ -1483,9 +1513,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         );
 
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
-        let transport_entry_string = format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
 
-        let scaling_entry_string = format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let empty_frame: Vec<u8> = vec![];
         let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
@@ -1638,9 +1670,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .map_err(ZmqClientError::from)?;
 
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
-        let transport_entry_string = format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
 
-        let scaling_entry_string = format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
+        let scaling_entry_string =
+            format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let empty_frame: Vec<u8> = vec![];
         let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();

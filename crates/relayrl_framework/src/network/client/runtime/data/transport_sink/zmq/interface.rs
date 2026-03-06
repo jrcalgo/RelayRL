@@ -62,8 +62,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
         )
         .map_err(TransportError::from)?;
 
-        let transport_entry = (client_namespace.to_string(), crate::network::ZMQ_CLIENT_CONTEXT.to_string(), transport_id);
-    
+        let transport_entry = (
+            client_namespace.to_string(),
+            crate::network::ZMQ_CLIENT_CONTEXT.to_string(),
+            transport_id,
+        );
+
         let zmq_pool = Arc::new(RwLock::new(ZmqPool::new(client_namespace.clone())));
         let zmq_inference_ops = ZmqInferenceOps::new(transport_entry.clone(), zmq_pool.clone());
         let zmq_training_ops = ZmqTrainingOps::new(transport_entry, zmq_pool.clone());
@@ -154,10 +158,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
 {
     fn send_client_ids(
         &self,
-        scaling_entry: &(String, String, Uuid),
-        client_ids: &[(String, String, Uuid)],
+        scaling_entry: (String, String, Uuid),
+        client_ids: Vec<(String, String, Uuid)>,
         replace: bool,
-        server_addresses: SharedTransportAddresses,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
             let _permit = scaling_protocol
@@ -184,7 +188,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     return Err(TransportError::CircuitOpen);
                                 }
 
-                                let inference_scaling_server_address: &str = server_addresses
+                                let inference_scaling_server_address: &str = transport_addresses
                                     .inference_addresses
                                     .inference_scaling_server_address
                                     .as_ref();
@@ -194,8 +198,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     let result =
                                 <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_client_ids(
                                     &self,
-                                    scaling_entry,
-                                    client_ids,
+                                    &scaling_entry,
+                                    &client_ids,
                                     inference_scaling_server_address,
                                 );
 
@@ -244,14 +248,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let training_scaling_server_address: &str =
-                            server_addresses.training_addresses.training_scaling_server_address.as_ref();
+                            transport_addresses.training_addresses.training_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_client_ids(
                                 &self,
-                                scaling_entry,
-                                client_ids,
+                                &scaling_entry,
+                                &client_ids,
                                 training_scaling_server_address,
                             );
 
@@ -331,9 +335,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
 
     fn send_scaling_warning(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: (String, String, Uuid),
         operation: ScalingOperation,
-        server_addresses: SharedTransportAddresses,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
             let _permit = scaling_protocol
@@ -359,14 +363,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let inference_scaling_server_address: &str =
-                            server_addresses.inference_addresses.inference_scaling_server_address.as_ref();
+                            transport_addresses.inference_addresses.inference_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_scaling_warning(
                                 &self,
-                                scaling_entry,
-                                operation,
+                                &scaling_entry,
+                                &operation,
                                 inference_scaling_server_address,
                             );
 
@@ -413,14 +417,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let training_scaling_server_address: &str =
-                            server_addresses.training_addresses.training_scaling_server_address.as_ref();
+                            transport_addresses.training_addresses.training_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_scaling_warning(
                                 &self,
-                                scaling_entry,
-                                operation,
+                                &scaling_entry,
+                                &operation,
                                 training_scaling_server_address,
                             );
 
@@ -501,9 +505,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
 
     fn send_scaling_complete(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: (String, String, Uuid),
         operation: ScalingOperation,
-        server_addresses: SharedTransportAddresses,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
             let _permit = scaling_protocol
@@ -529,14 +533,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let inference_scaling_server_address: &str =
-                            server_addresses.inference_addresses.inference_scaling_server_address.as_ref();
+                            transport_addresses.inference_addresses.inference_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_scaling_complete(
                                 &self,
-                                scaling_entry,
-                                operation,
+                                &scaling_entry,
+                                &operation,
                                 inference_scaling_server_address,
                             );
 
@@ -583,14 +587,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let training_scaling_server_address: &str =
-                            server_addresses.training_addresses.training_scaling_server_address.as_ref();
+                            transport_addresses.training_addresses.training_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_scaling_complete(
                                 &self,
-                                scaling_entry,
-                                operation,
+                                &scaling_entry,
+                                &operation,
                                 training_scaling_server_address,
                             );
 
@@ -671,8 +675,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
 
     fn send_shutdown_signal(
         &self,
-        scaling_entry: &(String, String, Uuid),
-        server_addresses: SharedTransportAddresses,
+        scaling_entry: (String, String, Uuid),
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
             let _permit = scaling_protocol
@@ -698,13 +702,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                             }
 
                             let inference_scaling_server_address: &str =
-                                server_addresses.inference_addresses.inference_scaling_server_address.as_ref();
+                                transport_addresses.inference_addresses.inference_scaling_server_address.as_ref();
 
                             let mut attempts = 0;
                             loop {
                                 let result = <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_shutdown_signal(
                                     &self,
-                                    scaling_entry,
+                                    &scaling_entry,
                                     inference_scaling_server_address,
                                 );
 
@@ -751,13 +755,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                             }
 
                             let training_scaling_server_address: &str =
-                                server_addresses.training_addresses.training_scaling_server_address.as_ref();
+                                transport_addresses.training_addresses.training_scaling_server_address.as_ref();
 
                             let mut attempts = 0;
                             loop {
                                 let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_shutdown_signal(
                                     &self,
-                                    scaling_entry,
+                                    &scaling_entry,
                                     training_scaling_server_address,
                                 );
 
@@ -844,11 +848,68 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
 impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B>
     for ZmqInterface<B>
 {
+    fn send_inference_model_init_request(
+        &self,
+        scaling_entry: (String, String, Uuid),
+        model_mode: ModelMode,
+        model_module: Option<ModelModule<B>>,
+        transport_addresses: SharedTransportAddresses,
+    ) -> Result<(), TransportError> {
+        if let Some(protocol) = self.inference_protocol.as_ref() {
+            let _permit = protocol
+                .backpressure
+                .acquire()
+                .map_err(TransportError::from)?;
+
+            if protocol.circuit_breaker.is_open() {
+                return Err(TransportError::CircuitOpen);
+            }
+
+            let inference_scaling_server_address: &str = transport_addresses
+                .inference_addresses
+                .inference_scaling_server_address
+                .as_ref();
+
+            let mut attempts = 0;
+            loop {
+                let result = self.execute_send_inference_model_init_request(
+                    &scaling_entry,
+                    &model_mode,
+                    &model_module,
+                    inference_scaling_server_address,
+                );
+
+                match result {
+                    Ok(_) => {
+                        protocol.circuit_breaker.record_success();
+                        return Ok(());
+                    }
+                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                        attempts += 1;
+                        protocol.circuit_breaker.record_failure();
+                        let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
+                        sleep(delay);
+                    }
+                    Err(e) => {
+                        protocol.circuit_breaker.record_failure();
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        } else {
+            return Err(TransportError::InvalidState(
+                "Inference protocol not initialized".to_string(),
+            ));
+        }
+    }
     fn send_inference_request(
         &self,
-        actor_entry: &(String, String, Uuid),
-        obs_bytes: &[u8],
-        server_addresses: SharedTransportAddresses,
+        actor_entry: (String, String, Uuid),
+        obs_bytes: Vec<u8>,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<RelayRLAction, TransportError> {
         if let Some(protocol) = self.inference_protocol.as_ref() {
             let _permit = protocol
@@ -860,7 +921,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                 return Err(TransportError::CircuitOpen);
             }
 
-            let inference_server_address: &str = server_addresses
+            let inference_server_address: &str = transport_addresses
                 .inference_addresses
                 .inference_server_address
                 .as_ref();
@@ -868,8 +929,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
             let mut attempts = 0;
             loop {
                 let result = self.execute_send_inference_request(
-                    actor_entry,
-                    obs_bytes,
+                    &actor_entry,
+                    &obs_bytes,
                     inference_server_address,
                 );
 
@@ -902,9 +963,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
 
     fn send_flag_last_inference(
         &self,
-        actor_entry: &(String, String, Uuid),
+        actor_entry: (String, String, Uuid),
         reward: f32,
-        server_addresses: SharedTransportAddresses,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(protocol) = self.inference_protocol.as_ref() {
             let _permit = protocol
@@ -916,7 +977,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                 return Err(TransportError::CircuitOpen);
             }
 
-            let inference_server_address: &str = server_addresses
+            let inference_server_address: &str = transport_addresses
                 .inference_addresses
                 .inference_server_address
                 .as_ref();
@@ -924,8 +985,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
             let mut attempts = 0;
             loop {
                 let result = self.execute_send_flag_last_inference(
-                    actor_entry,
-                    reward,
+                    &actor_entry,
+                    &reward,
                     inference_server_address,
                 );
 
@@ -975,7 +1036,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqInferenceExecution for ZmqInte
     fn execute_send_flag_last_inference(
         &self,
         actor_entry: &(String, String, Uuid),
-        reward: f32,
+        reward: &f32,
         inference_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqInferenceOps as ZmqInferenceExecution>::execute_send_flag_last_inference(
@@ -983,6 +1044,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqInferenceExecution for ZmqInte
             actor_entry,
             reward,
             inference_server_address,
+        )
+    }
+
+    fn execute_send_inference_model_init_request<MB: Backend + BackendMatcher<Backend = MB>>(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        model_mode: &ModelMode,
+        model_module: &Option<ModelModule<MB>>,
+        inference_scaling_server_address: &str,
+    ) -> Result<(), TransportError> {
+        <ZmqInferenceOps as ZmqInferenceExecution>::execute_send_inference_model_init_request(
+            &self.zmq_inference_ops,
+            scaling_entry,
+            model_mode,
+            model_module,
+            inference_scaling_server_address,
         )
     }
 
@@ -1003,7 +1080,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqInferenceExecution for ZmqInte
     fn execute_send_scaling_warning(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqInferenceOps as ZmqInferenceExecution>::execute_send_scaling_warning(
@@ -1017,7 +1094,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqInferenceExecution for ZmqInte
     fn execute_send_scaling_complete(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqInferenceOps as ZmqInferenceExecution>::execute_send_scaling_complete(
@@ -1046,12 +1123,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
 {
     fn send_algorithm_init_request(
         &self,
-        scaling_entry: &(String, String, Uuid),
-        actor_entries: &[(String, String, Uuid)],
+        scaling_entry: (String, String, Uuid),
+        actor_entries: Vec<(String, String, Uuid)>,
         model_mode: ModelMode,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
-        server_addresses: SharedTransportAddresses,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(protocol) = self.training_protocol.as_ref() {
             let _permit = protocol
@@ -1063,7 +1140,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 return Err(TransportError::CircuitOpen);
             }
 
-            let agent_listener_address: &str = server_addresses
+            let agent_listener_address: &str = transport_addresses
                 .training_addresses
                 .agent_listener_address
                 .as_ref();
@@ -1071,11 +1148,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             let mut attempts = 0;
             loop {
                 let result = self.execute_send_algorithm_init_request(
-                    scaling_entry,
-                    actor_entries,
-                    model_mode.clone(),
-                    algorithm.clone(),
-                    hyperparams.clone(),
+                    &scaling_entry,
+                    &actor_entries,
+                    &model_mode,
+                    &algorithm,
+                    &hyperparams,
                     agent_listener_address,
                 );
 
@@ -1108,8 +1185,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
 
     fn initial_model_handshake(
         &self,
-        actor_entry: &(String, String, Uuid),
-        server_addresses: SharedTransportAddresses,
+        actor_entry: (String, String, Uuid),
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         if let Some(protocol) = self.training_protocol.as_ref() {
             let _premit = protocol
@@ -1121,7 +1198,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 return Err(TransportError::CircuitOpen);
             }
 
-            let agent_listener_address: &str = server_addresses
+            let agent_listener_address: &str = transport_addresses
                 .training_addresses
                 .agent_listener_address
                 .as_ref();
@@ -1129,7 +1206,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             let mut attempts = 0;
             loop {
                 let result =
-                    self.execute_initial_model_handshake(actor_entry, agent_listener_address);
+                    self.execute_initial_model_handshake(&actor_entry, agent_listener_address);
 
                 match result {
                     Ok(model) => {
@@ -1160,9 +1237,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
 
     fn send_trajectory(
         &self,
-        buffer_entry: &(String, String, Uuid),
+        buffer_entry: (String, String, Uuid),
         encoded_trajectory: EncodedTrajectory,
-        server_addresses: SharedTransportAddresses,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(protocol) = self.training_protocol.as_ref() {
             let _permit = protocol
@@ -1174,7 +1251,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 return Err(TransportError::CircuitOpen);
             }
 
-            let trajectory_server_address: &str = server_addresses
+            let trajectory_server_address: &str = transport_addresses
                 .training_addresses
                 .trajectory_server_address
                 .as_ref();
@@ -1182,8 +1259,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             let mut attempts = 0;
             loop {
                 let result = self.execute_send_trajectory(
-                    buffer_entry,
-                    encoded_trajectory.clone(),
+                    &buffer_entry,
+                    &encoded_trajectory,
                     trajectory_server_address,
                 );
 
@@ -1216,16 +1293,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
 
     fn listen_for_model(
         &self,
-        receiver_entry: &(String, String, Uuid),
+        receiver_entry: (String, String, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
-        server_addresses: SharedTransportAddresses,
+        transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(protocol) = self.training_protocol.as_ref() {
             if protocol.circuit_breaker.is_open() {
                 return Err(TransportError::CircuitOpen);
             }
 
-            let model_server_address = server_addresses
+            let model_server_address = transport_addresses
                 .training_addresses
                 .model_server_address
                 .as_ref();
@@ -1233,8 +1310,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             let mut attempts = 0;
             loop {
                 let result = self.execute_listen_for_model(
-                    receiver_entry,
-                    global_dispatcher_tx.clone(),
+                    &receiver_entry,
+                    &global_dispatcher_tx.clone(),
                     model_server_address,
                 );
 
@@ -1271,7 +1348,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
     fn execute_listen_for_model(
         &self,
         receiver_entry: &(String, String, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        global_dispatcher_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqTrainingOps as ZmqTrainingExecution<B>>::execute_listen_for_model(
@@ -1287,9 +1364,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
         &self,
         scaling_entry: &(String, String, Uuid),
         actor_entries: &[(String, String, Uuid)],
-        model_mode: ModelMode,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        model_mode: &ModelMode,
+        algorithm: &Algorithm,
+        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqTrainingOps as ZmqTrainingExecution<B>>::execute_send_algorithm_init_request(
@@ -1320,7 +1397,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
     fn execute_send_trajectory(
         &self,
         buffer_entry: &(String, String, Uuid),
-        encoded_trajectory: EncodedTrajectory,
+        encoded_trajectory: &EncodedTrajectory,
         trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqTrainingOps as ZmqTrainingExecution<B>>::execute_send_trajectory(
@@ -1350,7 +1427,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
     fn execute_send_scaling_warning(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqTrainingOps as ZmqTrainingExecution<B>>::execute_send_scaling_warning(
@@ -1365,7 +1442,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
     fn execute_send_scaling_complete(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqTrainingOps as ZmqTrainingExecution<B>>::execute_send_scaling_complete(

@@ -54,8 +54,15 @@ pub(super) trait ZmqInferenceExecution {
     fn execute_send_flag_last_inference(
         &self,
         actor_entry: &(String, String, Uuid),
-        reward: f32,
+        reward: &f32,
         inference_server_address: &str,
+    ) -> Result<(), TransportError>;
+    fn execute_send_inference_model_init_request<B: Backend + BackendMatcher<Backend = B>>(
+        &self,
+        scaling_entry: &(String, String, Uuid),
+        model_mode: &ModelMode,
+        model_module: &Option<ModelModule<B>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
         &self,
@@ -66,13 +73,13 @@ pub(super) trait ZmqInferenceExecution {
     fn execute_send_scaling_warning(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
@@ -86,16 +93,16 @@ pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> 
     fn execute_listen_for_model(
         &self,
         receiver_entry: &(String, String, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        global_dispatcher_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_algorithm_init_request(
         &self,
         scaling_entry: &(String, String, Uuid),
         actor_entries: &[(String, String, Uuid)],
-        model_mode: ModelMode,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        model_mode: &ModelMode,
+        algorithm: &Algorithm,
+        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
         agent_listener_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_initial_model_handshake(
@@ -106,7 +113,7 @@ pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> 
     fn execute_send_trajectory(
         &self,
         buffer_entry: &(String, String, Uuid),
-        encoded_trajectory: EncodedTrajectory,
+        encoded_trajectory: &EncodedTrajectory,
         trajectory_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
@@ -118,13 +125,13 @@ pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> 
     fn execute_send_scaling_warning(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
         scaling_entry: &(String, String, Uuid),
-        operation: ScalingOperation,
+        operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
