@@ -1,4 +1,5 @@
-use crate::network::client::agent::ClientModes;
+use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
+use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -6,7 +7,7 @@ use crate::network::client::runtime::coordination::lifecycle_manager::SharedTran
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
-use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
+use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
@@ -81,13 +82,14 @@ pub(crate) struct StateManager<
     shared_client_modes: Arc<ClientModes>,
     shared_max_traj_length: Arc<RwLock<u128>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    shared_server_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
+    shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     default_model: Option<ModelModule<B>>,
+    shared_local_models: Vec<(DeviceType, LocalModelHandle<B>)>,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
-    pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterUuid>,
+    pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterNamespace>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -102,7 +104,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         shared_client_modes: Arc<ClientModes>,
         shared_max_traj_length: Arc<RwLock<u128>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        shared_server_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
+        shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         default_model: Option<ModelModule<B>>,
     ) -> (Self, Receiver<RoutedMessage>) {
@@ -118,9 +120,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 shared_client_modes,
                 shared_max_traj_length,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                shared_server_addresses,
+                shared_transport_addresses,
                 shared_local_model_path,
                 default_model,
+                shared_local_models: Vec::new(),
                 global_dispatcher_tx,
                 actor_inboxes: DashMap::new(),
                 actor_handles: DashMap::new(),
@@ -195,10 +198,58 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(None)
     }
 
+    /// Returns a `(LocalModelHandle<B>, needs_handshake)` pair for a new actor on `device`.
+    ///
+    /// - **Independent** mode: always creates a fresh `Arc<RwLock<Option<...>>>`.
+    ///   `needs_handshake` is `true` when no model could be pre-loaded.
+    /// - **Shared** mode: looks up the per-device pool.  The *first* actor on a given device
+    ///   creates the slot (and triggers a handshake if no model is available); every subsequent
+    ///   actor on the same device reuses the existing handle with `needs_handshake = false`,
+    ///   ensuring only one network round-trip happens per device.
+    async fn get_or_init_model_handle(
+        &mut self,
+        default_model: Option<ModelModule<B>>,
+        device: DeviceType,
+    ) -> Result<(LocalModelHandle<B>, bool), StateManagerError> {
+        match &self.shared_client_modes.actor_inference_mode {
+            ActorInferenceMode::Local(ModelMode::Shared) => {
+                // Reuse existing slot for this device (if any).
+                if let Some(idx) = self
+                    .shared_local_models
+                    .iter()
+                    .position(|(d, _)| d == &device)
+                {
+                    let handle = self.shared_local_models[idx].1.clone();
+                    // Subsequent actors never trigger an additional handshake.
+                    return Ok((handle, false));
+                }
+
+                // First actor for this device: create the slot.
+                let reloadable = self
+                    .load_reloadable_model(default_model, device.clone())
+                    .await?;
+                let needs_handshake = reloadable.is_none();
+                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
+                self.shared_local_models.push((device, handle.clone()));
+                Ok((handle, needs_handshake))
+            }
+
+            // Independent or Server-inference: every actor gets its own fresh handle.
+            _ => {
+                let reloadable = self
+                    .load_reloadable_model(default_model, device.clone())
+                    .await?;
+                let needs_handshake = reloadable.is_none();
+                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
+                Ok((handle, needs_handshake))
+            }
+        }
+    }
+
     pub(crate) async fn __new_actor(
         &mut self,
         actor_id: ActorUuid,
-        router_id: RouterUuid,
+        router_namespace: RouterNamespace,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
@@ -210,11 +261,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             );
             self.__remove_actor(actor_id)?
         }
-
-        // Use helper function to load model from various sources
-        let reloadable_model: Option<HotReloadableModel<B>> = self
-            .load_reloadable_model(default_model, device.clone())
-            .await?;
 
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
@@ -228,29 +274,37 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_training_dispatcher = self.shared_training_dispatcher.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let shared_server_addresses = self.shared_server_addresses.clone();
+        let shared_transport_addresses = self.shared_transport_addresses.clone();
+
+        let client_namespace = self.client_namespace.clone();
+
+        let (model_handle, model_handshake_flag) = self
+            .get_or_init_model_handle(default_model, device.clone())
+            .await?;
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
-            let (mut actor, handshake_flag): (Actor<B, D_IN, D_OUT>, bool) =
-                Actor::<B, D_IN, D_OUT>::new(
-                    actor_id,
-                    device.clone(),
-                    reloadable_model,
-                    shared_local_model_path,
-                    shared_max_traj_length,
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    shared_inference_dispatcher,
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    shared_training_dispatcher,
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    shared_server_addresses,
-                    actor_inbox_rx,
-                    tx_to_buffer,
-                    shared_client_modes,
-                )
-                .await;
+            let mut actor: Actor<B, D_IN, D_OUT> = Actor::<B, D_IN, D_OUT>::new(
+                client_namespace,
+                actor_id,
+                device.clone(),
+                model_handle,
+                shared_local_model_path,
+                shared_max_traj_length,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                shared_inference_dispatcher,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                shared_training_dispatcher,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                shared_transport_addresses,
+                actor_inbox_rx,
+                tx_to_buffer,
+                shared_client_modes,
+            )
+            .await;
 
-            if handshake_flag {
+            // Use the flag computed by StateManager so that, in Shared mode, only the first
+            // actor per device triggers the network handshake.
+            if model_handshake_flag {
                 let model_handshake_ms = RoutedMessage {
                     actor_id,
                     protocol: RoutingProtocol::ModelHandshake,
@@ -265,7 +319,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }));
 
         self.actor_handles.insert(actor_id, handle);
-        self.actor_router_addresses.insert(actor_id, router_id);
+        self.actor_router_addresses
+            .insert(actor_id, router_namespace);
 
         Ok(())
     }
@@ -273,14 +328,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn _restart_actor(
         &mut self,
         actor_id: ActorUuid,
-        router_id: RouterUuid,
+        router_namespace: RouterNamespace,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         self.__remove_actor(actor_id)?;
-        self.__new_actor(actor_id, router_id, device, default_model, tx_to_buffer)
-            .await?;
+        self.__new_actor(
+            actor_id,
+            router_namespace,
+            device,
+            default_model,
+            tx_to_buffer,
+        )
+        .await?;
         Ok(())
     }
 
@@ -311,8 +372,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 continue;
             }
 
-            remove_id(self.client_namespace.as_ref(), "actor", actor_id)
-                .map_err(StateManagerError::from)?;
+            remove_id(
+                self.client_namespace.as_ref(),
+                crate::network::ACTOR_CONTEXT,
+                actor_id,
+            )
+            .map_err(StateManagerError::from)?;
         }
 
         Ok(())
@@ -322,6 +387,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_handles.clear();
         self.actor_inboxes.clear();
         self.actor_router_addresses.clear();
+        self.shared_local_models.clear();
 
         Ok(())
     }
@@ -332,7 +398,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         self.actor_inboxes.remove(&id);
-        remove_id(self.client_namespace.as_ref(), "actor", id).map_err(StateManagerError::from)?;
+        remove_id(
+            self.client_namespace.as_ref(),
+            crate::network::ACTOR_CONTEXT,
+            id,
+        )
+        .map_err(StateManagerError::from)?;
         Ok(())
     }
 
@@ -376,37 +447,51 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_inboxes.insert(new_id, current_id_inbox);
         self.actor_inboxes.remove(&current_id);
 
-        replace_id(self.client_namespace.as_ref(), "actor", current_id, new_id)
-            .map_err(StateManagerError::from)?;
+        replace_id(
+            self.client_namespace.as_ref(),
+            crate::network::ACTOR_CONTEXT,
+            current_id,
+            new_id,
+        )
+        .map_err(StateManagerError::from)?;
 
         Ok(())
     }
 
-    pub(crate) fn distribute_actors(&self, router_ids: Vec<RouterUuid>) {
-        if router_ids.is_empty() {
+    pub(crate) fn distribute_actors(&self, router_namespaces: Vec<RouterNamespace>) {
+        if router_namespaces.is_empty() {
             return;
         }
 
         let actor_ids: Vec<ActorUuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
-            let router_id = router_ids[i % router_ids.len()];
-            self.actor_router_addresses.insert(*actor_id, router_id);
+            let router_namespace = router_namespaces[i % router_namespaces.len()].clone();
+            self.actor_router_addresses
+                .insert(*actor_id, router_namespace);
         }
     }
 
-    pub(crate) fn restore_actor_router_mappings(&self, mappings: Vec<(ActorUuid, RouterUuid)>) {
+    /// Replaces all actor-router mappings with the provided snapshot.
+    ///
+    /// Takes `&self` for the same reason as `distribute_actors`: `actor_router_addresses`
+    /// is a `DashMap` and mutation is safe through a shared reference.
+    pub(crate) fn restore_actor_router_mappings(
+        &self,
+        mappings: Vec<(ActorUuid, RouterNamespace)>,
+    ) {
         self.actor_router_addresses.clear();
 
-        for (actor_id, router_id) in mappings {
-            self.actor_router_addresses.insert(actor_id, router_id);
+        for (actor_id, router_namespace) in mappings {
+            self.actor_router_addresses
+                .insert(actor_id, router_namespace);
         }
     }
 
-    pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterUuid)> {
+    pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterNamespace)> {
         self.actor_router_addresses
             .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
+            .map(|entry| (*entry.key(), entry.value().clone()))
             .collect()
     }
 
