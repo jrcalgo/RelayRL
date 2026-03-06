@@ -10,7 +10,7 @@ use crate::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, NdArrayDType, TchDType,
 };
-use burn_tensor::{backend::Backend, Shape, Tensor};
+use burn_tensor::{Shape, Tensor, backend::Backend};
 
 use crate::model::{ModelError, ModelModule};
 

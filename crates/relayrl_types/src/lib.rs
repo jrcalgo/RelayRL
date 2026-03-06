@@ -43,7 +43,7 @@ pub mod prelude {
         pub use crate::data::utilities::compress::{CompressedData, CompressionScheme};
 
         #[cfg(feature = "integrity")]
-        pub use crate::data::utilities::integrity::{compute_checksum, VerifiedData};
+        pub use crate::data::utilities::integrity::{VerifiedData, compute_checksum};
 
         #[cfg(feature = "encryption")]
         pub use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};
