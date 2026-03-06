@@ -1,4 +1,4 @@
-use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
+use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol};
@@ -51,7 +51,7 @@ pub(crate) struct RouterDispatcher<
     const D_OUT: usize,
 > {
     global_dispatcher_rx: Receiver<RoutedMessage>,
-    router_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>>,
+    router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     pending_messages: Arc<Mutex<HashMap<ActorUuid, PendingMessage>>>,
@@ -62,7 +62,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 {
     pub(crate) fn new(
         global_dispatcher_rx: Receiver<RoutedMessage>,
-        router_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>>,
+        router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     ) -> Self {
         Self {
@@ -153,7 +153,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// Background task that periodically retries pending messages
     async fn retry_pending_messages_loop(
         pending_messages: Arc<Mutex<HashMap<ActorUuid, PendingMessage>>>,
-        router_channels: Arc<DashMap<RouterUuid, Sender<RoutedMessage>>>,
+        router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     ) {
         const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -230,17 +230,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             // Now process retries without holding the lock
             for (actor_id, pending_msg, first_attempt, retry_count) in retry_messages {
                 // Check router assignment (async operation, no lock needed)
-                let router_id = {
+                let router_namespace = {
                     let state = shared_state.read().await;
                     state
                         .actor_router_addresses
                         .get(&actor_id)
-                        .map(|entry| *entry.value())
+                        .map(|entry| entry.value().clone())
                 };
 
-                match router_id {
-                    Some(router_id) => {
-                        match router_channels.get(&router_id) {
+                match router_namespace {
+                    Some(router_namespace) => {
+                        match router_channels.get(&router_namespace) {
                             Some(tx) => {
                                 // Try to send (no lock needed)
                                 match tx.try_send(pending_msg.message) {
@@ -310,28 +310,28 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let actor_id = msg.actor_id;
 
         // Look up which router this actor is assigned to
-        let router_id = {
+        let router_namespace = {
             let state = self.shared_state.read().await;
             state
                 .actor_router_addresses
                 .get(&actor_id)
-                .map(|entry| *entry.value())
+                .map(|entry| entry.value().clone())
         };
 
-        match router_id {
-            Some(router_id) => match self.router_channels.get(&router_id) {
+        match router_namespace {
+            Some(router_namespace) => match self.router_channels.get(&router_namespace) {
                 Some(tx) => {
                     tx.send(msg).await.map_err(|e| {
                         RouterDispatcherError::DispatchError(format!(
                             "Failed to send message to router {}: {}",
-                            router_id, e
+                            router_namespace, e
                         ))
                     })?;
                     Ok(())
                 }
                 None => Err(RouterDispatcherError::RouterNotFoundError(format!(
                     "Router {} not found for actor {}",
-                    router_id, actor_id
+                    router_namespace, actor_id
                 ))),
             },
             None => {

@@ -1,5 +1,5 @@
 use super::{RoutedMessage, RouterError, RoutingProtocol};
-use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
+use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 
 use burn_tensor::backend::Backend;
@@ -22,7 +22,7 @@ pub(crate) struct ClientCentralFilter<
     const D_IN: usize,
     const D_OUT: usize,
 > {
-    associated_router_id: RouterUuid,
+    associated_router_namespace: RouterNamespace,
     rx_from_receiver: Receiver<RoutedMessage>,
     shared_agent_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shutdown: Option<broadcast::Receiver<()>>,
@@ -32,12 +32,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ClientCentralFilter<B, D_IN, D_OUT>
 {
     pub(crate) fn new(
-        associated_router_id: RouterUuid,
+        associated_router_namespace: RouterNamespace,
         rx_from_receiver: Receiver<RoutedMessage>,
         shared_agent_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     ) -> Self {
         Self {
-            associated_router_id,
+            associated_router_namespace,
             rx_from_receiver,
             shared_agent_state,
             shutdown: None,
@@ -52,7 +52,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn spawn_loop(mut self) -> Result<(), RouterError> {
         let mut shutdown: Option<broadcast::Receiver<()>> = self.shutdown.take();
         let mut rx: Receiver<RoutedMessage> = self.rx_from_receiver;
-        let this_router_id: RouterUuid = self.associated_router_id;
+        let this_router_namespace: RouterNamespace = self.associated_router_namespace.clone();
         let shared_agent_state = self.shared_agent_state.clone();
 
         loop {
@@ -61,10 +61,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     match msg_opt {
                         Some(msg) => {
                             if let RoutingProtocol::Shutdown = msg.protocol {
-                                Self::route_message(msg, &this_router_id, &shared_agent_state).await?;
+                                Self::route_message(msg, &this_router_namespace, &shared_agent_state).await?;
                                 break Ok(());
                             }
-                            Self::route_message(msg, &this_router_id, &shared_agent_state).await?;
+                            Self::route_message(msg, &this_router_namespace, &shared_agent_state).await?;
                         }
                         None => break Ok(()),
                     }
@@ -83,14 +83,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn route_message(
         msg: RoutedMessage,
-        router_id: &RouterUuid,
+        router_namespace: &RouterNamespace,
         shared_agent_state: &Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     ) -> Result<(), RouterError> {
         let actor_id: Uuid = msg.actor_id;
         let shared_state = shared_agent_state.read().await;
 
         match shared_state.actor_router_addresses.get(&actor_id) {
-            Some(assigned_router_id) if *assigned_router_id == *router_id => {
+            Some(assigned_router_namespace) if *assigned_router_namespace == *router_namespace => {
                 match shared_state.actor_inboxes.get(&actor_id) {
                     Some(tx) => {
                         if let Err(e) = tx.send(msg).await {
@@ -105,12 +105,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ))),
                 }
             }
-            Some(other_router_id) => Err(RouterError::FilterError(FilterError::RoutingError(
-                format!(
+            Some(other_router_namespace) => Err(RouterError::FilterError(
+                FilterError::RoutingError(format!(
                     "Actor {} is assigned to router {:?}, but message is for router {}",
-                    actor_id, other_router_id, router_id
-                ),
-            ))),
+                    actor_id, other_router_namespace, router_namespace
+                )),
+            )),
             None => Err(RouterError::FilterError(FilterError::RoutingError(
                 format!(
                     "Actor {} is not assigned to any router or does not exist",

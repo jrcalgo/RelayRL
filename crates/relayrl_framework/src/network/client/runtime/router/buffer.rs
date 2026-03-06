@@ -6,7 +6,7 @@ use crate::network::client::agent::ModelMode;
 use crate::network::client::agent::{ActorTrainingDataMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::scale_manager::RouterUuid;
+use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::data::file_sink::{
     FileSinkError, write_local_trajectory_file,
@@ -22,6 +22,7 @@ use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory, Traj
 use relayrl_types::prelude::action::CodecConfig;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
+use active_uuid_registry::interface::{get_context_entries, list_ids};
 use arrow::array::BinaryBuilder;
 use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
 use arrow::array::{Float32Builder, Float64Builder, ListBuilder, UInt64Builder};
@@ -88,7 +89,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     TransportTrajectorySinkTrait<B> + LocalFileTrajectorySinkTrait<B>
 {
     fn new(
-        associated_router_id: RouterUuid,
+        associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
         codec: CodecConfig,
@@ -96,7 +97,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn with_transport(
         &mut self,
         training_dispatcher: Arc<TrainingDispatcher<B>>,
-        shared_server_addresses: Arc<RwLock<SharedTransportAddresses>>,
+        shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> &mut Self;
     fn with_trajectory_writer(
         &mut self,
@@ -116,7 +117,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     LocalFileTrajectorySinkTrait<B>
 {
     fn new(
-        associated_router_id: RouterUuid,
+        associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: CodecConfig,
@@ -137,12 +138,12 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn send_trajectory(
-        associated_router_id: &RouterUuid,
+        associated_router_namespace: &RouterNamespace,
         actor_id: &ActorUuid,
         priority: &PriorityRank,
         encoded_trajectory: &EncodedTrajectory,
         training_dispatcher: &Option<Arc<TrainingDispatcher<B>>>,
-        shared_server_addresses: &Arc<RwLock<SharedTransportAddresses>>,
+        shared_transport_addresses: &Arc<RwLock<SharedTransportAddresses>>,
         actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError>;
 }
@@ -157,7 +158,7 @@ pub(crate) trait LocalFileTrajectorySinkTrait<B: Backend + BackendMatcher<Backen
 
 pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    associated_router_id: RouterUuid,
+    associated_router_namespace: RouterNamespace,
     active: AtomicBool,
     rx_from_actor: Option<Receiver<RoutedMessage>>,
     actor_last_processed: DashMap<Uuid, i64>,
@@ -167,7 +168,7 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    shared_server_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
+    shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -181,16 +182,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 {
     fn new(
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        associated_router_id: RouterUuid,
+        associated_router_namespace: RouterNamespace,
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        _associated_router_id: RouterUuid,
+        _associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: CodecConfig,
     ) -> Self {
         Self {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            associated_router_id,
+            associated_router_namespace,
             active: AtomicBool::new(false),
             rx_from_actor: Some(rx_from_actor),
             actor_last_processed: DashMap::new(),
@@ -199,7 +200,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_training_dispatcher: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            shared_server_addresses: None,
+            shared_transport_addresses: None,
             shared_trajectory_file_output: None,
             shutdown: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -213,10 +214,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     fn with_transport(
         &mut self,
         shared_training_dispatcher: Arc<TrainingDispatcher<B>>,
-        shared_server_addresses: Arc<RwLock<SharedTransportAddresses>>,
+        shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> &mut Self {
         self.shared_training_dispatcher = Some(shared_training_dispatcher);
-        self.shared_server_addresses = Some(shared_server_addresses);
+        self.shared_transport_addresses = Some(shared_transport_addresses);
         self
     }
 
@@ -248,12 +249,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let actor_last_processed = self.actor_last_processed.clone();
         let shared_client_modes = self.shared_client_modes.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let identity = self.associated_router_id;
+        let namespace = self.associated_router_namespace.clone();
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_training_dispatcher = self.shared_training_dispatcher.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let shared_server_addresses = self.shared_server_addresses.clone();
+        let shared_transport_addresses = self.shared_transport_addresses.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let codec = self.codec.clone();
 
@@ -321,11 +322,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let worker_training_dispatcher = shared_training_dispatcher.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let worker_server_addresses = shared_server_addresses.clone();
+        let worker_transport_addresses = shared_transport_addresses.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let worker_codec = codec.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let worker_identity = identity;
+        let worker_namespace = namespace.clone();
         let worker_trajectory_file_output = shared_trajectory_file_output.clone();
 
         let _worker_handle = tokio::spawn(async move {
@@ -383,14 +384,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         for job in jobs_to_process {
                             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                             if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode {
-                                if let (Some(dispatcher), Some(server_addresses)) =
-                                    (worker_training_dispatcher.clone(), worker_server_addresses.clone())
+                                if let (Some(dispatcher), Some(transport_addresses)) =
+                                    (worker_training_dispatcher.clone(), worker_transport_addresses.clone())
                                 {
                                     let transport_job = job.clone();
                                     let transport_codec = worker_codec.clone();
-                                    let transport_addrs = server_addresses.clone();
+                                    let transport_addrs = transport_addresses.clone();
                                     let transport_actor_last = worker_actor_last_processed.clone();
-                                    let transport_identity = worker_identity;
+                                    let transport_namespace = worker_namespace.clone();
 
                                     tokio::spawn(async move {
                                         // Encode trajectory for transport
@@ -410,7 +411,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
                                         let addrs = transport_addrs.read().await;
                                         if let Err(e) = Self::send_trajectory(
-                                            &transport_identity,
+                                            &transport_namespace,
                                             &transport_job.actor_id,
                                             &transport_job.priority,
                                             &encoded,
@@ -462,7 +463,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             let mut queue = worker_queue.lock().await;
             while let Some(job) = queue.pop() {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                if let Some(server_addresses) = &worker_server_addresses {
+                if let Some(transport_addresses) = &worker_transport_addresses {
                     if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
                         &worker_modes.actor_training_data_mode
                     {
@@ -475,12 +476,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         };
 
                         let _ = Self::send_trajectory(
-                            &worker_identity,
+                            &worker_namespace,
                             &job.actor_id,
                             &job.priority,
                             &encoded,
                             &worker_training_dispatcher,
-                            &server_addresses,
+                            &transport_addresses,
                             &worker_actor_last_processed,
                         )
                         .await;
@@ -588,23 +589,43 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
     for ClientTrajectoryBuffer<B>
 {
     async fn send_trajectory(
-        associated_router_id: &RouterUuid,
+        associated_router_namespace: &RouterNamespace,
         actor_id: &ActorUuid,
         priority: &PriorityRank,
         encoded_trajectory: &EncodedTrajectory,
         training_dispatcher: &Option<Arc<TrainingDispatcher<B>>>,
-        shared_server_addresses: &Arc<RwLock<SharedTransportAddresses>>,
+        shared_transport_addresses: &Arc<RwLock<SharedTransportAddresses>>,
         actor_last_processed: &DashMap<Uuid, i64>,
     ) -> Result<(), TrajectorySinkError> {
         if let Some(dispatcher) = training_dispatcher {
             // Update last sent timestamp for this actor
             actor_last_processed.insert(*actor_id, *priority);
 
+            let buffer_entry = {
+                let entries = get_context_entries(
+                    associated_router_namespace.as_ref(),
+                    crate::network::BUFFER_CONTEXT,
+                )
+                .map_err(|e| {
+                    TrajectorySinkError::TransportError(TransportError::UuidPoolError(e))
+                })?;
+                entries
+                    .first()
+                    .ok_or_else(|| {
+                        TrajectorySinkError::TransportError(
+                            TransportError::NoTransportConfiguredError(
+                                "No buffer context entries found".to_string(),
+                            ),
+                        )
+                    })?
+                    .clone()
+            };
+
             dispatcher
                 .send_trajectory(
-                    associated_router_id,
+                    buffer_entry,
                     encoded_trajectory.clone(),
-                    shared_server_addresses.clone(),
+                    shared_transport_addresses.clone(),
                 )
                 .await?
         }
