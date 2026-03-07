@@ -529,6 +529,7 @@ impl ZmqInferenceOps {
     }
 }
 
+/// these will be implemented in a future update (0.7.0)
 impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_inference_request(
         &self,
@@ -758,9 +759,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .cached_sockets
             .model_sub_socket
             .as_ref()
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::ListenForModelError("SUB socket pool not initialized".to_string())
+            })?
             .get(&receiver_id)
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::ListenForModelError(format!(
+                    "SUB socket not found for receiver ID: {}",
+                    receiver_id
+                ))
+            })?
             .clone();
 
         let model_server_address = model_server_address.to_string();
@@ -851,7 +859,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
         let algorithm_name_string = algorithm.as_str().to_string();
-        let hyperparams_string = serde_json::to_string(&hyperparams).unwrap_or_default();
+        let hyperparams_string = serde_json::to_string(&hyperparams).map_err(|e| {
+            TransportError::SendAlgorithmInitRequestError(format!(
+                "Failed to serialize hyperparams: {}",
+                e
+            ))
+        })?;
 
         let empty_frame: Vec<u8> = vec![];
         let transport_entry_frame: Vec<u8> = transport_entry_string.as_bytes().to_vec();
@@ -871,9 +884,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 .cached_sockets
                 .scaling_dealer_socket
                 .as_ref()
-                .unwrap()
+                .ok_or_else(|| {
+                    TransportError::SendAlgorithmInitRequestError(
+                        "Scaling dealer socket pool not initialized".to_string(),
+                    )
+                })?
                 .get(&scaling_id)
-                .unwrap();
+                .ok_or_else(|| {
+                    TransportError::SendAlgorithmInitRequestError(format!(
+                        "Scaling dealer socket not found for ID: {}",
+                        scaling_id
+                    ))
+                })?;
             socket_kv.value().clone()
         };
 
@@ -964,9 +986,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 .cached_sockets
                 .model_dealer_socket
                 .as_ref()
-                .unwrap()
+                .ok_or_else(|| {
+                    TransportError::ModelHandshakeError(
+                        "Model dealer socket pool not initialized".to_string(),
+                    )
+                })?
                 .get(&actor_id)
-                .unwrap();
+                .ok_or_else(|| {
+                    TransportError::ModelHandshakeError(format!(
+                        "Model dealer socket not found for actor ID: {}",
+                        actor_id
+                    ))
+                })?;
             socket_kv.value().clone()
         };
 
@@ -1121,9 +1152,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .cached_sockets
             .traj_push_socket
             .as_ref()
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::SendTrajError("Trajectory push socket pool not initialized".to_string())
+            })?
             .get(&buffer_id)
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::SendTrajError(format!(
+                    "Trajectory push socket not found for buffer ID: {}",
+                    buffer_id
+                ))
+            })?
             .value()
             .clone();
 
@@ -1215,9 +1253,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 .cached_sockets
                 .scaling_dealer_socket
                 .as_ref()
-                .unwrap()
+                .ok_or_else(|| {
+                    TransportError::SendClientIdsToServerError(
+                        "Scaling dealer socket pool not initialized".to_string(),
+                    )
+                })?
                 .get(&scaling_id)
-                .unwrap();
+                .ok_or_else(|| {
+                    TransportError::SendClientIdsToServerError(format!(
+                        "Scaling dealer socket not found for ID: {}",
+                        scaling_id
+                    ))
+                })?;
             socket_kv.value().clone()
         };
 
@@ -1367,9 +1414,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .cached_sockets
             .scaling_dealer_socket
             .as_ref()
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::SendScalingWarningError(
+                    "Scaling dealer socket pool not initialized".to_string(),
+                )
+            })?
             .get(&scaling_id)
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::SendScalingWarningError(format!(
+                    "Scaling dealer socket not found for ID: {}",
+                    scaling_id
+                ))
+            })?
             .value()
             .clone();
 
@@ -1535,9 +1591,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 .cached_sockets
                 .scaling_dealer_socket
                 .as_ref()
-                .unwrap()
+                .ok_or_else(|| {
+                    TransportError::SendScalingCompleteError(
+                        "Scaling dealer socket pool not initialized".to_string(),
+                    )
+                })?
                 .get(&scaling_id)
-                .unwrap();
+                .ok_or_else(|| {
+                    TransportError::SendScalingCompleteError(format!(
+                        "Scaling dealer socket not found for ID: {}",
+                        scaling_id
+                    ))
+                })?;
             socket_kv.value().clone()
         };
 
@@ -1693,9 +1758,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .cached_sockets
             .scaling_dealer_socket
             .as_ref()
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::SendShutdownSignalError(
+                    "Scaling dealer socket pool not initialized".to_string(),
+                )
+            })?
             .get(&scaling_id)
-            .unwrap()
+            .ok_or_else(|| {
+                TransportError::SendShutdownSignalError(format!(
+                    "Scaling dealer socket not found for ID: {}",
+                    scaling_id
+                ))
+            })?
             .value()
             .clone();
 
