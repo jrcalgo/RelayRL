@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] - 2026-03-08
+
+### Changed
+- **Dependency and workspace alignment** - Dependency updates and workspace inheritance
+  - Dependencies now use workspace inheritance where applicable (serde, serde_json, bytemuck, dashmap, uuid, tokio, tempfile, bincode)
+  - Exact version pins for `tch` (=0.22.0) and `ort` (=2.0.0-rc.11)
+  - Version bumps: blake3 1.8.2 → 1.8.3, bytes 1.10.1 → 1.11.1, lz4_flex 0.11.5 → 0.12.0, half 2.7.0 → 2.7.1
+
 ## [0.5.2] - 2026-02-19
 
 ### Added

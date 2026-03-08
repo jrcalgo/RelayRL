@@ -13,18 +13,26 @@ relayrl_framework = { version = "0.5.0-alpha.1", path = "crates/relayrl_framewor
 relayrl_types = { version = "0.5.2", path = "crates/relayrl_types"}
 relayrl_algorithms = { version = "0.1.0", path = "crates/relayrl_algorithms"}
 
-burn-tensor = "0.20.0"
-burn-ndarray = "0.20.0"
-burn-tch = "0.20.0"
+burn-tensor = "0.20.1"
+burn-ndarray = "0.20.1"
+burn-tch = "0.20.1"
 
-tokio = "1.49.0"
+tokio = "1.50.0"
 
 serde = "1.0.228"
 serde_json = "1.0.149"
 
 dashmap = "6.1.0"
 
+uuid = "1.22.0"
+
 ndarray = "0.17.2"
+
+bytemuck = "1.25.0"
+
+bincode = "2.0.1"
+
+tempfile = "3.26.0"
 
 thiserror = "2.0.18"
 async-trait = "0.1.89"
