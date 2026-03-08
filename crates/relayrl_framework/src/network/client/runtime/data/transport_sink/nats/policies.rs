@@ -1,1 +1,4 @@
 
+pub(super) struct NatsAuthentication {
+    
+}

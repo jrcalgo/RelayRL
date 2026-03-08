@@ -160,7 +160,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
         &self,
         scaling_entry: (String, String, Uuid),
         client_ids: Vec<(String, String, Uuid)>,
-        replace: bool,
+        replace_context: bool,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(scaling_protocol) = self.scaling_protocol.as_ref() {
