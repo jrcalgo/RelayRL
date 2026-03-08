@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-alpha.2] - 2026-03-07
+
+### Changed
+- **relayrl_types** - Dependency updated from 0.5.2 to 0.5.3; fixes ort-related compilation error
+- **Workspace dependency hierarchy** - Dependency versions and shared crates (e.g. `relayrl_types`, `tokio`, `serde`, `burn-tensor`, `arrow`, etc.) reworked in root [Cargo.toml](Cargo.toml) via `[workspace.dependencies]`; framework crate uses `relayrl_types = { workspace = true, ... }` and other workspace-inherited deps
+- **ZMQ ops** - Removed `unwrap`/`expect` in [crates/relayrl_framework/src/network/client/runtime/data/transport_sink/zmq/ops.rs](crates/relayrl_framework/src/network/client/runtime/data/transport_sink/zmq/ops.rs); errors now propagated via `Result` and `map_err` where appropriate
+
+### Added
+- **NATS scaffolding** - Additional scaffold for NATS transport: [nats/policies.rs](crates/relayrl_framework/src/network/client/runtime/data/transport_sink/nats/policies.rs) placeholder (`NatsAuthentication`); [nats/interface.rs](crates/relayrl_framework/src/network/client/runtime/data/transport_sink/nats/interface.rs) implements `AsyncClientTransportInterface`, `AsyncClientScalingTransportOps`, `AsyncClientInferenceTransportOps`, and related execution traits with stub method bodies ready for implementation
+
+---
+
 ## [0.5.0-alpha.1] - 2026-03-07
 
 ### Added
