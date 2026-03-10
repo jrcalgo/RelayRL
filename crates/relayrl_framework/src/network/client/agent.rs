@@ -87,6 +87,21 @@ pub enum RuntimeStatisticsReturnType {
     Hashmap(HashMap<String, String>),
 }
 
+#[derive(Debug, Clone)]
+pub struct AlgorithmArgs {
+    pub algorithm: Algorithm,
+    pub hyperparams: Option<HyperparameterArgs>,
+}
+
+impl Default for AlgorithmArgs {
+    fn default() -> Self {
+        Self {
+            algorithm: Algorithm::ConfigInit,
+            hyperparams: None,
+        }
+    }
+}
+
 #[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct InferenceAddresses {

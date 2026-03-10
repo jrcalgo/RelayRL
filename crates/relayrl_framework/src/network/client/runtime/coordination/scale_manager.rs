@@ -1,7 +1,7 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, AlgorithmArgs,
 };
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -102,21 +102,6 @@ pub(crate) struct RouterRuntimeParams {
     pub(crate) trajectory_buffer_loop: Option<JoinHandle<()>>,
     pub(crate) filter_tx: Sender<RoutedMessage>,
     pub(crate) trajectory_buffer_tx: Sender<RoutedMessage>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct AlgorithmArgs {
-    pub(crate) algorithm: Algorithm,
-    pub(crate) hyperparams: Option<HyperparameterArgs>,
-}
-
-impl Default for AlgorithmArgs {
-    fn default() -> Self {
-        Self {
-            algorithm: Algorithm::ConfigInit,
-            hyperparams: None,
-        }
-    }
 }
 
 pub type RouterNamespace = Arc<str>;
