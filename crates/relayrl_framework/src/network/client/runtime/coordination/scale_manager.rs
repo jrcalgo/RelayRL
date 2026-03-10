@@ -232,9 +232,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .unwrap_or(0);
         if router_count > 0 {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self._scale_in(router_count, false).await?;
+            self.scale_in(router_count, false).await?;
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-            self._scale_in(router_count).await?;
+            self.scale_in(router_count).await?;
         }
         self.router_dispatcher.take().map(|handle| handle.abort());
         self.router_filter_channels.clear();
@@ -245,7 +245,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _send_client_ids_to_server(
+    pub(crate) async fn send_client_ids_to_server(
         &self,
         client_entries: Vec<(String, String, Uuid)>,
         replace_context: bool,
@@ -275,7 +275,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _send_shutdown_signal_to_server(
+    pub(crate) async fn send_shutdown_signal_to_server(
         &mut self,
     ) -> Result<(), ScaleManagerError> {
         if let (Some(scaling_dispatcher), Some(transport_addresses)) =
@@ -299,7 +299,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _send_process_init_request(
+    pub(crate) async fn send_process_init_request(
         &mut self,
         actor_entries: Vec<(String, String, Uuid)>,
         process_init_flag: ProcessInitFlag<B>,
@@ -370,7 +370,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    pub(crate) async fn _scale_out(
+    pub(crate) async fn scale_out(
         &mut self,
         router_add: u32,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
@@ -378,8 +378,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let router_add = router_add as usize;
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let Some(transport_addresses) = self._get_transport_addresses()? {
-            self._send_scaling_warning(ScalingOperation::ScaleOut, transport_addresses)
+        if let Some(transport_addresses) = self.get_transport_addresses()? {
+            self.send_scaling_warning(ScalingOperation::ScaleOut, transport_addresses)
                 .await?;
         }
 
@@ -523,13 +523,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             let receiver_loop: Option<JoinHandle<()>> = if let Some(rcv) = receiver {
-                Some(Self::_spawn_transport_receiver(rcv).await)
+                Some(Self::spawn_transport_receiver(rcv).await)
             } else {
                 None
             };
-            let filter_loop: JoinHandle<()> = Self::_spawn_central_filter(filter).await;
+            let filter_loop: JoinHandle<()> = Self::spawn_central_filter(filter).await;
             let trajectory_buffer_loop: Option<JoinHandle<()>> = if let Some(buf) = buffer {
-                Some(Self::_spawn_trajectory_buffer(buf))
+                Some(Self::spawn_trajectory_buffer(buf))
             } else {
                 None
             };
@@ -574,12 +574,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 current_router_count
             );
             eprintln!("Rolling back newly created routers...");
-            self._rollback_routers(&new_router_namespaces).await;
+            self.rollback_routers(&new_router_namespaces).await;
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            if let Some(transport_addresses) = self._get_transport_addresses()? {
+            if let Some(transport_addresses) = self.get_transport_addresses()? {
                 let _ = self
-                    ._send_scaling_complete(ScalingOperation::ScaleOut, transport_addresses)
+                    .send_scaling_complete(ScalingOperation::ScaleOut, transport_addresses)
                     .await;
             }
 
@@ -611,9 +611,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let Some(transport_addresses) = self._get_transport_addresses()? {
+        if let Some(transport_addresses) = self.get_transport_addresses()? {
             if let Err(e) = self
-                ._send_scaling_complete(ScalingOperation::ScaleOut, transport_addresses)
+                .send_scaling_complete(ScalingOperation::ScaleOut, transport_addresses)
                 .await
             {
                 eprintln!(
@@ -628,7 +628,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     );
                 }
 
-                self._rollback_routers(&new_router_namespaces).await;
+                self.rollback_routers(&new_router_namespaces).await;
 
                 eprintln!(
                     "[ScaleManager] Failed to send scaling confirmation via transport: {}.\n\
@@ -643,7 +643,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             if send_ids {
                 let client_ids = get_namespace_entries(self.client_namespace.as_ref())
                     .map_err(ScaleManagerError::from)?;
-                self._send_client_ids_to_server(client_ids, true).await?;
+                self.send_client_ids_to_server(client_ids, true).await?;
             }
         }
 
@@ -655,7 +655,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    pub(crate) async fn _scale_in(
+    pub(crate) async fn scale_in(
         &mut self,
         router_remove: u32,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
@@ -663,11 +663,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let router_remove = router_remove as usize;
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let transport_addresses_opt = self._get_transport_addresses()?;
+        let transport_addresses_opt = self.get_transport_addresses()?;
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let Some(transport_addresses) = transport_addresses_opt.clone() {
-            self._send_scaling_warning(ScalingOperation::ScaleIn, transport_addresses)
+            self.send_scaling_warning(ScalingOperation::ScaleIn, transport_addresses)
                 .await?;
         }
 
@@ -677,7 +677,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             {
                 if let Some(transport_addresses) = transport_addresses_opt {
                     return self
-                        ._send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
+                        .send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
                         .await;
                 }
                 return Ok(());
@@ -707,7 +707,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             if let Some(transport_addresses) = transport_addresses_opt {
                 let _ = self
-                    ._send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
+                    .send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
                     .await;
             }
             return Err(ScaleManagerError::ScalingOperationNotSupportedError(
@@ -764,7 +764,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             if let Some(transport_addresses) = transport_addresses_opt {
                 let _ = self
-                    ._send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
+                    .send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
                     .await;
             }
 
@@ -789,7 +789,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let Some(transport_addresses) = transport_addresses_opt {
             if let Err(e) = self
-                ._send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
+                .send_scaling_complete(ScalingOperation::ScaleIn, transport_addresses)
                 .await
             {
                 {
@@ -817,7 +817,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             if send_ids {
                 let client_ids = get_namespace_entries(self.client_namespace.as_ref())?;
-                self._send_client_ids_to_server(client_ids, true).await?;
+                self.send_client_ids_to_server(client_ids, true).await?;
             }
         }
 
@@ -857,7 +857,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn _rollback_routers(&mut self, router_namespaces: &[RouterNamespace]) {
+    async fn rollback_routers(&mut self, router_namespaces: &[RouterNamespace]) {
         if let Some(ref params) = self.runtime_params {
             for router_namespace in router_namespaces {
                 if let Some((_, router_params)) = params.remove(router_namespace) {
@@ -882,7 +882,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    fn _get_transport_addresses(
+    fn get_transport_addresses(
         &self,
     ) -> Result<Option<Arc<RwLock<SharedTransportAddresses>>>, ScaleManagerError> {
         if self.scaling_dispatcher.is_some() {
@@ -898,7 +898,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    async fn _send_scaling_warning(
+    async fn send_scaling_warning(
         &self,
         operation: ScalingOperation,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
@@ -924,7 +924,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    async fn _send_scaling_complete(
+    async fn send_scaling_complete(
         &self,
         operation: ScalingOperation,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
@@ -949,7 +949,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _spawn_central_filter(filter: ClientCentralFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
+    async fn spawn_central_filter(filter: ClientCentralFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = filter.spawn_loop().await {
                 eprintln!("[ScaleManager] Central filter error: {}", e);
@@ -958,7 +958,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    async fn _spawn_transport_receiver(
+    async fn spawn_transport_receiver(
         mut receiver: ClientTransportModelReceiver<B>,
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
@@ -968,7 +968,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         })
     }
 
-    fn _spawn_trajectory_buffer(mut buffer: ClientTrajectoryBuffer<B>) -> JoinHandle<()> {
+    fn spawn_trajectory_buffer(mut buffer: ClientTrajectoryBuffer<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = buffer.spawn_loop() {
                 eprintln!("[ScaleManager] Trajectory buffer error: {}", e);

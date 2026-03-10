@@ -4,7 +4,7 @@ use crate::network::HyperparameterArgs;
 use crate::network::TransportType;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
+use crate::network::client::agent::AlgorithmArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::prelude::config::TransportConfigParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -230,7 +230,7 @@ impl LifeCycleManager {
     pub(crate) fn spawn_loop(&self) {
         let self_clone: LifeCycleManager = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = self_clone._watch().await {
+            if let Err(e) = self_clone.watch().await {
                 eprintln!("[LifeCycleManager] Failed to spawn loop: {}", e);
             }
         });
@@ -318,12 +318,12 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    pub(crate) fn _shutdown(&mut self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) fn shutdown(&mut self) -> Result<(), LifeCycleManagerError> {
         self.shutdown_notifier.notify_waiters();
-        self._handle_shutdown_signal()
+        self.handle_shutdown_signal()
     }
 
-    pub(crate) async fn _watch(&self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
         loop {
             let config_update_polling_seconds =
                 self.config_update_polling_seconds.read().await.clone() as u64;
@@ -333,11 +333,11 @@ impl LifeCycleManager {
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
-                    self._handle_shutdown_signal()?;
+                    self.handle_shutdown_signal()?;
                     break Ok(());
                 }
                 _ = self.shutdown_notifier.notified() => {
-                    self._handle_shutdown_signal()?;
+                    self.handle_shutdown_signal()?;
                     break Ok(());
                 }
                 _ = interval.tick() => {
@@ -347,7 +347,7 @@ impl LifeCycleManager {
                             if modified > *last_modified {
                                 println!("[LifeCycleManager] Config file changed, reloading...");
                                 *last_modified = modified;
-                                self._handle_config_change(self.config_path.as_ref().clone()).await?;
+                                self.handle_config_change(self.config_path.as_ref().clone()).await?;
                             }
                         }
                     }
@@ -356,7 +356,7 @@ impl LifeCycleManager {
         }
     }
 
-    pub(crate) fn _handle_shutdown_signal(&self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) fn handle_shutdown_signal(&self) -> Result<(), LifeCycleManagerError> {
         if let Err(e) = self.shutdown_tx.send(()) {
             return Err(LifeCycleManagerError::SendShutdownSignalError(
                 format!("Failed to send shutdown signal. No active receivers: {}", e).to_string(),
@@ -366,7 +366,7 @@ impl LifeCycleManager {
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _handle_config_change(
+    pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
     ) -> Result<(), LifeCycleManagerError> {
@@ -387,7 +387,7 @@ impl LifeCycleManager {
     }
 
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-    pub(crate) async fn _handle_config_change(
+    pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
     ) -> Result<(), LifeCycleManagerError> {
