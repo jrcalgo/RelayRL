@@ -21,6 +21,8 @@ use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
+use active_uuid_registry::registry_uuid::Uuid;
+
 use bincode::config;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +31,6 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
-use uuid::Uuid;
 
 use burn_tensor::{Tensor, backend::Backend};
 use thiserror::Error;

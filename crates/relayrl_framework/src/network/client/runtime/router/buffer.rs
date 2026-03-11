@@ -22,7 +22,9 @@ use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory, Traj
 use relayrl_types::prelude::action::CodecConfig;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
+use active_uuid_registry::registry_uuid::Uuid;
 use active_uuid_registry::interface::{get_context_entries, list_ids};
+
 use arrow::array::BinaryBuilder;
 use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
 use arrow::array::{Float32Builder, Float64Builder, ListBuilder, UInt64Builder};
@@ -40,7 +42,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, broadcast};
-use uuid::Uuid;
 
 type PriorityRank = i64;
 

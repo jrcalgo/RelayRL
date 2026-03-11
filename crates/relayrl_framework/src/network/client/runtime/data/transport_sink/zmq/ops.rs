@@ -23,6 +23,8 @@ use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
 use relayrl_types::model::utils::validate_module;
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+
 use burn_tensor::backend::Backend;
 use std::io::Write;
 use zmq::SocketType::PAIR;
@@ -36,7 +38,6 @@ use std::sync::RwLock;
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc::Sender;
 use tokio::task;
-use uuid::Uuid;
 use zmq::{Context, Socket, SocketType};
 
 use thiserror::Error;
@@ -475,8 +476,8 @@ impl ZmqPool {
 }
 
 fn validate_entry(
-    entry: &(String, String, Uuid),
-) -> Result<&(String, String, Uuid), TransportError> {
+    entry: &(NamespaceString, ContextString, Uuid),
+) -> Result<&(NamespaceString, ContextString, Uuid), TransportError> {
     let (namespace, context, id) = entry;
 
     if id.is_nil() {
@@ -509,13 +510,13 @@ impl ServerResponse {
 }
 
 pub(super) struct ZmqInferenceOps {
-    transport_entry: (String, String, Uuid),
+    transport_entry: (NamespaceString, ContextString, Uuid),
     zmq_pool: Arc<RwLock<ZmqPool>>,
 }
 
 impl ZmqInferenceOps {
     pub(super) fn new(
-        transport_entry: (String, String, Uuid),
+        transport_entry: (NamespaceString, ContextString, Uuid),
         zmq_pool: Arc<RwLock<ZmqPool>>,
     ) -> Self {
         Self {
@@ -533,7 +534,7 @@ impl ZmqInferenceOps {
 impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_inference_request(
         &self,
-        actor_entry: &(String, String, Uuid),
+        actor_entry: &(NamespaceString, ContextString, Uuid),
         action_request: &[u8],
         inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
@@ -542,7 +543,7 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
 
     fn execute_send_flag_last_inference(
         &self,
-        actor_entry: &(String, String, Uuid),
+        actor_entry: &(NamespaceString, ContextString, Uuid),
         reward: &f32,
         inference_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -551,8 +552,8 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
 
     fn execute_send_client_ids(
         &self,
-        scaling_entry: &(String, String, Uuid),
-        client_ids: &[(String, String, Uuid)],
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        client_ids: &[(NamespaceString, ContextString, Uuid)],
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
@@ -560,7 +561,7 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
 
     fn execute_send_inference_model_init_request<B: Backend + BackendMatcher<Backend = B>>(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
         model_mode: &ModelMode,
         model_module: &Option<ModelModule<B>>,
         inference_scaling_server_address: &str,
@@ -570,7 +571,7 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
 
     fn execute_send_scaling_warning(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
         operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -579,7 +580,7 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
 
     fn execute_send_scaling_complete(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
         operation: &ScalingOperation,
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -588,7 +589,7 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
 
     fn execute_send_shutdown_signal(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
         inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
@@ -596,13 +597,13 @@ impl ZmqInferenceExecution for ZmqInferenceOps {
 }
 
 pub(super) struct ZmqTrainingOps {
-    transport_entry: (String, String, Uuid),
+    transport_entry: (NamespaceString, ContextString, Uuid),
     zmq_pool: Arc<RwLock<ZmqPool>>,
 }
 
 impl ZmqTrainingOps {
     pub(super) fn new(
-        transport_entry: (String, String, Uuid),
+        transport_entry: (NamespaceString, ContextString, Uuid),
         zmq_pool: Arc<RwLock<ZmqPool>>,
     ) -> Self {
         Self {
@@ -711,7 +712,7 @@ impl ZmqTrainingOps {
 impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTrainingOps {
     fn execute_listen_for_model(
         &self,
-        receiver_entry: &(String, String, Uuid),
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -817,8 +818,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
     fn execute_send_algorithm_init_request(
         &self,
-        scaling_entry: &(String, String, Uuid),
-        actor_entries: &[(String, String, Uuid)],
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        actor_entries: &[(NamespaceString, ContextString, Uuid)],
         model_mode: &ModelMode,
         algorithm: &Algorithm,
         hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
@@ -933,7 +934,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
     fn execute_initial_model_handshake(
         &self,
-        actor_entry: &(String, String, Uuid),
+        actor_entry: &(NamespaceString, ContextString, Uuid),
         agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         let validated_entry = validate_entry(actor_entry)?;
@@ -1099,7 +1100,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
     fn execute_send_trajectory(
         &self,
-        buffer_entry: &(String, String, Uuid),
+        buffer_entry: &(NamespaceString, ContextString, Uuid),
         encoded_trajectory: &EncodedTrajectory,
         trajectory_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -1189,8 +1190,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
     fn execute_send_client_ids(
         &self,
-        scaling_entry: &(String, String, Uuid),
-        client_ids: &[(String, String, Uuid)],
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        client_ids: &[(NamespaceString, ContextString, Uuid)],
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(scaling_entry)?;
@@ -1344,7 +1345,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
     fn execute_send_scaling_warning(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
         operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -1523,7 +1524,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
     fn execute_send_scaling_complete(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
         operation: &ScalingOperation,
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -1700,7 +1701,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
     fn execute_send_shutdown_signal(
         &self,
-        scaling_entry: &(String, String, Uuid),
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
         training_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(scaling_entry)?;

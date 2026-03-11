@@ -47,7 +47,7 @@ use thiserror::Error;
 
 use burn_tensor::backend::Backend;
 
-use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 use active_uuid_registry::interface::{
     clear_namespace, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
     reserve_id_with, reserve_namespace,
@@ -67,7 +67,6 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
@@ -256,7 +255,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn send_client_ids_to_server(
         &self,
-        client_entries: Vec<(String, String, Uuid)>,
+        client_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
@@ -275,7 +274,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn send_algorithm_init_request(
         &mut self,
-        actor_entries: Vec<(String, String, Uuid)>,
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
     ) -> Result<(), CoordinatorError> {
         match self.runtime_params.as_mut() {
             Some(params) => params
@@ -296,7 +295,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn send_inference_model_init_request(
         &mut self,
-        actor_entries: Vec<(String, String, Uuid)>,
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         default_model: Option<ModelModule<B>>,
     ) -> Result<(), CoordinatorError> {
         match self.runtime_params.as_mut() {
@@ -351,7 +350,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let client_namespace: Arc<str> = Arc::from(format!(
             "{}-{}",
             crate::network::CLIENT_NAMESPACE_PREFIX,
-            uuid::Uuid::new_v4()
+            Uuid::new_v4()
         ));
 
         clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
@@ -642,7 +641,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let Some(params) = self.runtime_params.as_mut() {
-            let client_entries: Vec<(String, String, Uuid)> =
+            let client_entries: Vec<(NamespaceString, ContextString, Uuid)> =
                 get_namespace_entries(params.client_namespace.as_ref())
                     .map_err(CoordinatorError::from)?;
             params

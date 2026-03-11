@@ -24,6 +24,8 @@ use active_uuid_registry::interface::{remove_id, replace_id};
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 
+use active_uuid_registry::registry_uuid::Uuid;
+
 use dashmap::DashMap;
 use std::sync::Arc;
 
@@ -32,7 +34,6 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {

@@ -32,6 +32,8 @@ use relayrl_types::data::tensor::{
 use relayrl_types::data::tensor::{NdArrayDType, TchDType};
 use relayrl_types::model::ModelModule;
 
+use active_uuid_registry::registry_uuid::Uuid;
+
 use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
@@ -43,7 +45,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 /// Errors returned by the client API.
 #[non_exhaustive]

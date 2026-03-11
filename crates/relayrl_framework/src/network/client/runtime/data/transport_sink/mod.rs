@@ -8,12 +8,13 @@ use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
 use crate::prelude::network::ClientModes;
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
 
-use active_uuid_registry::UuidPoolError;
 use relayrl_types::HyperparameterArgs;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::data::trajectory::EncodedTrajectory;
 use relayrl_types::model::ModelModule;
+
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;
@@ -22,7 +23,6 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
-use uuid::Uuid;
 
 #[cfg(feature = "nats-transport")]
 pub(crate) mod nats;
@@ -115,20 +115,20 @@ pub(crate) trait AsyncClientInferenceTransportOps<B: Backend + BackendMatcher<Ba
 {
     async fn send_inference_model_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         model_mode: ModelMode,
         model_module: Option<ModelModule<B>>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_inference_request(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         obs_bytes: Vec<u8>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<RelayRLAction, TransportError>;
     async fn send_flag_last_inference(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         reward: f32,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
@@ -140,20 +140,20 @@ pub(crate) trait SyncClientInferenceTransportOps<B: Backend + BackendMatcher<Bac
 {
     fn send_inference_model_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         model_mode: ModelMode,
         model_module: Option<ModelModule<B>>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_inference_request(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         obs_bytes: Vec<u8>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<RelayRLAction, TransportError>;
     fn send_flag_last_inference(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         reward: f32,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
@@ -166,8 +166,8 @@ pub(crate) trait AsyncClientTrainingTransportOps<B: Backend + BackendMatcher<Bac
 {
     async fn send_algorithm_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
-        actor_entries: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
@@ -175,18 +175,18 @@ pub(crate) trait AsyncClientTrainingTransportOps<B: Backend + BackendMatcher<Bac
     ) -> Result<(), TransportError>;
     async fn initial_model_handshake(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     async fn send_trajectory(
         &self,
-        buffer_entry: (String, String, Uuid),
+        buffer_entry: (NamespaceString, ContextString, Uuid),
         encoded_trajectory: EncodedTrajectory,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn listen_for_model(
         &self,
-        receiver_entry: (String, String, Uuid),
+        receiver_entry: (NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
@@ -198,8 +198,8 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
 {
     fn send_algorithm_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
-        actor_entries: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
@@ -207,18 +207,18 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
     ) -> Result<(), TransportError>;
     fn initial_model_handshake(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     fn send_trajectory(
         &self,
-        buffer_entry: (String, String, Uuid),
+        buffer_entry: (NamespaceString, ContextString, Uuid),
         encoded_trajectory: EncodedTrajectory,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn listen_for_model(
         &self,
-        receiver_entry: (String, String, Uuid),
+        receiver_entry: (NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
@@ -230,26 +230,26 @@ pub(crate) trait AsyncClientScalingTransportOps<B: Backend + BackendMatcher<Back
 {
     async fn send_client_ids(
         &self,
-        scaling_entry: (String, String, Uuid),
-        client_ids: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        client_ids: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_scaling_warning(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_scaling_complete(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_shutdown_signal(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
 }
@@ -260,26 +260,26 @@ pub(crate) trait SyncClientScalingTransportOps<B: Backend + BackendMatcher<Backe
 {
     fn send_client_ids(
         &self,
-        scaling_entry: (String, String, Uuid),
-        client_ids: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        client_ids: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_scaling_warning(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_scaling_complete(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_shutdown_signal(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
 }

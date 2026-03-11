@@ -28,7 +28,7 @@ use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::HyperparameterConfig;
 
-use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 use active_uuid_registry::interface::{
     add_id, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
     reserve_id_with, reserve_namespace,
@@ -47,7 +47,6 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ScaleManagerError {
@@ -247,7 +246,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn send_client_ids_to_server(
         &self,
-        client_entries: Vec<(String, String, Uuid)>,
+        client_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
     ) -> Result<(), ScaleManagerError> {
         if let (Some(scaling_dispatcher), Some(transport_addresses)) =
@@ -301,7 +300,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn send_process_init_request(
         &mut self,
-        actor_entries: Vec<(String, String, Uuid)>,
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         process_init_flag: ProcessInitFlag<B>,
     ) -> Result<(), ScaleManagerError> {
         if let (Some(scaling_dispatcher), Some(transport_addresses)) =
@@ -834,7 +833,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 trajectory_buffer_loop.abort();
             }
 
-            let namespace_entries: Vec<(String, String, Uuid)> =
+            let namespace_entries: Vec<(NamespaceString, ContextString, Uuid)> =
                 get_namespace_entries(router_namespace.as_ref())?;
 
             for (_, context, id) in namespace_entries.iter() {
