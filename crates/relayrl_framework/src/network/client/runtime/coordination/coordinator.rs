@@ -3,8 +3,10 @@ use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, InferenceAddressesArgs, TrainingAddressesArgs,
 };
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::AlgorithmArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -12,9 +14,8 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
 };
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::scale_manager::{
-    AlgorithmArgs, ProcessInitFlag,
-};
+use crate::network::client::runtime::coordination::scale_manager::
+    ProcessInitFlag;
 use crate::network::client::runtime::coordination::scale_manager::{
     ScaleManager, ScaleManagerError,
 };
@@ -46,7 +47,7 @@ use thiserror::Error;
 
 use burn_tensor::backend::Backend;
 
-use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 use active_uuid_registry::interface::{
     clear_namespace, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
     reserve_id_with, reserve_namespace,
@@ -66,7 +67,6 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
@@ -147,7 +147,7 @@ pub trait ClientInterface<
     ) -> Self
     where
         Self: Sized;
-    async fn _start(
+    async fn start(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
@@ -164,8 +164,8 @@ pub trait ClientInterface<
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError>;
-    async fn _shutdown(&mut self) -> Result<(), CoordinatorError>;
-    async fn _restart(
+    async fn shutdown(&mut self) -> Result<(), CoordinatorError>;
+    async fn restart(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
@@ -182,7 +182,7 @@ pub trait ClientInterface<
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError>;
-    async fn _new_actor(
+    async fn new_actor(
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
@@ -190,36 +190,36 @@ pub trait ClientInterface<
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         send_algorithm_init: bool,
     ) -> Result<Uuid, CoordinatorError>;
-    async fn _remove_actor(
+    async fn remove_actor(
         &mut self,
         id: ActorUuid,
         send_ids: bool,
     ) -> Result<(), CoordinatorError>;
-    async fn _set_actor_id(
+    async fn set_actor_id(
         &mut self,
         current_id: ActorUuid,
         new_id: ActorUuid,
     ) -> Result<(), CoordinatorError>;
-    async fn _request_action(
+    async fn request_action(
         &self,
         ids: Vec<ActorUuid>,
         observation: Arc<AnyBurnTensor<B, D_IN>>,
         mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError>;
-    async fn _flag_last_action(
+    async fn flag_last_action(
         &self,
         ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError>;
-    async fn _get_model_version(
+    async fn get_model_version(
         &self,
         ids: Vec<ActorUuid>,
     ) -> Result<Vec<(ActorUuid, i64)>, CoordinatorError>;
-    async fn _scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
-    async fn _scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
-    async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError>;
-    async fn _set_config_path(&self, config_path: PathBuf) -> Result<(), CoordinatorError>;
+    async fn scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
+    async fn scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
+    async fn get_config(&self) -> Result<ClientConfigLoader, CoordinatorError>;
+    async fn set_config_path(&self, config_path: PathBuf) -> Result<(), CoordinatorError>;
 }
 
 pub struct CoordinatorParams<
@@ -253,15 +253,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 {
     /// Transparent helper function used by the agent API for calling into the runtime to send client IDs to the server
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _send_client_ids_to_server(
+    pub(crate) async fn send_client_ids_to_server(
         &self,
-        client_entries: Vec<(String, String, Uuid)>,
+        client_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => params
                 .scaling
-                ._send_client_ids_to_server(client_entries, replace_context)
+                .send_client_ids_to_server(client_entries, replace_context)
                 .await
                 .map_err(CoordinatorError::from),
             None => Err(CoordinatorError::NoRuntimeInstanceError),
@@ -272,14 +272,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Transparent helper function used by the agent API for calling into the runtime to send an algorithm init request to the server
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _send_algorithm_init_request(
+    pub(crate) async fn send_algorithm_init_request(
         &mut self,
-        actor_entries: Vec<(String, String, Uuid)>,
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
     ) -> Result<(), CoordinatorError> {
         match self.runtime_params.as_mut() {
             Some(params) => params
                 .scaling
-                ._send_process_init_request(
+                .send_process_init_request(
                     actor_entries,
                     ProcessInitFlag::<B>::TrainingAlgorithmInit,
                 )
@@ -293,15 +293,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Transparent helper function used by the agent API for calling into the runtime to send an inference model init request to the server
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _send_inference_model_init_request(
+    pub(crate) async fn send_inference_model_init_request(
         &mut self,
-        actor_entries: Vec<(String, String, Uuid)>,
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         default_model: Option<ModelModule<B>>,
     ) -> Result<(), CoordinatorError> {
         match self.runtime_params.as_mut() {
             Some(params) => params
                 .scaling
-                ._send_process_init_request(
+                .send_process_init_request(
                     actor_entries,
                     ProcessInitFlag::<B>::InferenceModelInit(default_model),
                 )
@@ -330,7 +330,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn _start(
+    async fn start(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
@@ -350,7 +350,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let client_namespace: Arc<str> = Arc::from(format!(
             "{}-{}",
             crate::network::CLIENT_NAMESPACE_PREFIX,
-            uuid::Uuid::new_v4()
+            Uuid::new_v4()
         ));
 
         clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
@@ -412,47 +412,92 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     &mut config_loader.transport_config;
 
                 if let Some(inference_addresses) = inference_address_args {
-                    if let Some(inference_server_address) =
-                        inference_addresses.inference_server_address
-                    {
-                        transport_params_for_packing
-                            .inference_addresses
-                            .inference_server_address = inference_server_address;
-                    }
-                    if let Some(inference_scaling_server_address) =
-                        inference_addresses.inference_scaling_server_address
-                    {
-                        transport_params_for_packing
-                            .inference_addresses
-                            .inference_scaling_server_address = inference_scaling_server_address;
+                    match &self.transport_type {
+                        #[cfg(feature = "nats-transport")]
+                        TransportType::NATS => {
+                            if let Some(inference_server_address) = match inference_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                InferenceAddressesArgs::NATS(params) => params.clone(),
+                                #[cfg(feature = "zmq-transport")]
+                                InferenceAddressesArgs::ZMQ(_) => None,
+                            } {
+                                transport_params_for_packing.nats_addresses.inference_server_address = inference_server_address;
+                            }
+                        }
+                        #[cfg(feature = "zmq-transport")]
+                        TransportType::ZMQ => {
+                            if let Some(inference_server_address) = match inference_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                InferenceAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                InferenceAddressesArgs::ZMQ(ref params) => params.inference_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.inference_addresses.inference_server_address = inference_server_address;
+                            } 
+
+                            if let Some(inference_scaling_server_address) = match inference_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                InferenceAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                InferenceAddressesArgs::ZMQ(ref params) => params.inference_scaling_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.inference_addresses.inference_scaling_server_address = inference_scaling_server_address;
+                            }
+                        }
                     }
                 }
 
                 if let Some(training_addresses) = training_address_args {
-                    if let Some(agent_listener_address) = training_addresses.agent_listener_address
-                    {
-                        transport_params_for_packing
-                            .training_addresses
-                            .agent_listener_address = agent_listener_address;
-                    }
-                    if let Some(model_server_address) = training_addresses.model_server_address {
-                        transport_params_for_packing
-                            .training_addresses
-                            .model_server_address = model_server_address;
-                    }
-                    if let Some(trajectory_server_address) =
-                        training_addresses.trajectory_server_address
-                    {
-                        transport_params_for_packing
-                            .training_addresses
-                            .trajectory_server_address = trajectory_server_address;
-                    }
-                    if let Some(training_scaling_server_address) =
-                        training_addresses.training_scaling_server_address
-                    {
-                        transport_params_for_packing
-                            .training_addresses
-                            .training_scaling_server_address = training_scaling_server_address;
+                    match &self.transport_type {
+                        #[cfg(feature = "nats-transport")]
+                        TransportType::NATS => {
+                            if let Some(training_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(params) => params.clone(),
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(_) => None,
+                            } {
+                                transport_params_for_packing.nats_addresses.training_server_address = training_server_address;
+                            }
+                        }
+                        #[cfg(feature = "zmq-transport")]
+                        TransportType::ZMQ => {
+                            if let Some(agent_listener_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.agent_listener_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.agent_listener_address = agent_listener_address;
+                            }
+
+                            if let Some(model_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.model_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.model_server_address = model_server_address;
+                            }
+
+                            if let Some(trajectory_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.trajectory_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.trajectory_server_address = trajectory_server_address;
+                            }
+
+                            if let Some(training_scaling_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.training_scaling_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.training_scaling_server_address = training_scaling_server_address;
+                            }
+                        }
                     }
                 }
 
@@ -606,11 +651,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         if let Some(params) = self.runtime_params.as_mut() {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            if let Err(e) = params.scaling._scale_out(router_scale, false).await {
+            if let Err(e) = params.scaling.scale_out(router_scale, false).await {
                 return Err(CoordinatorError::ScaleManagerError(e));
             }
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-            if let Err(e) = params.scaling._scale_out(router_scale).await {
+            if let Err(e) = params.scaling.scale_out(router_scale).await {
                 return Err(CoordinatorError::ScaleManagerError(e));
             }
         }
@@ -622,7 +667,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if actor_count > 0 {
             for _ in 1..=actor_count {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                Self::_new_actor(
+                Self::new_actor(
                     self,
                     default_device.clone(),
                     actor_default_model.clone(),
@@ -631,7 +676,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 )
                 .await?;
                 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                Self::_new_actor(self, default_device.clone(), actor_default_model.clone()).await?;
+                Self::new_actor(self, default_device.clone(), actor_default_model.clone()).await?;
             }
         } else {
             println!(
@@ -641,12 +686,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let Some(params) = self.runtime_params.as_mut() {
-            let client_entries: Vec<(String, String, Uuid)> =
+            let client_entries: Vec<(NamespaceString, ContextString, Uuid)> =
                 get_namespace_entries(params.client_namespace.as_ref())
                     .map_err(CoordinatorError::from)?;
             params
                 .scaling
-                ._send_client_ids_to_server(client_entries, true)
+                .send_client_ids_to_server(client_entries, true)
                 .await?;
 
             let actor_entries = get_context_entries(
@@ -655,7 +700,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             )?;
             params
                 .scaling
-                ._send_process_init_request(
+                .send_process_init_request(
                     actor_entries,
                     ProcessInitFlag::<B>::TrainingAlgorithmInit,
                 )
@@ -665,7 +710,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn _shutdown(&mut self) -> Result<(), CoordinatorError> {
+    async fn shutdown(&mut self) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
                 // Sends a shutdown RoutedMessage to all actors, which flushes current trajectory to the server and then aborts the actor's message loop task
@@ -673,12 +718,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .shared_state
                     .write()
                     .await
-                    .__shutdown_all_actors()
+                    .shutdown_all_actors()
                     .await?;
 
                 // inform server(s) that the client is being shutdown and to remove all actor-related data from server runtime
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                params.scaling._send_shutdown_signal_to_server().await?;
+                params.scaling.send_shutdown_signal_to_server().await?;
 
                 // shutdown transport client components (sockets, etc.)
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -689,7 +734,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (router receivers, router senders, central filters)
                 // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes)
-                if let Err(e) = params.lifecycle._shutdown() {
+                if let Err(e) = params.lifecycle.shutdown() {
                     return Err(CoordinatorError::LifeCycleManagerError(e));
                 }
 
@@ -718,7 +763,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn _restart(
+    async fn restart(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
@@ -735,8 +780,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError> {
-        self._shutdown().await?;
-        self._start(
+        self.shutdown().await?;
+        self.start(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             algorithm_args,
             actor_count,
@@ -751,7 +796,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn _new_actor(
+    async fn new_actor(
         &mut self,
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
@@ -817,7 +862,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .shared_state
                     .write()
                     .await
-                    .__new_actor(
+                    .new_actor(
                         actor_id.clone(),
                         router_namespace,
                         device,
@@ -837,13 +882,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                         params
                             .scaling
-                            ._send_client_ids_to_server(actor_entry.clone(), false)
+                            .send_client_ids_to_server(actor_entry.clone(), false)
                             .await?;
 
                         if send_algorithm_init {
                             params
                                 .scaling
-                                ._send_process_init_request(
+                                .send_process_init_request(
                                     actor_entry,
                                     ProcessInitFlag::<B>::TrainingAlgorithmInit,
                                 )
@@ -856,13 +901,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::NewActorError(
-                    "[Coordinator] No runtime instance to _new_actor...".to_string(),
+                    "[Coordinator] No runtime instance to new_actor...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _remove_actor(
+    async fn remove_actor(
         &mut self,
         id: ActorUuid,
         send_ids: bool,
@@ -875,7 +920,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .shared_state
                     .write()
                     .await
-                    .__remove_actor(id)
+                    .remove_actor(id)
                     .map_err(CoordinatorError::from)?;
                 // remove the actor id from the namespace/context since we're removing the actor
                 remove_id(
@@ -893,7 +938,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     )?;
                     params
                         .scaling
-                        ._send_client_ids_to_server(actor_entries, true)
+                        .send_client_ids_to_server(actor_entries, true)
                         .await?;
                 }
 
@@ -901,20 +946,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::RemoveActorError(
-                    "[Coordinator] No runtime instance to _remove_actor...".to_string(),
+                    "[Coordinator] No runtime instance to remove_actor...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _set_actor_id(
+    async fn set_actor_id(
         &mut self,
         current_id: ActorUuid,
         new_id: ActorUuid,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                StateManager::<B, D_IN, D_OUT>::__set_actor_id(
+                StateManager::<B, D_IN, D_OUT>::set_actor_id(
                     &*params.shared_state.write().await,
                     current_id,
                     new_id,
@@ -929,7 +974,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     // send all actor ids to the server since all we do here is replace an id with another one
                     params
                         .scaling
-                        ._send_client_ids_to_server(actor_ids, true)
+                        .send_client_ids_to_server(actor_ids, true)
                         .await?;
                 }
 
@@ -937,13 +982,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::SetActorIdError(
-                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                    "[Coordinator] No runtime instance to set_actor_id...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _request_action(
+    async fn request_action(
         &self,
         ids: Vec<ActorUuid>,
         observation: Arc<AnyBurnTensor<B, D_IN>>,
@@ -1048,13 +1093,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                    "[Coordinator] No runtime instance to request_action...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _flag_last_action(
+    async fn flag_last_action(
         &self,
         ids: Vec<ActorUuid>,
         reward: Option<f32>,
@@ -1090,13 +1135,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] No runtime instance to _flag_last_action...".to_string(),
+                    "[Coordinator] No runtime instance to flag_last_action...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _get_model_version(
+    async fn get_model_version(
         &self,
         ids: Vec<ActorUuid>,
     ) -> Result<Vec<(Uuid, i64)>, CoordinatorError> {
@@ -1142,75 +1187,75 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] No runtime instance to _get_model_version...".to_string(),
+                    "[Coordinator] No runtime instance to get_model_version...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError> {
+    async fn scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 return params
                     .scaling
-                    ._scale_out(router_add, true)
+                    .scale_out(router_add, true)
                     .await
                     .map_err(CoordinatorError::ScaleManagerError);
                 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                 return params
                     .scaling
-                    ._scale_out(router_add)
+                    .scale_out(router_add)
                     .await
                     .map_err(CoordinatorError::ScaleManagerError);
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                    "[Coordinator] No runtime instance to scale_out...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError> {
+    async fn scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                params.scaling._scale_in(router_remove, true).await?;
+                params.scaling.scale_in(router_remove, true).await?;
                 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                params.scaling._scale_in(router_remove).await?;
+                params.scaling.scale_in(router_remove).await?;
                 Ok(())
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] No runtime instance to _shutdown...".to_string(),
+                    "[Coordinator] No runtime instance to scale_in...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _get_config(&self) -> Result<ClientConfigLoader, CoordinatorError> {
+    async fn get_config(&self) -> Result<ClientConfigLoader, CoordinatorError> {
         match &self.runtime_params {
             Some(params) => Ok(ClientConfigLoader::load_config(
                 &params.lifecycle.get_config_path(),
             )),
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::GetConfigError(
-                    "[Coordinator] No runtime instance to _get_config...".to_string(),
+                    "[Coordinator] No runtime instance to get_config...".to_string(),
                 ),
             )),
         }
     }
 
-    async fn _set_config_path(&self, config_path: PathBuf) -> Result<(), CoordinatorError> {
+    async fn set_config_path(&self, config_path: PathBuf) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                params.lifecycle._handle_config_change(config_path).await?;
+                params.lifecycle.handle_config_change(config_path).await?;
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::SetConfigError(
-                    "[Coordinator] No runtime instance to _set_config...".to_string(),
+                    "[Coordinator] No runtime instance to set_config_path...".to_string(),
                 ),
             )),
         }

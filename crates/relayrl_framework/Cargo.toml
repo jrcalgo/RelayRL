@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_framework"
-version = "0.5.0-alpha.2"
+version = "0.5.0-alpha.3"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "A distributed, system-oriented multi-agent reinforcement learning framework."
@@ -57,7 +57,6 @@ active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
 # General external crates used throughout framework
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
-uuid = { workspace = true, features = ["v8"] }
 log = { version = "0.4.28", features = ["kv"] }
 rand = "0.9.2"
 dashmap = { workspace = true }
@@ -79,7 +78,7 @@ arrow-array = { workspace = true }
 
 # Optional dependencies
 zmq = { version = "0.10.0", optional = true }
-async-nats = { version = "0.46.0", optional = true }
+async-nats = { version = "0.46.0", features = ["jetstream"], optional = true }
 prometheus = { version = "0.14.0", features = ["process"], optional = true }
 opentelemetry_sdk = { version = "0.31.0", features = ["metrics", "rt-tokio"], optional = true }
 opentelemetry = { version = "0.31.0", optional = true}

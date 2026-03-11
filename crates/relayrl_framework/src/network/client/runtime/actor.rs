@@ -21,6 +21,8 @@ use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
+use active_uuid_registry::registry_uuid::Uuid;
+
 use bincode::config;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +31,6 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
-use uuid::Uuid;
 
 use burn_tensor::{Tensor, backend::Backend};
 use thiserror::Error;
@@ -83,10 +84,10 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
     where
         Self: Sized;
     async fn spawn_loop(&mut self) -> Result<(), ActorError>;
-    async fn _initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError>;
-    async fn __get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError>;
-    async fn _refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError>;
-    async fn _handle_shutdown(&self, _msg: RoutedMessage) -> Result<(), ActorError>;
+    async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError>;
+    async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError>;
+    async fn refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError>;
+    async fn handle_shutdown(&self, _msg: RoutedMessage) -> Result<(), ActorError>;
 }
 
 /// Responsible for performing inference with an in-memory model
@@ -323,7 +324,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         while let Some(msg) = self.rx_from_router.recv().await {
             match msg.protocol {
                 RoutingProtocol::ModelHandshake => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::_initial_model_handshake(self, msg)
+                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::initial_model_handshake(self, msg)
                         .await?;
                 }
                 RoutingProtocol::RequestInference => {
@@ -333,13 +334,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     self.perform_flag_last_action(msg).await?;
                 }
                 RoutingProtocol::ModelVersion => {
-                    self.__get_model_version(msg).await?;
+                    self.get_model_version(msg).await?;
                 }
                 RoutingProtocol::ModelUpdate => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::_refresh_model(self, msg).await?;
+                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::refresh_model(self, msg).await?;
                 }
                 RoutingProtocol::Shutdown => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::_handle_shutdown(self, msg).await?;
+                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::handle_shutdown(self, msg).await?;
                     break;
                 }
                 _ => {}
@@ -348,7 +349,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn _initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
+    async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelHandshake = msg.payload {
             // Fast path: model already loaded (this should never happen)
             {
@@ -448,7 +449,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn __get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError> {
+    async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelVersion { reply_to } = msg.payload {
             let version = {
                 let model_guard = self.reloadable_model.read().await;
@@ -465,7 +466,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn _refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError> {
+    async fn refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelUpdate {
             model_bytes,
             version,
@@ -518,7 +519,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn _handle_shutdown(&self, _msg: RoutedMessage) -> Result<(), ActorError> {
+    async fn handle_shutdown(&self, _msg: RoutedMessage) -> Result<(), ActorError> {
         if !self.current_traj.actions.is_empty() {
             let send_traj_msg = {
                 let traj_clone = self.current_traj.clone();

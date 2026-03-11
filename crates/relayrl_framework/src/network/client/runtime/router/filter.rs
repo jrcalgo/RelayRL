@@ -2,13 +2,14 @@ use super::{RoutedMessage, RouterError, RoutingProtocol};
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 
+use active_uuid_registry::registry_uuid::Uuid;
+
 use burn_tensor::backend::Backend;
 use relayrl_types::data::tensor::BackendMatcher;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{RwLock, broadcast};
-use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum FilterError {
