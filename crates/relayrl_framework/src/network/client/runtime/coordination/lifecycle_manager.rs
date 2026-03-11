@@ -24,27 +24,36 @@ use tokio::sync::{Notify, RwLock, broadcast};
 
 use thiserror::Error;
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SharedInferenceAddresses {
+pub(crate) struct SharedZmqInferenceAddresses {
     pub(crate) inference_server_address: Arc<str>,
     pub(crate) inference_scaling_server_address: Arc<str>,
 }
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SharedTrainingAddresses {
+pub(crate) struct SharedZmqTrainingAddresses {
     pub(crate) agent_listener_address: Arc<str>,
     pub(crate) model_server_address: Arc<str>,
     pub(crate) trajectory_server_address: Arc<str>,
     pub(crate) training_scaling_server_address: Arc<str>,
 }
 
+/// Shared transport addresses for both NATS and ZMQ transports.
+/// 
+/// I was going to store these in an enum but I realized I don't hate myself enough to do that. Would have to pattern match everywhere that uses this instead of just storing shared pointers to empty strings for unused fields, memory be damned.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SharedTransportAddresses {
-    pub(crate) inference_addresses: SharedInferenceAddresses,
-    pub(crate) training_addresses: SharedTrainingAddresses,
+    #[cfg(feature = "nats-transport")]
+    pub(crate) nats_inference_address: Arc<str>,
+    #[cfg(feature = "nats-transport")]
+    pub(crate) nats_training_address: Arc<str>,
+    #[cfg(feature = "zmq-transport")]
+    pub(crate) zmq_inference_addresses: SharedZmqInferenceAddresses,
+    #[cfg(feature = "zmq-transport")]
+    pub(crate) zmq_training_addresses: SharedZmqTrainingAddresses,
 }
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -74,44 +83,60 @@ pub(crate) fn construct_transport_addresses(
         }
     }
 
-    SharedTransportAddresses {
-        inference_addresses: SharedInferenceAddresses {
-            inference_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .inference_addresses
-                    .inference_server_address,
-            ),
-            inference_scaling_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .inference_addresses
-                    .inference_scaling_server_address,
-            ),
+    match *transport_type {
+        #[cfg(feature = "zmq-transport")]
+        TransportType::ZMQ => SharedTransportAddresses {
+            zmq_inference_addresses: SharedZmqInferenceAddresses {
+                inference_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.inference_addresses.inference_server_address,
+                ),
+                inference_scaling_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.inference_addresses.inference_scaling_server_address,
+                ),
+            },
+            zmq_training_addresses: SharedZmqTrainingAddresses {
+                agent_listener_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.agent_listener_address,
+                ),
+                model_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.model_server_address,
+                ),
+                trajectory_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.trajectory_server_address,
+                ),
+                training_scaling_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.training_scaling_server_address,
+                ),
+            },
+            #[cfg(feature = "nats-transport")]
+            nats_inference_address: Arc::new(""),
+            #[cfg(feature = "nats-transport")]
+            nats_training_address: Arc::new(""),
         },
-        training_addresses: SharedTrainingAddresses {
-            agent_listener_address: construct_address(
-                transport_type,
-                &transport_config.training_addresses.agent_listener_address,
-            ),
-            model_server_address: construct_address(
-                transport_type,
-                &transport_config.training_addresses.model_server_address,
-            ),
-            trajectory_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .training_addresses
-                    .trajectory_server_address,
-            ),
-            training_scaling_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .training_addresses
-                    .training_scaling_server_address,
-            ),
+        #[cfg(feature = "nats-transport")]
+        TransportType::NATS => SharedTransportAddresses {
+            #[cfg(feature = "zmq-transport")]
+            zmq_inference_addresses: SharedZmqInferenceAddresses {
+                inference_server_address: Arc::new(""),
+                inference_scaling_server_address: Arc::new(""),
+            },
+            zmq_training_addresses: SharedZmqTrainingAddresses {
+                agent_listener_address: Arc::new(""),
+                model_server_address: Arc::new(""),
+                trajectory_server_address: Arc::new(""),
+                training_scaling_server_address: Arc::new(""),
+            },
+            nats_inference_address: construct_address(transport_type, &transport_config.nats_addresses.inference_server_address),
+            nats_training_address: construct_address(transport_type, &transport_config.nats_addresses.training_server_address),
         },
     }
+
 }
 
 pub(crate) fn construct_local_model_path(local_model_module: &LocalModelModuleParams) -> PathBuf {

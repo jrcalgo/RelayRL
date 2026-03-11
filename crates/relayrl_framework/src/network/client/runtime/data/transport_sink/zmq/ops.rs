@@ -1,7 +1,7 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    SharedInferenceAddresses, SharedTrainingAddresses, SharedTransportAddresses,
+    SharedZmqInferenceAddresses, SharedZmqTrainingAddresses, SharedTransportAddresses,
 };
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::zmq::{
@@ -214,38 +214,38 @@ impl ZmqPool {
                 match address_type {
                     CacheAddressType::InferenceServer => {
                         addr_guard
-                            .inference_addresses
+                            .zmq_inference_addresses
                             .inference_server_address
                             .as_ref()
                             != new_address
                     }
                     CacheAddressType::AgentListener => {
                         addr_guard
-                            .training_addresses
+                            .zmq_training_addresses
                             .agent_listener_address
                             .as_ref()
                             != new_address
                     }
                     CacheAddressType::ModelServer => {
-                        addr_guard.training_addresses.model_server_address.as_ref() != new_address
+                        addr_guard.zmq_training_addresses.model_server_address.as_ref() != new_address
                     }
                     CacheAddressType::TrajectoryServer => {
                         addr_guard
-                            .training_addresses
+                            .zmq_training_addresses
                             .trajectory_server_address
                             .as_ref()
                             != new_address
                     }
                     CacheAddressType::TrainingScalingServer => {
                         addr_guard
-                            .training_addresses
+                            .zmq_training_addresses
                             .training_scaling_server_address
                             .as_ref()
                             != new_address
                     }
                     CacheAddressType::InferenceScalingServer => {
                         addr_guard
-                            .inference_addresses
+                            .zmq_inference_addresses
                             .inference_scaling_server_address
                             .as_ref()
                             != new_address
@@ -269,162 +269,162 @@ impl ZmqPool {
 
         let updated_addresses = match address_type {
             CacheAddressType::InferenceServer => SharedTransportAddresses {
-                inference_addresses: SharedInferenceAddresses {
+                zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: Arc::from(new_address),
                     inference_scaling_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_scaling_server_address
                         .clone(),
                 },
-                training_addresses: SharedTrainingAddresses {
+                zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .agent_listener_address
                         .clone(),
                     model_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .model_server_address
                         .clone(),
                     trajectory_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .trajectory_server_address
                         .clone(),
                     training_scaling_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .training_scaling_server_address
                         .clone(),
                 },
             },
             CacheAddressType::AgentListener => SharedTransportAddresses {
-                inference_addresses: SharedInferenceAddresses {
+                zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_server_address
                         .clone(),
                     inference_scaling_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_scaling_server_address
                         .clone(),
                 },
-                training_addresses: SharedTrainingAddresses {
+                zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: Arc::from(new_address),
                     model_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .model_server_address
                         .clone(),
                     trajectory_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .trajectory_server_address
                         .clone(),
                     training_scaling_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .training_scaling_server_address
                         .clone(),
                 },
             },
             CacheAddressType::ModelServer => SharedTransportAddresses {
-                inference_addresses: SharedInferenceAddresses {
+                zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_server_address
                         .clone(),
                     inference_scaling_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_scaling_server_address
                         .clone(),
                 },
-                training_addresses: SharedTrainingAddresses {
+                zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .agent_listener_address
                         .clone(),
                     model_server_address: Arc::from(new_address),
                     trajectory_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .trajectory_server_address
                         .clone(),
                     training_scaling_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .training_scaling_server_address
                         .clone(),
                 },
             },
             CacheAddressType::TrajectoryServer => SharedTransportAddresses {
-                inference_addresses: SharedInferenceAddresses {
+                zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_server_address
                         .clone(),
                     inference_scaling_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_scaling_server_address
                         .clone(),
                 },
-                training_addresses: SharedTrainingAddresses {
+                zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .agent_listener_address
                         .clone(),
                     model_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .model_server_address
                         .clone(),
                     trajectory_server_address: Arc::from(new_address),
                     training_scaling_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .training_scaling_server_address
                         .clone(),
                 },
             },
             CacheAddressType::InferenceScalingServer => SharedTransportAddresses {
-                inference_addresses: SharedInferenceAddresses {
+                zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_server_address
                         .clone(),
                     inference_scaling_server_address: Arc::from(new_address),
                 },
-                training_addresses: SharedTrainingAddresses {
+                zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .agent_listener_address
                         .clone(),
                     model_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .model_server_address
                         .clone(),
                     trajectory_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .trajectory_server_address
                         .clone(),
                     training_scaling_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .training_scaling_server_address
                         .clone(),
                 },
             },
             CacheAddressType::TrainingScalingServer => SharedTransportAddresses {
-                inference_addresses: SharedInferenceAddresses {
+                zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_server_address
                         .clone(),
                     inference_scaling_server_address: current_addresses
-                        .inference_addresses
+                        .zmq_inference_addresses
                         .inference_scaling_server_address
                         .clone(),
                 },
-                training_addresses: SharedTrainingAddresses {
+                zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .agent_listener_address
                         .clone(),
                     model_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .model_server_address
                         .clone(),
                     trajectory_server_address: current_addresses
-                        .training_addresses
+                        .zmq_training_addresses
                         .trajectory_server_address
                         .clone(),
                     training_scaling_server_address: Arc::from(new_address),

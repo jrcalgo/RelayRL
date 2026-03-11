@@ -3,7 +3,7 @@ use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, InferenceAddressesArgs, TrainingAddressesArgs,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::AlgorithmArgs;
@@ -412,47 +412,92 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     &mut config_loader.transport_config;
 
                 if let Some(inference_addresses) = inference_address_args {
-                    if let Some(inference_server_address) =
-                        inference_addresses.inference_server_address
-                    {
-                        transport_params_for_packing
-                            .inference_addresses
-                            .inference_server_address = inference_server_address;
-                    }
-                    if let Some(inference_scaling_server_address) =
-                        inference_addresses.inference_scaling_server_address
-                    {
-                        transport_params_for_packing
-                            .inference_addresses
-                            .inference_scaling_server_address = inference_scaling_server_address;
+                    match &self.transport_type {
+                        #[cfg(feature = "nats-transport")]
+                        TransportType::NATS => {
+                            if let Some(inference_server_address) = match inference_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                InferenceAddressesArgs::NATS(params) => params.clone(),
+                                #[cfg(feature = "zmq-transport")]
+                                InferenceAddressesArgs::ZMQ(_) => None,
+                            } {
+                                transport_params_for_packing.nats_addresses.inference_server_address = inference_server_address;
+                            }
+                        }
+                        #[cfg(feature = "zmq-transport")]
+                        TransportType::ZMQ => {
+                            if let Some(inference_server_address) = match inference_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                InferenceAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                InferenceAddressesArgs::ZMQ(ref params) => params.inference_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.inference_addresses.inference_server_address = inference_server_address;
+                            } 
+
+                            if let Some(inference_scaling_server_address) = match inference_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                InferenceAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                InferenceAddressesArgs::ZMQ(ref params) => params.inference_scaling_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.inference_addresses.inference_scaling_server_address = inference_scaling_server_address;
+                            }
+                        }
                     }
                 }
 
                 if let Some(training_addresses) = training_address_args {
-                    if let Some(agent_listener_address) = training_addresses.agent_listener_address
-                    {
-                        transport_params_for_packing
-                            .training_addresses
-                            .agent_listener_address = agent_listener_address;
-                    }
-                    if let Some(model_server_address) = training_addresses.model_server_address {
-                        transport_params_for_packing
-                            .training_addresses
-                            .model_server_address = model_server_address;
-                    }
-                    if let Some(trajectory_server_address) =
-                        training_addresses.trajectory_server_address
-                    {
-                        transport_params_for_packing
-                            .training_addresses
-                            .trajectory_server_address = trajectory_server_address;
-                    }
-                    if let Some(training_scaling_server_address) =
-                        training_addresses.training_scaling_server_address
-                    {
-                        transport_params_for_packing
-                            .training_addresses
-                            .training_scaling_server_address = training_scaling_server_address;
+                    match &self.transport_type {
+                        #[cfg(feature = "nats-transport")]
+                        TransportType::NATS => {
+                            if let Some(training_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(params) => params.clone(),
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(_) => None,
+                            } {
+                                transport_params_for_packing.nats_addresses.training_server_address = training_server_address;
+                            }
+                        }
+                        #[cfg(feature = "zmq-transport")]
+                        TransportType::ZMQ => {
+                            if let Some(agent_listener_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.agent_listener_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.agent_listener_address = agent_listener_address;
+                            }
+
+                            if let Some(model_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.model_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.model_server_address = model_server_address;
+                            }
+
+                            if let Some(trajectory_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.trajectory_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.trajectory_server_address = trajectory_server_address;
+                            }
+
+                            if let Some(training_scaling_server_address) = match training_addresses {
+                                #[cfg(feature = "nats-transport")]
+                                TrainingAddressesArgs::NATS(_) => None,
+                                #[cfg(feature = "zmq-transport")]
+                                TrainingAddressesArgs::ZMQ(ref params) => params.training_scaling_server_address.clone(),
+                            } {
+                                transport_params_for_packing.zmq_addresses.training_addresses.training_scaling_server_address = training_scaling_server_address;
+                            }
+                        }
                     }
                 }
 

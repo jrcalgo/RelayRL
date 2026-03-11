@@ -105,25 +105,43 @@ impl Default for AlgorithmArgs {
 
 #[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct InferenceAddresses {
+pub struct ZmqInferenceAddressesArgs {
     pub inference_server_address: Option<NetworkParams>,
     pub inference_scaling_server_address: Option<NetworkParams>,
 }
 
 #[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrainingAddresses {
+pub struct ZmqTrainingAddressesArgs {
     pub agent_listener_address: Option<NetworkParams>,
     pub model_server_address: Option<NetworkParams>,
     pub trajectory_server_address: Option<NetworkParams>,
     pub training_scaling_server_address: Option<NetworkParams>,
 }
 
-#[cfg(feature = "zmq-transport")]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum InferenceAddressesArgs {
+    #[cfg(feature = "zmq-transport")]
+    ZMQ(ZmqInferenceAddressesArgs),
+    #[cfg(feature = "nats-transport")]
+    NATS(Option<NetworkParams>),
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrainingAddressesArgs {
+    #[cfg(feature = "zmq-transport")]
+    ZMQ(ZmqTrainingAddressesArgs),
+    #[cfg(feature = "nats-transport")]
+    NATS(Option<NetworkParams>),
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct InferenceParams {
     pub model_mode: ModelMode,
-    pub inference_addresses: Option<InferenceAddresses>,
+    pub inference_addresses: Option<InferenceAddressesArgs>,
 }
 
 impl Default for InferenceParams {
@@ -139,7 +157,7 @@ impl Default for InferenceParams {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingParams {
     pub model_mode: ModelMode,
-    pub training_addresses: Option<TrainingAddresses>,
+    pub training_addresses: Option<TrainingAddressesArgs>,
 }
 
 #[cfg(feature = "zmq-transport")]

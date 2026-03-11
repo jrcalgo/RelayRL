@@ -229,33 +229,45 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
         }
     },
     "transport_config": {
-        "inference_addresses": {
+        "nats_addresses": {
             "inference_server": {
                 "host": "127.0.0.1",
-                "port": "7800"
+                "port": "50050"
             },
-            "inference_scaling_server": {
-                "host": "127.0.0.1",
-                "port": "7801"
-            }
-        },
-        "training_addresses": {
-            "model_server": {
+            "training_server": {
                 "host": "127.0.0.1",
                 "port": "50051"
-            },
-            "trajectory_server": {
-                "host": "127.0.0.1",
-                "port": "7776"
-            },
-            "agent_listener": {
-                "host": "127.0.0.1",
-                "port": "7777"
-            },
-            "training_scaling_server": {
-                "host": "127.0.0.1",
-                "port": "7778"
             }
+        },
+        "zmq_addresses": {
+            "inference_addresses": {
+                "inference_server": {
+                    "host": "127.0.0.1",
+                    "port": "7800"
+                },
+                "inference_scaling_server": {
+                    "host": "127.0.0.1",
+                    "port": "7801"
+                }
+            },
+            "training_addresses": {
+                "model_server": {
+                    "host": "127.0.0.1",
+                    "port": "50051"
+                },
+                "trajectory_server": {
+                    "host": "127.0.0.1",
+                    "port": "7776"
+                },
+                "agent_listener": {
+                    "host": "127.0.0.1",
+                    "port": "7777"
+                },
+                "training_scaling_server": {
+                    "host": "127.0.0.1",
+                    "port": "7778"
+                }
+            },
         },
         "local_model_module": {
             "directory": "model_module",
@@ -330,48 +342,17 @@ pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_CONTENT: &str = r#"{
         }
     },
     "transport_config": {
-        "inference_addresses": {
+        "nats_addresses": {
             "inference_server": {
                 "host": "127.0.0.1",
-                "port": "7800"
+                "port": "50050"
             },
-            "inference_scaling_server": {
-                "host": "127.0.0.1",
-                "port": "7801"
-            }
-        },
-        "training_addresses": {
-            "model_server": {
+            "training_server": {
                 "host": "127.0.0.1",
                 "port": "50051"
-            },
-            "trajectory_server": {
-                "host": "127.0.0.1",
-                "port": "7776"
-            },
-            "agent_listener": {
-                "host": "127.0.0.1",
-                "port": "7777"
-            },
-            "training_scaling_server": {
-                "host": "127.0.0.1",
-                "port": "7778"
             }
         },
-        "local_model_module": {
-            "directory": "model_module",
-            "model_name": "client_model",
-            "format": "pt"
-        },
-        "max_traj_length": 100000000
-    }
-}"#;
-
-/// TODO: Implement infernece server configuration file and builder components.
-pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_CONTENT: &str = r#"{
-    "inference_server_config": {
-        "config_update_polling_seconds": 10.0,
-        "transport_config": {
+        "zmq_addresses": {
             "inference_addresses": {
                 "inference_server": {
                     "host": "127.0.0.1",
@@ -399,6 +380,61 @@ pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_CONTENT: &str = r#"{
                     "host": "127.0.0.1",
                     "port": "7778"
                 }
+            },
+        },
+        "local_model_module": {
+            "directory": "model_module",
+            "model_name": "client_model",
+            "format": "pt"
+        },
+        "max_traj_length": 100000000
+    }
+}"#;
+
+/// TODO: Implement infernece server configuration file and builder components.
+pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_CONTENT: &str = r#"{
+    "inference_server_config": {
+        "config_update_polling_seconds": 10.0,
+        "transport_config": {
+            "nats_addresses": {
+                "inference_server": {
+                    "host": "127.0.0.1",
+                    "port": "50050"
+                },
+                "training_server": {
+                    "host": "127.0.0.1",
+                    "port": "50051"
+                }
+            },
+            "zmq_addresses": {
+                "inference_addresses": {
+                    "inference_server": {
+                        "host": "127.0.0.1",
+                        "port": "7800"
+                    },
+                    "inference_scaling_server": {
+                        "host": "127.0.0.1",
+                        "port": "7801"
+                    }
+                },
+                "training_addresses": {
+                    "model_server": {
+                        "host": "127.0.0.1",
+                        "port": "50051"
+                    },
+                    "trajectory_server": {
+                        "host": "127.0.0.1",
+                        "port": "7776"
+                    },
+                    "agent_listener": {
+                        "host": "127.0.0.1",
+                        "port": "7777"
+                    },
+                    "training_scaling_server": {
+                        "host": "127.0.0.1",
+                        "port": "7778"
+                    }
+                },
             },
             "local_model_module": {
                 "directory": "model_module",
@@ -1087,8 +1123,8 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
 
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
-                inference_addresses: transport_config.inference_addresses.clone(),
-                training_addresses: transport_config.training_addresses.clone(),
+                nats_addresses: transport_config.nats_addresses.clone(),
+                zmq_addresses: transport_config.zmq_addresses.clone(),
                 max_traj_length: transport_config.max_traj_length,
                 local_model_module: transport_config.local_model_module.clone(),
             },
@@ -1515,8 +1551,8 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
 
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
-                inference_addresses: transport_config.inference_addresses.clone(),
-                training_addresses: transport_config.training_addresses.clone(),
+                nats_addresses: transport_config.nats_addresses.clone(),
+                zmq_addresses: transport_config.zmq_addresses.clone(),
                 max_traj_length: transport_config.max_traj_length,
                 local_model_module: transport_config.local_model_module.clone(),
             },
@@ -1547,13 +1583,13 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TransportInferenceAddresses {
+pub struct ZmqTransportInferenceAddresses {
     pub inference_server_address: NetworkParams,
     pub inference_scaling_server_address: NetworkParams,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TransportTrainingAddresses {
+pub struct ZmqTransportTrainingAddresses {
     pub agent_listener_address: NetworkParams,
     pub model_server_address: NetworkParams,
     pub trajectory_server_address: NetworkParams,
@@ -1561,46 +1597,68 @@ pub struct TransportTrainingAddresses {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ZmqTransportAddresses {
+    pub inference_addresses: ZmqTransportInferenceAddresses,
+    pub training_addresses: ZmqTransportTrainingAddresses,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NatsTransportAddresses {
+    pub inference_server_address: NetworkParams,
+    pub training_server_address: NetworkParams,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransportConfigParams {
-    pub inference_addresses: TransportInferenceAddresses,
-    pub training_addresses: TransportTrainingAddresses,
+    pub nats_addresses: NatsTransportAddresses,
+    pub zmq_addresses: ZmqTransportAddresses,
     pub max_traj_length: u128,
     pub local_model_module: LocalModelModuleParams,
 }
 
 impl TransportConfigParams {
-    pub fn get_inference_server_address(&self) -> &NetworkParams {
-        &self.inference_addresses.inference_server_address
+    pub fn get_nats_inference_server_address(&self) -> &NetworkParams {
+        &self.nats_addresses.inference_server_address
     }
 
-    pub fn get_agent_listener_address(&self) -> &NetworkParams {
-        &self.training_addresses.agent_listener_address
+    pub fn get_nats_training_server_address(&self) -> &NetworkParams {
+        &self.nats_addresses.training_server_address
     }
 
-    pub fn get_model_server_address(&self) -> &NetworkParams {
-        &self.training_addresses.model_server_address
+    pub fn get_zmq_inference_server_address(&self) -> &NetworkParams {
+        &self.zmq_addresses.inference_addresses.inference_server_address
     }
 
-    pub fn get_trajectory_server_address(&self) -> &NetworkParams {
-        &self.training_addresses.trajectory_server_address
+    pub fn get_zmq_agent_listener_address(&self) -> &NetworkParams {
+        &self.zmq_addresses.training_addresses.agent_listener_address
     }
 
-    pub fn get_inference_scaling_server_address(&self) -> &NetworkParams {
-        &self.inference_addresses.inference_scaling_server_address
+    pub fn get_zmq_model_server_address(&self) -> &NetworkParams {
+        &self.zmq_addresses.training_addresses.model_server_address
     }
 
-    pub fn get_training_scaling_server_address(&self) -> &NetworkParams {
-        &self.training_addresses.training_scaling_server_address
+    pub fn get_zmq_trajectory_server_address(&self) -> &NetworkParams {
+        &self.zmq_addresses.training_addresses.trajectory_server_address
+    }
+
+    pub fn get_zmq_inference_scaling_server_address(&self) -> &NetworkParams {
+        &self.zmq_addresses.inference_addresses.inference_scaling_server_address
+    }
+
+    pub fn get_zmq_training_scaling_server_address(&self) -> &NetworkParams {
+        &self.zmq_addresses.training_addresses.training_scaling_server_address
     }
 }
 
 pub trait TransportConfigBuildParams {
-    fn set_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_model_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_nats_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_nats_training_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_zmq_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_zmq_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_zmq_model_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_zmq_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_zmq_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
+    fn set_zmq_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self;
     fn set_local_model_module(&mut self, directory_name: &str, model_name: &str) -> &mut Self;
     fn build(&self) -> TransportConfigParams;
@@ -1608,12 +1666,14 @@ pub trait TransportConfigBuildParams {
 }
 
 pub struct TransportConfigBuilder {
-    inference_server_address: Option<NetworkParams>,
-    agent_listener_address: Option<NetworkParams>,
-    model_server_address: Option<NetworkParams>,
-    trajectory_server_address: Option<NetworkParams>,
-    inference_scaling_server_address: Option<NetworkParams>,
-    training_scaling_server_address: Option<NetworkParams>,
+    nats_inference_server_address: Option<NetworkParams>,
+    nats_training_server_address: Option<NetworkParams>,
+    zmq_inference_server_address: Option<NetworkParams>,
+    zmq_agent_listener_address: Option<NetworkParams>,
+    zmq_model_server_address: Option<NetworkParams>,
+    zmq_trajectory_server_address: Option<NetworkParams>,
+    zmq_inference_scaling_server_address: Option<NetworkParams>,
+    zmq_training_scaling_server_address: Option<NetworkParams>,
     max_traj_length: Option<u128>,
     local_model_module: Option<LocalModelModuleParams>,
 }
@@ -1626,48 +1686,64 @@ pub struct LocalModelModuleParams {
 }
 
 impl TransportConfigBuildParams for TransportConfigBuilder {
-    fn set_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.inference_server_address = Some(NetworkParams {
+    fn set_nats_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.nats_inference_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.agent_listener_address = Some(NetworkParams {
+    fn set_nats_training_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.nats_training_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_model_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.model_server_address = Some(NetworkParams {
+    fn set_zmq_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.zmq_inference_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.trajectory_server_address = Some(NetworkParams {
+    fn set_zmq_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.zmq_agent_listener_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.inference_scaling_server_address = Some(NetworkParams {
+    fn set_zmq_model_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.zmq_model_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
         self
     }
 
-    fn set_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.training_scaling_server_address = Some(NetworkParams {
+    fn set_zmq_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.zmq_trajectory_server_address = Some(NetworkParams {
+            host: host.to_string(),
+            port: port.to_string(),
+        });
+        self
+    }
+
+    fn set_zmq_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.zmq_inference_scaling_server_address = Some(NetworkParams {
+            host: host.to_string(),
+            port: port.to_string(),
+        });
+        self
+    }
+
+    fn set_zmq_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
+        self.zmq_training_scaling_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
@@ -1689,22 +1765,15 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
     }
 
     fn build(&self) -> TransportConfigParams {
-        let inference_server_address: NetworkParams = match &self.inference_server_address {
+        let nats_inference_server_address: NetworkParams = match &self.nats_inference_server_address {
             Some(address) => address.clone(),
             None => NetworkParams {
                 host: "127.0.0.1".to_string(),
                 port: "50050".to_string(),
             },
         };
-        let agent_listener_address: NetworkParams = match &self.agent_listener_address {
-            Some(address) => address.clone(),
-            None => NetworkParams {
-                host: "127.0.0.1".to_string(),
-                port: "7778".to_string(),
-            },
-        };
 
-        let model_server_address: NetworkParams = match &self.model_server_address {
+        let nats_training_server_address: NetworkParams = match &self.nats_training_server_address {
             Some(address) => address.clone(),
             None => NetworkParams {
                 host: "127.0.0.1".to_string(),
@@ -1712,7 +1781,31 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             },
         };
 
-        let trajectory_server_address: NetworkParams = match &self.trajectory_server_address {
+        let zmq_inference_server_address: NetworkParams = match &self.zmq_inference_server_address {
+            Some(address) => address.clone(),
+            None => NetworkParams {
+                host: "127.0.0.1".to_string(),
+                port: "50050".to_string(),
+            },
+        };
+
+        let zmq_agent_listener_address: NetworkParams = match &self.zmq_agent_listener_address {
+            Some(address) => address.clone(),
+            None => NetworkParams {
+                host: "127.0.0.1".to_string(),
+                port: "7778".to_string(),
+            },
+        };
+
+        let zmq_model_server_address: NetworkParams = match &self.zmq_model_server_address {
+            Some(address) => address.clone(),
+            None => NetworkParams {
+                host: "127.0.0.1".to_string(),
+                port: "50051".to_string(),
+            },
+        };
+
+        let zmq_trajectory_server_address: NetworkParams = match &self.zmq_trajectory_server_address {
             Some(address) => address.clone(),
             None => NetworkParams {
                 host: "127.0.0.1".to_string(),
@@ -1720,8 +1813,8 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             },
         };
 
-        let inference_scaling_server_address: NetworkParams =
-            match &self.inference_scaling_server_address {
+        let zmq_inference_scaling_server_address: NetworkParams =
+            match &self.zmq_inference_scaling_server_address {
                 Some(address) => address.clone(),
                 None => NetworkParams {
                     host: "127.0.0.1".to_string(),
@@ -1729,8 +1822,8 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 },
             };
 
-        let training_scaling_server_address: NetworkParams =
-            match &self.training_scaling_server_address {
+        let zmq_training_scaling_server_address: NetworkParams =
+            match &self.zmq_training_scaling_server_address {
                 Some(address) => address.clone(),
                 None => NetworkParams {
                     host: "127.0.0.1".to_string(),
@@ -1753,15 +1846,21 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         };
 
         TransportConfigParams {
-            inference_addresses: TransportInferenceAddresses {
-                inference_server_address,
-                inference_scaling_server_address,
+            nats_addresses: NatsTransportAddresses {
+                inference_server_address: nats_inference_server_address,
+                training_server_address: nats_training_server_address,
             },
-            training_addresses: TransportTrainingAddresses {
-                agent_listener_address,
-                model_server_address,
-                trajectory_server_address,
-                training_scaling_server_address,
+            zmq_addresses: ZmqTransportAddresses {
+                inference_addresses: ZmqTransportInferenceAddresses {
+                    inference_server_address: zmq_inference_server_address,
+                    inference_scaling_server_address: zmq_inference_scaling_server_address,
+                },
+                training_addresses: ZmqTransportTrainingAddresses {
+                    agent_listener_address: zmq_agent_listener_address,
+                    model_server_address: zmq_model_server_address,
+                    trajectory_server_address: zmq_trajectory_server_address,
+                    training_scaling_server_address: zmq_training_scaling_server_address,
+                },
             },
             max_traj_length,
             local_model_module,
@@ -1770,32 +1869,44 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
 
     fn build_default() -> TransportConfigParams {
         TransportConfigParams {
-            inference_addresses: TransportInferenceAddresses {
+            nats_addresses: NatsTransportAddresses {
                 inference_server_address: NetworkParams {
                     host: "127.0.0.1".to_string(),
                     port: "50050".to_string(),
                 },
-                inference_scaling_server_address: NetworkParams {
-                    host: "127.0.0.1".to_string(),
-                    port: "7777".to_string(),
-                },
-            },
-            training_addresses: TransportTrainingAddresses {
-                agent_listener_address: NetworkParams {
-                    host: "127.0.0.1".to_string(),
-                    port: "7779".to_string(),
-                },
-                model_server_address: NetworkParams {
+                training_server_address: NetworkParams {
                     host: "127.0.0.1".to_string(),
                     port: "50051".to_string(),
                 },
-                trajectory_server_address: NetworkParams {
-                    host: "127.0.0.1".to_string(),
-                    port: "7776".to_string(),
+            },
+            zmq_addresses: ZmqTransportAddresses {
+                inference_addresses: ZmqTransportInferenceAddresses {
+                    inference_server_address: NetworkParams {
+                        host: "127.0.0.1".to_string(),
+                        port: "50050".to_string(),
+                    },
+                    inference_scaling_server_address: NetworkParams {
+                        host: "127.0.0.1".to_string(),
+                        port: "7777".to_string(),
+                    },
                 },
-                training_scaling_server_address: NetworkParams {
-                    host: "127.0.0.1".to_string(),
-                    port: "7778".to_string(),
+                training_addresses: ZmqTransportTrainingAddresses {
+                    agent_listener_address: NetworkParams {
+                        host: "127.0.0.1".to_string(),
+                        port: "7779".to_string(),
+                    },
+                    model_server_address: NetworkParams {
+                        host: "127.0.0.1".to_string(),
+                        port: "50051".to_string(),
+                    },
+                    trajectory_server_address: NetworkParams {
+                        host: "127.0.0.1".to_string(),
+                        port: "7776".to_string(),
+                    },
+                    training_scaling_server_address: NetworkParams {
+                        host: "127.0.0.1".to_string(),
+                        port: "7778".to_string(),
+                    },
                 },
             },
             max_traj_length: 1000,

@@ -190,7 +190,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                 }
 
                                 let inference_scaling_server_address: &str = transport_addresses
-                                    .inference_addresses
+                                    .zmq_inference_addresses
                                     .inference_scaling_server_address
                                     .as_ref();
 
@@ -249,7 +249,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let training_scaling_server_address: &str =
-                            transport_addresses.training_addresses.training_scaling_server_address.as_ref();
+                            transport_addresses.zmq_training_addresses.training_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
@@ -364,7 +364,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let inference_scaling_server_address: &str =
-                            transport_addresses.inference_addresses.inference_scaling_server_address.as_ref();
+                            transport_addresses.zmq_inference_addresses.inference_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
@@ -418,7 +418,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let training_scaling_server_address: &str =
-                            transport_addresses.training_addresses.training_scaling_server_address.as_ref();
+                            transport_addresses.zmq_training_addresses.training_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
@@ -534,7 +534,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let inference_scaling_server_address: &str =
-                            transport_addresses.inference_addresses.inference_scaling_server_address.as_ref();
+                            transport_addresses.zmq_inference_addresses.inference_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
@@ -588,7 +588,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         }
 
                         let training_scaling_server_address: &str =
-                            transport_addresses.training_addresses.training_scaling_server_address.as_ref();
+                            transport_addresses.zmq_training_addresses.training_scaling_server_address.as_ref();
 
                         let mut attempts = 0;
                         loop {
@@ -703,7 +703,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                             }
 
                             let inference_scaling_server_address: &str =
-                                transport_addresses.inference_addresses.inference_scaling_server_address.as_ref();
+                                transport_addresses.zmq_inference_addresses.inference_scaling_server_address.as_ref();
 
                             let mut attempts = 0;
                             loop {
@@ -756,7 +756,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                             }
 
                             let training_scaling_server_address: &str =
-                                transport_addresses.training_addresses.training_scaling_server_address.as_ref();
+                                transport_addresses.zmq_training_addresses.training_scaling_server_address.as_ref();
 
                             let mut attempts = 0;
                             loop {
@@ -867,7 +867,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
             }
 
             let inference_scaling_server_address: &str = transport_addresses
-                .inference_addresses
+                .zmq_inference_addresses
                 .inference_scaling_server_address
                 .as_ref();
 
@@ -923,7 +923,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
             }
 
             let inference_server_address: &str = transport_addresses
-                .inference_addresses
+                .zmq_inference_addresses
                 .inference_server_address
                 .as_ref();
 
@@ -979,7 +979,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
             }
 
             let inference_server_address: &str = transport_addresses
-                .inference_addresses
+                .zmq_inference_addresses
                 .inference_server_address
                 .as_ref();
 
@@ -1142,7 +1142,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             }
 
             let agent_listener_address: &str = transport_addresses
-                .training_addresses
+                .zmq_training_addresses
                 .agent_listener_address
                 .as_ref();
 
@@ -1200,7 +1200,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             }
 
             let agent_listener_address: &str = transport_addresses
-                .training_addresses
+                .zmq_training_addresses
                 .agent_listener_address
                 .as_ref();
 
@@ -1253,7 +1253,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             }
 
             let trajectory_server_address: &str = transport_addresses
-                .training_addresses
+                .zmq_training_addresses
                 .trajectory_server_address
                 .as_ref();
 
@@ -1304,7 +1304,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             }
 
             let model_server_address = transport_addresses
-                .training_addresses
+                .zmq_training_addresses
                 .model_server_address
                 .as_ref();
 
