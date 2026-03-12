@@ -11,6 +11,7 @@ use crate::network::client::runtime::data::transport_sink::{
 };
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
+use crate::network::client::runtime::data::transport_sink::combine_scaling_results;
 
 use active_uuid_registry::interface::reserve_id_with;
 use relayrl_types::HyperparameterArgs;
@@ -139,21 +140,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
     }
 }
 
-fn combine_scaling_results(
-    result1: Option<Result<(), TransportError>>,
-    result2: Option<Result<(), TransportError>>,
-) -> Result<(), TransportError> {
-    match (result1, result2) {
-        (Some(Err(e)), Some(Err(e2))) => Err(TransportError::MultipleErrors(e.to_string(), e2.to_string())),
-        (Some(Err(e)), None) => Err(e),
-        (None, Some(Err(e))) => Err(e),
-        (None, None) => Err(TransportError::InvalidState(
-            "Inference and Training servers not initialized, and yet we have a scaling operation. This should never happen. What are you doing? How did you get here?".to_string(),
-        )),
-        _ => Ok(()),
-    }
-}
-
 impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
     for ZmqInterface<B>
 {
@@ -209,7 +195,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                             inference_protocol.circuit_breaker.record_success();
                                             return Ok(());
                                         }
-                                        Err(e)
+                                        Err(_)
                                             if attempts
                                                 < inference_protocol
                                                     .config
@@ -265,7 +251,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     training_protocol.circuit_breaker.record_success();
                                     return Ok(());
                                 }
-                                Err(e)
+                                Err(_)
                                     if attempts
                                         < training_protocol.config.retry_policy.max_attempts =>
                                 {
@@ -314,7 +300,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         scaling_protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         scaling_protocol.circuit_breaker.record_failure();
                     }
@@ -380,7 +366,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     inference_protocol.circuit_breaker.record_success();
                                     return Ok(());
                                 }
-                                Err(e)
+                                Err(_)
                                     if attempts
                                         < inference_protocol.config.retry_policy.max_attempts =>
                                 {
@@ -434,7 +420,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     training_protocol.circuit_breaker.record_success();
                                     return Ok(());
                                 }
-                                Err(e)
+                                Err(_)
                                     if attempts
                                         < training_protocol.config.retry_policy.max_attempts =>
                                 {
@@ -484,7 +470,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         scaling_protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         scaling_protocol.circuit_breaker.record_failure();
                     }
@@ -550,7 +536,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     inference_protocol.circuit_breaker.record_success();
                                     return Ok(());
                                 }
-                                Err(e)
+                                Err(_)
                                     if attempts
                                         < inference_protocol.config.retry_policy.max_attempts =>
                                 {
@@ -604,7 +590,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     training_protocol.circuit_breaker.record_success();
                                     return Ok(());
                                 }
-                                Err(e)
+                                Err(_)
                                     if attempts
                                         < training_protocol.config.retry_policy.max_attempts =>
                                 {
@@ -654,7 +640,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         scaling_protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         scaling_protocol.circuit_breaker.record_failure();
                     }
@@ -718,7 +704,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                         inference_protocol.circuit_breaker.record_success();
                                         return Ok(());
                                     }
-                                    Err(e)
+                                    Err(_)
                                         if attempts
                                             < inference_protocol.config.retry_policy.max_attempts =>
                                     {
@@ -771,7 +757,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                         training_protocol.circuit_breaker.record_success();
                                         return Ok(());
                                     }
-                                    Err(e)
+                                    Err(_)
                                         if attempts
                                             < training_protocol.config.retry_policy.max_attempts =>
                                     {
@@ -820,7 +806,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         scaling_protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         scaling_protocol.circuit_breaker.record_failure();
                         let delay = scaling_protocol
@@ -885,7 +871,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                         protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         protocol.circuit_breaker.record_failure();
                         let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
@@ -906,6 +892,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
             ));
         }
     }
+
     fn send_inference_request(
         &self,
         actor_entry: (NamespaceString, ContextString, Uuid),
@@ -940,7 +927,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                         protocol.circuit_breaker.record_success();
                         return Ok(action);
                     }
-                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         protocol.circuit_breaker.record_failure();
                         let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
@@ -996,7 +983,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                         protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         protocol.circuit_breaker.record_failure();
                         let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
@@ -1162,7 +1149,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                         protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         protocol.circuit_breaker.record_failure();
                         let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
@@ -1214,7 +1201,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                         protocol.circuit_breaker.record_success();
                         return Ok(model);
                     }
-                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         protocol.circuit_breaker.record_failure();
                         let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
@@ -1270,7 +1257,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                         protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         protocol.circuit_breaker.record_failure();
                         let delay = protocol.config.retry_policy.delay_for_attempt(attempts);
@@ -1321,7 +1308,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                         protocol.circuit_breaker.record_success();
                         return Ok(());
                     }
-                    Err(e) if attempts < protocol.config.retry_policy.max_attempts => {
+                    Err(_) if attempts < protocol.config.retry_policy.max_attempts => {
                         attempts += 1;
                         protocol.circuit_breaker.record_failure();
                         let delay = protocol.config.retry_policy.delay_for_attempt(attempts);

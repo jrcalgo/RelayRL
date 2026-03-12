@@ -269,6 +269,8 @@ impl ZmqPool {
 
         let updated_addresses = match address_type {
             CacheAddressType::InferenceServer => SharedTransportAddresses {
+                nats_inference_address: current_addresses.nats_inference_address.clone(),
+                nats_training_address: current_addresses.nats_training_address.clone(),
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: Arc::from(new_address),
                     inference_scaling_server_address: current_addresses
@@ -296,6 +298,8 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::AgentListener => SharedTransportAddresses {
+                nats_inference_address: current_addresses.nats_inference_address.clone(),
+                nats_training_address: current_addresses.nats_training_address.clone(),
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -323,6 +327,8 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::ModelServer => SharedTransportAddresses {
+                nats_inference_address: current_addresses.nats_inference_address.clone(),
+                nats_training_address: current_addresses.nats_training_address.clone(),
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -350,6 +356,8 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::TrajectoryServer => SharedTransportAddresses {
+                nats_inference_address: current_addresses.nats_inference_address.clone(),
+                nats_training_address: current_addresses.nats_training_address.clone(),
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -377,6 +385,8 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::InferenceScalingServer => SharedTransportAddresses {
+                nats_inference_address: current_addresses.nats_inference_address.clone(),
+                nats_training_address: current_addresses.nats_training_address.clone(),
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -404,6 +414,8 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::TrainingScalingServer => SharedTransportAddresses {
+                nats_inference_address: current_addresses.nats_inference_address.clone(),
+                nats_training_address: current_addresses.nats_training_address.clone(),
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -790,11 +802,36 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                             e
                         ))
                     })?
-                    .recv_bytes(0)
+                    .recv_multipart(0)
                 {
-                    Ok(model_bytes) => {
+                    Ok(message_parts) => {
+                        if message_parts.len() < 3 {
+                            eprintln!("[ZmqClient] Malformed model update response");
+                            return Err(TransportError::ListenForModelError(
+                                "Malformed model update response".to_string(),
+                            ));
+                        }
+
+                        let model_bytes = message_parts[1].clone();
+                        let actor_id_bytes = message_parts[2].clone();
+
+                        if model_bytes.is_empty() {
+                            eprintln!("[ZmqClient] Model bytes are empty");
+                            continue;  // drops the message
+                        }
+
+                        let actor_id = {
+                            if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
+                                eprintln!("[ZmqClient] Actor ID bytes are empty or invalid");
+                                continue;  // drops the message
+                            } else {
+                                let actor_array = actor_id_bytes.as_array::<16>().cloned().unwrap(); // safe because we know the length is 16
+                                Uuid::from_bytes(actor_array)
+                            }
+                        };
+
                         let msg = RoutedMessage {
-                            actor_id: Uuid::nil(), // broadcast placeholder
+                            actor_id,
                             protocol: RoutingProtocol::ModelUpdate,
                             payload: RoutedPayload::ModelUpdate {
                                 model_bytes,
@@ -859,6 +896,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         let scaling_entry_string =
             format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
+        let actor_entries_string = actor_entries.iter().map(|entry| format!("{}:{}:{}", client_namespace, entry.1, entry.2)).collect::<Vec<String>>().join(",");
+
         let algorithm_name_string = algorithm.as_str().to_string();
         let hyperparams_string = serde_json::to_string(&hyperparams).map_err(|e| {
             TransportError::SendAlgorithmInitRequestError(format!(
@@ -870,6 +909,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         let empty_frame: Vec<u8> = vec![];
         let transport_entry_frame: Vec<u8> = transport_entry_string.as_bytes().to_vec();
         let scaling_entry_frame: Vec<u8> = scaling_entry_string.as_bytes().to_vec();
+        let actor_entries_frame: Vec<u8> = actor_entries_string.as_bytes().to_vec();
         let algorithm_init_payload: Vec<u8> = b"ALGORITHM_INIT".to_vec();
         let algorithm_name_frame: Vec<u8> = algorithm_name_string.as_bytes().to_vec();
         let _hyperparams_payload: Vec<u8> = hyperparams_string.as_bytes().to_vec();
@@ -913,6 +953,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                     empty_frame,
                     transport_entry_frame,
                     scaling_entry_frame,
+                    actor_entries_frame,
                     algorithm_init_payload,
                     algorithm_name_frame,
                 ],
@@ -1141,6 +1182,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             encoded_trajectory.num_actions
         );
 
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        let transport_entry_string =
+            format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
+
+        let buffer_entry_string = format!("{}:{}:{}", client_namespace, router_context, buffer_id);
+
+        let empty_frame: Vec<u8> = vec![];
+        let transport_entry_frame: &[u8] = transport_entry_string.as_bytes();
+        let buffer_entry_frame: &[u8] = buffer_entry_string.as_bytes();
+        let serialized_traj_frame: &[u8] = serialized_traj.as_slice();
+
         let socket = self
             .zmq_pool
             .read()
@@ -1171,8 +1223,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .try_lock()
             .map_err(|e| {
                 TransportError::SendTrajError(format!("Failed to lock push socket: {}", e))
-            })?
-            .send(serialized_traj, 0)
+            })?.send_multipart([
+                &empty_frame,
+                transport_entry_frame,
+                buffer_entry_frame,
+                serialized_traj_frame,
+            ], 0)
         {
             Ok(_) => {
                 println!("[ZmqClient] Trajectory sent successfully");
