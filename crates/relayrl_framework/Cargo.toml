@@ -23,7 +23,7 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["client", "zmq-transport"]
+default = ["client", "zmq-transport", "nats-transport"]
 
 tch-backend = ["relayrl_types/tch-backend", "relayrl_types/tch-model"]
 
@@ -56,6 +56,7 @@ active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
 tokio = { workspace = true, features = ["full"] }
+tokio-stream = "0.1.18"
 serde = { workspace = true, features = ["derive"] }
 log = { version = "0.4.28", features = ["kv"] }
 rand = "0.9.2"
@@ -68,6 +69,7 @@ tempfile = { workspace = true }
 serde_json = { workspace = true }
 bytemuck = { workspace = true }
 bincode = { workspace = true }
+bytes = "1.11.1"
 # TODO: Add Redis support for training data storagen & querying
 # redis = 0.32.7
 
