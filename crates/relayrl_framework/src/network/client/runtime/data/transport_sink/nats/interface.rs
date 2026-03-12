@@ -1,34 +1,331 @@
+use crate::network::client::agent::ClientModes;
+use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ModelMode};
+use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::data::transport_sink::{
+    AsyncClientInferenceTransportOps, AsyncClientScalingTransportOps,
+    AsyncClientTrainingTransportOps, AsyncClientTransportInterface, ScalingOperation,
+    TransportError, TransportUuid,
+};
+use crate::network::client::runtime::router::RoutedMessage;
+use crate::utilities::configuration::Algorithm;
 
+use active_uuid_registry::interface::reserve_id_with;
+use relayrl_types::HyperparameterArgs;
+use relayrl_types::prelude::action::RelayRLAction;
+use relayrl_types::prelude::model::ModelModule;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+use relayrl_types::prelude::trajectory::EncodedTrajectory;
 
+use burn_tensor::backend::Backend;
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::sync::mpsc::Sender;
+use async_trait::async_trait;
 
-pub(crate) struct NatsInterface {
-    nats_inference_ops: NatsInferenceOps,
-    nats_training_ops: NatsTrainingOps,
-    inference_authentication: NatsAuthentication,
-    training_authentication: NatsAuthentication,
+use super::ops::{NatsConnectionManager, NatsInferenceOps, NatsTrainingOps};
+use super::policies::{BackpressureController, CircuitBreaker, NatsPolicyConfig};
+use super::{NatsInferenceExecution, NatsTrainingExecution};
+use super::super::combine_scaling_results;
+
+use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
+
+struct NatsProtocol {
+    circuit_breaker: CircuitBreaker,
+    backpressure: BackpressureController,
+    config: NatsPolicyConfig,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B> for NatsInterface {
+pub(crate) struct NatsInterface<B: Backend + BackendMatcher<Backend = B>> {
+    nats_inference_ops: NatsInferenceOps,
+    nats_training_ops: NatsTrainingOps,
+    inference_protocol: Option<NatsProtocol>,
+    training_protocol: Option<NatsProtocol>,
+    scaling_protocol: Option<NatsProtocol>,
+    _phantom: PhantomData<B>,
+}
+
+#[async_trait]
+impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
+    for NatsInterface<B>
+{
     async fn new(
         client_namespace: Arc<str>,
         shared_client_modes: Arc<ClientModes>,
     ) -> Result<Self, TransportError> {
+        let _transport_id: TransportUuid = reserve_id_with(
+            client_namespace.as_ref(),
+            crate::network::NATS_CLIENT_CONTEXT,
+            42,
+            100,
+        )
+        .map_err(TransportError::from)?;
+
+        let transport_entry = (
+            client_namespace.to_string(),
+            crate::network::NATS_CLIENT_CONTEXT.to_string(),
+        );
+
+        let nats_connection_manager =
+            Arc::new(RwLock::new(NatsConnectionManager::new(client_namespace.clone())));
+        let nats_inference_ops =
+            NatsInferenceOps::new(transport_entry.clone(), nats_connection_manager.clone());
+        let nats_training_ops =
+            NatsTrainingOps::new(transport_entry.clone(), nats_connection_manager.clone());
+
+        let inference_protocol = match shared_client_modes.actor_inference_mode {
+            ActorInferenceMode::Server(_) => {
+                let config = NatsPolicyConfig::for_inference();
+                Some(NatsProtocol {
+                    circuit_breaker: CircuitBreaker::new(
+                        config.circuit_breaker_threshold,
+                        config.circuit_breaker_duration,
+                    ),
+                    backpressure: BackpressureController::new(config.max_concurrent_requests),
+                    config,
+                })
+            }
+            ActorInferenceMode::Local(_) => None,
+        };
+
+        let training_protocol = match shared_client_modes.actor_training_data_mode {
+            ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) => {
+                let config = NatsPolicyConfig::for_training();
+                Some(NatsProtocol {
+                    circuit_breaker: CircuitBreaker::new(
+                        config.circuit_breaker_threshold,
+                        config.circuit_breaker_duration,
+                    ),
+                    backpressure: BackpressureController::new(config.max_concurrent_requests),
+                    config,
+                })
+            }
+            _ => None,
+        };
+
+        let scaling_protocol = match (
+            &shared_client_modes.actor_inference_mode,
+            &shared_client_modes.actor_training_data_mode,
+        ) {
+            (
+                ActorInferenceMode::Local(_),
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::Offline(_),
+            ) => None,
+            _ => {
+                let config = NatsPolicyConfig::for_scaling();
+                Some(NatsProtocol {
+                    circuit_breaker: CircuitBreaker::new(
+                        config.circuit_breaker_threshold,
+                        config.circuit_breaker_duration,
+                    ),
+                    backpressure: BackpressureController::new(config.max_concurrent_requests),
+                    config,
+                })
+            }
+        };
+
+        Ok(Self {
+            nats_inference_ops,
+            nats_training_ops,
+            inference_protocol,
+            training_protocol,
+            scaling_protocol,
+            _phantom: PhantomData,
+        })
     }
 
     async fn shutdown(&self) -> Result<(), TransportError> {
-        
+        unimplemented!("NatsInterface::shutdown")
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B> for NatsInterface {
+#[async_trait]
+impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
+    for NatsInterface<B>
+{
     async fn send_client_ids(
         &self,
         scaling_entry: (NamespaceString, ContextString, Uuid),
         client_ids: Vec<(NamespaceString, ContextString, Uuid)>,
-        replace_context: bool,
+        _replace_context: bool,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
+        let scaling_protocol = self
+            .scaling_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let _permit = scaling_protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if scaling_protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
 
+        let nats_inference_server_address = transport_addresses.nats_inference_address.clone();
+        let nats_training_server_address = transport_addresses.nats_training_address.clone();
+        let mut attempts = 0u32;
+
+        loop {
+            let (inference_result, training_result) = tokio::join!(
+                async {
+                    if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                        let _permit = inference_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                inference_protocol.config.timeout,
+                                <NatsInterface<B> as NatsInferenceExecution>::execute_send_client_ids(
+                                    self,
+                                    &scaling_entry,
+                                    &client_ids,
+                                    nats_inference_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    inference_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                },
+                async {
+                    if let Some(training_protocol) = self.training_protocol.as_ref() {
+                        let _permit = training_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                training_protocol.config.timeout,
+                                <NatsInterface<B> as NatsTrainingExecution<B>>::execute_send_client_ids(
+                                    self,
+                                    &scaling_entry,
+                                    &client_ids,
+                                    nats_training_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    training_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+            );
+
+            match combine_scaling_results(inference_result, training_result) {
+                Ok(()) => {
+                    scaling_protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    attempts += 1;
+                    scaling_protocol.circuit_breaker.record_failure();
+                    tokio::time::sleep(
+                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    scaling_protocol.circuit_breaker.record_failure();
+                    return Err(TransportError::MaxRetriesExceeded {
+                        cause: e.to_string(),
+                        attempts,
+                    });
+                }
+            }
+        }
     }
 
     async fn send_scaling_warning(
@@ -37,7 +334,181 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        
+        let scaling_protocol = self
+            .scaling_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let _permit = scaling_protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if scaling_protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_inference_server_address = transport_addresses.nats_inference_address.clone();
+        let nats_training_server_address = transport_addresses.nats_training_address.clone();
+        let mut attempts = 0u32;
+
+        loop {
+            let (inference_result, training_result) = tokio::join!(
+                async {
+                    if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                        let _permit = inference_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                inference_protocol.config.timeout,
+                                <NatsInterface<B> as NatsInferenceExecution>::execute_send_scaling_warning(
+                                    &self,
+                                    &scaling_entry,
+                                    &operation,
+                                    nats_inference_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    inference_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                },
+                async {
+                    if let Some(training_protocol) = self.training_protocol.as_ref() {
+                        let _permit = training_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                training_protocol.config.timeout,
+                                <NatsInterface<B> as NatsTrainingExecution<B>>::execute_send_scaling_warning(
+                                    &self,
+                                    &scaling_entry,
+                                    &operation,
+                                    nats_training_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    training_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+            );
+
+            match combine_scaling_results(inference_result, training_result) {
+                Ok(()) => {
+                    scaling_protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    attempts += 1;
+                    scaling_protocol.circuit_breaker.record_failure();
+                    tokio::time::sleep(
+                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    scaling_protocol.circuit_breaker.record_failure();
+                    return Err(TransportError::MaxRetriesExceeded {
+                        cause: e.to_string(),
+                        attempts,
+                    });
+                }
+            }
+        }
     }
 
     async fn send_scaling_complete(
@@ -46,7 +517,180 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        
+        let scaling_protocol = self
+            .scaling_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let _permit = scaling_protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if scaling_protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_inference_server_address = transport_addresses.nats_inference_address.clone();
+        let nats_training_server_address = transport_addresses.nats_training_address.clone();
+        let mut attempts = 0u32;
+
+        loop {
+            let (inference_result, training_result) = tokio::join!(
+                async {
+                    if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                        let _permit = inference_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                inference_protocol.config.timeout,
+                                <NatsInterface<B> as NatsInferenceExecution>::execute_send_scaling_complete(&self,
+                                    &scaling_entry,
+                                    &operation,
+                                    nats_inference_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    inference_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                },
+                async {
+                    if let Some(training_protocol) = self.training_protocol.as_ref() {
+                        let _permit = training_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                training_protocol.config.timeout,
+                                <NatsInterface<B> as NatsTrainingExecution<B>>::execute_send_scaling_complete(
+                                    &self,
+                                    &scaling_entry,
+                                    &operation,
+                                    nats_training_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    training_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+            );
+
+            match combine_scaling_results(inference_result, training_result) {
+                Ok(()) => {
+                    scaling_protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    attempts += 1;
+                    scaling_protocol.circuit_breaker.record_failure();
+                    tokio::time::sleep(
+                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    scaling_protocol.circuit_breaker.record_failure();
+                    return Err(TransportError::MaxRetriesExceeded {
+                        cause: e.to_string(),
+                        attempts,
+                    });
+                }
+            }
+        }
     }
 
     async fn send_shutdown_signal(
@@ -54,11 +698,186 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
         scaling_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        
+        let scaling_protocol = self
+            .scaling_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let _permit = scaling_protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if scaling_protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_inference_server_address = transport_addresses.nats_inference_address.clone();
+        let nats_training_server_address = transport_addresses.nats_training_address.clone();
+        let mut attempts = 0u32;
+
+        loop {
+            let (inference_result, training_result) = tokio::join!(
+                async {
+                    if let Some(inference_protocol) = self.inference_protocol.as_ref() {
+                        let _permit = inference_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if inference_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                inference_protocol.config.timeout,
+                                <NatsInterface<B> as NatsInferenceExecution>::execute_send_shutdown_signal(
+                                    &self,
+                                    &scaling_entry,
+                                    nats_inference_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    inference_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    inference_protocol.circuit_breaker.record_failure();
+                                    if attempts < inference_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            inference_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                },
+                async {
+                    if let Some(training_protocol) = self.training_protocol.as_ref() {
+                        let _permit = training_protocol
+                            .backpressure
+                            .acquire()
+                            .await
+                            .map_err(|e| TransportError::NatsClientError(e.to_string()));
+                        if let Err(e) = _permit {
+                            return Some(Err(e));
+                        }
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Some(Err(TransportError::CircuitOpen));
+                        }
+                        let mut attempts = 0u32;
+                        loop {
+                            match tokio::time::timeout(
+                                training_protocol.config.timeout,
+                                <NatsInterface<B> as NatsTrainingExecution<B>>::execute_send_shutdown_signal(
+                                    self,
+                                    &scaling_entry,
+                                    nats_training_server_address.as_ref(),
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    training_protocol.circuit_breaker.record_success();
+                                    return Some(Ok(()));
+                                }
+                                Ok(Err(e)) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: e.to_string(),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                                Err(timeout) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    if attempts < training_protocol.config.retry_policy.max_attempts {
+                                        attempts += 1;
+                                        tokio::time::sleep(
+                                            training_protocol.config.retry_policy.delay_for_attempt(attempts),
+                                        )
+                                        .await;
+                                    } else {
+                                        return Some(Err(TransportError::MaxRetriesExceeded {
+                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            attempts,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+            );
+
+            match combine_scaling_results(inference_result, training_result) {
+                Ok(()) => {
+                    scaling_protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Err(_) if attempts < scaling_protocol.config.retry_policy.max_attempts => {
+                    attempts += 1;
+                    scaling_protocol.circuit_breaker.record_failure();
+                    tokio::time::sleep(
+                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    scaling_protocol.circuit_breaker.record_failure();
+                    return Err(TransportError::MaxRetriesExceeded {
+                        cause: e.to_string(),
+                        attempts,
+                    });
+                }
+            }
+        }
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<B> for NatsInterface {
+#[async_trait]
+impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<B>
+    for NatsInterface<B>
+{
     async fn send_inference_model_init_request(
         &self,
         scaling_entry: (NamespaceString, ContextString, Uuid),
@@ -66,7 +885,66 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
         model_module: Option<ModelModule<B>>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        
+        let protocol = self
+            .inference_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Inference protocol not initialized".into()))?;
+        let _permit = protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_inference_server_address: &str = transport_addresses.nats_inference_address.as_ref();
+        let mut attempts = 0u32;
+
+        loop {
+            match tokio::time::timeout(
+                protocol.config.timeout,
+                self.execute_send_inference_model_init_request(
+                    &scaling_entry,
+                    &model_mode,
+                    &model_module,
+                    nats_inference_server_address,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+                Err(timeout) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: format!("timeout: {}", timeout.to_string()),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     async fn send_inference_request(
@@ -75,7 +953,61 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
         obs_bytes: Vec<u8>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<RelayRLAction, TransportError> {
-        
+        let protocol = self
+            .inference_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Inference protocol not initialized".into()))?;
+        let _permit = protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_inference_server_address: &str = transport_addresses.nats_inference_address.as_ref();
+        let mut attempts = 0u32;
+
+        loop {
+            match tokio::time::timeout(
+                protocol.config.timeout,
+                self.execute_send_inference_request(&actor_entry, &obs_bytes, nats_inference_server_address),
+            )
+            .await
+            {
+                Ok(Ok(action)) => {
+                    protocol.circuit_breaker.record_success();
+                    return Ok(action);
+                }
+                Ok(Err(e)) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+                Err(timeout) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: format!("timeout: {}", timeout.to_string()),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     async fn send_flag_last_inference(
@@ -84,118 +1016,68 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
         reward: f32,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        
+        let protocol = self
+            .inference_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Inference protocol not initialized".into()))?;
+        let _permit = protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_inference_server_address: &str = transport_addresses.nats_inference_address.as_ref();
+        let mut attempts = 0u32;
+
+        loop {
+            match tokio::time::timeout(
+                protocol.config.timeout,
+                self.execute_send_flag_last_inference(&actor_entry, &reward, nats_inference_server_address),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+                Err(timeout) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: format!("timeout: {}", timeout.to_string()),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> NatsInferenceExecution for NatsInterface {
-    #[inline]
-    async fn execute_send_inference_request(
-        &self,
-        actor_entry: &(NamespaceString, ContextString, Uuid),
-        obs_bytes: &[u8],
-        inference_server_address: &str,
-    ) -> Result<RelayRLAction, TransportError> {
-        <NatsInferenceOps as NatsInferenceExecution<B>>::execute_send_inference_request(
-            &self.nats_inference_ops,
-            actor_entry,
-            obs_bytes,
-            inference_server_address,
-        )
-    }
-
-    #[inline]
-    async fn execute_send_flag_last_inference(
-        &self,
-        actor_entry: &(NamespaceString, ContextString, Uuid),
-        reward: &f32,
-        inference_server_address: &str,
-    ) -> Result<(), TransportError> {
-        <NatsInferenceOps as NatsInferenceExecution<B>>::execute_send_flag_last_inference(
-            &self.nats_inference_ops,
-            actor_entry,
-            reward,
-            inference_server_address,
-        )
-    }
-
-    #[inline]
-    async fn execute_send_inference_model_init_request<MB: Backend + BackendMatcher<Backend = MB>>(
-        &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        model_mode: &ModelMode,
-        model_module: &Option<ModelModule<MB>>,
-        inference_scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
-        <NatsInferenceOps as NatsInferenceExecution<B>>::execute_send_inference_model_init_request(
-            &self.nats_inference_ops,
-            scaling_entry,
-            model_mode,
-            model_module,
-            inference_scaling_server_address,
-        )
-    }
-
-    #[inline]
-    async fn execute_send_client_ids(
-        &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        client_ids: &[(NamespaceString, ContextString, Uuid)],
-        inference_scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
-        <NatsInferenceOps as NatsInferenceExecution<B>>::execute_send_client_ids(
-            &self.nats_inference_ops,
-            scaling_entry,
-            client_ids,
-            inference_scaling_server_address,
-        )
-    }
-
-    #[inline]
-    async fn execute_send_scaling_warning(
-        &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        operation: &ScalingOperation,
-        inference_scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
-        <NatsInferenceOps as NatsInferenceExecution<B>>::execute_send_scaling_warning(
-            &self.nats_inference_ops,
-            scaling_entry,
-            operation,
-            inference_scaling_server_address,
-        )
-    }
-
-    #[inline]
-    async fn execute_send_scaling_complete(
-        &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        operation: &ScalingOperation,
-        inference_scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
-        <NatsInferenceOps as NatsInferenceExecution<B>>::execute_send_scaling_complete(
-            &self.nats_inference_ops,
-            scaling_entry,
-            operation,
-            inference_scaling_server_address,
-        )
-    }
-
-    #[inline]
-    async fn execute_send_shutdown_signal(
-        &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        inference_scaling_server_address: &str,
-    ) -> Result<(), TransportError> {
-        <NatsInferenceOps as NatsInferenceExecution<B>>::execute_send_shutdown_signal(
-            &self.nats_inference_ops,
-            scaling_entry,
-            inference_scaling_server_address,
-        )
-    }
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B> for NatsInterface {
+#[async_trait]
+impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B>
+    for NatsInterface<B>
+{
     async fn send_algorithm_init_request(
         &self,
         scaling_entry: (NamespaceString, ContextString, Uuid),
@@ -205,7 +1087,68 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        
+        let protocol = self
+            .training_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        let _permit = protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_training_server_address: &str = transport_addresses.nats_training_address.as_ref();
+        let mut attempts = 0u32;
+
+        loop {
+            match tokio::time::timeout(
+                protocol.config.timeout,
+                self.execute_send_algorithm_init_request(
+                    &scaling_entry,
+                    &actor_entries,
+                    &model_mode,
+                    &algorithm,
+                    &hyperparams,
+                    nats_training_server_address,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+                Err(timeout) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: format!("timeout: {}", timeout.to_string()),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     async fn initial_model_handshake(
@@ -213,7 +1156,61 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         actor_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
-        
+        let protocol = self
+            .training_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        let _permit = protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_training_server_address: &str = transport_addresses.nats_training_address.as_ref();
+        let mut attempts = 0u32;
+
+        loop {
+            match tokio::time::timeout(
+                protocol.config.timeout,
+                self.execute_initial_model_handshake(&actor_entry, nats_training_server_address),
+            )
+            .await
+            {
+                Ok(Ok(model)) => {
+                    protocol.circuit_breaker.record_success();
+                    return Ok(model);
+                }
+                Ok(Err(e)) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+                Err(timeout) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: format!("timeout: {}", timeout.to_string()),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     async fn send_trajectory(
@@ -222,7 +1219,61 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         encoded_trajectory: EncodedTrajectory,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        
+        let protocol = self
+            .training_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        let _permit = protocol
+            .backpressure
+            .acquire()
+            .await
+            .map_err(|e| TransportError::NatsClientError(e.to_string()))?;
+        if protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_training_server_address: &str = transport_addresses.nats_training_address.as_ref();
+        let mut attempts = 0u32;
+
+        loop {
+            match tokio::time::timeout(
+                protocol.config.timeout,
+                self.execute_send_trajectory(&buffer_entry, &encoded_trajectory, nats_training_server_address),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+                Err(timeout) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: format!("timeout: {}", timeout.to_string()),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     async fn listen_for_model(
@@ -231,23 +1282,194 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         global_dispatcher_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
+        let protocol = self
+            .training_protocol
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        if protocol.circuit_breaker.is_open() {
+            return Err(TransportError::CircuitOpen);
+        }
+
+        let nats_training_server_address: &str = transport_addresses.nats_training_address.as_ref();
+        let mut attempts = 0u32;
+
+        loop {
+            match tokio::time::timeout(
+                protocol.config.timeout,
+                self.execute_listen_for_model(&receiver_entry, &global_dispatcher_tx, nats_training_server_address),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: e.to_string(),
+                            attempts,
+                        });
+                    }
+                }
+                Err(timeout) => {
+                    protocol.circuit_breaker.record_failure();
+                    if attempts < protocol.config.retry_policy.max_attempts {
+                        attempts += 1;
+                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
+                            .await;
+                    } else {
+                        return Err(TransportError::MaxRetriesExceeded {
+                            cause: format!("timeout: {}", timeout.to_string()),
+                            attempts,
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for NatsInterface {
+// ── NatsInferenceExecution delegation ────────────────────────────────────────
+
+impl<B: Backend + BackendMatcher<Backend = B>> NatsInferenceExecution for NatsInterface<B> {
+    #[inline]
+    async fn execute_send_inference_request(
+        &self,
+        actor_entry: &(NamespaceString, ContextString, Uuid),
+        obs_bytes: &[u8],
+        nats_inference_server_address: &str,
+    ) -> Result<RelayRLAction, TransportError> {
+        <NatsInferenceOps as NatsInferenceExecution>::execute_send_inference_request(
+            &self.nats_inference_ops,
+            actor_entry,
+            obs_bytes,
+            nats_inference_server_address,
+        )
+        .await
+    }
+
+    #[inline]
+    async fn execute_send_flag_last_inference(
+        &self,
+        actor_entry: &(NamespaceString, ContextString, Uuid),
+        reward: &f32,
+        nats_inference_server_address: &str,
+    ) -> Result<(), TransportError> {
+        <NatsInferenceOps as NatsInferenceExecution>::execute_send_flag_last_inference(
+            &self.nats_inference_ops,
+            actor_entry,
+            reward,
+            nats_inference_server_address,
+        )
+        .await
+    }
+
+    #[inline]
+    async fn execute_send_inference_model_init_request<
+        MB: Backend + BackendMatcher<Backend = MB>,
+    >(
+        &self,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        model_mode: &ModelMode,
+        model_module: &Option<ModelModule<MB>>,
+        nats_inference_server_address: &str,
+    ) -> Result<(), TransportError> {
+        <NatsInferenceOps as NatsInferenceExecution>::execute_send_inference_model_init_request(
+            &self.nats_inference_ops,
+            scaling_entry,
+            model_mode,
+            model_module,
+            nats_inference_server_address,
+        )
+        .await
+    }
+
+    #[inline]
+    async fn execute_send_client_ids(
+        &self,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        client_ids: &[(NamespaceString, ContextString, Uuid)],
+        nats_inference_server_address: &str,
+    ) -> Result<(), TransportError> {
+        <NatsInferenceOps as NatsInferenceExecution>::execute_send_client_ids(
+            &self.nats_inference_ops,
+            scaling_entry,
+            client_ids,
+            nats_inference_server_address,
+        )
+        .await
+    }
+
+    #[inline]
+    async fn execute_send_scaling_warning(
+        &self,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        operation: &ScalingOperation,
+        nats_inference_server_address: &str,
+    ) -> Result<(), TransportError> {
+        <NatsInferenceOps as NatsInferenceExecution>::execute_send_scaling_warning(
+            &self.nats_inference_ops,
+            scaling_entry,
+            operation,
+            nats_inference_server_address,
+        )
+        .await
+    }
+
+    #[inline]
+    async fn execute_send_scaling_complete(
+        &self,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        operation: &ScalingOperation,
+        nats_inference_server_address: &str,
+    ) -> Result<(), TransportError> {
+        <NatsInferenceOps as NatsInferenceExecution>::execute_send_scaling_complete(
+            &self.nats_inference_ops,
+            scaling_entry,
+            operation,
+            nats_inference_server_address,
+        )
+        .await
+    }
+
+    #[inline]
+    async fn execute_send_shutdown_signal(
+        &self,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        nats_inference_server_address: &str,
+    ) -> Result<(), TransportError> {
+        <NatsInferenceOps as NatsInferenceExecution>::execute_send_shutdown_signal(
+            &self.nats_inference_ops,
+            scaling_entry,
+            nats_inference_server_address,
+        )
+        .await
+    }
+}
+
+// ── NatsTrainingExecution delegation ─────────────────────────────────────────
+
+impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for NatsInterface<B> {
     #[inline]
     async fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: &Sender<RoutedMessage>,
-        model_server_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_listen_for_model(
             &self.nats_training_ops,
             receiver_entry,
             global_dispatcher_tx,
-            model_server_address,
+            nats_training_server_address,
         )
+        .await
     }
 
     #[inline]
@@ -258,7 +1480,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         model_mode: &ModelMode,
         algorithm: &Algorithm,
         hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
-        agent_listener_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_send_algorithm_init_request(
             &self.nats_training_ops,
@@ -267,21 +1489,23 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             model_mode,
             algorithm,
             hyperparams,
-            agent_listener_address,
+            nats_training_server_address,
         )
+        .await
     }
 
     #[inline]
     async fn execute_initial_model_handshake(
         &self,
         actor_entry: &(NamespaceString, ContextString, Uuid),
-        agent_listener_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_initial_model_handshake(
             &self.nats_training_ops,
             actor_entry,
-            agent_listener_address,
+            nats_training_server_address,
         )
+        .await
     }
 
     #[inline]
@@ -289,14 +1513,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         &self,
         buffer_entry: &(NamespaceString, ContextString, Uuid),
         encoded_trajectory: &EncodedTrajectory,
-        trajectory_server_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_send_trajectory(
             &self.nats_training_ops,
             buffer_entry,
             encoded_trajectory,
-            trajectory_server_address,
+            nats_training_server_address,
         )
+        .await
     }
 
     #[inline]
@@ -304,14 +1529,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         &self,
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         client_ids: &[(NamespaceString, ContextString, Uuid)],
-        training_scaling_server_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_send_client_ids(
             &self.nats_training_ops,
             scaling_entry,
             client_ids,
-            training_scaling_server_address,
+            nats_training_server_address,
         )
+        .await
     }
 
     #[inline]
@@ -319,14 +1545,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         &self,
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         operation: &ScalingOperation,
-        training_scaling_server_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_send_scaling_warning(
             &self.nats_training_ops,
             scaling_entry,
             operation,
-            training_scaling_server_address,
+            nats_training_server_address,
         )
+        .await
     }
 
     #[inline]
@@ -334,26 +1561,28 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         &self,
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         operation: &ScalingOperation,
-        training_scaling_server_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_send_scaling_complete(
             &self.nats_training_ops,
             scaling_entry,
             operation,
-            training_scaling_server_address,
+            nats_training_server_address,
         )
+        .await
     }
 
     #[inline]
     async fn execute_send_shutdown_signal(
         &self,
         scaling_entry: &(NamespaceString, ContextString, Uuid),
-        training_scaling_server_address: &str,
+        nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_send_shutdown_signal(
             &self.nats_training_ops,
             scaling_entry,
-            training_scaling_server_address,
+            nats_training_server_address,
         )
+        .await
     }
 }
