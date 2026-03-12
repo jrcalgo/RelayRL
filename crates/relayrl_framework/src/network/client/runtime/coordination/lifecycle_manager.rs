@@ -115,22 +115,22 @@ pub(crate) fn construct_transport_addresses(
                 ),
             },
             #[cfg(feature = "nats-transport")]
-            nats_inference_address: Arc::new(""),
+            nats_inference_address: Arc::<str>::from(""),
             #[cfg(feature = "nats-transport")]
-            nats_training_address: Arc::new(""),
+            nats_training_address: Arc::<str>::from(""),
         },
         #[cfg(feature = "nats-transport")]
         TransportType::NATS => SharedTransportAddresses {
             #[cfg(feature = "zmq-transport")]
             zmq_inference_addresses: SharedZmqInferenceAddresses {
-                inference_server_address: Arc::new(""),
-                inference_scaling_server_address: Arc::new(""),
+                inference_server_address: Arc::<str>::from(""),
+                inference_scaling_server_address: Arc::<str>::from(""),
             },
             zmq_training_addresses: SharedZmqTrainingAddresses {
-                agent_listener_address: Arc::new(""),
-                model_server_address: Arc::new(""),
-                trajectory_server_address: Arc::new(""),
-                training_scaling_server_address: Arc::new(""),
+                agent_listener_address: Arc::<str>::from(""),
+                model_server_address: Arc::<str>::from(""),
+                trajectory_server_address: Arc::<str>::from(""),
+                training_scaling_server_address: Arc::<str>::from(""),
             },
             nats_inference_address: construct_address(transport_type, &transport_config.nats_addresses.inference_server_address),
             nats_training_address: construct_address(transport_type, &transport_config.nats_addresses.training_server_address),
