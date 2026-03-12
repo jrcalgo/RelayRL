@@ -214,8 +214,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                         async_tr
                             .send_inference_model_init_request(
                                 scaling_entry,
-                                &model_mode,
-                                &model_module,
+                                model_mode,
+                                model_module,
                                 transport_addresses,
                             )
                             .await
@@ -247,7 +247,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 async_tr
                     .send_client_ids(
                         scaling_entry,
-                        &client_ids,
+                        client_ids,
                         replace_context,
                         transport_addresses,
                     )
