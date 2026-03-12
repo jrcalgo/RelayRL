@@ -3,6 +3,7 @@ use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
+use crate::network::client::runtime::data::transport_sink::nats::interface::NatsInterface;
 use crate::network::client::runtime::data::transport_sink::zmq::interface::ZmqInterface;
 use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
 use crate::prelude::network::ClientModes;
@@ -75,6 +76,20 @@ pub enum TransportError {
     MultipleErrors(String, String),
 }
 
+fn combine_scaling_results(
+    result1: Option<Result<(), TransportError>>,
+    result2: Option<Result<(), TransportError>>,
+) -> Result<(), TransportError> {
+    match (result1, result2) {
+        (Some(Err(e)), Some(Err(e2))) => Err(TransportError::MultipleErrors(e.to_string(), e2.to_string())),
+        (Some(Err(e)), None) => Err(e),
+        (None, Some(Err(e))) => Err(e),
+        (None, None) => Err(TransportError::InvalidState(
+            "Inference and Training servers not initialized, and yet we have a scaling operation. This should never happen. What are you doing? How did you get here?".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
 pub(crate) enum ClientTransportInterface<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(feature = "zmq-transport")]
     Sync(Box<dyn SyncClientTransportInterface<B>>),
@@ -83,6 +98,7 @@ pub(crate) enum ClientTransportInterface<B: Backend + BackendMatcher<Backend = B
 }
 
 #[cfg(feature = "nats-transport")]
+#[async_trait]
 pub(crate) trait AsyncClientTransportInterface<B: Backend + BackendMatcher<Backend = B>>:
     AsyncClientInferenceTransportOps<B> + AsyncClientTrainingTransportOps<B>
 {
@@ -225,6 +241,7 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
 }
 
 #[cfg(feature = "nats-transport")]
+#[async_trait]
 pub(crate) trait AsyncClientScalingTransportOps<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync
 {
@@ -284,7 +301,7 @@ pub(crate) trait SyncClientScalingTransportOps<B: Backend + BackendMatcher<Backe
     ) -> Result<(), TransportError>;
 }
 
-pub(crate) fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
+pub(crate) async fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
     transport_type: TransportType,
     client_namespace: Arc<str>,
     shared_client_modes: Arc<ClientModes>,
@@ -298,7 +315,8 @@ pub(crate) fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>
         #[cfg(feature = "nats-transport")]
         TransportType::NATS => Ok(ClientTransportInterface::<B>::Async(Box::new(
             NatsInterface::<B>::new(client_namespace, shared_client_modes)
-                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
+                .await
+                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?
         ))),
     }
 }

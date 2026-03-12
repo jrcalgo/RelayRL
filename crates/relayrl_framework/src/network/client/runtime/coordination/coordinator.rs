@@ -535,7 +535,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 self.transport_type,
                 client_namespace.clone(),
                 shared_client_modes.clone(),
-            )
+            ).await
             .map_err(|e| CoordinatorError::TransportError(e))?;
 
             let shared_transport: Arc<ClientTransportInterface<B>> = Arc::new(transport);
