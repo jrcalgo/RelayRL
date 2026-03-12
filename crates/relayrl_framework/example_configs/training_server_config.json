@@ -100,7 +100,7 @@
                     "host": "127.0.0.1",
                     "port": "7778"
                 }
-            },
+            }
         },
         "local_model_module": {
             "directory": "model_module",

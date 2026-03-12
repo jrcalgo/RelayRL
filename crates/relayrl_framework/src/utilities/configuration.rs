@@ -267,7 +267,7 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
                     "host": "127.0.0.1",
                     "port": "7778"
                 }
-            },
+            }
         },
         "local_model_module": {
             "directory": "model_module",
@@ -380,7 +380,7 @@ pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_CONTENT: &str = r#"{
                     "host": "127.0.0.1",
                     "port": "7778"
                 }
-            },
+            }
         },
         "local_model_module": {
             "directory": "model_module",
@@ -434,7 +434,7 @@ pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_CONTENT: &str = r#"{
                         "host": "127.0.0.1",
                         "port": "7778"
                     }
-                },
+                }
             },
             "local_model_module": {
                 "directory": "model_module",
