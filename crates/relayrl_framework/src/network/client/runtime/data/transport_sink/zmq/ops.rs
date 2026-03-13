@@ -269,8 +269,11 @@ impl ZmqPool {
 
         let updated_addresses = match address_type {
             CacheAddressType::InferenceServer => SharedTransportAddresses {
+                #[cfg(feature = "nats-transport")]
                 nats_inference_address: current_addresses.nats_inference_address.clone(),
+                #[cfg(feature = "nats-transport")]
                 nats_training_address: current_addresses.nats_training_address.clone(),
+                #[cfg(feature = "zmq-transport")]
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: Arc::from(new_address),
                     inference_scaling_server_address: current_addresses
@@ -278,6 +281,7 @@ impl ZmqPool {
                         .inference_scaling_server_address
                         .clone(),
                 },
+                #[cfg(feature = "zmq-transport")]
                 zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
                         .zmq_training_addresses
@@ -298,8 +302,11 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::AgentListener => SharedTransportAddresses {
+                #[cfg(feature = "nats-transport")]
                 nats_inference_address: current_addresses.nats_inference_address.clone(),
+                #[cfg(feature = "nats-transport")]
                 nats_training_address: current_addresses.nats_training_address.clone(),
+                #[cfg(feature = "zmq-transport")]
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -310,6 +317,7 @@ impl ZmqPool {
                         .inference_scaling_server_address
                         .clone(),
                 },
+                #[cfg(feature = "zmq-transport")]
                 zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: Arc::from(new_address),
                     model_server_address: current_addresses
@@ -327,8 +335,11 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::ModelServer => SharedTransportAddresses {
+                #[cfg(feature = "nats-transport")]
                 nats_inference_address: current_addresses.nats_inference_address.clone(),
+                #[cfg(feature = "nats-transport")]
                 nats_training_address: current_addresses.nats_training_address.clone(),
+                #[cfg(feature = "zmq-transport")]
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -339,6 +350,7 @@ impl ZmqPool {
                         .inference_scaling_server_address
                         .clone(),
                 },
+                #[cfg(feature = "zmq-transport")]
                 zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
                         .zmq_training_addresses
@@ -356,8 +368,11 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::TrajectoryServer => SharedTransportAddresses {
+                #[cfg(feature = "nats-transport")]
                 nats_inference_address: current_addresses.nats_inference_address.clone(),
+                #[cfg(feature = "nats-transport")]
                 nats_training_address: current_addresses.nats_training_address.clone(),
+                #[cfg(feature = "zmq-transport")]
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -368,6 +383,7 @@ impl ZmqPool {
                         .inference_scaling_server_address
                         .clone(),
                 },
+                #[cfg(feature = "zmq-transport")]
                 zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
                         .zmq_training_addresses
@@ -385,8 +401,11 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::InferenceScalingServer => SharedTransportAddresses {
+                #[cfg(feature = "nats-transport")]
                 nats_inference_address: current_addresses.nats_inference_address.clone(),
+                #[cfg(feature = "nats-transport")]
                 nats_training_address: current_addresses.nats_training_address.clone(),
+                #[cfg(feature = "zmq-transport")]
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -394,6 +413,7 @@ impl ZmqPool {
                         .clone(),
                     inference_scaling_server_address: Arc::from(new_address),
                 },
+                #[cfg(feature = "zmq-transport")]
                 zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
                         .zmq_training_addresses
@@ -414,8 +434,11 @@ impl ZmqPool {
                 },
             },
             CacheAddressType::TrainingScalingServer => SharedTransportAddresses {
+                #[cfg(feature = "nats-transport")]
                 nats_inference_address: current_addresses.nats_inference_address.clone(),
+                #[cfg(feature = "nats-transport")]
                 nats_training_address: current_addresses.nats_training_address.clone(),
+                #[cfg(feature = "zmq-transport")]
                 zmq_inference_addresses: SharedZmqInferenceAddresses {
                     inference_server_address: current_addresses
                         .zmq_inference_addresses
@@ -426,6 +449,7 @@ impl ZmqPool {
                         .inference_scaling_server_address
                         .clone(),
                 },
+                #[cfg(feature = "zmq-transport")]
                 zmq_training_addresses: SharedZmqTrainingAddresses {
                     agent_listener_address: current_addresses
                         .zmq_training_addresses

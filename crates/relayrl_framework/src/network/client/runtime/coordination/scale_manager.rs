@@ -1,7 +1,9 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::AlgorithmArgs;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, AlgorithmArgs,
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, uses_local_file_writing
 };
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -500,9 +502,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         );
                     }
 
-                    if let ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _) =
-                        &self.shared_client_modes.actor_training_data_mode
-                    {
+                    if uses_local_file_writing(&self.shared_client_modes.actor_training_data_mode) {
                         buffer_init
                             .with_trajectory_writer(self.shared_trajectory_file_output.clone());
                     }

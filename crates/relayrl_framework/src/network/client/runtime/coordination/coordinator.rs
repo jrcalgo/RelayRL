@@ -2,11 +2,11 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, InferenceAddressesArgs, TrainingAddressesArgs,
-};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::AlgorithmArgs;
+use crate::network::client::agent::{InferenceAddressesArgs, TrainingAddressesArgs, AlgorithmArgs};
+use crate::network::client::agent::{
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -514,6 +514,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     Some(params) => Some(params),
                     None => None,
                 },
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorTrainingDataMode::Hybrid(_, file_params) => match file_params {
                     Some(params) => Some(params),
                     None => None,
@@ -574,7 +575,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         {
             let shared_max_traj_length = lifecycle.get_max_traj_length();
-
+            
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             let shared_transport_addresses = if let ActorInferenceMode::Server(_) =
                 shared_client_modes.actor_inference_mode
             {

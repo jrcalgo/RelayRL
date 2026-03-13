@@ -1,6 +1,5 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
-use crate::network::client::agent::LocalTrajectoryFileParams;
-use crate::network::client::agent::LocalTrajectoryFileType;
+use crate::network::client::agent::{LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::ModelMode;
 use crate::network::client::agent::{ActorTrainingDataMode, ClientModes};
@@ -431,7 +430,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                 }
                             }
 
-                            if let ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode {
+                            if uses_local_file_writing(&worker_modes.actor_training_data_mode) {
                                 if let Some(ref traj_output) = worker_trajectory_file_output {
                                     let local_job = job.clone();
                                     let local_actor_last = worker_actor_last_processed.clone();
@@ -489,9 +488,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
                 }
 
-                if let ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _) =
-                    &worker_modes.actor_training_data_mode
-                {
+                if uses_local_file_writing(&worker_modes.actor_training_data_mode) {
                     if let Some(ref traj_output) = worker_trajectory_file_output {
                         let params = traj_output.read().await;
 

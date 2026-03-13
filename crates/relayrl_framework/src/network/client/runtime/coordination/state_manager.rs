@@ -12,7 +12,6 @@ use crate::network::client::runtime::coordination::scale_manager::RouterNamespac
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::ClientConfigLoader;
 
