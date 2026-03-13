@@ -1,15 +1,16 @@
-use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::trajectory::RelayRLTrajectory;
-
 use crate::network::client::runtime::router::buffer::TrajectorySinkError;
 use crate::network::client::runtime::router::filter::FilterError;
 use crate::network::client::runtime::router::receiver::TransportReceiverError;
+
+use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::trajectory::RelayRLTrajectory;
+
+use active_uuid_registry::registry_uuid::Uuid;
 
 use std::any::Any;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
 pub(crate) mod buffer;
 pub(crate) mod filter;

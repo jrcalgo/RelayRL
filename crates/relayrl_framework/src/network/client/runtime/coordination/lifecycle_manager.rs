@@ -4,7 +4,7 @@ use crate::network::HyperparameterArgs;
 use crate::network::TransportType;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
+use crate::network::client::agent::AlgorithmArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::prelude::config::TransportConfigParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -24,27 +24,36 @@ use tokio::sync::{Notify, RwLock, broadcast};
 
 use thiserror::Error;
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SharedInferenceAddresses {
+pub(crate) struct SharedZmqInferenceAddresses {
     pub(crate) inference_server_address: Arc<str>,
     pub(crate) inference_scaling_server_address: Arc<str>,
 }
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SharedTrainingAddresses {
+pub(crate) struct SharedZmqTrainingAddresses {
     pub(crate) agent_listener_address: Arc<str>,
     pub(crate) model_server_address: Arc<str>,
     pub(crate) trajectory_server_address: Arc<str>,
     pub(crate) training_scaling_server_address: Arc<str>,
 }
 
+/// Shared transport addresses for both NATS and ZMQ transports.
+/// 
+/// I was going to store these in an enum but I realized I don't hate myself enough to do that. Would have to pattern match everywhere that uses this instead of just storing shared pointers to empty strings for unused fields, memory be damned.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SharedTransportAddresses {
-    pub(crate) inference_addresses: SharedInferenceAddresses,
-    pub(crate) training_addresses: SharedTrainingAddresses,
+    #[cfg(feature = "nats-transport")]
+    pub(crate) nats_inference_address: Arc<str>,
+    #[cfg(feature = "nats-transport")]
+    pub(crate) nats_training_address: Arc<str>,
+    #[cfg(feature = "zmq-transport")]
+    pub(crate) zmq_inference_addresses: SharedZmqInferenceAddresses,
+    #[cfg(feature = "zmq-transport")]
+    pub(crate) zmq_training_addresses: SharedZmqTrainingAddresses,
 }
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -74,44 +83,60 @@ pub(crate) fn construct_transport_addresses(
         }
     }
 
-    SharedTransportAddresses {
-        inference_addresses: SharedInferenceAddresses {
-            inference_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .inference_addresses
-                    .inference_server_address,
-            ),
-            inference_scaling_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .inference_addresses
-                    .inference_scaling_server_address,
-            ),
+    match *transport_type {
+        #[cfg(feature = "zmq-transport")]
+        TransportType::ZMQ => SharedTransportAddresses {
+            zmq_inference_addresses: SharedZmqInferenceAddresses {
+                inference_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.inference_addresses.inference_server_address,
+                ),
+                inference_scaling_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.inference_addresses.inference_scaling_server_address,
+                ),
+            },
+            zmq_training_addresses: SharedZmqTrainingAddresses {
+                agent_listener_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.agent_listener_address,
+                ),
+                model_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.model_server_address,
+                ),
+                trajectory_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.trajectory_server_address,
+                ),
+                training_scaling_server_address: construct_address(
+                    transport_type,
+                    &transport_config.zmq_addresses.training_addresses.training_scaling_server_address,
+                ),
+            },
+            #[cfg(feature = "nats-transport")]
+            nats_inference_address: Arc::<str>::from(""),
+            #[cfg(feature = "nats-transport")]
+            nats_training_address: Arc::<str>::from(""),
         },
-        training_addresses: SharedTrainingAddresses {
-            agent_listener_address: construct_address(
-                transport_type,
-                &transport_config.training_addresses.agent_listener_address,
-            ),
-            model_server_address: construct_address(
-                transport_type,
-                &transport_config.training_addresses.model_server_address,
-            ),
-            trajectory_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .training_addresses
-                    .trajectory_server_address,
-            ),
-            training_scaling_server_address: construct_address(
-                transport_type,
-                &transport_config
-                    .training_addresses
-                    .training_scaling_server_address,
-            ),
+        #[cfg(feature = "nats-transport")]
+        TransportType::NATS => SharedTransportAddresses {
+            #[cfg(feature = "zmq-transport")]
+            zmq_inference_addresses: SharedZmqInferenceAddresses {
+                inference_server_address: Arc::<str>::from(""),
+                inference_scaling_server_address: Arc::<str>::from(""),
+            },
+            zmq_training_addresses: SharedZmqTrainingAddresses {
+                agent_listener_address: Arc::<str>::from(""),
+                model_server_address: Arc::<str>::from(""),
+                trajectory_server_address: Arc::<str>::from(""),
+                training_scaling_server_address: Arc::<str>::from(""),
+            },
+            nats_inference_address: construct_address(transport_type, &transport_config.nats_addresses.inference_server_address),
+            nats_training_address: construct_address(transport_type, &transport_config.nats_addresses.training_server_address),
         },
     }
+
 }
 
 pub(crate) fn construct_local_model_path(local_model_module: &LocalModelModuleParams) -> PathBuf {
@@ -230,7 +255,7 @@ impl LifeCycleManager {
     pub(crate) fn spawn_loop(&self) {
         let self_clone: LifeCycleManager = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = self_clone._watch().await {
+            if let Err(e) = self_clone.watch().await {
                 eprintln!("[LifeCycleManager] Failed to spawn loop: {}", e);
             }
         });
@@ -318,12 +343,12 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    pub(crate) fn _shutdown(&mut self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) fn shutdown(&mut self) -> Result<(), LifeCycleManagerError> {
         self.shutdown_notifier.notify_waiters();
-        self._handle_shutdown_signal()
+        self.handle_shutdown_signal()
     }
 
-    pub(crate) async fn _watch(&self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
         loop {
             let config_update_polling_seconds =
                 self.config_update_polling_seconds.read().await.clone() as u64;
@@ -333,11 +358,11 @@ impl LifeCycleManager {
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
-                    self._handle_shutdown_signal()?;
+                    self.handle_shutdown_signal()?;
                     break Ok(());
                 }
                 _ = self.shutdown_notifier.notified() => {
-                    self._handle_shutdown_signal()?;
+                    self.handle_shutdown_signal()?;
                     break Ok(());
                 }
                 _ = interval.tick() => {
@@ -347,7 +372,7 @@ impl LifeCycleManager {
                             if modified > *last_modified {
                                 println!("[LifeCycleManager] Config file changed, reloading...");
                                 *last_modified = modified;
-                                self._handle_config_change(self.config_path.as_ref().clone()).await?;
+                                self.handle_config_change(self.config_path.as_ref().clone()).await?;
                             }
                         }
                     }
@@ -356,7 +381,7 @@ impl LifeCycleManager {
         }
     }
 
-    pub(crate) fn _handle_shutdown_signal(&self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) fn handle_shutdown_signal(&self) -> Result<(), LifeCycleManagerError> {
         if let Err(e) = self.shutdown_tx.send(()) {
             return Err(LifeCycleManagerError::SendShutdownSignalError(
                 format!("Failed to send shutdown signal. No active receivers: {}", e).to_string(),
@@ -366,7 +391,7 @@ impl LifeCycleManager {
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn _handle_config_change(
+    pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
     ) -> Result<(), LifeCycleManagerError> {
@@ -387,7 +412,7 @@ impl LifeCycleManager {
     }
 
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-    pub(crate) async fn _handle_config_change(
+    pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
     ) -> Result<(), LifeCycleManagerError> {

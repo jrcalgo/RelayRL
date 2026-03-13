@@ -62,32 +62,44 @@
         }
     },
     "transport_config": {
-        "inference_addresses": {
+        "nats_addresses": {
             "inference_server": {
                 "host": "127.0.0.1",
-                "port": "7800"
+                "port": "50050"
             },
-            "inference_scaling_server": {
-                "host": "127.0.0.1",
-                "port": "7801"
-            }
-        },
-        "training_addresses": {
-            "model_server": {
+            "training_server": {
                 "host": "127.0.0.1",
                 "port": "50051"
+            }
+        },
+        "zmq_addresses": {
+            "inference_addresses": {
+                "inference_server": {
+                    "host": "127.0.0.1",
+                    "port": "7800"
+                },
+                "inference_scaling_server": {
+                    "host": "127.0.0.1",
+                    "port": "7801"
+                }
             },
-            "trajectory_server": {
-                "host": "127.0.0.1",
-                "port": "7776"
-            },
-            "agent_listener": {
-                "host": "127.0.0.1",
-                "port": "7777"
-            },
-            "training_scaling_server": {
-                "host": "127.0.0.1",
-                "port": "7778"
+            "training_addresses": {
+                "model_server": {
+                    "host": "127.0.0.1",
+                    "port": "50051"
+                },
+                "trajectory_server": {
+                    "host": "127.0.0.1",
+                    "port": "7776"
+                },
+                "agent_listener": {
+                    "host": "127.0.0.1",
+                    "port": "7777"
+                },
+                "training_scaling_server": {
+                    "host": "127.0.0.1",
+                    "port": "7778"
+                }
             }
         },
         "local_model_module": {

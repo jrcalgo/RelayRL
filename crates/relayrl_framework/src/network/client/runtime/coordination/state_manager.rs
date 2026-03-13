@@ -12,7 +12,6 @@ use crate::network::client::runtime::coordination::scale_manager::RouterNamespac
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::ClientConfigLoader;
 
@@ -24,6 +23,8 @@ use active_uuid_registry::interface::{remove_id, replace_id};
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 
+use active_uuid_registry::registry_uuid::Uuid;
+
 use dashmap::DashMap;
 use std::sync::Arc;
 
@@ -32,7 +33,6 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -246,7 +246,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    pub(crate) async fn __new_actor(
+    pub(crate) async fn new_actor(
         &mut self,
         actor_id: ActorUuid,
         router_namespace: RouterNamespace,
@@ -259,7 +259,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 "[StateManager] Actor ID {} already exists, replacing existing actor...",
                 actor_id
             );
-            self.__remove_actor(actor_id)?
+            self.remove_actor(actor_id)?
         }
 
         // Create actor inbox for receiving messages from the filter
@@ -325,7 +325,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    pub(crate) async fn _restart_actor(
+    pub(crate) async fn restart_actor(
         &mut self,
         actor_id: ActorUuid,
         router_namespace: RouterNamespace,
@@ -333,8 +333,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
-        self.__remove_actor(actor_id)?;
-        self.__new_actor(
+        self.remove_actor(actor_id)?;
+        self.new_actor(
             actor_id,
             router_namespace,
             device,
@@ -345,7 +345,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    pub(crate) async fn __shutdown_all_actors(&self) -> Result<(), StateManagerError> {
+    pub(crate) async fn shutdown_all_actors(&self) -> Result<(), StateManagerError> {
         // Send Shutdown message to every actor inbox; actors will flush and exit
         for entry in self.actor_inboxes.iter() {
             let actor_id: ActorUuid = *entry.key();
@@ -392,7 +392,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    pub(crate) fn __remove_actor(&mut self, id: Uuid) -> Result<(), StateManagerError> {
+    pub(crate) fn remove_actor(&mut self, id: Uuid) -> Result<(), StateManagerError> {
         if let Some((_, handle)) = self.actor_handles.remove(&id) {
             handle.abort();
         }
@@ -407,7 +407,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    pub(crate) fn __set_actor_id(
+    pub(crate) fn set_actor_id(
         &self,
         current_id: ActorUuid,
         new_id: ActorUuid,

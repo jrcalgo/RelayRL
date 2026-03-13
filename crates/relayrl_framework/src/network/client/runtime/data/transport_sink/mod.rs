@@ -3,17 +3,21 @@ use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
+#[cfg(feature = "nats-transport")]
+use crate::network::client::runtime::data::transport_sink::nats::interface::NatsInterface;
+#[cfg(feature = "zmq-transport")]
 use crate::network::client::runtime::data::transport_sink::zmq::interface::ZmqInterface;
 use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
 use crate::prelude::network::ClientModes;
 use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
 
-use active_uuid_registry::UuidPoolError;
 use relayrl_types::HyperparameterArgs;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::data::trajectory::EncodedTrajectory;
 use relayrl_types::model::ModelModule;
+
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;
@@ -22,7 +26,6 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
-use uuid::Uuid;
 
 #[cfg(feature = "nats-transport")]
 pub(crate) mod nats;
@@ -75,6 +78,20 @@ pub enum TransportError {
     MultipleErrors(String, String),
 }
 
+fn combine_scaling_results(
+    result1: Option<Result<(), TransportError>>,
+    result2: Option<Result<(), TransportError>>,
+) -> Result<(), TransportError> {
+    match (result1, result2) {
+        (Some(Err(e)), Some(Err(e2))) => Err(TransportError::MultipleErrors(e.to_string(), e2.to_string())),
+        (Some(Err(e)), None) => Err(e),
+        (None, Some(Err(e))) => Err(e),
+        (None, None) => Err(TransportError::InvalidState(
+            "Inference and Training servers not initialized, and yet we have a scaling operation. This should never happen. What are you doing? How did you get here?".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
 pub(crate) enum ClientTransportInterface<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(feature = "zmq-transport")]
     Sync(Box<dyn SyncClientTransportInterface<B>>),
@@ -83,6 +100,7 @@ pub(crate) enum ClientTransportInterface<B: Backend + BackendMatcher<Backend = B
 }
 
 #[cfg(feature = "nats-transport")]
+#[async_trait]
 pub(crate) trait AsyncClientTransportInterface<B: Backend + BackendMatcher<Backend = B>>:
     AsyncClientInferenceTransportOps<B> + AsyncClientTrainingTransportOps<B>
 {
@@ -115,20 +133,20 @@ pub(crate) trait AsyncClientInferenceTransportOps<B: Backend + BackendMatcher<Ba
 {
     async fn send_inference_model_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         model_mode: ModelMode,
         model_module: Option<ModelModule<B>>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_inference_request(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         obs_bytes: Vec<u8>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<RelayRLAction, TransportError>;
     async fn send_flag_last_inference(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         reward: f32,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
@@ -140,20 +158,20 @@ pub(crate) trait SyncClientInferenceTransportOps<B: Backend + BackendMatcher<Bac
 {
     fn send_inference_model_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         model_mode: ModelMode,
         model_module: Option<ModelModule<B>>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_inference_request(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         obs_bytes: Vec<u8>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<RelayRLAction, TransportError>;
     fn send_flag_last_inference(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         reward: f32,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
@@ -166,8 +184,8 @@ pub(crate) trait AsyncClientTrainingTransportOps<B: Backend + BackendMatcher<Bac
 {
     async fn send_algorithm_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
-        actor_entries: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
@@ -175,18 +193,18 @@ pub(crate) trait AsyncClientTrainingTransportOps<B: Backend + BackendMatcher<Bac
     ) -> Result<(), TransportError>;
     async fn initial_model_handshake(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     async fn send_trajectory(
         &self,
-        buffer_entry: (String, String, Uuid),
+        buffer_entry: (NamespaceString, ContextString, Uuid),
         encoded_trajectory: EncodedTrajectory,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn listen_for_model(
         &self,
-        receiver_entry: (String, String, Uuid),
+        receiver_entry: (NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
@@ -198,8 +216,8 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
 {
     fn send_algorithm_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
-        actor_entries: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
         algorithm: Algorithm,
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
@@ -207,49 +225,50 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
     ) -> Result<(), TransportError>;
     fn initial_model_handshake(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     fn send_trajectory(
         &self,
-        buffer_entry: (String, String, Uuid),
+        buffer_entry: (NamespaceString, ContextString, Uuid),
         encoded_trajectory: EncodedTrajectory,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn listen_for_model(
         &self,
-        receiver_entry: (String, String, Uuid),
+        receiver_entry: (NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
 }
 
 #[cfg(feature = "nats-transport")]
+#[async_trait]
 pub(crate) trait AsyncClientScalingTransportOps<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync
 {
     async fn send_client_ids(
         &self,
-        scaling_entry: (String, String, Uuid),
-        client_ids: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        client_ids: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_scaling_warning(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_scaling_complete(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn send_shutdown_signal(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
 }
@@ -260,31 +279,31 @@ pub(crate) trait SyncClientScalingTransportOps<B: Backend + BackendMatcher<Backe
 {
     fn send_client_ids(
         &self,
-        scaling_entry: (String, String, Uuid),
-        client_ids: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        client_ids: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_scaling_warning(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_scaling_complete(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn send_shutdown_signal(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
 }
 
-pub(crate) fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
+pub(crate) async fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
     transport_type: TransportType,
     client_namespace: Arc<str>,
     shared_client_modes: Arc<ClientModes>,
@@ -298,7 +317,8 @@ pub(crate) fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>
         #[cfg(feature = "nats-transport")]
         TransportType::NATS => Ok(ClientTransportInterface::<B>::Async(Box::new(
             NatsInterface::<B>::new(client_namespace, shared_client_modes)
-                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
+                .await
+                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?
         ))),
     }
 }

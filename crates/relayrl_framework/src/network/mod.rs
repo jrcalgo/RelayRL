@@ -53,10 +53,10 @@ pub mod server;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Clone, Copy, Debug)]
 pub enum TransportType {
-    #[cfg(feature = "zmq-transport")]
-    ZMQ,
     #[cfg(feature = "nats-transport")]
     NATS,
+    #[cfg(feature = "zmq-transport")]
+    ZMQ,
 }
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

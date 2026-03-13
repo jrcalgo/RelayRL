@@ -12,12 +12,13 @@ use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
 
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
-use uuid::Uuid;
 
 pub(crate) struct InferenceDispatcher<B: Backend + BackendMatcher<Backend = B>> {
     transport: Arc<ClientTransportInterface<B>>,
@@ -30,7 +31,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
 
     pub(crate) async fn send_inference_request(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         obs_bytes: Vec<u8>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<RelayRLAction, TransportError> {
@@ -52,7 +53,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
 
     pub(crate) async fn send_flag_last_inference(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         reward: f32,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
@@ -84,7 +85,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
 
     pub(crate) async fn initial_model_handshake(
         &self,
-        actor_entry: (String, String, Uuid),
+        actor_entry: (NamespaceString, ContextString, Uuid),
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
@@ -105,7 +106,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
 
     pub(crate) async fn listen_for_model(
         &self,
-        receiver_entry: (String, String, Uuid),
+        receiver_entry: (NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
@@ -127,7 +128,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
 
     pub(crate) async fn send_trajectory(
         &self,
-        buffer_entry: (String, String, Uuid),
+        buffer_entry: (NamespaceString, ContextString, Uuid),
         encoded_trajectory: EncodedTrajectory,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
@@ -164,8 +165,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 
     pub(crate) async fn send_process_init_request(
         &self,
-        scaling_entry: (String, String, Uuid),
-        actor_entries: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         process_init_request: ProcessInitRequest<B>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
@@ -213,8 +214,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                         async_tr
                             .send_inference_model_init_request(
                                 scaling_entry,
-                                &model_mode,
-                                &model_module,
+                                model_mode,
+                                model_module,
                                 transport_addresses,
                             )
                             .await
@@ -226,8 +227,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 
     pub(crate) async fn send_client_ids(
         &self,
-        scaling_entry: (String, String, Uuid),
-        client_ids: Vec<(String, String, Uuid)>,
+        scaling_entry: (NamespaceString, ContextString, Uuid),
+        client_ids: Vec<(NamespaceString, ContextString, Uuid)>,
         replace_context: bool,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
@@ -246,7 +247,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                 async_tr
                     .send_client_ids(
                         scaling_entry,
-                        &client_ids,
+                        client_ids,
                         replace_context,
                         transport_addresses,
                     )
@@ -257,7 +258,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 
     pub(crate) async fn send_scaling_warning(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
@@ -279,7 +280,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 
     pub(crate) async fn send_scaling_complete(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         operation: ScalingOperation,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
@@ -301,7 +302,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 
     pub(crate) async fn send_shutdown_signal(
         &self,
-        scaling_entry: (String, String, Uuid),
+        scaling_entry: (NamespaceString, ContextString, Uuid),
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
         let transport_addresses = shared_transport_addresses.read().await.clone();

@@ -1,6 +1,5 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
-use crate::network::client::agent::LocalTrajectoryFileParams;
-use crate::network::client::agent::LocalTrajectoryFileType;
+use crate::network::client::agent::{LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::ModelMode;
 use crate::network::client::agent::{ActorTrainingDataMode, ClientModes};
@@ -22,7 +21,9 @@ use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory, Traj
 use relayrl_types::prelude::action::CodecConfig;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
+use active_uuid_registry::registry_uuid::Uuid;
 use active_uuid_registry::interface::{get_context_entries, list_ids};
+
 use arrow::array::BinaryBuilder;
 use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
 use arrow::array::{Float32Builder, Float64Builder, ListBuilder, UInt64Builder};
@@ -40,7 +41,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, broadcast};
-use uuid::Uuid;
 
 type PriorityRank = i64;
 
@@ -430,7 +430,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                 }
                             }
 
-                            if let ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode {
+                            if uses_local_file_writing(&worker_modes.actor_training_data_mode) {
                                 if let Some(ref traj_output) = worker_trajectory_file_output {
                                     let local_job = job.clone();
                                     let local_actor_last = worker_actor_last_processed.clone();
@@ -488,9 +488,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
                 }
 
-                if let ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _) =
-                    &worker_modes.actor_training_data_mode
-                {
+                if uses_local_file_writing(&worker_modes.actor_training_data_mode) {
                     if let Some(ref traj_output) = worker_trajectory_file_output {
                         let params = traj_output.read().await;
 

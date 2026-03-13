@@ -14,8 +14,6 @@ use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
     ClientCoordinator, ClientInterface, CoordinatorError,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::prelude::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -34,6 +32,8 @@ use relayrl_types::data::tensor::{
 use relayrl_types::data::tensor::{NdArrayDType, TchDType};
 use relayrl_types::model::ModelModule;
 
+use active_uuid_registry::registry_uuid::Uuid;
+
 use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
@@ -45,7 +45,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 /// Errors returned by the client API.
 #[non_exhaustive]
@@ -87,29 +86,65 @@ pub enum RuntimeStatisticsReturnType {
     Hashmap(HashMap<String, String>),
 }
 
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone)]
+pub struct AlgorithmArgs {
+    pub algorithm: Algorithm,
+    pub hyperparams: Option<HyperparameterArgs>,
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+impl Default for AlgorithmArgs {
+    fn default() -> Self {
+        Self {
+            algorithm: Algorithm::ConfigInit,
+            hyperparams: None,
+        }
+    }
+}
+
 #[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct InferenceAddresses {
+pub struct ZmqInferenceAddressesArgs {
     pub inference_server_address: Option<NetworkParams>,
     pub inference_scaling_server_address: Option<NetworkParams>,
 }
 
 #[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrainingAddresses {
+pub struct ZmqTrainingAddressesArgs {
     pub agent_listener_address: Option<NetworkParams>,
     pub model_server_address: Option<NetworkParams>,
     pub trajectory_server_address: Option<NetworkParams>,
     pub training_scaling_server_address: Option<NetworkParams>,
 }
 
-#[cfg(feature = "zmq-transport")]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum InferenceAddressesArgs {
+    #[cfg(feature = "zmq-transport")]
+    ZMQ(ZmqInferenceAddressesArgs),
+    #[cfg(feature = "nats-transport")]
+    NATS(Option<NetworkParams>),
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrainingAddressesArgs {
+    #[cfg(feature = "zmq-transport")]
+    ZMQ(ZmqTrainingAddressesArgs),
+    #[cfg(feature = "nats-transport")]
+    NATS(Option<NetworkParams>),
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct InferenceParams {
     pub model_mode: ModelMode,
-    pub inference_addresses: Option<InferenceAddresses>,
+    pub inference_addresses: Option<InferenceAddressesArgs>,
 }
 
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 impl Default for InferenceParams {
     fn default() -> Self {
         Self {
@@ -123,7 +158,7 @@ impl Default for InferenceParams {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingParams {
     pub model_mode: ModelMode,
-    pub training_addresses: Option<TrainingAddresses>,
+    pub training_addresses: Option<TrainingAddressesArgs>,
 }
 
 #[cfg(feature = "zmq-transport")]
@@ -267,6 +302,13 @@ impl Default for ActorTrainingDataMode {
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         return Self::Offline(None);
     }
+}
+
+pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode) -> bool {
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _));
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_));
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
@@ -664,7 +706,7 @@ impl<
         self.output_dtype = output_dtype;
 
         self.coordinator
-            ._start(
+            .start(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 algorithm_args,
                 actor_count,
@@ -703,7 +745,7 @@ impl<
         >,
     ) -> Result<(), ClientError> {
         self.coordinator
-            ._restart(
+            .restart(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 algorithm_args,
                 actor_count,
@@ -723,7 +765,7 @@ impl<
     /// # Errors
     /// Returns an error if shutdown coordination fails.
     pub async fn shutdown(&mut self) -> Result<(), ClientError> {
-        self.coordinator._shutdown().await?;
+        self.coordinator.shutdown().await?;
         Ok(())
     }
 
@@ -737,11 +779,11 @@ impl<
     pub async fn scale_throughput(&mut self, router_scale: i32) -> Result<(), ClientError> {
         match router_scale {
             add if router_scale > 0 => {
-                self.coordinator._scale_out(add as u32).await?;
+                self.coordinator.scale_out(add as u32).await?;
                 Ok(())
             }
             remove if router_scale < 0 => {
-                self.coordinator._scale_in(remove.unsigned_abs()).await?;
+                self.coordinator.scale_in(remove.unsigned_abs()).await?;
                 Ok(())
             }
             _ => Err(ClientError::NoopRouterScale(
@@ -780,7 +822,7 @@ impl<
 
                     let result = self
                         .coordinator
-                        ._request_action(ids, obs_tensor, mask_tensor, reward)
+                        .request_action(ids, obs_tensor, mask_tensor, reward)
                         .await?;
                     Ok(result)
                 } else {
@@ -807,7 +849,7 @@ impl<
         ids: Vec<Uuid>,
         reward: Option<f32>,
     ) -> Result<(), ClientError> {
-        self.coordinator._flag_last_action(ids, reward).await?;
+        self.coordinator.flag_last_action(ids, reward).await?;
         Ok(())
     }
 
@@ -818,7 +860,7 @@ impl<
         &self,
         actor_ids: Vec<Uuid>,
     ) -> Result<Vec<(Uuid, i64)>, ClientError> {
-        Ok(self.coordinator._get_model_version(actor_ids).await?)
+        Ok(self.coordinator.get_model_version(actor_ids).await?)
     }
 
     /// Collect runtime statistics.
@@ -839,12 +881,12 @@ impl<
 
     /// Fetch the active client configuration.
     pub async fn get_config(&self) -> Result<ClientConfigLoader, ClientError> {
-        Ok(self.coordinator._get_config().await?)
+        Ok(self.coordinator.get_config().await?)
     }
 
     /// Set the configuration path used by the runtime.
     pub async fn set_config_path(&self, config_path: PathBuf) -> Result<(), ClientError> {
-        self.coordinator._set_config_path(config_path).await?;
+        self.coordinator.set_config_path(config_path).await?;
         Ok(())
     }
 }
@@ -904,10 +946,10 @@ impl<
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             let _ = self
                 .coordinator
-                ._new_actor(device, default_model, true, true)
+                .new_actor(device, default_model, true, true)
                 .await?;
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-            let _ = self.coordinator._new_actor(device, default_model).await?;
+            let _ = self.coordinator.new_actor(device, default_model).await?;
             Ok(())
         })
     }
@@ -935,12 +977,12 @@ impl<
                     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                     actor_ids.push(
                         self.coordinator
-                            ._new_actor(device.clone(), default_model.clone(), false, false)
+                            .new_actor(device.clone(), default_model.clone(), false, false)
                             .await?,
                     );
                     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                     self.coordinator
-                        ._new_actor(device.clone(), default_model.clone())
+                        .new_actor(device.clone(), default_model.clone())
                         .await?;
                 }
 
@@ -967,14 +1009,14 @@ impl<
                     };
 
                     self.coordinator
-                        ._send_client_ids_to_server(actor_entries.clone(), true)
+                        .send_client_ids_to_server(actor_entries.clone(), true)
                         .await?;
 
                     if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
                         &self.coordinator.client_modes.actor_training_data_mode
                     {
                         self.coordinator
-                            ._send_algorithm_init_request(actor_entries.clone())
+                            .send_algorithm_init_request(actor_entries.clone())
                             .await?;
                     }
 
@@ -982,7 +1024,7 @@ impl<
                         &self.coordinator.client_modes.actor_inference_mode
                     {
                         self.coordinator
-                            ._send_inference_model_init_request(
+                            .send_inference_model_init_request(
                                 actor_entries,
                                 default_model.clone(),
                             )
@@ -1001,7 +1043,7 @@ impl<
         actor_id: ActorUuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator._remove_actor(actor_id, true).await?;
+            self.coordinator.remove_actor(actor_id, true).await?;
             Ok(())
         })
     }
@@ -1021,7 +1063,7 @@ impl<
         } else {
             Box::pin(async move {
                 for actor_id in actor_ids {
-                    self.coordinator._remove_actor(actor_id, false).await?;
+                    self.coordinator.remove_actor(actor_id, false).await?;
                 }
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -1046,7 +1088,7 @@ impl<
                     };
 
                     self.coordinator
-                        ._send_client_ids_to_server(client_actor_ids, true)
+                        .send_client_ids_to_server(client_actor_ids, true)
                         .await?;
                 }
 
@@ -1079,7 +1121,7 @@ impl<
         new_id: ActorUuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator._set_actor_id(current_id, new_id).await?;
+            self.coordinator.set_actor_id(current_id, new_id).await?;
             Ok(())
         })
     }
