@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-alpha.3] - 2026-03-13
+
+### Added
+- **NATS Implementation** - Full NATS transport implementation replacing alpha.2 stubs; `nats/ops.rs` added (~1459 lines); `nats/interface.rs` and `nats/policies.rs` substantially completed with working send/receive logic, stream handling, and authentication policy enforcement
+- **`tokio-stream` dependency** - Added `tokio-stream 0.1.18` to support async NATS stream processing
+- **`combine_results` utility** - `combine_results` added to `transport_sink/mod.rs` for aggregating multi-transport results; `client_transport_factory` made `async`
+- **`is_local_file_writing_enabled` helper** - Crate-level helper on `RelayRLAgent` to query whether local file writing is active
+
+### Changed
+- **NATS `SharedTransportAddresses` init** - `lifecycle_manager.rs` updated to properly initialize `SharedTransportAddresses` when constructing a NATS transport client
+- **Transport dispatcher param ownership** - `send_client_ids` and `send_inference_model_init_request` parameters changed from references to owned values
+- **ZMQ model listener** - Model listener updated to receive multipart ZMQ messages carrying both the serialized model and `actor_id`
+- **Example config NATS addresses** - All three example configs updated to include the NATS address namespace
+- **`async_trait` on async transport traits** - `#[async_trait]` applied uniformly across async transport traits in `transport_sink`
+
+### Fixed
+- **Feature flag compilation** - Resolved compilation errors under `client` and `client zmq-transport` feature flag selections across `coordinator.rs`, `scale_manager.rs`, `transport_sink/mod.rs`, `zmq/ops.rs`, and `router/buffer.rs`
+- **Trailing comma in example configs** - Stray JSON trailing comma removed from all three example configs and `configuration.rs` that would have caused config parsing failures at runtime
+
+---
+
 ## [0.5.0-alpha.2] - 2026-03-07
 
 ### Changed
