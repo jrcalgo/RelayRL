@@ -144,6 +144,7 @@ pub struct InferenceParams {
     pub inference_addresses: Option<InferenceAddressesArgs>,
 }
 
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 impl Default for InferenceParams {
     fn default() -> Self {
         Self {
@@ -301,6 +302,13 @@ impl Default for ActorTrainingDataMode {
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         return Self::Offline(None);
     }
+}
+
+pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode) -> bool {
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _));
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_));
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
