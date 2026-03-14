@@ -243,6 +243,220 @@ pub enum NatsAuthentication {
     CredentialsString(String),
 }
 
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use std::time::Duration;
+
+    // -------------------------------------------------------------------------
+    // RetryPolicy tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn attempt_0_returns_zero() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.delay_for_attempt(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn attempt_1_returns_initial_delay_without_jitter() {
+        let policy = RetryPolicy {
+            add_jitter: false,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(policy.delay_for_attempt(1), policy.initial_delay);
+    }
+
+    #[test]
+    fn attempt_2_applies_backoff_without_jitter() {
+        let policy = RetryPolicy {
+            initial_delay: Duration::from_millis(100),
+            backoff_multiplier: 2.0,
+            add_jitter: false,
+            ..RetryPolicy::default()
+        };
+        // attempt 2 => initial * backoff^1 = 100 * 2 = 200ms
+        assert_eq!(policy.delay_for_attempt(2), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn delay_capped_at_max() {
+        let policy = RetryPolicy {
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_millis(500),
+            backoff_multiplier: 10.0,
+            add_jitter: false,
+            ..RetryPolicy::default()
+        };
+        // Very high attempt should be capped at max_delay
+        let delay = policy.delay_for_attempt(20);
+        assert!(delay <= Duration::from_millis(500 + 1)); // small tolerance
+    }
+
+    #[test]
+    fn no_retries_policy_max_attempts_zero() {
+        let policy = RetryPolicy::no_retries();
+        assert_eq!(policy.max_attempts, 0);
+    }
+
+    #[test]
+    fn aggressive_policy_has_correct_fields() {
+        let policy = RetryPolicy::aggressive();
+        assert_eq!(policy.max_attempts, 5);
+        assert_eq!(policy.initial_delay, Duration::from_millis(50));
+        assert_eq!(policy.backoff_multiplier, 1.5);
+    }
+
+    #[test]
+    fn jitter_is_within_25_percent() {
+        let policy = RetryPolicy {
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(10),
+            backoff_multiplier: 1.0,
+            add_jitter: true,
+            max_attempts: 3,
+        };
+        for _ in 0..20 {
+            let delay = policy.delay_for_attempt(1);
+            // base = 100ms, jitter up to 25% => max 125ms
+            assert!(delay >= Duration::from_millis(100));
+            assert!(delay <= Duration::from_millis(126));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // CircuitBreaker tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn starts_closed() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert_eq!(cb.failure_count(), 0);
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn remains_closed_below_threshold() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn opens_at_threshold() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(cb.is_open());
+    }
+
+    #[test]
+    fn circuit_breaker_stays_open_within_duration() {
+        let cb = CircuitBreaker::new(1, Duration::from_secs(60));
+        cb.record_failure();
+        assert!(cb.is_open(), "Should be open before duration elapses");
+    }
+
+    #[test]
+    fn transitions_to_half_open_after_duration() {
+        let cb = CircuitBreaker::new(1, Duration::from_millis(10));
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        std::thread::sleep(Duration::from_millis(15));
+        // is_open() transitions to HalfOpen when duration has passed
+        assert!(!cb.is_open());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn record_success_resets_to_closed() {
+        let cb = CircuitBreaker::new(1, Duration::from_secs(60));
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert_eq!(cb.failure_count(), 0);
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn does_not_double_open() {
+        let cb = CircuitBreaker::new(2, Duration::from_secs(30));
+        // Record more failures than threshold
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Open);
+        // opened_at should be set once (we can't observe it directly, but state is Open)
+        assert!(cb.is_open());
+    }
+
+    #[test]
+    fn failure_count_increments() {
+        let cb = CircuitBreaker::new(10, Duration::from_secs(30));
+        for i in 1..=5 {
+            cb.record_failure();
+            assert_eq!(cb.failure_count(), i);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // BackpressureController tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn available_permits_starts_at_max() {
+        let ctrl = BackpressureController::new(5);
+        assert_eq!(ctrl.available_permits(), 5);
+        assert_eq!(ctrl.max_concurrent(), 5);
+    }
+
+    #[tokio::test]
+    async fn acquiring_permit_reduces_count() {
+        let ctrl = BackpressureController::new(5);
+        let _permit = ctrl.acquire().await.unwrap();
+        assert_eq!(ctrl.available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn dropping_permit_restores_count() {
+        let ctrl = BackpressureController::new(5);
+        {
+            let _permit = ctrl.acquire().await.unwrap();
+            assert_eq!(ctrl.available_permits(), 4);
+        }
+        // permit dropped
+        assert_eq!(ctrl.available_permits(), 5);
+    }
+
+    #[tokio::test]
+    async fn blocks_when_at_capacity() {
+        use std::sync::Arc;
+        let ctrl = Arc::new(BackpressureController::new(1));
+        // Acquire the only permit
+        let permit = ctrl.acquire().await.unwrap();
+
+        let ctrl2 = ctrl.clone();
+        let task = tokio::spawn(async move {
+            ctrl2.acquire().await.unwrap()
+        });
+
+        // Yield and ensure the task is parked (not yet completed)
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!task.is_finished());
+
+        // Release the permit, task should unblock
+        drop(permit);
+        let _p = task.await.unwrap();
+        assert_eq!(ctrl.available_permits(), 0); // 1 permit re-acquired by task
+    }
+}
+
 impl NatsAuthentication {
     /// Apply this authentication to a [`async_nats::ConnectOptions`] builder.
     ///

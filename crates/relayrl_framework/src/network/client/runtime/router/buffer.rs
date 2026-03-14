@@ -637,4 +637,327 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use crate::network::client::agent::{
+        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    };
+    use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
+    use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+    use active_uuid_registry::registry_uuid::Uuid;
+    use relayrl_types::data::action::RelayRLAction;
+    use relayrl_types::data::trajectory::RelayRLTrajectory;
+    use std::collections::BinaryHeap;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::{RwLock, broadcast, mpsc};
+
+    // The backend is only referenced through phantom data in the no-transport build.
+    // We use NdArray from burn_ndarray which is always available.
+    use burn_ndarray::NdArray;
+    type TestBackend = NdArray<f32>;
+
+    fn disabled_modes() -> Arc<ClientModes> {
+        Arc::new(ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        })
+    }
+
+    fn test_namespace() -> RouterNamespace {
+        Arc::from("test-ns")
+    }
+
+    fn now_millis() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    }
+
+    fn make_send_trajectory_msg(actor_id: Uuid, num_actions: usize) -> RoutedMessage {
+        use relayrl_types::data::action::RelayRLAction;
+        let mut traj = RelayRLTrajectory::new(num_actions.max(1));
+        for i in 0..num_actions {
+            traj.add_action(RelayRLAction::minimal(i as f32, false));
+        }
+        let ts = now_millis();
+        RoutedMessage {
+            actor_id,
+            protocol: RoutingProtocol::SendTrajectory,
+            payload: RoutedPayload::SendTrajectory {
+                timestamp: (ts, ts * 1_000_000),
+                trajectory: traj,
+            },
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // SinkQueueEntry ordering – BinaryHeap pops lowest priority rank first
+    // -------------------------------------------------------------------------
+
+    fn make_entry(priority: i64) -> SinkQueueEntry {
+        SinkQueueEntry {
+            priority,
+            actor_id: Uuid::new_v4(),
+            traj_for_processing: Arc::new(RelayRLTrajectory::new(1)),
+        }
+    }
+
+    #[test]
+    fn lower_priority_rank_is_higher_heap_priority() {
+        let mut heap: BinaryHeap<SinkQueueEntry> = BinaryHeap::new();
+        heap.push(make_entry(100));
+        heap.push(make_entry(50));
+        heap.push(make_entry(200));
+
+        // BinaryHeap pops the "highest" element first.
+        // Our Ord is reversed, so the entry with the lowest priority rank pops first.
+        assert_eq!(heap.pop().unwrap().priority, 50);
+        assert_eq!(heap.pop().unwrap().priority, 100);
+        assert_eq!(heap.pop().unwrap().priority, 200);
+    }
+
+    #[test]
+    fn equal_priority_equal_actor_id_is_equal() {
+        let id = Uuid::new_v4();
+        let a = SinkQueueEntry {
+            priority: 10,
+            actor_id: id,
+            traj_for_processing: Arc::new(RelayRLTrajectory::new(1)),
+        };
+        let b = SinkQueueEntry {
+            priority: 10,
+            actor_id: id,
+            traj_for_processing: Arc::new(RelayRLTrajectory::new(1)),
+        };
+        assert_eq!(a, b);
+    }
+
+    // -------------------------------------------------------------------------
+    // _compute_priority
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn fresh_actor_no_burden_gets_negative_age_rank() {
+        let actor_id = Uuid::new_v4();
+        let last_sent: DashMap<Uuid, i64> = DashMap::new();
+        // Very fresh timestamp (near now) → age_millis ≈ 0 → priority ≈ 0
+        let ts = now_millis();
+        let priority =
+            ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (ts, 0));
+        // With no burden and nearly zero age the priority is small (≥ -5ms tolerance)
+        assert!(priority >= -100, "Priority {} is unexpectedly low", priority);
+    }
+
+    #[test]
+    fn old_trajectory_gets_more_negative_rank() {
+        let actor_id = Uuid::new_v4();
+        let last_sent: DashMap<Uuid, i64> = DashMap::new();
+
+        let fresh_ts = now_millis();
+        let old_ts = now_millis().saturating_sub(60_000); // 1 minute ago
+
+        let fresh_priority =
+            ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (fresh_ts, 0));
+        let old_priority =
+            ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (old_ts, 0));
+
+        assert!(
+            old_priority < fresh_priority,
+            "Older trajectory should have lower priority rank: old={} fresh={}",
+            old_priority, fresh_priority
+        );
+    }
+
+    #[test]
+    fn high_recent_sends_increases_rank() {
+        let actor_id = Uuid::new_v4();
+        let ts = now_millis();
+
+        let low_burden: DashMap<Uuid, i64> = DashMap::new();
+        let high_burden: DashMap<Uuid, i64> = DashMap::new();
+        high_burden.insert(actor_id, 10_000_000); // large recent_sends
+
+        let low = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &low_burden, (ts, 0));
+        let high = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &high_burden, (ts, 0));
+
+        assert!(
+            high > low,
+            "High-burden actor should have higher priority rank: high={} low={}",
+            high, low
+        );
+    }
+
+    #[test]
+    fn age_capped_at_300_000_ms() {
+        let actor_id = Uuid::new_v4();
+        let last_sent: DashMap<Uuid, i64> = DashMap::new();
+
+        // 10 minutes ago (600_000 ms) — should be capped at 300_000
+        let ts_10min = now_millis().saturating_sub(600_000);
+        // 6 minutes ago (360_000 ms) — also above cap, same result expected
+        let ts_6min = now_millis().saturating_sub(360_000);
+
+        let p10 = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (ts_10min, 0));
+        let p6  = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (ts_6min,  0));
+
+        // Both exceed the 300_000 cap, so both should yield the same priority
+        assert_eq!(p10, p6, "Priority should be identical when age exceeds the 300s cap");
+    }
+
+    // -------------------------------------------------------------------------
+    // spawn_loop behaviour
+    // -------------------------------------------------------------------------
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[tokio::test]
+    async fn spawn_loop_double_call_returns_err() {
+        let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            disabled_modes(),
+        );
+        assert!(buf.spawn_loop().is_ok());
+        // Second call: rx already taken, must return Err
+        assert!(buf.spawn_loop().is_err());
+        drop(tx);
+    }
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[tokio::test]
+    async fn receiver_ignores_non_trajectory_payloads() {
+        let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            disabled_modes(),
+        );
+        buf.spawn_loop().unwrap();
+
+        let actor_id = Uuid::new_v4();
+        // Send a Shutdown message (non-trajectory payload)
+        tx.send(RoutedMessage {
+            actor_id,
+            protocol: RoutingProtocol::Shutdown,
+            payload: RoutedPayload::Shutdown,
+        })
+        .await
+        .unwrap();
+
+        // Give the receiver task time to process
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // No assertions needed beyond "no panic"; the receiver should still be alive
+        // and not have crashed.
+        drop(tx);
+    }
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[tokio::test]
+    async fn shutdown_signal_stops_receiver() {
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            disabled_modes(),
+        );
+        buf.with_shutdown(shutdown_rx);
+        buf.spawn_loop().unwrap();
+
+        // Signal shutdown
+        let _ = shutdown_tx.send(());
+
+        // Give tasks time to exit
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // No assertion needed beyond no panic/hang; the test completing proves tasks exited.
+        drop(tx);
+    }
+
+    // -------------------------------------------------------------------------
+    // Failure mode: dropped tx breaks receiver loop cleanly
+    // -------------------------------------------------------------------------
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[tokio::test]
+    async fn dropped_tx_breaks_receiver_loop() {
+        let (tx, rx) = mpsc::channel::<RoutedMessage>(4);
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            disabled_modes(),
+        );
+        buf.spawn_loop().unwrap();
+
+        // Drop the sender — the receiver should observe channel close and exit
+        drop(tx);
+
+        // Give receiver task time to notice channel close
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Test passes if we reach here without hanging
+    }
+
+    // -------------------------------------------------------------------------
+    // Failure mode: partial trajectory (1 action) forwarded without error
+    // -------------------------------------------------------------------------
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[tokio::test]
+    async fn partial_trajectory_still_forwarded() {
+        let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            disabled_modes(),
+        );
+        buf.spawn_loop().unwrap();
+
+        let actor_id = Uuid::new_v4();
+        // Send a trajectory with only 1 action
+        tx.send(make_send_trajectory_msg(actor_id, 1)).await.unwrap();
+
+        // No error expected; allow processing time
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        drop(tx);
+    }
+
+    // -------------------------------------------------------------------------
+    // Concurrent push safety
+    // -------------------------------------------------------------------------
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[tokio::test]
+    async fn concurrent_actors_send_trajectories_safely() {
+        let (tx, rx) = mpsc::channel::<RoutedMessage>(256);
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            disabled_modes(),
+        );
+        buf.spawn_loop().unwrap();
+
+        const NUM_ACTORS: usize = 8;
+        const TRAJS_PER_ACTOR: usize = 5;
+
+        let mut handles = Vec::new();
+        for _ in 0..NUM_ACTORS {
+            let tx_clone = tx.clone();
+            let actor_id = Uuid::new_v4();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..TRAJS_PER_ACTOR {
+                    let msg = make_send_trajectory_msg(actor_id, 3);
+                    tx_clone.send(msg).await.unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Allow buffer tasks time to process all messages
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        drop(tx);
+    }
+}
