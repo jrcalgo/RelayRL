@@ -8,7 +8,6 @@ pub(crate) mod runtime {
         pub(crate) mod state_manager;
     }
     pub(crate) mod router;
-    pub(crate) mod router_dispatcher;
 
     pub(crate) mod data {
         pub(crate) mod file_sink;

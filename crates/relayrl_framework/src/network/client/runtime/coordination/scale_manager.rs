@@ -26,7 +26,7 @@ use crate::network::client::runtime::router::receiver::{
 use crate::network::client::runtime::router::{
     RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
 };
-use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
+use crate::network::client::runtime::router::router_dispatcher::RouterDispatcher;
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::HyperparameterConfig;
 

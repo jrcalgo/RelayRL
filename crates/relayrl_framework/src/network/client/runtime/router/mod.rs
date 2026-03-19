@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 pub(crate) mod buffer;
 pub(crate) mod filter;
 pub(crate) mod receiver;
+pub(crate) mod router_dispatcher;
 
 #[derive(Debug, Error)]
 pub enum RouterError {
