@@ -332,4 +332,52 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use crate::network::client::agent::ModelMode;
+    use crate::utilities::configuration::Algorithm;
+    use burn_ndarray::NdArray;
+    use relayrl_types::HyperparameterArgs;
+    use std::collections::HashMap;
+
+    type TestBackend = NdArray<f32>;
+
+    // -------------------------------------------------------------------------
+    // ProcessInitRequest enum data model
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn training_init_request_holds_model_mode_and_algorithm() {
+        let req = ProcessInitRequest::<TestBackend>::TrainingAlgorithmInit(
+            ModelMode::Independent,
+            Algorithm::PPO,
+            HashMap::new(),
+        );
+        assert!(matches!(
+            req,
+            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Independent, Algorithm::PPO, _)
+        ));
+    }
+
+    #[test]
+    fn inference_init_request_with_none_model() {
+        let req = ProcessInitRequest::<TestBackend>::InferenceModelInit(ModelMode::Shared, None);
+        assert!(matches!(
+            req,
+            ProcessInitRequest::InferenceModelInit(ModelMode::Shared, None)
+        ));
+    }
+
+    #[test]
+    fn training_init_request_shared_mode() {
+        let req = ProcessInitRequest::<TestBackend>::TrainingAlgorithmInit(
+            ModelMode::Shared,
+            Algorithm::REINFORCE,
+            HashMap::new(),
+        );
+        assert!(matches!(
+            req,
+            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Shared, Algorithm::REINFORCE, _)
+        ));
+    }
+}

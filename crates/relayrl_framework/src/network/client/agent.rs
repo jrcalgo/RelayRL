@@ -1128,4 +1128,131 @@ impl<
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use burn_ndarray::{NdArray, NdArrayDevice};
+    use burn_tensor::{Bool, Float, Int, Tensor, TensorData};
+    use relayrl_types::data::tensor::{NdArrayDType, DeviceType};
+
+    type TestBackend = NdArray<f32>;
+
+    // -------------------------------------------------------------------------
+    // uses_local_file_writing
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn offline_returns_true() {
+        assert!(uses_local_file_writing(&ActorTrainingDataMode::Offline(None)));
+    }
+
+    #[test]
+    fn disabled_returns_false() {
+        assert!(!uses_local_file_writing(&ActorTrainingDataMode::Disabled));
+    }
+
+    // -------------------------------------------------------------------------
+    // Default impls
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn model_mode_default_is_independent() {
+        assert_eq!(ModelMode::default(), ModelMode::Independent);
+    }
+
+    #[test]
+    fn actor_inference_mode_default_is_local_independent() {
+        assert_eq!(
+            ActorInferenceMode::default(),
+            ActorInferenceMode::Local(ModelMode::Independent),
+        );
+    }
+
+    #[test]
+    fn client_modes_default_uses_component_defaults() {
+        let modes = ClientModes::default();
+        assert_eq!(modes.actor_inference_mode, ActorInferenceMode::default());
+    }
+
+    // -------------------------------------------------------------------------
+    // AgentBuilder construction
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn builder_has_client_modes_set() {
+        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder();
+        assert!(b.client_modes.is_some());
+    }
+
+    #[test]
+    fn actor_count_setter_sets_field() {
+        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().actor_count(5);
+        assert_eq!(b.actor_count, Some(5));
+    }
+
+    #[test]
+    fn router_scale_setter_sets_field() {
+        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().router_scale(2);
+        assert_eq!(b.router_scale, Some(2));
+    }
+
+    #[test]
+    fn actor_count_does_not_change_router_scale() {
+        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().actor_count(3);
+        assert!(b.router_scale.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // RelayRLAgent zero-count / zero-scale early-return guards
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn scale_throughput_zero_returns_noop_error() {
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(ClientModes::default());
+        let result = agent.scale_throughput(0).await;
+        assert!(matches!(result, Err(ClientError::NoopRouterScale(_))));
+    }
+
+    #[tokio::test]
+    async fn new_actors_zero_returns_noop_error() {
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(ClientModes::default());
+        let result = agent.new_actors(0, DeviceType::NdArray, None).await;
+        assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
+    }
+
+    #[tokio::test]
+    async fn remove_actors_empty_vec_returns_noop_error() {
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(ClientModes::default());
+        let result = agent.remove_actors(vec![]).await;
+        assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
+    }
+
+    // -------------------------------------------------------------------------
+    // ToAnyBurnTensor trait impls
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn float_tensor_converts_to_any_burn_tensor_float() {
+        let device = NdArrayDevice::default();
+        let t: Tensor<TestBackend, 1, Float> = Tensor::zeros([1], &device);
+        let result = t.to_any_burn_tensor(DType::NdArray(NdArrayDType::F32));
+        assert!(matches!(result, AnyBurnTensor::Float(_)));
+    }
+
+    #[test]
+    fn int_tensor_converts_to_any_burn_tensor_int() {
+        let device = NdArrayDevice::default();
+        let data = TensorData::new(vec![0_i64], [1]);
+        let t: Tensor<TestBackend, 1, Int> = Tensor::from_data(data, &device);
+        let result = t.to_any_burn_tensor(DType::NdArray(NdArrayDType::I32));
+        assert!(matches!(result, AnyBurnTensor::Int(_)));
+    }
+
+    #[test]
+    fn bool_tensor_converts_to_any_burn_tensor_bool() {
+        let device = NdArrayDevice::default();
+        let float_t: Tensor<TestBackend, 1, Float> = Tensor::zeros([1], &device);
+        let bool_t: Tensor<TestBackend, 1, Bool> = float_t.greater_elem(-1.0_f32);
+        let result = bool_t.to_any_burn_tensor(DType::NdArray(NdArrayDType::Bool));
+        assert!(matches!(result, AnyBurnTensor::Bool(_)));
+    }
+}

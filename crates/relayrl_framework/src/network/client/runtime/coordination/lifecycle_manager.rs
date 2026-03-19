@@ -547,4 +547,85 @@ mod unit_tests {
             "Sending to a channel with no receivers should return Err"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Helper: create a LifeCycleManager with a temp config file
+    // -------------------------------------------------------------------------
+
+    fn make_lifecycle_manager() -> LifeCycleManager {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(tmp, "{{}}").expect("write temp config");
+        let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
+        let lm = LifeCycleManager::new(&config, tmp.path().to_path_buf());
+        // keep tempfile alive until LifeCycleManager is constructed
+        drop(tmp);
+        lm
+    }
+
+    // -------------------------------------------------------------------------
+    // Async setter / getter round-trips
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_max_traj_length_round_trip() {
+        let lm = make_lifecycle_manager();
+        lm.set_max_traj_length(&99).await.unwrap();
+        let val = *lm.get_max_traj_length().read().await;
+        assert_eq!(val, 99);
+    }
+
+    #[tokio::test]
+    async fn set_max_traj_length_overwrites_previous_value() {
+        let lm = make_lifecycle_manager();
+        lm.set_max_traj_length(&10).await.unwrap();
+        lm.set_max_traj_length(&200).await.unwrap();
+        let val = *lm.get_max_traj_length().read().await;
+        assert_eq!(val, 200);
+    }
+
+    #[tokio::test]
+    async fn set_local_model_path_round_trip() {
+        let lm = make_lifecycle_manager();
+        let params = LocalModelModuleParams {
+            directory: "test_dir".to_string(),
+            model_name: "my_net".to_string(),
+            format: "pt".to_string(),
+        };
+        lm.set_local_model_path(&params).await.unwrap();
+        let path = lm.get_local_model_path().read().await.clone();
+        let path_str = path.to_str().unwrap();
+        assert!(path_str.contains("test_dir"), "path should contain directory");
+        assert!(path_str.contains("my_net"), "path should contain model name");
+        assert!(path_str.contains(".pt"), "path should contain extension");
+    }
+
+    #[tokio::test]
+    async fn set_trajectory_file_path_round_trip() {
+        let lm = make_lifecycle_manager();
+        let params = LocalTrajectoryFileParams {
+            directory: PathBuf::from("exp_output"),
+            file_type: LocalTrajectoryFileType::Arrow,
+        };
+        lm.set_trajectory_file_path(&params).await.unwrap();
+        let output = lm.get_trajectory_file_output().read().await.clone();
+        let dir_str = output.directory.to_str().unwrap();
+        assert!(dir_str.contains("exp_output"), "directory should be preserved");
+        assert!(
+            matches!(output.file_type, LocalTrajectoryFileType::Arrow),
+            "file type should be Arrow"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_trajectory_file_path_csv_preserved() {
+        let lm = make_lifecycle_manager();
+        let params = LocalTrajectoryFileParams {
+            directory: PathBuf::from("csv_out"),
+            file_type: LocalTrajectoryFileType::Csv,
+        };
+        lm.set_trajectory_file_path(&params).await.unwrap();
+        let output = lm.get_trajectory_file_output().read().await.clone();
+        assert!(matches!(output.file_type, LocalTrajectoryFileType::Csv));
+    }
 }

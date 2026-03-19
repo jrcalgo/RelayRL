@@ -113,4 +113,35 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use active_uuid_registry::UuidPoolError;
+
+    // -------------------------------------------------------------------------
+    // TransportReceiverError — non-transport-gated variants
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn no_entries_found_displays_non_empty_string() {
+        let err = TransportReceiverError::NoEntriesFound;
+        let s = format!("{}", err);
+        assert!(!s.is_empty(), "Display output should be non-empty");
+    }
+
+    #[test]
+    fn uuid_pool_error_wraps_source() {
+        let source = UuidPoolError::FailedToFindUuidInPoolError("test-uuid".to_string());
+        let err = TransportReceiverError::from(source.clone());
+        assert!(matches!(err, TransportReceiverError::UuidPoolError(_)));
+        let display = format!("{}", err);
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn uuid_pool_error_display_contains_source_message() {
+        let source = UuidPoolError::FailedToFindUuidInPoolError("my-id".to_string());
+        let err = TransportReceiverError::from(source);
+        let display = format!("{}", err);
+        assert!(display.contains("my-id"));
+    }
+}
