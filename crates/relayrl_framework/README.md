@@ -3,7 +3,7 @@
 **Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
-**Version:** 0.5.0-alpha.3
+**Version:** 0.5.0-beta
 
 **Status:** Under active development, expect broken functionality and breaking changes!
 
@@ -29,9 +29,8 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 **Current Limitations:**
 
-- **Data Collection:** Only local Arrow file sink is available
-- **Transport Layer:** Network transport (ZMQ) is under active development
-- **Database Layer:** PostgreSQL/SQLite support is under active development
+- **Data Collection:** Only local Arrow or CSV file sinks are available
+- **Transport Layer:** Network transport (ZMQ/NATS) is implemented, however no complementary server is available at this time
 
 **Major Changes:**
 
@@ -39,7 +38,7 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 - **Rust-First Design Philosophy:** Complete removal of PyO3 and its Python code dependencies from framework; all core components written entirely in Rust.
 - **Backend Independence:** Replacement of direct `Tch` crate dependency with `Burn`, enabling generic Tensor interfacing with the framework (currently supports Burn's `Tch` and `NdArray` Tensor backends, as well as `TorchScript` and `ONNX` model inference).
 - **Improved Error Handling:** Near complete removal of panics and replacement with proper error handling (retries, branches, etc.) and upstream propagation.
-- **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building a strong `ZMQ` transport implementation.
+- **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building strong `ZMQ` and `NATS` transport implementations.
 - **Type System:** Moved to a separate crate (`relayrl_types`).
 - **RL Algorithms:** Moved to a separate crate (`relayrl_algorithms`), which remains unimplemented for now.
 - **Python Bindings:** Moved to a separate crate (`relayrl_python`), which remains unimplemented for now.
@@ -149,8 +148,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - ### **Beyond this crate:**
   - `relayrl_algorithms` crate creation and publication for training workflows
-  - `relayrl_types` updates to minimize serialization overhead and to reduce tensor copy towards zero-copy (preferably)
-  - `relayrl_cli` for ease-of-use and language agnostic execution via a deployable gRPC pipeline for external CLI process interfacing
+  - `relayrl_types` updates to minimize serialization overhead and to reduce tensor copy towards zero-copy (as much as possible)
+  - `relayrl_cli` for ease-of-use, deployability, and language agnostic execution via a deployable gRPC pipeline for external CLI process interfacing
 
 ## Contributing
 
