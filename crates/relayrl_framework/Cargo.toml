@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_framework"
-version = "0.5.0-alpha.3"
+version = "0.5.0-beta"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "A distributed, system-oriented multi-agent reinforcement learning framework."
@@ -14,7 +14,7 @@ license = "Apache-2.0"
 [package.metadata.docs.rs]
 all-features = false
 no-default-features = true
-features = ["client", "tch-backend"]
+features = ["client", "zmq-transport", "nats-transport", "tch-backend"]
 rustdoc-args = ["--cfg", "docsrs"]
 rustc-args = ["--cfg", "docsrs"]
 
@@ -23,17 +23,9 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["client", "zmq-transport", "nats-transport"]
+default = ["client", "tch-backend", "zmq-transport", "nats-transport"]
 
 tch-backend = ["relayrl_types/tch-backend", "relayrl_types/tch-model"]
-
-full-zmq-network = ["client", "zmq-training-server", "zmq-inference-server"]
-zmq-training-network = ["client", "zmq-training-server"]
-zmq-inference-network = ["client", "zmq-inference-server"]
-
-full-nats-network = ["client", "nats-training-server", "nats-inference-server"]
-nats-training-network = ["client", "nats-training-server"]
-nats-inference-network = ["client", "nats-inference-server"]
 
 client = []
 zmq-training-server = ["zmq-transport"]
@@ -103,5 +95,8 @@ optional = true
 version = "0.5.1"
 features = ["html_reports", "async_tokio"]
 
-[dev-dependencies.gym]
-version = "2.2.1"
+[dev-dependencies.burn-ndarray]
+workspace = true
+
+[dev-dependencies.burn-tch]
+workspace = true
