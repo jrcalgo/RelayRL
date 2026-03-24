@@ -18,7 +18,6 @@ jobs:
         toolchain:
           - stable
           - beta
-          - nightly
     defaults:
       run:
         working-directory: crates
