@@ -438,4 +438,182 @@ impl LifeCycleManager {
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use crate::network::client::agent::{LocalTrajectoryFileType, LocalTrajectoryFileParams};
+    use crate::utilities::configuration::LocalModelModuleParams;
+
+    // -------------------------------------------------------------------------
+    // construct_local_model_path
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn construct_local_model_path_joins_components() {
+        let params = LocalModelModuleParams {
+            directory: "model_dir".to_string(),
+            model_name: "my_model".to_string(),
+            format: "pt".to_string(),
+        };
+        let path = construct_local_model_path(&params);
+        let path_str = path.to_str().unwrap();
+        assert!(
+            path_str.contains("model_dir"),
+            "Path should contain directory component"
+        );
+        assert!(
+            path_str.contains("my_model"),
+            "Path should contain model_name component"
+        );
+        assert!(
+            path_str.contains(".pt"),
+            "Path should contain formatted extension"
+        );
+    }
+
+    #[test]
+    fn construct_local_model_path_uses_cwd_as_root() {
+        let params = LocalModelModuleParams {
+            directory: "subdir".to_string(),
+            model_name: "net".to_string(),
+            format: "mpk".to_string(),
+        };
+        let path = construct_local_model_path(&params);
+        assert!(
+            path.is_absolute(),
+            "Returned path should be absolute (rooted at cwd)"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // construct_trajectory_file_output
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn construct_trajectory_file_output_joins_directory_with_cwd() {
+        let params = LocalTrajectoryFileParams {
+            directory: PathBuf::from("experiment_data"),
+            file_type: LocalTrajectoryFileType::Arrow,
+        };
+        let result = construct_trajectory_file_output(&params);
+        let dir_str = result.directory.to_str().unwrap();
+        assert!(
+            dir_str.contains("experiment_data"),
+            "Result directory should contain the given subdirectory"
+        );
+        assert!(
+            result.directory.is_absolute(),
+            "Result directory should be absolute"
+        );
+        assert!(
+            matches!(result.file_type, LocalTrajectoryFileType::Arrow),
+            "File type should be preserved"
+        );
+    }
+
+    #[test]
+    fn construct_trajectory_file_output_preserves_file_type() {
+        let params = LocalTrajectoryFileParams {
+            directory: PathBuf::from("out"),
+            file_type: LocalTrajectoryFileType::Csv,
+        };
+        let result = construct_trajectory_file_output(&params);
+        assert!(matches!(result.file_type, LocalTrajectoryFileType::Csv));
+    }
+
+    #[test]
+    fn subscribe_shutdown_receives_signal_after_handle_shutdown() {
+        // Test the broadcast mechanism used by LifeCycleManager in isolation.
+        // This mirrors what subscribe_shutdown() + handle_shutdown_signal() do.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<()>(10);
+        // Simulate subscribe_shutdown: the subscriber gets a clone of rx
+        // Simulate handle_shutdown_signal: sends () on tx
+        tx.send(()).unwrap();
+        let result = rx.try_recv();
+        assert!(result.is_ok(), "Subscriber should receive the shutdown signal");
+    }
+
+    #[test]
+    fn handle_shutdown_signal_fails_with_no_receivers() {
+        // broadcast::send returns Err when there are no active receivers.
+        let (tx, rx) = tokio::sync::broadcast::channel::<()>(1);
+        drop(rx); // drop the only receiver
+        let result = tx.send(());
+        assert!(
+            result.is_err(),
+            "Sending to a channel with no receivers should return Err"
+        );
+    }
+
+    fn make_lifecycle_manager() -> LifeCycleManager {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(tmp, "{{}}").expect("write temp config");
+        let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
+        let lm = LifeCycleManager::new(AlgorithmArgs::default(), &config, tmp.path().to_path_buf(), TransportType::NATS);
+        // keep tempfile alive until LifeCycleManager is constructed
+        drop(tmp);
+        lm
+    }
+
+    #[tokio::test]
+    async fn set_max_traj_length_round_trip() {
+        let lm = make_lifecycle_manager();
+        lm.set_max_traj_length(&99).await.unwrap();
+        let val = *lm.get_max_traj_length().read().await;
+        assert_eq!(val, 99);
+    }
+
+    #[tokio::test]
+    async fn set_max_traj_length_overwrites_previous_value() {
+        let lm = make_lifecycle_manager();
+        lm.set_max_traj_length(&10).await.unwrap();
+        lm.set_max_traj_length(&200).await.unwrap();
+        let val = *lm.get_max_traj_length().read().await;
+        assert_eq!(val, 200);
+    }
+
+    #[tokio::test]
+    async fn set_local_model_path_round_trip() {
+        let lm = make_lifecycle_manager();
+        let params = LocalModelModuleParams {
+            directory: "test_dir".to_string(),
+            model_name: "my_net".to_string(),
+            format: "pt".to_string(),
+        };
+        lm.set_local_model_path(&params).await.unwrap();
+        let path = lm.get_local_model_path().read().await.clone();
+        let path_str = path.to_str().unwrap();
+        assert!(path_str.contains("test_dir"), "path should contain directory");
+        assert!(path_str.contains("my_net"), "path should contain model name");
+        assert!(path_str.contains(".pt"), "path should contain extension");
+    }
+
+    #[tokio::test]
+    async fn set_trajectory_file_path_round_trip() {
+        let lm = make_lifecycle_manager();
+        let params = LocalTrajectoryFileParams {
+            directory: PathBuf::from("exp_output"),
+            file_type: LocalTrajectoryFileType::Arrow,
+        };
+        lm.set_trajectory_file_path(&params).await.unwrap();
+        let output = lm.get_trajectory_file_output().read().await.clone();
+        let dir_str = output.directory.to_str().unwrap();
+        assert!(dir_str.contains("exp_output"), "directory should be preserved");
+        assert!(
+            matches!(output.file_type, LocalTrajectoryFileType::Arrow),
+            "file type should be Arrow"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_trajectory_file_path_csv_preserved() {
+        let lm = make_lifecycle_manager();
+        let params = LocalTrajectoryFileParams {
+            directory: PathBuf::from("csv_out"),
+            file_type: LocalTrajectoryFileType::Csv,
+        };
+        lm.set_trajectory_file_path(&params).await.unwrap();
+        let output = lm.get_trajectory_file_output().read().await.clone();
+        assert!(matches!(output.file_type, LocalTrajectoryFileType::Csv));
+    }
+}

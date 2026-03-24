@@ -977,4 +977,35 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn scale_out_equals_scale_out() {
+        assert_eq!(ScalingOperation::ScaleOut, ScalingOperation::ScaleOut);
+    }
+
+    #[test]
+    fn scale_in_equals_scale_in() {
+        assert_eq!(ScalingOperation::ScaleIn, ScalingOperation::ScaleIn);
+    }
+
+    #[test]
+    fn scale_out_not_equal_scale_in() {
+        assert_ne!(ScalingOperation::ScaleOut, ScalingOperation::ScaleIn);
+    }
+
+    #[test]
+    fn scaling_not_supported_error_display_contains_message() {
+        let err = ScaleManagerError::ScalingOperationNotSupportedError("test message".into());
+        let display = format!("{}", err);
+        assert!(display.contains("test message"));
+    }
+
+    #[test]
+    fn get_router_runtime_params_error_display_contains_message() {
+        let err = ScaleManagerError::GetRouterRuntimeParamsError("x".into());
+        let display = format!("{}", err);
+        assert!(display.contains("x"));
+    }
+}

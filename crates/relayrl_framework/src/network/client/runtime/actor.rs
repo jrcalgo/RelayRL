@@ -548,4 +548,358 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+
+    use crate::network::client::agent::{
+        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    };
+    use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+
+    use active_uuid_registry::registry_uuid::Uuid;
+    use relayrl_types::data::tensor::DeviceType;
+    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
+    use relayrl_types::data::tensor::NdArrayDType;
+    use relayrl_types::prelude::tensor::relayrl::DType;
+    
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::{RwLock, mpsc, oneshot};
+
+    use burn_ndarray::NdArray;
+    use burn_ndarray::NdArrayDevice;
+    use burn_tch::LibTorch;
+
+
+    type NdArrayBackend = NdArray<f32>;
+    type TchBackend = LibTorch<f32>;
+
+    const D_IN: usize = 4;
+    const D_OUT: usize = 1;
+
+    fn disabled_data_mode() -> Arc<ClientModes> {
+        Arc::new(ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        })
+    }
+
+    fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
+        Arc::new(RwLock::new(None))
+    }
+
+    fn empty_torch_model_handle() -> LocalModelHandle<TchBackend> {
+        Arc::new(RwLock::new(None))
+    }
+
+    async fn create_ndarray_actor(max_traj_length: u128, device: DeviceType) -> (Actor<NdArrayBackend, D_IN, D_OUT>, mpsc::Sender<RoutedMessage>, mpsc::Receiver<RoutedMessage>) {
+        let actor_id = Uuid::new_v4();
+        let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+
+        let actor = Actor::<NdArrayBackend, D_IN, D_OUT>::new(
+            Arc::from("test-actor-namespace"),
+            actor_id,
+            device,
+            empty_onnx_model_handle(),
+            Arc::new(RwLock::new(PathBuf::new())),
+            Arc::new(RwLock::new(max_traj_length as u128)),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            rx_from_router,
+            tx_to_buffer,
+            disabled_data_mode(),
+        ).await;
+
+        (actor, tx_to_actor, rx_from_buffer)
+
+    }
+
+    async fn create_tch_actor(max_traj_length: u128, device: DeviceType) -> (Actor<TchBackend, D_IN, D_OUT>, mpsc::Sender<RoutedMessage>, mpsc::Receiver<RoutedMessage>) {
+        let actor_id = Uuid::new_v4();
+        let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+
+        let actor = Actor::<TchBackend, D_IN, D_OUT>::new(
+            Arc::from("test-actor-namespace"),
+            actor_id,
+            device,
+            empty_torch_model_handle(),
+            Arc::new(RwLock::new(PathBuf::new())),
+            Arc::new(RwLock::new(max_traj_length as u128)),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            rx_from_router,
+            tx_to_buffer,
+            disabled_data_mode(),
+        ).await;
+
+        (actor, tx_to_actor, rx_from_buffer)
+    }
+
+    fn build_msg(actor_id: ActorUuid, protocol: RoutingProtocol, payload: RoutedPayload) -> RoutedMessage {
+        RoutedMessage {
+            actor_id,
+            protocol,
+            payload,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_loop_exits_on_channel_close() {
+        let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let handle = tokio::spawn(async move { actor.spawn_loop().await });
+
+        drop(tx); // closed channel, loop exits
+
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
+            .await
+            .expect("spawn_loop did not exit in time")
+            .expect("join error");
+
+        assert!(result.is_ok(), "spawn_loop did not exit in time on channel close for NdArray, CPU actor");
+    }
+
+    #[tokio::test]
+    async fn spawn_loop_exits_on_shutdown_message() {
+        let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+        let handle = tokio::spawn(async move { actor.spawn_loop().await });
+
+        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
+            .await
+            .expect("spawn_loop did not exit on Shutdown")
+            .expect("join error");
+
+        assert!(result.is_ok(), "spawn_loop did not exit on Shutdown for NdArray, CPU actor");
+    }
+
+    #[tokio::test]
+    async fn get_model_version_returns_minus_one_when_no_model() {
+        let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+        let handle = tokio::spawn(async move { actor.spawn_loop().await });
+
+        let (reply_tx, reply_rx) = oneshot::channel::<i64>();
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::ModelVersion,
+            RoutedPayload::ModelVersion { reply_to: reply_tx },
+        ))
+        .await
+        .unwrap();
+
+        let version = tokio::time::timeout(
+            tokio::time::Duration::from_millis(200),
+            reply_rx,
+        )
+        .await
+        .expect("timeout waiting for model version")
+        .expect("oneshot cancelled");
+
+        assert_eq!(version, -1, "Unloaded model should report version -1");
+
+        // Shutdown the actor
+        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
+            .await
+            .unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn handle_shutdown_sends_trajectory_when_non_empty() {
+        let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+        let handle = tokio::spawn(async move { actor.spawn_loop().await });
+
+        // Build trajectory via FlagLastInference (adds a terminal action)
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::FlagLastInference,
+            RoutedPayload::FlagLastInference { reward: 1.0 },
+        ))
+        .await
+        .unwrap();
+
+        // Wait for the FlagLastInference to produce a SendTrajectory
+        let traj_msg = tokio::time::timeout(
+            tokio::time::Duration::from_millis(200),
+            rx_buf.recv(),
+        )
+        .await
+        .expect("timeout waiting for trajectory after FlagLastInference")
+        .expect("buffer rx closed");
+
+        assert!(matches!(traj_msg.payload, RoutedPayload::SendTrajectory { .. }));
+
+        // Now send Shutdown
+        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
+            .await
+            .unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn handle_shutdown_does_not_send_when_empty_traj() {
+        let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+        let handle = tokio::spawn(async move { actor.spawn_loop().await });
+
+        // Send Shutdown immediately without adding any actions
+        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
+            .await
+            .unwrap();
+        let _ = handle.await;
+
+        // Buffer should be empty
+        assert!(
+            rx_buf.try_recv().is_err(),
+            "Buffer should be empty after shutdown with no trajectory"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_action_inference_appends_to_trajectory() {
+        let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+
+        let obs = Arc::new(AnyBurnTensor::Float(FloatBurnTensor::<NdArrayBackend, D_IN> {
+            tensor: Arc::new(Tensor::zeros([D_IN], &NdArrayDevice::default())),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }));
+        let mask = None::<Arc<AnyBurnTensor<NdArrayBackend, D_OUT>>>;
+        let reward = 1.0;
+
+        let inference_request = InferenceRequest {
+            observation: Box::new(obs),
+            mask: Box::new(mask),
+            reward,
+            reply_to: oneshot::channel().0,
+        };
+
+        tx.send(build_msg(actor_id, RoutingProtocol::RequestInference, RoutedPayload::RequestInference(Box::new(inference_request))));
+
+        let msg = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            rx_buf.recv(),
+        )
+        .await
+        .expect("timeout waiting for trajectory")
+        .expect("buffer rx closed");
+
+        assert!(matches!(msg.payload, RoutedPayload::SendTrajectory { .. }), "RequestInference should produce a SendTrajectory message");
+    }
+
+    #[tokio::test]
+    async fn flag_last_action_appends_terminal_action_and_sends_traj() {
+        let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+        let handle = tokio::spawn(async move { actor.spawn_loop().await });
+
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::FlagLastInference,
+            RoutedPayload::FlagLastInference { reward: 0.0 },
+        ))
+        .await
+        .unwrap();
+
+        let msg = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            rx_buf.recv(),
+        )
+        .await
+        .expect("timeout waiting for trajectory")
+        .expect("buffer rx closed");
+
+        assert!(
+            matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
+            "FlagLastInference should produce a SendTrajectory message"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_loop_can_run_concurrently() {
+        let mut handles = Vec::new();
+
+        for _ in 0..3 {
+            let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+            let actor_id = actor.actor_id;
+            let h = tokio::spawn(async move { actor.spawn_loop().await });
+            // Immediately shut each actor down
+            tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
+                .await
+                .unwrap();
+            handles.push(h);
+        }
+
+        for h in handles {
+            let result = tokio::time::timeout(tokio::time::Duration::from_millis(500), h)
+                .await
+                .expect("actor did not shut down in time")
+                .expect("join error");
+            assert!(result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn trajectory_send_failure_returns_err() {
+        let (mut actor, tx, rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+
+        // Drop buffer receiver so send() fails
+        drop(rx_buf);
+
+        let result = actor
+            .perform_flag_last_action(build_msg(
+                actor_id,
+                RoutingProtocol::FlagLastInference,
+                RoutedPayload::FlagLastInference { reward: 0.0 },
+            ))
+            .await;
+
+        assert!(
+            matches!(result, Err(ActorError::TrajectorySendError(_))),
+            "Expected TrajectorySendError, got {:?}",
+            result
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn model_version_reply_failure_returns_err() {
+        let (actor, _tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let actor_id = actor.actor_id;
+
+        let (reply_tx, reply_rx) = oneshot::channel::<i64>();
+        // Drop the receiver side before the actor replies
+        drop(reply_rx);
+
+        let result = actor
+            .get_model_version(build_msg(
+                actor_id,
+                RoutingProtocol::ModelVersion,
+                RoutedPayload::ModelVersion { reply_to: reply_tx },
+            ))
+            .await;
+
+        assert!(
+            matches!(result, Err(ActorError::MessageHandlingError(_))),
+            "Expected MessageHandlingError when oneshot rx is dropped, got {:?}",
+            result
+        );
+    }
+        
+}

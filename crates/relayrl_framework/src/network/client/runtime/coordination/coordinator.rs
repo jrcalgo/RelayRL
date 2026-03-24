@@ -1265,4 +1265,91 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use active_uuid_registry::registry_uuid::Uuid;
+    use burn_ndarray::NdArray;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    type TestBackend = NdArray<f32>;
+
+    fn make_coordinator() -> ClientCoordinator<TestBackend, 4, 1> {
+        ClientCoordinator::<TestBackend, 4, 1>::new(TransportType::NATS, ClientModes::default())
+    }
+
+    #[test]
+    fn from_string_yields_invalid_value() {
+        let err = ClientConfigError::from("bad input".to_string());
+        assert!(matches!(err, ClientConfigError::InvalidValue(ref s) if s == "bad input"));
+    }
+
+    #[test]
+    fn new_has_no_runtime_params() {
+        let coordinator = make_coordinator();
+        assert!(coordinator.runtime_params.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_actor_no_runtime_returns_err() {
+        let mut c = make_coordinator();
+        let result = c.remove_actor(Uuid::new_v4(), false).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_actor_id_no_runtime_returns_err() {
+        let mut c = make_coordinator();
+        let result = c.set_actor_id(Uuid::new_v4(), Uuid::new_v4()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn flag_last_action_no_runtime_returns_err() {
+        let c = make_coordinator();
+        let result = c.flag_last_action(vec![], None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_model_version_no_runtime_returns_err() {
+        let c = make_coordinator();
+        let result = c.get_model_version(vec![]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn scale_out_no_runtime_returns_err() {
+        let mut c = make_coordinator();
+        let result = c.scale_out(1).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn scale_in_no_runtime_returns_err() {
+        let mut c = make_coordinator();
+        let result = c.scale_in(1).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_config_no_runtime_returns_err() {
+        let c = make_coordinator();
+        let result = c.get_config().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_config_path_no_runtime_returns_err() {
+        let c = make_coordinator();
+        let result = c.set_config_path(PathBuf::new()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_no_runtime_returns_err() {
+        let mut c = make_coordinator();
+        let result = c.shutdown().await;
+        assert!(result.is_err());
+    }
+}

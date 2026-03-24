@@ -514,4 +514,238 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use crate::network::client::agent::{
+        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    };
+    use active_uuid_registry::registry_uuid::Uuid;
+    use burn_ndarray::NdArray;
+    use relayrl_types::data::tensor::DeviceType;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    type TestBackend = NdArray<f32>;
+    const D_IN: usize = 4;
+    const D_OUT: usize = 1;
+
+    fn disabled_modes() -> Arc<ClientModes> {
+        Arc::new(ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        })
+    }
+
+    fn shared_modes() -> Arc<ClientModes> {
+        Arc::new(ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Shared),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        })
+    }
+
+    fn make_state_manager(
+        modes: Arc<ClientModes>,
+    ) -> (
+        StateManager<TestBackend, D_IN, D_OUT>,
+        tokio::sync::mpsc::Receiver<RoutedMessage>,
+    ) {
+        StateManager::<TestBackend, D_IN, D_OUT>::new(
+            Arc::from("test-sm"),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            modes,
+            Arc::new(RwLock::new(100u128)),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            Arc::new(RwLock::new(PathBuf::new())),
+            None,
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // distribute_actors
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn distribute_actors_round_robin_2_routers() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let actor_ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let ns1: RouterNamespace = Arc::from("r1");
+        let ns2: RouterNamespace = Arc::from("r2");
+
+        for id in &actor_ids {
+            let handle = Arc::new(tokio::spawn(async {}));
+            sm.actor_handles.insert(*id, handle);
+        }
+
+        sm.distribute_actors(vec![ns1.clone(), ns2.clone()]);
+
+        assert_eq!(sm.actor_router_addresses.len(), 4);
+        for id in &actor_ids {
+            let assigned = sm.actor_router_addresses.get(id).unwrap();
+            assert!(
+                *assigned == ns1 || *assigned == ns2,
+                "Actor {} assigned to unexpected namespace",
+                id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn distribute_actors_empty_namespaces_is_noop() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let actor_id = Uuid::new_v4();
+        let original_ns: RouterNamespace = Arc::from("original");
+        sm.actor_handles
+            .insert(actor_id, Arc::new(tokio::spawn(async {})));
+        sm.actor_router_addresses
+            .insert(actor_id, original_ns.clone());
+
+        sm.distribute_actors(vec![]);
+
+        let assigned = sm.actor_router_addresses.get(&actor_id).unwrap();
+        assert_eq!(*assigned, original_ns, "Namespace should not change");
+    }
+
+    #[tokio::test]
+    async fn distribute_actors_single_namespace() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let actor_ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        let ns: RouterNamespace = Arc::from("only");
+
+        for id in &actor_ids {
+            sm.actor_handles
+                .insert(*id, Arc::new(tokio::spawn(async {})));
+        }
+
+        sm.distribute_actors(vec![ns.clone()]);
+
+        for id in &actor_ids {
+            let assigned = sm.actor_router_addresses.get(id).unwrap();
+            assert_eq!(*assigned, ns);
+        }
+    }
+
+    #[test]
+    fn restore_replaces_all_mappings() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let old_id = Uuid::new_v4();
+        let new_id = Uuid::new_v4();
+        let old_ns: RouterNamespace = Arc::from("old");
+        let new_ns: RouterNamespace = Arc::from("new");
+
+        sm.actor_router_addresses.insert(old_id, old_ns);
+        sm.restore_actor_router_mappings(vec![(new_id, new_ns.clone())]);
+
+        assert!(
+            !sm.actor_router_addresses.contains_key(&old_id),
+            "Old mapping should be cleared"
+        );
+        let assigned = sm.actor_router_addresses.get(&new_id).unwrap();
+        assert_eq!(*assigned, new_ns);
+    }
+
+    #[test]
+    fn restore_with_empty_clears_all() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        sm.actor_router_addresses
+            .insert(Uuid::new_v4(), Arc::from("ns"));
+        sm.restore_actor_router_mappings(vec![]);
+        assert!(sm.actor_router_addresses.is_empty());
+    }
+
+    #[test]
+    fn get_returns_all_inserted_mappings() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let id3 = Uuid::new_v4();
+        let ns1: RouterNamespace = Arc::from("r1");
+        let ns2: RouterNamespace = Arc::from("r2");
+        let ns3: RouterNamespace = Arc::from("r3");
+
+        sm.actor_router_addresses.insert(id1, ns1.clone());
+        sm.actor_router_addresses.insert(id2, ns2.clone());
+        sm.actor_router_addresses.insert(id3, ns3.clone());
+
+        let result = sm.get_actor_router_mappings();
+        assert_eq!(result.len(), 3);
+        assert!(result.iter().any(|(id, ns)| *id == id1 && *ns == ns1));
+        assert!(result.iter().any(|(id, ns)| *id == id2 && *ns == ns2));
+        assert!(result.iter().any(|(id, ns)| *id == id3 && *ns == ns3));
+    }
+
+    #[tokio::test]
+    async fn get_actor_id_list_reflects_inserted_handles() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+        for id in &ids {
+            sm.actor_handles
+                .insert(*id, Arc::new(tokio::spawn(async {})));
+        }
+
+        let list = sm.get_actor_id_list();
+        assert_eq!(list.len(), 3);
+        for id in &ids {
+            assert!(list.contains(id), "Actor {} not in list", id);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_mode_second_actor_reuses_same_arc() {
+        let (mut sm, _rx) = make_state_manager(shared_modes());
+
+        let (h1, needs1) = sm
+            .get_or_init_model_handle(None, DeviceType::Cpu)
+            .await
+            .unwrap();
+        let (h2, needs2) = sm
+            .get_or_init_model_handle(None, DeviceType::Cpu)
+            .await
+            .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&h1, &h2),
+            "Shared mode should reuse the same Arc"
+        );
+        assert!(needs1, "First call should need handshake (no model)");
+        assert!(!needs2, "Second call should NOT need handshake");
+    }
+
+    #[tokio::test]
+    async fn independent_mode_each_actor_gets_fresh_arc() {
+        let (mut sm, _rx) = make_state_manager(disabled_modes());
+
+        let (h1, _) = sm
+            .get_or_init_model_handle(None, DeviceType::Cpu)
+            .await
+            .unwrap();
+        let (h2, _) = sm
+            .get_or_init_model_handle(None, DeviceType::Cpu)
+            .await
+            .unwrap();
+
+        assert!(
+            !Arc::ptr_eq(&h1, &h2),
+            "Independent mode should create fresh Arc each time"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_model_and_empty_path_sets_needs_handshake() {
+        let (mut sm, _rx) = make_state_manager(disabled_modes());
+        // shared_local_model_path is empty PathBuf, default_model is None
+        let (_, needs_handshake) = sm
+            .get_or_init_model_handle(None, DeviceType::Cpu)
+            .await
+            .unwrap();
+        assert!(
+            needs_handshake,
+            "No model available → needs_handshake must be true"
+        );
+    }
+}

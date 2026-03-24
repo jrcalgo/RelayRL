@@ -355,4 +355,327 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use crate::network::client::agent::{
+        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    };
+    use crate::network::client::runtime::coordination::state_manager::StateManager;
+    use crate::network::client::runtime::router::{RoutedPayload, RoutingProtocol};
+    use active_uuid_registry::registry_uuid::Uuid;
+    use burn_ndarray::NdArray;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::{RwLock, broadcast, mpsc};
+
+    type TestBackend = NdArray<f32>;
+    const D_IN: usize = 4;
+    const D_OUT: usize = 1;
+
+    fn disabled_modes() -> Arc<ClientModes> {
+        Arc::new(ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        })
+    }
+
+    fn make_state_manager() -> (StateManager<TestBackend, D_IN, D_OUT>, mpsc::Receiver<RoutedMessage>) {
+        StateManager::<TestBackend, D_IN, D_OUT>::new(
+            Arc::from("test-dispatcher"),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            disabled_modes(),
+            Arc::new(RwLock::new(100u128)),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            Arc::new(RwLock::new(PathBuf::new())),
+            None,
+        )
+    }
+
+    fn make_routed_message(actor_id: Uuid, protocol: RoutingProtocol) -> RoutedMessage {
+        RoutedMessage {
+            actor_id,
+            protocol,
+            payload: RoutedPayload::ModelHandshake,
+        }
+    }
+
+    /// Build a RouterDispatcher with a pre-wired state manager and router channel map.
+    /// Returns: (dispatcher, global_tx, router_channels, shared_state)
+    fn make_dispatcher() -> (
+        RouterDispatcher<TestBackend, D_IN, D_OUT>,
+        mpsc::Sender<RoutedMessage>,
+        Arc<DashMap<RouterNamespace, mpsc::Sender<RoutedMessage>>>,
+        Arc<RwLock<StateManager<TestBackend, D_IN, D_OUT>>>,
+    ) {
+        let (sm, _state_global_rx) = make_state_manager();
+        let shared_state = Arc::new(RwLock::new(sm));
+        let router_channels: Arc<DashMap<RouterNamespace, mpsc::Sender<RoutedMessage>>> =
+            Arc::new(DashMap::new());
+        // The dispatcher reads from its own channel (not the StateManager's global_rx)
+        let (global_tx, global_rx) = mpsc::channel::<RoutedMessage>(32);
+        let dispatcher = RouterDispatcher::<TestBackend, D_IN, D_OUT>::new(
+            global_rx,
+            router_channels.clone(),
+            shared_state.clone(),
+        );
+        (dispatcher, global_tx, router_channels, shared_state)
+    }
+
+    // -------------------------------------------------------------------------
+    // Timeout values per protocol
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn get_timeout_for_protocol_correct_values() {
+        assert_eq!(
+            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+                &RoutingProtocol::RequestInference
+            ),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+                &RoutingProtocol::ModelVersion
+            ),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+                &RoutingProtocol::FlagLastInference
+            ),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+                &RoutingProtocol::ModelHandshake
+            ),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+                &RoutingProtocol::SendTrajectory
+            ),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+                &RoutingProtocol::ModelUpdate
+            ),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+                &RoutingProtocol::Shutdown
+            ),
+            Duration::from_secs(60)
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Dispatch to correct router
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dispatches_to_assigned_router() {
+        let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
+
+        let actor_id = Uuid::new_v4();
+        let ns: RouterNamespace = Arc::from("router-dispatch-test");
+
+        // Register actor → namespace in state
+        shared_state
+            .write()
+            .await
+            .actor_router_addresses
+            .insert(actor_id, ns.clone());
+
+        // Create router channel and register it
+        let (router_tx, mut router_rx) = mpsc::channel::<RoutedMessage>(4);
+        router_channels.insert(ns, router_tx);
+
+        // Shutdown after one message to make the test deterministic
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let dispatcher = dispatcher.with_shutdown(shutdown_rx);
+
+        let _handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
+
+        global_tx
+            .send(make_routed_message(actor_id, RoutingProtocol::ModelHandshake))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            router_rx.recv(),
+        )
+        .await
+        .expect("timeout waiting for router to receive message")
+        .expect("router rx closed");
+
+        assert_eq!(received.actor_id, actor_id);
+        shutdown_tx.send(()).ok();
+    }
+
+    // -------------------------------------------------------------------------
+    // Retry queue for unassigned actors
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn queues_message_for_unassigned_actor() {
+        let (mut dispatcher, _tx, _router_channels, _shared_state) = make_dispatcher();
+
+        let actor_id = Uuid::new_v4();
+        // Actor has no router assignment → dispatch_message should queue it
+        let msg = make_routed_message(actor_id, RoutingProtocol::ModelHandshake);
+        let result = dispatcher.dispatch_message(msg).await;
+        assert!(
+            matches!(result, Err(RouterDispatcherError::ActorNotAssignedError(_))),
+            "Expected ActorNotAssignedError, got {:?}",
+            result
+        );
+
+        // Verify it ended up in pending_messages
+        let pending = dispatcher.pending_messages.lock().await;
+        assert!(
+            pending.contains_key(&actor_id),
+            "Message should be queued in pending_messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_deliver_message_after_assignment() {
+        let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
+
+        let actor_id = Uuid::new_v4();
+        let ns: RouterNamespace = Arc::from("retry-ns");
+
+        // No router assignment yet — send message
+        // Create router channel but don't register the router yet
+        let (router_tx, mut router_rx) = mpsc::channel::<RoutedMessage>(4);
+
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let dispatcher = dispatcher.with_shutdown(shutdown_rx);
+
+        let _handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
+
+        // Send message before actor is assigned → queued
+        global_tx
+            .send(make_routed_message(actor_id, RoutingProtocol::ModelHandshake))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        // Now assign actor to a router
+        shared_state
+            .write()
+            .await
+            .actor_router_addresses
+            .insert(actor_id, ns.clone());
+        router_channels.insert(ns, router_tx);
+
+        // Wait for retry loop to deliver (up to 500ms)
+        let received = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            router_rx.recv(),
+        )
+        .await
+        .expect("timeout: retry did not deliver message")
+        .expect("router rx closed");
+
+        assert_eq!(received.actor_id, actor_id);
+        shutdown_tx.send(()).ok();
+    }
+
+    // -------------------------------------------------------------------------
+    // Shutdown behaviour
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dispatcher_exits_on_broadcast_signal() {
+        let (dispatcher, _global_tx, _router_channels, _shared_state) = make_dispatcher();
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let dispatcher = dispatcher.with_shutdown(shutdown_rx);
+
+        let handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
+
+        shutdown_tx.send(()).unwrap();
+
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            handle,
+        )
+        .await
+        .expect("dispatcher did not exit in time")
+        .expect("join error");
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_exits_on_channel_close() {
+        let (dispatcher, global_tx, _router_channels, _shared_state) = make_dispatcher();
+        let handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
+
+        drop(global_tx); // closed channel → dispatcher sees None → exits
+
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            handle,
+        )
+        .await
+        .expect("dispatcher did not exit in time")
+        .expect("join error");
+
+        assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // Failure modes
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn closed_router_channel_does_not_panic() {
+        let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
+        let actor_id = Uuid::new_v4();
+        let ns: RouterNamespace = Arc::from("closed-router-ns");
+
+        shared_state
+            .write()
+            .await
+            .actor_router_addresses
+            .insert(actor_id, ns.clone());
+
+        // Insert a router channel, then immediately drop the rx side
+        let (router_tx, router_rx) = mpsc::channel::<RoutedMessage>(4);
+        router_channels.insert(ns, router_tx);
+        drop(router_rx);
+
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let dispatcher = dispatcher.with_shutdown(shutdown_rx);
+        let handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
+
+        // This should log an error but not panic
+        global_tx
+            .send(make_routed_message(actor_id, RoutingProtocol::ModelHandshake))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        shutdown_tx.send(()).ok();
+
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(300),
+            handle,
+        )
+        .await
+        .expect("timeout")
+        .expect("join error");
+
+        assert!(result.is_ok(), "Dispatcher should not panic on closed router channel");
+    }
+}
