@@ -126,6 +126,7 @@ pub(crate) fn construct_transport_addresses(
                 inference_server_address: Arc::<str>::from(""),
                 inference_scaling_server_address: Arc::<str>::from(""),
             },
+            #[cfg(feature = "zmq-transport")]
             zmq_training_addresses: SharedZmqTrainingAddresses {
                 agent_listener_address: Arc::<str>::from(""),
                 model_server_address: Arc::<str>::from(""),
@@ -443,10 +444,6 @@ mod unit_tests {
     use crate::network::client::agent::{LocalTrajectoryFileType, LocalTrajectoryFileParams};
     use crate::utilities::configuration::LocalModelModuleParams;
 
-    // -------------------------------------------------------------------------
-    // construct_local_model_path
-    // -------------------------------------------------------------------------
-
     #[test]
     fn construct_local_model_path_joins_components() {
         let params = LocalModelModuleParams {
@@ -483,10 +480,6 @@ mod unit_tests {
             "Returned path should be absolute (rooted at cwd)"
         );
     }
-
-    // -------------------------------------------------------------------------
-    // construct_trajectory_file_output
-    // -------------------------------------------------------------------------
 
     #[test]
     fn construct_trajectory_file_output_joins_directory_with_cwd() {
@@ -549,7 +542,7 @@ mod unit_tests {
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(tmp, "{{}}").expect("write temp config");
         let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
-        let lm = LifeCycleManager::new(AlgorithmArgs::default(), &config, tmp.path().to_path_buf(), TransportType::NATS);
+        let lm = LifeCycleManager::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] AlgorithmArgs::default(), &config, tmp.path().to_path_buf(), #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default());
         // keep tempfile alive until LifeCycleManager is constructed
         drop(tmp);
         lm

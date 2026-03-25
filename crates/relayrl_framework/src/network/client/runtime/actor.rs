@@ -568,10 +568,14 @@ mod unit_tests {
 
     use burn_ndarray::NdArray;
     use burn_ndarray::NdArrayDevice;
+     
+    #[cfg(feature = "tch-backend")]
     use burn_tch::LibTorch;
 
 
     type NdArrayBackend = NdArray<f32>;
+
+    #[cfg(feature = "tch-backend")]
     type TchBackend = LibTorch<f32>;
 
     const D_IN: usize = 4;
@@ -588,6 +592,7 @@ mod unit_tests {
         Arc::new(RwLock::new(None))
     }
 
+    #[cfg(feature = "tch-backend")]
     fn empty_torch_model_handle() -> LocalModelHandle<TchBackend> {
         Arc::new(RwLock::new(None))
     }
@@ -619,6 +624,7 @@ mod unit_tests {
 
     }
 
+    #[cfg(feature = "tch-backend")]
     async fn create_tch_actor(max_traj_length: u128, device: DeviceType) -> (Actor<TchBackend, D_IN, D_OUT>, mpsc::Sender<RoutedMessage>, mpsc::Receiver<RoutedMessage>) {
         let actor_id = Uuid::new_v4();
         let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
@@ -776,7 +782,7 @@ mod unit_tests {
         let actor_id = actor.actor_id;
 
         let obs = Arc::new(AnyBurnTensor::Float(FloatBurnTensor::<NdArrayBackend, D_IN> {
-            tensor: Arc::new(Tensor::zeros([D_IN], &NdArrayDevice::default())),
+            tensor: Arc::new(Tensor::zeros(burn_tensor::Shape::new([4; D_IN]), &NdArrayDevice::default())),
             dtype: DType::NdArray(NdArrayDType::F32),
         }));
         let mask = None::<Arc<AnyBurnTensor<NdArrayBackend, D_OUT>>>;
@@ -789,7 +795,7 @@ mod unit_tests {
             reply_to: oneshot::channel().0,
         };
 
-        tx.send(build_msg(actor_id, RoutingProtocol::RequestInference, RoutedPayload::RequestInference(Box::new(inference_request))));
+        tx.send(build_msg(actor_id, RoutingProtocol::RequestInference, RoutedPayload::RequestInference(Box::new(inference_request)))).await.unwrap();
 
         let msg = tokio::time::timeout(
             tokio::time::Duration::from_millis(300),

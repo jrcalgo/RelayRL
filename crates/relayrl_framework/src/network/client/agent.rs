@@ -154,14 +154,14 @@ impl Default for InferenceParams {
     }
 }
 
-#[cfg(feature = "zmq-transport")]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingParams {
     pub model_mode: ModelMode,
     pub training_addresses: Option<TrainingAddressesArgs>,
 }
 
-#[cfg(feature = "zmq-transport")]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 impl Default for TrainingParams {
     fn default() -> Self {
         Self {
@@ -526,7 +526,7 @@ impl<
         // Initialize agent object
         let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.transport_type.unwrap_or(TransportType::ZMQ),
+            self.transport_type.unwrap_or(TransportType::default()),
             self.client_modes.unwrap_or(ClientModes::default()),
         );
 
@@ -1191,21 +1191,21 @@ mod unit_tests {
 
     #[tokio::test]
     async fn scale_throughput_zero_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(TransportType::NATS, ClientModes::default());
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default());
         let result = agent.scale_throughput(0).await;
         assert!(matches!(result, Err(ClientError::NoopRouterScale(_))));
     }
 
     #[tokio::test]
     async fn new_actors_zero_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(TransportType::NATS, ClientModes::default());
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default());
         let result = agent.new_actors(0, DeviceType::Cpu, None).await;
         assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
     }
 
     #[tokio::test]
     async fn remove_actors_empty_vec_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(TransportType::NATS, ClientModes::default());
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default());
         let result = agent.remove_actors(vec![]).await;
         assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
     }

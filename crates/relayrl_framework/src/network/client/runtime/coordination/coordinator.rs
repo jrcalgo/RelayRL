@@ -1275,7 +1275,7 @@ mod unit_tests {
     type TestBackend = NdArray<f32>;
 
     fn make_coordinator() -> ClientCoordinator<TestBackend, 4, 1> {
-        ClientCoordinator::<TestBackend, 4, 1>::new(TransportType::NATS, ClientModes::default())
+        ClientCoordinator::<TestBackend, 4, 1>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default())
     }
 
     #[test]

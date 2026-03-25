@@ -2,6 +2,7 @@ use crate::network::TransportType;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+#[cfg(feature = "zmq-transport")]
 use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
 #[cfg(feature = "nats-transport")]
 use crate::network::client::runtime::data::transport_sink::nats::interface::NatsInterface;
