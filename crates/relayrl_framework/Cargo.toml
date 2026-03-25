@@ -34,7 +34,7 @@ nats-training-server = ["nats-transport"]
 nats-inference-server = ["nats-transport"]
 
 zmq-transport = ["zmq"]
-nats-transport = ["async-nats"]
+nats-transport = ["async-nats", "tokio-stream"]
 
 logging = ["log4rs"]
 metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]
@@ -48,7 +48,7 @@ active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
 tokio = { workspace = true, features = ["full"] }
-tokio-stream = "0.1.18"
+tokio-stream = { version = "0.1.18", optional = true }
 serde = { workspace = true, features = ["derive"] }
 log = { version = "0.4.28", features = ["kv"] }
 rand = "0.9.2"
