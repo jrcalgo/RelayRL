@@ -812,7 +812,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         let global_dispatcher_tx = global_dispatcher_tx.clone();
 
         task::spawn_blocking(move || {
-            println!(
+            log::info!(
                 "[ZmqClient] Listening for model updates at {}",
                 model_server_address
             );
@@ -830,7 +830,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 {
                     Ok(message_parts) => {
                         if message_parts.len() < 3 {
-                            eprintln!("[ZmqClient] Malformed model update response");
+                            log::error!("[ZmqClient] Malformed model update response");
                             return Err(TransportError::ListenForModelError(
                                 "Malformed model update response".to_string(),
                             ));
@@ -840,13 +840,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                         let actor_id_bytes = message_parts[2].clone();
 
                         if model_bytes.is_empty() {
-                            eprintln!("[ZmqClient] Model bytes are empty");
+                            log::warn!("[ZmqClient] Model bytes are empty");
                             continue;  // drops the message
                         }
 
                         let actor_id = {
                             if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
-                                eprintln!("[ZmqClient] Actor ID bytes are empty or invalid");
+                                log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
                                 continue;  // drops the message
                             } else {
                                 let actor_array = actor_id_bytes.as_array::<16>().cloned().unwrap(); // safe because we know the length is 16
@@ -865,7 +865,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                         let _ = global_dispatcher_tx.blocking_send(msg);
                     }
                     Err(e) => {
-                        eprintln!("[ZmqClient] SUB socket recv error: {}", e);
+                        log::error!("[ZmqClient] SUB socket recv error: {}", e);
                         return Err::<(), TransportError>(TransportError::ListenForModelError(
                             format!("SUB socket recv error: {}", e),
                         ));
@@ -984,7 +984,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 0,
             ) {
             Ok(_) => {
-                println!("[ZmqClient] Sent algorithm init request");
+                log::info!("[ZmqClient] Sent algorithm init request");
             }
             Err(e) => {
                 return Err(TransportError::SendAlgorithmInitRequestError(format!(
@@ -1028,7 +1028,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        println!("[ZmqClient] Starting initial model handshake...");
+        log::info!("[ZmqClient] Starting initial model handshake...");
 
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
         let transport_entry_string =
@@ -1081,9 +1081,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ],
                 0,
             ) {
-            Ok(_) => println!("[ZmqClient] Sent GET_MODEL request"),
+            Ok(_) => log::info!("[ZmqClient] Sent GET_MODEL request"),
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send GET_MODEL: {}", e);
+                log::error!("[ZmqClient] Failed to send GET_MODEL: {}", e);
                 return Err(TransportError::ModelHandshakeError(format!(
                     "Failed to send GET_MODEL: {}",
                     e
@@ -1100,14 +1100,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         {
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
-                    eprintln!("[ZmqClient] Malformed handshake response");
+                    log::error!("[ZmqClient] Malformed handshake response");
                     return Err(TransportError::ModelHandshakeError(
                         "Malformed handshake response".to_string(),
                     ));
                 }
 
                 let model_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Received initial model ({} bytes)",
                     model_bytes.len()
                 );
@@ -1116,7 +1116,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match NamedTempFile::new() {
                     Ok(mut temp_file) => {
                         if let Err(e) = temp_file.write_all(model_bytes) {
-                            eprintln!("[ZmqClient] Failed to write model to temp file: {}", e);
+                            log::error!("[ZmqClient] Failed to write model to temp file: {}", e);
                             return Err(TransportError::ModelHandshakeError(format!(
                                 "Failed to write model to temp file: {}",
                                 e
@@ -1126,17 +1126,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                         match ModelModule::<B>::load_from_path(temp_file.path()) {
                             Ok(model) => {
                                 if let Err(e) = validate_module::<B>(&model) {
-                                    eprintln!("[ZmqClient] Failed to validate model: {:?}", e);
+                                    log::error!("[ZmqClient] Failed to validate model: {:?}", e);
                                     return Err(TransportError::ModelHandshakeError(format!(
                                         "Failed to validate model: {:?}",
                                         e
                                     )));
                                 }
-                                println!("[ZmqClient] Model loaded and validated successfully");
+                                log::info!("[ZmqClient] Model loaded and validated successfully");
                                 Ok(Some(model))
                             }
                             Err(e) => {
-                                eprintln!("[ZmqClient] Failed to load model: {:?}", e);
+                                log::error!("[ZmqClient] Failed to load model: {:?}", e);
                                 Err(TransportError::ModelHandshakeError(format!(
                                     "Failed to load model: {:?}",
                                     e
@@ -1145,7 +1145,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                         }
                     }
                     Err(e) => {
-                        eprintln!("[ZmqClient] Failed to create temp file: {}", e);
+                        log::error!("[ZmqClient] Failed to create temp file: {}", e);
                         Err(TransportError::ModelHandshakeError(format!(
                             "Failed to create temp file: {}",
                             e
@@ -1154,7 +1154,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to receive model: {}", e);
+                log::error!("[ZmqClient] Failed to receive model: {}", e);
                 Err(TransportError::ModelHandshakeError(format!(
                     "Failed to receive model: {}",
                     e
@@ -1200,7 +1200,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             TransportError::SendTrajError(format!("Failed to serialize trajectory: {}", e))
         })?;
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending trajectory ({} bytes, {} actions)",
             serialized_traj.len(),
             encoded_trajectory.num_actions
@@ -1255,11 +1255,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ], 0)
         {
             Ok(_) => {
-                println!("[ZmqClient] Trajectory sent successfully");
+                log::info!("[ZmqClient] Trajectory sent successfully");
                 Ok(())
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send trajectory: {}", e);
+                log::error!("[ZmqClient] Failed to send trajectory: {}", e);
                 Err(TransportError::SendTrajError(format!(
                     "Failed to send trajectory: {}",
                     e
@@ -1366,7 +1366,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ],
                 0,
             ) {
-            Ok(_) => println!("[ZmqClient] Sent client IDs to server"),
+            Ok(_) => log::info!("[ZmqClient] Sent client IDs to server"),
             Err(e) => {
                 return Err(TransportError::SendClientIdsToServerError(format!(
                     "Failed to send client IDs to server: {}",
@@ -1397,7 +1397,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(&message_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server updated cache with client IDs");
+                            log::info!("[ZmqClient] Server updated cache with client IDs");
                             return Ok(());
                         }
                         ServerResponse::Failure => {
@@ -1443,7 +1443,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ScalingOperation::ScaleIn => "scale_in",
         };
 
-        println!(
+        log::info!(
             "[ZmqClient] Scaling warning notification send for {}",
             operation_type
         );
@@ -1466,7 +1466,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending scaling warning to {}",
             training_scaling_server_address
         );
@@ -1528,10 +1528,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 0,
             ) {
             Ok(_) => {
-                println!("[ZmqClient] Scaling warning sent successfully");
+                log::info!("[ZmqClient] Scaling warning sent successfully");
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send scaling warning: {}", e);
+                log::error!("[ZmqClient] Failed to send scaling warning: {}", e);
                 return Err(TransportError::SendScalingWarningError(format!(
                     "Failed to send scaling warning: {}",
                     e
@@ -1551,14 +1551,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         {
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
-                    eprintln!("[ZmqClient] Malformed scaling warning response");
+                    log::error!("[ZmqClient] Malformed scaling warning response");
                     return Err(TransportError::SendScalingWarningError(
                         "Malformed scaling warning response".to_string(),
                     ));
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Scaling warning response: {}",
                     String::from_utf8_lossy(response_bytes)
                 );
@@ -1566,17 +1566,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server acknowledged scaling warning");
+                            log::info!("[ZmqClient] Server acknowledged scaling warning");
                         }
                         ServerResponse::Failure => {
-                            println!("[ZmqClient] Server failed to acknowledge scaling warning");
+                            log::error!("[ZmqClient] Server failed to acknowledge scaling warning");
                             return Err(TransportError::SendScalingWarningError(
                                 "Server failed to acknowledge scaling warning".to_string(),
                             ));
                         }
                     },
                     Err(e) => {
-                        eprintln!(
+                        log::error!(
                             "[ZmqClient] Failed to parse scaling warning response: {}",
                             e
                         );
@@ -1588,7 +1588,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
             }
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "[ZmqClient] Failed to receive scaling warning response: {}",
                     e
                 );
@@ -1622,7 +1622,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ScalingOperation::ScaleIn => "scale_in",
         };
 
-        println!(
+        log::info!(
             "[ZmqClient] Scaling complete notification send for {}",
             operation_type
         );
@@ -1644,7 +1644,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending scaling complete to {}",
             training_scaling_server_address
         );
@@ -1705,10 +1705,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 0,
             ) {
             Ok(_) => {
-                println!("[ZmqClient] Scaling complete sent successfully");
+                log::info!("[ZmqClient] Scaling complete sent successfully");
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send scaling complete: {}", e);
+                log::error!("[ZmqClient] Failed to send scaling complete: {}", e);
                 return Err(TransportError::SendScalingCompleteError(format!(
                     "Failed to send scaling complete: {}",
                     e
@@ -1728,14 +1728,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         {
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
-                    eprintln!("[ZmqClient] Malformed scaling complete response");
+                    log::error!("[ZmqClient] Malformed scaling complete response");
                     return Err(TransportError::SendScalingCompleteError(
                         "Malformed scaling complete response".to_string(),
                     ));
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Scaling complete response: {}",
                     String::from_utf8_lossy(response_bytes)
                 );
@@ -1743,17 +1743,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server acknowledged scaling complete");
+                            log::info!("[ZmqClient] Server acknowledged scaling complete");
                         }
                         ServerResponse::Failure => {
-                            println!("[ZmqClient] Server failed to acknowledge scaling complete");
+                            log::error!("[ZmqClient] Server failed to acknowledge scaling complete");
                             return Err(TransportError::SendScalingCompleteError(
                                 "Server failed to acknowledge scaling complete".to_string(),
                             ));
                         }
                     },
                     Err(e) => {
-                        eprintln!(
+                        log::error!(
                             "[ZmqClient] Failed to parse scaling complete response: {}",
                             e
                         );
@@ -1765,7 +1765,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
             }
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "[ZmqClient] Failed to receive scaling complete response: {}",
                     e
                 );
@@ -1793,7 +1793,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ));
         }
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending shutdown signal to {}",
             training_scaling_server_address
         );
@@ -1871,7 +1871,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ],
                 0,
             ) {
-            Ok(_) => println!("[ZmqClient] Sent shutdown signal to server"),
+            Ok(_) => log::info!("[ZmqClient] Sent shutdown signal to server"),
             Err(e) => {
                 return Err(TransportError::SendShutdownSignalError(format!(
                     "Failed to send shutdown signal to server: {}",
@@ -1898,7 +1898,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Shutdown signal response: {}",
                     String::from_utf8_lossy(response_bytes)
                 );
@@ -1906,11 +1906,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server acknowledged shutdown signal");
+                            log::info!("[ZmqClient] Server acknowledged shutdown signal");
                             return Ok(());
                         }
                         ServerResponse::Failure => {
-                            println!("[ZmqClient] Server failed to acknowledge shutdown signal");
+                            log::error!("[ZmqClient] Server failed to acknowledge shutdown signal");
                             return Err(TransportError::SendShutdownSignalError(
                                 "Server failed to acknowledge shutdown signal".to_string(),
                             ));

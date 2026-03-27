@@ -179,7 +179,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let dispatcher: RouterDispatcher<B, D_IN, D_OUT> = match lifecycle.subscribe_shutdown() {
             Ok(rx) => dispatcher.with_shutdown(rx),
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "[ScaleManager] Failed to subscribe dispatcher to shutdown: {}",
                     e
                 );
@@ -189,7 +189,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let router_dispatcher: Option<JoinHandle<()>> = Some(tokio::spawn(async move {
             if let Err(e) = dispatcher.spawn_loop().await {
-                eprintln!("[ScaleManager] RouterDispatcher error: {}", e);
+                log::error!("[ScaleManager] RouterDispatcher error: {}", e);
             }
         }));
 
@@ -567,12 +567,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .unwrap_or(0);
 
         if current_router_count != initial_router_count + router_add {
-            eprintln!(
+            log::error!(
                 "Router creation failed: expected {} routers, but have {}",
                 initial_router_count + router_add,
                 current_router_count
             );
-            eprintln!("Rolling back newly created routers...");
+            log::warn!("Rolling back newly created routers...");
             self.rollback_routers(&new_router_namespaces).await;
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -615,7 +615,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .send_scaling_complete(ScalingOperation::ScaleOut, transport_addresses)
                 .await
             {
-                eprintln!(
+                log::warn!(
                     "Rolling back: removing newly created routers and restoring actor mappings..."
                 );
 
@@ -629,7 +629,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 self.rollback_routers(&new_router_namespaces).await;
 
-                eprintln!(
+                log::error!(
                     "[ScaleManager] Failed to send scaling confirmation via transport: {}.\n\
                     Server was not notified of scaling completion.\n\
                     Rollback complete. System restored to pre-scaling router state.",
@@ -646,7 +646,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
         }
 
-        println!(
+        log::info!(
             "Scale up successful: {} new router(s) added, total routers: {}",
             router_add, current_router_count
         );
@@ -671,7 +671,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         if self.runtime_params.is_none() {
-            println!("No routers to scale down.");
+            log::warn!("No routers to scale down.");
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             {
                 if let Some(transport_addresses) = transport_addresses_opt {
@@ -699,7 +699,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .len();
 
         if initial_router_count < router_remove {
-            eprintln!(
+            log::error!(
                 "Cannot remove {} routers: only {} routers exist",
                 router_remove, initial_router_count
             );
@@ -742,7 +742,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         };
 
         if current_router_count != initial_router_count - router_remove {
-            eprintln!(
+            log::error!(
                 "Router removal verification failed: expected {} routers, but have {}",
                 initial_router_count - router_remove,
                 current_router_count
@@ -806,7 +806,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let state = self.shared_state.write().await;
                     state.restore_actor_router_mappings(old_actor_mappings);
                 }
-                eprintln!(
+                log::error!(
                     "[ScaleManager] Failed to send scaling confirmation via transport: {}.\n\
                     Full rollback complete. All routers restored.",
                     e
@@ -843,13 +843,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             remove_namespace(router_namespace.as_ref());
             self.router_filter_channels.remove(router_namespace);
 
-            println!(
+            log::info!(
                 "Router namespace {} removed from registry.",
                 router_namespace
             );
         }
 
-        println!(
+        log::info!(
             "Scale down successful: {} router(s) removed, total routers: {}",
             router_remove, current_router_count
         );
@@ -874,7 +874,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     remove_namespace(router_namespace.as_ref());
                     self.router_filter_channels.remove(router_namespace);
 
-                    eprintln!("Rolled back router with namespace tag {}", router_namespace);
+                    log::warn!("Rolled back router with namespace tag {}", router_namespace);
                 }
             }
         }
@@ -951,7 +951,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn spawn_central_filter(filter: ClientCentralFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = filter.spawn_loop().await {
-                eprintln!("[ScaleManager] Central filter error: {}", e);
+                log::error!("[ScaleManager] Central filter error: {}", e);
             }
         })
     }
@@ -962,7 +962,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = receiver.spawn_loop().await {
-                eprintln!("[ScaleManager] Transport receiver error: {}", e);
+                log::error!("[ScaleManager] Transport receiver error: {}", e);
             }
         })
     }
@@ -970,7 +970,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     fn spawn_trajectory_buffer(mut buffer: ClientTrajectoryBuffer<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = buffer.spawn_loop() {
-                eprintln!("[ScaleManager] Trajectory buffer error: {}", e);
+                log::error!("[ScaleManager] Trajectory buffer error: {}", e);
             }
         })
     }

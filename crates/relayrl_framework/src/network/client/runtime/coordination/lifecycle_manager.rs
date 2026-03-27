@@ -15,6 +15,7 @@ use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use std::collections::HashMap;
+use log::*;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -211,7 +212,7 @@ impl LifeCycleManager {
         let last_modified: SystemTime = fs::metadata(&config_path)
             .and_then(|m| m.modified())
             .unwrap_or_else(|e| {
-                eprintln!(
+                log::error!(
                     "[LifeCycleManager] Failed to read config metadata: {}, using current time",
                     e
                 );
@@ -257,7 +258,7 @@ impl LifeCycleManager {
         let self_clone: LifeCycleManager = self.clone();
         tokio::spawn(async move {
             if let Err(e) = self_clone.watch().await {
-                eprintln!("[LifeCycleManager] Failed to spawn loop: {}", e);
+                log::error!("[LifeCycleManager] Failed to spawn loop: {}", e);
             }
         });
     }
@@ -371,7 +372,7 @@ impl LifeCycleManager {
                         if let Ok(modified) = metadata.modified() {
                             let mut last_modified = self.last_modified.write().await;
                             if modified > *last_modified {
-                                println!("[LifeCycleManager] Config file changed, reloading...");
+                                log::info!("[LifeCycleManager] Config file changed, reloading...");
                                 *last_modified = modified;
                                 self.handle_config_change(self.config_path.as_ref().clone()).await?;
                             }

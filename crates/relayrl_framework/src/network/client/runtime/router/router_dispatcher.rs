@@ -107,17 +107,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 // Log errors but continue processing
                                 match e {
                                     RouterDispatcherError::ActorNotAssignedError(error_message) => {
-                                        eprintln!("[RouterDispatcher] {}. Message queued for retry.", error_message);
+                                        log::error!("[RouterDispatcher] {}. Message queued for retry.", error_message);
                                     }
                                     _ => {
-                                        eprintln!("[RouterDispatcher] Dispatch error: {}", e);
+                                        log::error!("[RouterDispatcher] Dispatch error: {}", e);
                                     }
                                 }
                             }
                         }
                         None => {
                             // Channel closed, exit loop
-                            println!("[RouterDispatcher] Global channel closed, shutting down");
+                            log::warn!("[RouterDispatcher] Global channel closed, shutting down");
                             retry_handle.abort();
                             break Ok(());
                         }
@@ -129,7 +129,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         None => std::future::pending::<()>().await,
                     }
                 } => {
-                    println!("[RouterDispatcher] Shutdown signal received");
+                    log::info!("[RouterDispatcher] Shutdown signal received");
                     retry_handle.abort();
                     break Ok(());
                 }
@@ -181,7 +181,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     // Check if expired
                     if elapsed > max_retry_duration {
-                        eprintln!(
+                        log::warn!(
                             "[RouterDispatcher] Message for actor {} expired after {}ms (retry count: {})",
                             actor_id,
                             elapsed.as_millis(),
@@ -245,7 +245,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 // Try to send (no lock needed)
                                 match tx.try_send(pending_msg.message) {
                                     Ok(()) => {
-                                        println!(
+                                        log::info!(
                                             "[RouterDispatcher] Successfully dispatched queued message for actor {} after {} retries",
                                             actor_id, retry_count
                                         );
@@ -264,7 +264,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         );
                                     }
                                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                        eprintln!(
+                                        log::warn!(
                                             "[RouterDispatcher] Router channel closed for actor {}, removing from retry queue",
                                             actor_id
                                         );
@@ -425,9 +425,6 @@ mod unit_tests {
         (dispatcher, global_tx, router_channels, shared_state)
     }
 
-    // -------------------------------------------------------------------------
-    // Timeout values per protocol
-    // -------------------------------------------------------------------------
 
     #[test]
     fn get_timeout_for_protocol_correct_values() {
@@ -474,11 +471,7 @@ mod unit_tests {
             Duration::from_secs(60)
         );
     }
-
-    // -------------------------------------------------------------------------
-    // Dispatch to correct router
-    // -------------------------------------------------------------------------
-
+  
     #[tokio::test]
     async fn dispatches_to_assigned_router() {
         let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
@@ -519,10 +512,6 @@ mod unit_tests {
         assert_eq!(received.actor_id, actor_id);
         shutdown_tx.send(()).ok();
     }
-
-    // -------------------------------------------------------------------------
-    // Retry queue for unassigned actors
-    // -------------------------------------------------------------------------
 
     #[tokio::test]
     async fn queues_message_for_unassigned_actor() {
@@ -591,10 +580,6 @@ mod unit_tests {
         shutdown_tx.send(()).ok();
     }
 
-    // -------------------------------------------------------------------------
-    // Shutdown behaviour
-    // -------------------------------------------------------------------------
-
     #[tokio::test]
     async fn dispatcher_exits_on_broadcast_signal() {
         let (dispatcher, _global_tx, _router_channels, _shared_state) = make_dispatcher();
@@ -633,10 +618,6 @@ mod unit_tests {
 
         assert!(result.is_ok());
     }
-
-    // -------------------------------------------------------------------------
-    // Failure modes
-    // -------------------------------------------------------------------------
 
     #[tokio::test]
     async fn closed_router_channel_does_not_panic() {

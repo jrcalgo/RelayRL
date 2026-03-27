@@ -176,7 +176,6 @@ pub mod templates;
 pub mod utilities {
     pub mod configuration;
     pub(crate) mod observability;
-    pub(crate) mod tokio;
 }
 
 /// Prelude module for convenient imports.

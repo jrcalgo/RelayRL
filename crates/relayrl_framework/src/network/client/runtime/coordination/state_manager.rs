@@ -255,7 +255,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         tx_to_buffer: Sender<RoutedMessage>,
     ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&actor_id) {
-            println!(
+            log::warn!(
                 "[StateManager] Actor ID {} already exists, replacing existing actor...",
                 actor_id
             );
@@ -314,7 +314,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
 
             if let Err(e) = actor.spawn_loop().await {
-                eprintln!("[StateManager] Actor {:?} loop error: {}", actor_id, e);
+                log::error!("[StateManager] Actor {:?} loop error: {}", actor_id, e);
             }
         }));
 

@@ -12,7 +12,6 @@ use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
 use crate::utilities::configuration::ClientConfigLoader;
-use crate::utilities::tokio::get_or_init_tokio_runtime;
 
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{BackendMatcher, ConversionBurnTensor, DeviceType};
@@ -23,6 +22,7 @@ use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
+use log::*;
 use bincode::config;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -293,7 +293,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let model_init_flag = model_handle.read().await.is_none();
         if model_init_flag {
-            eprintln!(
+            log::warn!(
                 "[ActorEntity] Startup model is None, initial model handshake necessitated..."
             );
         }
@@ -355,7 +355,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             {
                 let model_guard = self.reloadable_model.read().await;
                 if model_guard.is_some() {
-                    println!(
+                    log::warn!(
                         "[Actor {:?}] Model already available, handshake not needed",
                         self.actor_id
                     );
@@ -365,7 +365,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             if let Some(training_dispatcher) = &self.shared_training_dispatcher {
-                println!(
+                log::info!(
                     "[Actor {:?}] Starting training model handshake",
                     self.actor_id
                 );
@@ -388,13 +388,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .initial_model_handshake(actor_entry, shared_transport_addresses)
                     .await
                 {
-                    println!(
+                    log::info!(
                         "[Actor {:?}] Model handshake successful, received model data",
                         self.actor_id
                     );
 
                     if let Err(e) = model.save(&self.shared_local_model_path.read().await.clone()) {
-                        eprintln!("[Actor {:?}] Failed to save model: {:?}", self.actor_id, e);
+                        log::error!("[Actor {:?}] Failed to save model: {:?}", self.actor_id, e);
                     }
 
                     let model_path = self.shared_local_model_path.clone();
@@ -409,7 +409,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 .reload_from_path(model_path.read().await.clone(), version)
                                 .await
                                 .map_err(|e| {
-                                    eprintln!(
+                                    log::error!(
                                         "[Actor {:?}] Failed to reload model: {:?}",
                                         actor_id, e
                                     );
@@ -425,13 +425,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         }
                     }
                 } else {
-                    eprintln!(
+                    log::error!(
                         "[Actor {:?}] Model handshake failed or no model update needed",
                         self.actor_id
                     );
                 }
             } else {
-                eprintln!(
+                log::error!(
                     "[Actor {:?}] No transport dispatcher configured for model handshake",
                     self.actor_id
                 );
@@ -439,7 +439,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
             {
-                eprintln!(
+                log::error!(
                     "[Actor {:?}] No transport dispatcher configured for model handshake",
                     self.actor_id
                 );
@@ -478,7 +478,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             if let Ok(ok_model) = model {
                 if let Err(e) = validate_module::<B>(&ok_model).map_err(ActorError::from) {
-                    eprintln!(
+                    log::error!(
                         "[ActorEntity {:?}] Failed to validate model: {:?}",
                         self.actor_id, e
                     );
@@ -486,7 +486,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
 
                 if let Err(e) = ok_model.save(&model_path).map_err(ActorError::from) {
-                    eprintln!(
+                    log::error!(
                         "[ActorEntity {:?}] Failed to save model: {:?}",
                         self.actor_id, e
                     );
@@ -778,7 +778,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn handle_action_inference_appends_to_trajectory() {
-        let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let (mut actor, tx, mut rx_buf) = create_ndarray_actor(1, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
 
         let obs = Arc::new(AnyBurnTensor::Float(FloatBurnTensor::<NdArrayBackend, D_IN> {

@@ -401,7 +401,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                         {
                                             Ok(enc) => enc,
                                             Err(e) => {
-                                                eprintln!(
+                                                log::error!(
                                                     "[TrajectoryBuffer] Encode error: {:?}",
                                                     e
                                                 );
@@ -421,7 +421,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                         )
                                         .await
                                         {
-                                            eprintln!(
+                                            log::error!(
                                                 "[TrajectoryBuffer] Transport send error: {:?}",
                                                 e
                                             );
@@ -446,7 +446,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                         )
                                         .await
                                         {
-                                            eprintln!(
+                                            log::error!(
                                                 "[TrajectoryBuffer] Local write error: {:?}",
                                                 e
                                             );
@@ -470,7 +470,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         let encoded = match job.traj_for_processing.encode(&worker_codec) {
                             Ok(enc) => enc,
                             Err(e) => {
-                                eprintln!("[TrajectoryBuffer] Encode error: {:?}", e);
+                                log::error!("[TrajectoryBuffer] Encode error: {:?}", e);
                                 return;
                             }
                         };

@@ -96,11 +96,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                     match result {
                         Ok(()) => {
                             // this should never happen, but if it does, we need to break the loop
-                            eprintln!("[ClientTransportModelReceiver] listen_for_model returned Ok");
+                            log::warn!("[ClientTransportModelReceiver] listen_for_model returned Ok");
                             self.active.store(false, Ordering::SeqCst);
                         }
                         Err(e) => {
-                            eprintln!("[ClientTransportModelReceiver] Failed to listen for model: {}", e);
+                            log::error!("[ClientTransportModelReceiver] Failed to listen for model: {}", e);
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }

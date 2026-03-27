@@ -39,9 +39,9 @@ use crate::prelude::config::TransportConfigParams;
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 #[cfg(feature = "logging")]
-use crate::utilities::observability::logging::builder::LoggingBuilder;
+use crate::utilities::observability::logging::*;
 #[cfg(feature = "metrics")]
-use crate::utilities::observability::metrics::MetricsManager;
+use crate::utilities::observability::metrics::*;
 
 use thiserror::Error;
 
@@ -58,6 +58,8 @@ use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
 use relayrl_types::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
+
+use log::*;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -228,8 +230,6 @@ pub struct CoordinatorParams<
     const D_OUT: usize,
 > {
     pub(crate) client_namespace: Arc<str>,
-    #[cfg(feature = "logging")]
-    pub(crate) logger: LoggingBuilder,
     #[cfg(feature = "metrics")]
     pub(crate) metrics: MetricsManager,
     pub(crate) lifecycle: LifeCycleManager,
@@ -347,22 +347,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             CodecConfig,
         >,
     ) -> Result<(), CoordinatorError> {
-        let client_namespace: Arc<str> = Arc::from(format!(
-            "{}-{}",
-            crate::network::CLIENT_NAMESPACE_PREFIX,
-            Uuid::new_v4()
-        ));
-
-        clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
-        reserve_namespace(client_namespace.as_ref());
-
         #[cfg(feature = "logging")]
-        let logger = LoggingBuilder::new();
-
-        #[cfg(feature = "metrics")]
-        let metrics: MetricsManager = observability::init_observability();
-
-        let shared_client_modes: Arc<ClientModes> = self.client_modes.clone();
+        init_logging();
 
         let config_path: PathBuf = match config_path {
             Some(path) => path,
@@ -376,6 +362,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         };
 
         let mut config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
+
+        #[cfg(feature = "metrics")]
+        let metrics: MetricsManager = init_metrics(config_loader.get_metrics_name(), config_loader.get_otlp_endpoint());
+
+        let client_namespace: Arc<str> = Arc::from(format!(
+            "{}-{}",
+            crate::network::CLIENT_NAMESPACE_PREFIX,
+            Uuid::new_v4()
+        ));
+
+        clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
+        reserve_namespace(client_namespace.as_ref());
+
+        let shared_client_modes: Arc<ClientModes> = self.client_modes.clone();
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -641,8 +641,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             self.runtime_params = Some(CoordinatorParams {
                 client_namespace,
-                #[cfg(feature = "logging")]
-                logger,
                 #[cfg(feature = "metrics")]
                 metrics,
                 lifecycle,
@@ -681,7 +679,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 Self::new_actor(self, default_device.clone(), actor_default_model.clone()).await?;
             }
         } else {
-            println!(
+            log::warn!(
                 "[Coordinator] RelayRLAgent started with no actors: either restart or add actors to the runtime!"
             );
         }
