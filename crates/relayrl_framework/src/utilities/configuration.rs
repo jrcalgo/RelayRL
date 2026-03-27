@@ -945,6 +945,8 @@ pub struct ClientConfigParams {
     pub config_update_polling_seconds: f32,
     pub init_hyperparameters: HyperparameterConfig,
     pub trajectory_file_output: LocalTrajectoryFileParams,
+    pub metrics_name: String,
+    pub otlp_endpoint: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -980,6 +982,8 @@ impl ClientConfigLoader {
                 config_update_polling_seconds: client_config.config_update_polling_seconds,
                 init_hyperparameters: client_config.init_hyperparameters,
                 trajectory_file_output: client_config.trajectory_file_output,
+                metrics_name: client_config.metrics_name,
+                otlp_endpoint: client_config.otlp_endpoint,
             },
             transport_config,
         }
@@ -1000,6 +1004,8 @@ impl ClientConfigLoader {
                             config_update_polling_seconds: 10.0,
                             init_hyperparameters: HyperparameterConfig::default(),
                             trajectory_file_output: LocalTrajectoryFileParams::default(),
+                            metrics_name: "relayrl-client".to_string(),
+                            otlp_endpoint: "http://127.0.0.1:4317".to_string(),
                         },
                         transport_config: TransportConfigBuilder::build_default()
                     }
@@ -1037,6 +1043,14 @@ impl ClientConfigLoader {
         &self.client_config.trajectory_file_output
     }
 
+    pub fn get_metrics_name(&self) -> &str {
+        &self.client_config.metrics_name
+    }
+
+    pub fn get_otlp_endpoint(&self) -> &str {
+        &self.client_config.otlp_endpoint
+    }
+
     pub fn get_transport_config(&self) -> &TransportConfigParams {
         &self.transport_config
     }
@@ -1047,6 +1061,8 @@ pub trait ClientConfigBuildParams {
     fn set_config_path(&mut self, config_path: &str) -> &mut Self;
     fn set_init_hyperparameters(&mut self, init_hyperparameters: HyperparameterConfig)
     -> &mut Self;
+    fn set_metrics_name(&mut self, metrics_name: &str) -> &mut Self;
+    fn set_otlp_endpoint(&mut self, otlp_endpoint: &str) -> &mut Self;
     fn set_trajectory_file_output(
         &mut self,
         trajectory_file_output: LocalTrajectoryFileParams,
@@ -1063,6 +1079,8 @@ pub struct ClientConfigBuilder {
     init_hyperparameters: Option<HyperparameterConfig>,
     transport_config: Option<TransportConfigParams>,
     trajectory_file_output: Option<LocalTrajectoryFileParams>,
+    metrics_name: Option<String>,
+    otlp_endpoint: Option<String>,
 }
 
 impl ClientConfigBuildParams for ClientConfigBuilder {
@@ -1089,6 +1107,16 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         trajectory_file_output: LocalTrajectoryFileParams,
     ) -> &mut Self {
         self.trajectory_file_output = Some(trajectory_file_output);
+        self
+    }
+
+    fn set_metrics_name(&mut self, metrics_name: &str) -> &mut Self {
+        self.metrics_name = Some(metrics_name.to_string());
+        self
+    }
+
+    fn set_otlp_endpoint(&mut self, otlp_endpoint: &str) -> &mut Self {
+        self.otlp_endpoint = Some(otlp_endpoint.to_string());
         self
     }
 
@@ -1119,6 +1147,14 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 .trajectory_file_output
                 .clone()
                 .unwrap_or_else(|| LocalTrajectoryFileParams::default()),
+            metrics_name: self
+                .metrics_name
+                .clone()
+                .unwrap_or_else(|| "relayrl-client".to_string()),
+            otlp_endpoint: self
+                .otlp_endpoint
+                .clone()
+                .unwrap_or_else(|| "http://127.0.0.1:4317".to_string()),
         };
 
         let transport_config: TransportConfigParams = match &self.transport_config {
@@ -1127,7 +1163,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 zmq_addresses: transport_config.zmq_addresses.clone(),
                 max_traj_length: transport_config.max_traj_length,
                 local_model_module: transport_config.local_model_module.clone(),
-            },
+            },  
             None => TransportConfigBuilder::build_default(),
         };
 
@@ -1145,6 +1181,8 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 config_update_polling_seconds: 10.0,
                 init_hyperparameters: HyperparameterConfig::default(),
                 trajectory_file_output: LocalTrajectoryFileParams::default(),
+                metrics_name: "relayrl-client".to_string(),
+                otlp_endpoint: "http://127.0.0.1:4317".to_string(),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }
