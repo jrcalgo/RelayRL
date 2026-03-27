@@ -19,7 +19,7 @@ static METRICS_MANAGER: OnceLock<MetricsManager> = OnceLock::new();
 /// Initialize the metrics system with default configuration
 ///
 /// This sets up the global metrics registry with default exporters.
-pub fn init_metrics() -> MetricsManager {
+pub fn init_metrics(meter_name: &'static str, otlp_endpoint: &str) -> MetricsManager {
     #[cfg(feature = "prometheus")]
     let prometheus_registry = Some(export::prometheus::create_prometheus_registry());
 
@@ -27,9 +27,9 @@ pub fn init_metrics() -> MetricsManager {
     let prometheus_registry = None;
 
     #[cfg(feature = "opentelemetry")]
-    export::open_telemetry::init_opentelemetry_with_otlp("http://localhost:4317");
+    export::open_telemetry::init_opentelemetry_with_otlp(otlp_endpoint);
 
-    let otel_meter = global::meter("relay-rl");
+    let otel_meter = global::meter(meter_name);
 
     let mgr_ref =
         METRICS_MANAGER.get_or_init(|| MetricsManager::new(prometheus_registry, otel_meter));
