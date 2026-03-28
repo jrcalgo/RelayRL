@@ -350,6 +350,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(feature = "logging")]
         init_logging();
 
+        let client_namespace: Arc<str> = Arc::from(format!(
+            "{}-{}",
+            crate::network::CLIENT_NAMESPACE_PREFIX,
+            Uuid::new_v4()
+        ));
+
+        clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
+        reserve_namespace(client_namespace.as_ref());
+
+        let shared_client_modes: Arc<ClientModes> = self.client_modes.clone();
+
         let config_path: PathBuf = match config_path {
             Some(path) => path,
             None => match DEFAULT_CLIENT_CONFIG_PATH.clone() {
@@ -362,20 +373,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         };
 
         let mut config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
-
-        #[cfg(feature = "metrics")]
-        let metrics: MetricsManager = init_metrics(config_loader.get_metrics_name(), config_loader.get_otlp_endpoint());
-
-        let client_namespace: Arc<str> = Arc::from(format!(
-            "{}-{}",
-            crate::network::CLIENT_NAMESPACE_PREFIX,
-            Uuid::new_v4()
-        ));
-
-        clear_namespace(client_namespace.as_ref()); // for this agent runtime, ensure no overlapping namespace exists in uuid registry/entire process
-        reserve_namespace(client_namespace.as_ref());
-
-        let shared_client_modes: Arc<ClientModes> = self.client_modes.clone();
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -528,6 +525,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         lifecycle.spawn_loop();
+
+        #[cfg(feature = "metrics")]
+        let metrics = {
+            let metrics_args = lifecycle.get_metrics_args();
+            init_metrics(metrics_args).await
+        };
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let (inference_dispatcher, scaling_dispatcher, training_dispatcher) = {
@@ -815,7 +818,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
                 #[cfg(feature = "metrics")]
-                params.metrics.record_counter("actors_created", 1, &[]);
+                params.metrics.record_counter("actors_created", 1, &[]).await;
 
                 // Get router runtime params
                 let router_runtime_params =
@@ -915,7 +918,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         match &self.runtime_params {
             Some(params) => {
                 #[cfg(feature = "metrics")]
-                params.metrics.record_counter("actors_removed", 1, &[]);
+                params.metrics.record_counter("actors_removed", 1, &[]).await;
                 params
                     .shared_state
                     .write()
@@ -1083,11 +1086,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(feature = "metrics")]
                 params
                     .metrics
-                    .record_histogram("action_request_latency", duration, &[]);
+                    .record_histogram("action_request_latency", duration, &[])
+                    .await;
                 #[cfg(feature = "metrics")]
                 params
                     .metrics
-                    .record_counter("action_requests", num_ids, &[]);
+                    .record_counter("action_requests", num_ids, &[])
+                    .await;
 
                 Ok(actions)
             }

@@ -184,6 +184,8 @@ pub(crate) struct LifeCycleManager {
     max_traj_length: Arc<RwLock<u128>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
+    #[cfg(feature = "metrics")]
+    metrics_args: Arc<RwLock<(String, String)>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
     local_model_path: Arc<RwLock<PathBuf>>,
@@ -233,6 +235,11 @@ impl LifeCycleManager {
                 &transport_config,
                 &transport_type,
             ))),
+            #[cfg(feature = "metrics")]
+            metrics_args: Arc::new(RwLock::new((
+                config.client_config.metrics_meter_name.clone(),
+                config.client_config.metrics_otlp_endpoint.clone(),
+            ))),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             init_hyperparameters: Arc::new(RwLock::new(
                 config.client_config.init_hyperparameters.to_args(None),
@@ -276,6 +283,11 @@ impl LifeCycleManager {
         self.transport_addresses.clone()
     }
 
+    #[cfg(feature = "metrics")]
+    pub fn get_metrics_args(&self) -> Arc<RwLock<(String, String)>> {
+        self.metrics_args.clone()
+    }
+
     pub fn get_local_model_path(&self) -> Arc<RwLock<PathBuf>> {
         self.local_model_path.clone()
     }
@@ -316,6 +328,17 @@ impl LifeCycleManager {
         Ok(())
     }
 
+    #[cfg(feature = "metrics")]
+    pub(crate) async fn set_metrics_args(
+        &self,
+        metrics_meter_name: &str,
+        metrics_otlp_endpoint: &str,
+    ) -> Result<(), LifeCycleManagerError> {
+        let mut metrics_args_guard = self.metrics_args.write().await;
+        *metrics_args_guard = (metrics_meter_name.to_string(), metrics_otlp_endpoint.to_string());
+        Ok(())
+    }
+    
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn set_init_hyperparameters(
         &self,
@@ -392,7 +415,7 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(all(any(feature = "nats-transport", feature = "zmq-transport"), not(feature = "metrics")))]
     pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
@@ -413,7 +436,29 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[cfg(all(any(feature = "nats-transport", feature = "zmq-transport"), feature = "metrics"))]
+    pub(crate) async fn handle_config_change(
+        &self,
+        path: PathBuf,
+    ) -> Result<(), LifeCycleManagerError> {
+        let new_config = ClientConfigLoader::load_config(&path);
+
+        tokio::try_join!(
+            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
+            self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
+            self.set_local_model_path(&new_config.transport_config.local_model_module),
+            self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
+            self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),
+            self.set_metrics_args(&new_config.client_config.metrics_meter_name, &new_config.client_config.metrics_otlp_endpoint),
+        )
+        .map_err(|e| {
+            LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
+        })?;
+
+        Ok(())
+    }
+
+    #[cfg(all(not(any(feature = "nats-transport", feature = "zmq-transport")), not(feature = "metrics")))]
     pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
@@ -424,6 +469,26 @@ impl LifeCycleManager {
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
+        )
+        .map_err(|e| {
+            LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
+        })?;
+
+        Ok(())
+    }
+
+    #[cfg(all(not(any(feature = "nats-transport", feature = "zmq-transport")), feature = "metrics"))]
+    pub(crate) async fn handle_config_change(
+        &self,
+        path: PathBuf,
+    ) -> Result<(), LifeCycleManagerError> {
+        let new_config = ClientConfigLoader::load_config(&path);
+
+        tokio::try_join!(
+            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
+            self.set_local_model_path(&new_config.transport_config.local_model_module),
+            self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
+            self.set_metrics_args(&new_config.client_config.metrics_meter_name, &new_config.client_config.metrics_otlp_endpoint),
         )
         .map_err(|e| {
             LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
