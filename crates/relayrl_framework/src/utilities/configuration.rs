@@ -226,6 +226,12 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_CONTENT: &str = r#"{
         "trajectory_file_output": {
             "directory": "experiment_data",
             "file_type": "json"
+        },
+        "metrics_meter_name": "relayrl-client",
+        "metrics_otlp_endpoint": {
+            "prefix": "http://",
+            "host": "127.0.0.1",
+            "port": "4317"
         }
     },
     "transport_config": {
@@ -945,8 +951,8 @@ pub struct ClientConfigParams {
     pub config_update_polling_seconds: f32,
     pub init_hyperparameters: HyperparameterConfig,
     pub trajectory_file_output: LocalTrajectoryFileParams,
-    pub metrics_name: String,
-    pub otlp_endpoint: String,
+    pub metrics_meter_name: String,
+    pub metrics_otlp_endpoint: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -982,8 +988,8 @@ impl ClientConfigLoader {
                 config_update_polling_seconds: client_config.config_update_polling_seconds,
                 init_hyperparameters: client_config.init_hyperparameters,
                 trajectory_file_output: client_config.trajectory_file_output,
-                metrics_name: client_config.metrics_name,
-                otlp_endpoint: client_config.otlp_endpoint,
+                metrics_meter_name: client_config.metrics_meter_name,
+                metrics_otlp_endpoint: client_config.metrics_otlp_endpoint,
             },
             transport_config,
         }
@@ -1004,8 +1010,8 @@ impl ClientConfigLoader {
                             config_update_polling_seconds: 10.0,
                             init_hyperparameters: HyperparameterConfig::default(),
                             trajectory_file_output: LocalTrajectoryFileParams::default(),
-                            metrics_name: "relayrl-client".to_string(),
-                            otlp_endpoint: "http://127.0.0.1:4317".to_string(),
+                            metrics_meter_name: "relayrl-client".to_string(),
+                            metrics_otlp_endpoint: "http://127.0.0.1:4317".to_string(),
                         },
                         transport_config: TransportConfigBuilder::build_default()
                     }
@@ -1043,12 +1049,12 @@ impl ClientConfigLoader {
         &self.client_config.trajectory_file_output
     }
 
-    pub fn get_metrics_name(&self) -> &str {
-        &self.client_config.metrics_name
+    pub fn get_metrics_meter_name(&self) -> &str {
+        &self.client_config.metrics_meter_name
     }
 
-    pub fn get_otlp_endpoint(&self) -> &str {
-        &self.client_config.otlp_endpoint
+    pub fn get_metrics_otlp_endpoint(&self) -> &str {
+        &self.client_config.metrics_otlp_endpoint
     }
 
     pub fn get_transport_config(&self) -> &TransportConfigParams {
@@ -1147,11 +1153,11 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 .trajectory_file_output
                 .clone()
                 .unwrap_or_else(|| LocalTrajectoryFileParams::default()),
-            metrics_name: self
+            metrics_meter_name: self
                 .metrics_name
                 .clone()
                 .unwrap_or_else(|| "relayrl-client".to_string()),
-            otlp_endpoint: self
+            metrics_otlp_endpoint: self
                 .otlp_endpoint
                 .clone()
                 .unwrap_or_else(|| "http://127.0.0.1:4317".to_string()),
@@ -1181,8 +1187,8 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 config_update_polling_seconds: 10.0,
                 init_hyperparameters: HyperparameterConfig::default(),
                 trajectory_file_output: LocalTrajectoryFileParams::default(),
-                metrics_name: "relayrl-client".to_string(),
-                otlp_endpoint: "http://127.0.0.1:4317".to_string(),
+                metrics_meter_name: "relayrl-client".to_string(),
+                metrics_otlp_endpoint: "http://127.0.0.1:4317".to_string(),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }
@@ -1958,4 +1964,511 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // --- Helper JSON with correct serde struct-field names ---
+    //
+    // The DEFAULT_*_CONFIG_CONTENT templates use mismatched field names relative to
+    // the actual Rust structs (e.g. "inference_server" vs "inference_server_address",
+    // "training_server_config" vs "server_config"), so parsing them always hits the
+    // unwrap_or_else fallback.  These constants use the true field names so that
+    // load_config() succeeds and we can assert on the parsed values.
+
+    const VALID_CLIENT_CONFIG_JSON: &str = r#"{
+        "client_config": {
+            "algorithm_name": "PPO",
+            "config_path": "/tmp/client_config.json",
+            "config_update_polling_seconds": 5.0,
+            "init_hyperparameters": {
+                "REINFORCE": {
+                    "discrete": true,
+                    "with_vf_baseline": true,
+                    "seed": 1,
+                    "traj_per_epoch": 8,
+                    "gamma": 0.98,
+                    "lam": 0.97,
+                    "pi_lr": 0.0003,
+                    "vf_lr": 0.001,
+                    "train_vf_iters": 80
+                }
+            },
+            "trajectory_file_output": {
+                "directory": "experiment_data",
+                "file_type": "Csv"
+            },
+            "metrics_name": "test-client",
+            "otlp_endpoint": "http://127.0.0.1:4317"
+        },
+        "transport_config": {
+            "nats_addresses": {
+                "inference_server_address": { "host": "127.0.0.1", "port": "50050" },
+                "training_server_address":  { "host": "127.0.0.1", "port": "50051" }
+            },
+            "zmq_addresses": {
+                "inference_addresses": {
+                    "inference_server_address":        { "host": "127.0.0.1", "port": "7800" },
+                    "inference_scaling_server_address": { "host": "127.0.0.1", "port": "7801" }
+                },
+                "training_addresses": {
+                    "model_server_address":          { "host": "127.0.0.1", "port": "50051" },
+                    "trajectory_server_address":     { "host": "127.0.0.1", "port": "7776"  },
+                    "agent_listener_address":        { "host": "127.0.0.1", "port": "7777"  },
+                    "training_scaling_server_address": { "host": "127.0.0.1", "port": "7778" }
+                }
+            },
+            "local_model_module": {
+                "directory": "model_module",
+                "model_name": "client_model",
+                "format": "pt"
+            },
+            "max_traj_length": 100000000
+        }
+    }"#;
+
+    const VALID_SERVER_CONFIG_JSON: &str = r#"{
+        "server_config": {
+            "config_path": "/tmp/server_config.json",
+            "default_hyperparameters": {
+                "REINFORCE": {
+                    "discrete": true,
+                    "with_vf_baseline": true,
+                    "seed": 1,
+                    "traj_per_epoch": 8,
+                    "gamma": 0.98,
+                    "lam": 0.97,
+                    "pi_lr": 0.0003,
+                    "vf_lr": 0.001,
+                    "train_vf_iters": 80
+                }
+            },
+            "training_tensorboard": {
+                "launch_tb_on_startup": true,
+                "scalar_tags": "AverageEpRet;LossQ",
+                "global_step_tag": "Epoch"
+            },
+            "default_model_path": "/tmp/model.pt"
+        },
+        "transport_config": {
+            "nats_addresses": {
+                "inference_server_address": { "host": "127.0.0.1", "port": "50050" },
+                "training_server_address":  { "host": "127.0.0.1", "port": "50051" }
+            },
+            "zmq_addresses": {
+                "inference_addresses": {
+                    "inference_server_address":        { "host": "127.0.0.1", "port": "7800" },
+                    "inference_scaling_server_address": { "host": "127.0.0.1", "port": "7801" }
+                },
+                "training_addresses": {
+                    "model_server_address":            { "host": "127.0.0.1", "port": "50051" },
+                    "trajectory_server_address":       { "host": "127.0.0.1", "port": "7776"  },
+                    "agent_listener_address":          { "host": "127.0.0.1", "port": "7777"  },
+                    "training_scaling_server_address": { "host": "127.0.0.1", "port": "7778"  }
+                }
+            },
+            "local_model_module": {
+                "directory": "model_module",
+                "model_name": "server_model",
+                "format": "pt"
+            },
+            "max_traj_length": 50000
+        }
+    }"#;
+
+    fn write_temp_file(content: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("failed to create temp file");
+        file.write_all(content.as_bytes())
+            .expect("failed to write temp file");
+        file
+    }
+
+    #[test]
+    fn algorithm_from_str_known_variants() {
+        assert_eq!(Algorithm::from_str("DDPG"), Some(Algorithm::DDPG));
+        assert_eq!(Algorithm::from_str("PPO"), Some(Algorithm::PPO));
+        assert_eq!(Algorithm::from_str("REINFORCE"), Some(Algorithm::REINFORCE));
+        assert_eq!(Algorithm::from_str("TD3"), Some(Algorithm::TD3));
+        assert_eq!(Algorithm::from_str("CONFIG_INIT"), Some(Algorithm::ConfigInit));
+    }
+
+    #[test]
+    fn algorithm_from_str_unknown_becomes_custom() {
+        assert_eq!(
+            Algorithm::from_str("MAPPO"),
+            Some(Algorithm::CUSTOM("MAPPO".to_string()))
+        );
+    }
+
+    #[test]
+    fn algorithm_as_str_round_trips_known() {
+        assert_eq!(Algorithm::DDPG.as_str(), "DDPG");
+        assert_eq!(Algorithm::PPO.as_str(), "PPO");
+        assert_eq!(Algorithm::REINFORCE.as_str(), "REINFORCE");
+        assert_eq!(Algorithm::TD3.as_str(), "TD3");
+        assert_eq!(Algorithm::ConfigInit.as_str(), "CONFIG_INIT");
+    }
+
+    #[test]
+    fn algorithm_custom_as_str() {
+        assert_eq!(Algorithm::CUSTOM("MY_ALGO".to_string()).as_str(), "MY_ALGO");
+    }
+
+    #[test]
+    fn hyperparameter_default_reinforce_only() {
+        let hp = HyperparameterConfig::default();
+        assert!(hp.ddpg.is_none());
+        assert!(hp.ppo.is_none());
+        assert!(hp.reinforce.is_some());
+        assert!(hp.td3.is_none());
+        assert!(hp.custom.is_none());
+    }
+
+    #[test]
+    fn hyperparameter_to_args_specific_algorithm_returns_expected_keys() {
+        let hp = HyperparameterConfig::default();
+        let args = hp.to_args(Some(&Algorithm::REINFORCE));
+        assert_eq!(args.len(), 1);
+        let entry = args
+            .get(&Algorithm::REINFORCE)
+            .expect("REINFORCE entry missing");
+        if let HyperparameterArgs::Map(map) = entry {
+            assert!(map.contains_key("seed"));
+            assert!(map.contains_key("gamma"));
+            assert!(map.contains_key("lam"));
+            assert!(map.contains_key("pi_lr"));
+            assert!(map.contains_key("vf_lr"));
+        } else {
+            panic!("Expected HyperparameterArgs::Map");
+        }
+    }
+
+    #[test]
+    fn hyperparameter_to_args_none_returns_all_present_algorithms() {
+        // Default only populates REINFORCE, so to_args(None) should return 1 entry.
+        let hp = HyperparameterConfig::default();
+        let args = hp.to_args(None);
+        assert_eq!(args.len(), 1);
+        assert!(args.contains_key(&Algorithm::REINFORCE));
+    }
+
+    #[test]
+    fn transport_build_default_nats_addresses() {
+        let transport = TransportConfigBuilder::build_default();
+        let nats_inf = transport.get_nats_inference_server_address();
+        let nats_train = transport.get_nats_training_server_address();
+        assert_eq!(nats_inf.host, "127.0.0.1");
+        assert_eq!(nats_inf.port, "50050");
+        assert_eq!(nats_train.host, "127.0.0.1");
+        assert_eq!(nats_train.port, "50051");
+    }
+
+    #[test]
+    fn transport_build_default_zmq_addresses() {
+        let transport = TransportConfigBuilder::build_default();
+        let model_server = transport.get_zmq_model_server_address();
+        let traj_server = transport.get_zmq_trajectory_server_address();
+        assert_eq!(model_server.host, "127.0.0.1");
+        assert_eq!(model_server.port, "50051");
+        assert_eq!(traj_server.host, "127.0.0.1");
+        assert_eq!(traj_server.port, "7776");
+    }
+
+    #[test]
+    fn transport_builder_custom_nats_inference_address() {
+        let mut builder = TransportConfigBuilder {
+            nats_inference_server_address: None,
+            nats_training_server_address: None,
+            zmq_inference_server_address: None,
+            zmq_agent_listener_address: None,
+            zmq_model_server_address: None,
+            zmq_trajectory_server_address: None,
+            zmq_inference_scaling_server_address: None,
+            zmq_training_scaling_server_address: None,
+            max_traj_length: None,
+            local_model_module: None,
+        };
+        builder.set_nats_inference_server_address("10.0.0.1", "9999");
+        let transport = builder.build();
+        let addr = transport.get_nats_inference_server_address();
+        assert_eq!(addr.host, "10.0.0.1");
+        assert_eq!(addr.port, "9999");
+    }
+
+    #[test]
+    fn transport_builder_custom_max_traj_length() {
+        let mut builder = TransportConfigBuilder {
+            nats_inference_server_address: None,
+            nats_training_server_address: None,
+            zmq_inference_server_address: None,
+            zmq_agent_listener_address: None,
+            zmq_model_server_address: None,
+            zmq_trajectory_server_address: None,
+            zmq_inference_scaling_server_address: None,
+            zmq_training_scaling_server_address: None,
+            max_traj_length: None,
+            local_model_module: None,
+        };
+        builder.set_max_traj_length(500);
+        let transport = builder.build();
+        assert_eq!(transport.max_traj_length, 500);
+    }
+
+    #[test]
+    fn client_build_default_algorithm_is_reinforce() {
+        let loader = ClientConfigBuilder::build_default();
+        assert_eq!(loader.get_algorithm_name(), "REINFORCE");
+    }
+
+    #[test]
+    fn client_build_default_config_path() {
+        let loader = ClientConfigBuilder::build_default();
+        assert_eq!(
+            loader.get_config_path(),
+            &PathBuf::from("client_config.json")
+        );
+    }
+
+    #[test]
+    fn client_build_default_polling_seconds() {
+        let loader = ClientConfigBuilder::build_default();
+        assert_eq!(loader.client_config.config_update_polling_seconds, 10.0_f32);
+    }
+
+    #[test]
+    fn client_build_default_metrics_name() {
+        let loader = ClientConfigBuilder::build_default();
+        assert_eq!(loader.get_metrics_meter_name(), "relayrl-client");
+    }
+
+    #[test]
+    fn client_build_default_otlp_endpoint() {
+        let loader = ClientConfigBuilder::build_default();
+        assert_eq!(loader.get_metrics_otlp_endpoint(), "http://127.0.0.1:4317");
+    }
+
+    #[test]
+    fn client_build_default_hyperparameters_has_reinforce_only() {
+        let loader = ClientConfigBuilder::build_default();
+        let hp = loader.get_init_hyperparameters();
+        assert!(hp.ddpg.is_none());
+        assert!(hp.ppo.is_none());
+        assert!(hp.reinforce.is_some());
+        assert!(hp.td3.is_none());
+        assert!(hp.custom.is_none());
+    }
+
+    #[test]
+    fn client_builder_overrides_algorithm_name() {
+        let mut builder = ClientConfigBuilder {
+            algorithm_name: None,
+            config_path: None,
+            config_update_polling_seconds: None,
+            init_hyperparameters: None,
+            transport_config: None,
+            trajectory_file_output: None,
+            metrics_name: None,
+            otlp_endpoint: None,
+        };
+        builder.set_algorithm_name("PPO");
+        let loader = builder.build();
+        assert_eq!(loader.get_algorithm_name(), "PPO");
+    }
+
+    #[test]
+    fn client_builder_overrides_metrics_name() {
+        let mut builder = ClientConfigBuilder {
+            algorithm_name: None,
+            config_path: None,
+            config_update_polling_seconds: None,
+            init_hyperparameters: None,
+            transport_config: None,
+            trajectory_file_output: None,
+            metrics_name: None,
+            otlp_endpoint: None,
+        };
+        builder.set_metrics_name("my-custom-metric");
+        let loader = builder.build();
+        assert_eq!(loader.get_metrics_meter_name(), "my-custom-metric");
+    }
+
+    #[test]
+    fn client_builder_overrides_otlp_endpoint() {
+        let mut builder = ClientConfigBuilder {
+            algorithm_name: None,
+            config_path: None,
+            config_update_polling_seconds: None,
+            init_hyperparameters: None,
+            transport_config: None,
+            trajectory_file_output: None,
+            metrics_name: None,
+            otlp_endpoint: None,
+        };
+        builder.set_otlp_endpoint("http://0.0.0.0:9317");
+        let loader = builder.build();
+        assert_eq!(loader.get_metrics_otlp_endpoint(), "http://0.0.0.0:9317");
+    }
+
+    #[test]
+    fn client_load_config_from_valid_json_file() {
+        let temp = write_temp_file(VALID_CLIENT_CONFIG_JSON);
+        let path = temp.path().to_path_buf();
+        let loader = ClientConfigLoader::load_config(&path);
+        assert_eq!(loader.get_algorithm_name(), "PPO");
+        assert_eq!(loader.client_config.config_update_polling_seconds, 5.0_f32);
+        assert_eq!(loader.get_metrics_meter_name(), "test-client");
+        assert_eq!(loader.get_metrics_otlp_endpoint(), "http://127.0.0.1:4317");
+    }
+
+    #[test]
+    fn client_load_config_transport_parsed_from_valid_json() {
+        let temp = write_temp_file(VALID_CLIENT_CONFIG_JSON);
+        let path = temp.path().to_path_buf();
+        let loader = ClientConfigLoader::load_config(&path);
+        let transport = loader.get_transport_config();
+        assert_eq!(transport.get_nats_inference_server_address().port, "50050");
+        assert_eq!(transport.get_zmq_trajectory_server_address().port, "7776");
+        assert_eq!(transport.max_traj_length, 100000000);
+    }
+
+    #[test]
+    fn client_load_config_fallback_on_malformed_json() {
+        let temp = write_temp_file("NOT VALID JSON {{{{");
+        let path = temp.path().to_path_buf();
+        let loader = ClientConfigLoader::load_config(&path);
+        // Hardcoded fallback values (from unwrap_or_else closure)
+        assert_eq!(loader.get_algorithm_name(), "REINFORCE");
+        assert_eq!(loader.client_config.config_update_polling_seconds, 10.0_f32);
+        assert_eq!(loader.get_metrics_meter_name(), "relayrl-client");
+    }
+
+    #[test]
+    fn client_new_config_algorithm_override() {
+        // JSON has algorithm_name "PPO"; passing Some("TD3") must win.
+        let temp = write_temp_file(VALID_CLIENT_CONFIG_JSON);
+        let path = temp.path().to_path_buf();
+        let loader = ClientConfigLoader::new_config(Some("TD3".to_string()), Some(path));
+        assert_eq!(loader.get_algorithm_name(), "TD3");
+    }
+
+    #[test]
+    fn client_new_config_uses_file_algorithm_when_none_passed() {
+        // JSON has algorithm_name "PPO"; passing None should keep it.
+        let temp = write_temp_file(VALID_CLIENT_CONFIG_JSON);
+        let path = temp.path().to_path_buf();
+        let loader = ClientConfigLoader::new_config(None, Some(path.clone()));
+        assert_eq!(loader.get_algorithm_name(), "PPO");
+        // config_path in the struct is the path we provided, not the one inside the JSON.
+        assert_eq!(loader.get_config_path(), &path);
+    }
+
+    #[test]
+    fn server_build_default_config_path() {
+        let loader = TrainingServerConfigBuilder::build_default();
+        assert_eq!(
+            loader.get_config_path(),
+            &PathBuf::from("server_config.json")
+        );
+    }
+
+    #[test]
+    fn server_build_default_no_hyperparameters() {
+        let loader = TrainingServerConfigBuilder::build_default();
+        assert!(loader.get_hyperparameters().is_none());
+    }
+
+    #[test]
+    fn server_build_default_tensorboard_not_launched() {
+        let loader = TrainingServerConfigBuilder::build_default();
+        assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
+    }
+
+    #[test]
+    fn server_build_default_tensorboard_scalar_tags() {
+        let loader = TrainingServerConfigBuilder::build_default();
+        let tags = &loader.get_training_tensorboard().scalar_tags;
+        assert_eq!(
+            tags,
+            &vec!["AverageEpRet".to_string(), "StdEpRet".to_string()]
+        );
+    }
+
+    #[test]
+    fn server_builder_overrides_config_path() {
+        let mut builder = TrainingServerConfigBuilder {
+            config_path: None,
+            default_hyperparameters: None,
+            training_tensorboard: None,
+            default_model_path: None,
+            transport_config: None,
+        };
+        builder.set_config_path("my_server.json");
+        let loader = builder.build();
+        assert_eq!(loader.get_config_path(), &PathBuf::from("my_server.json"));
+    }
+
+    #[test]
+    fn server_builder_overrides_tensorboard_params() {
+        let mut builder = TrainingServerConfigBuilder {
+            config_path: None,
+            default_hyperparameters: None,
+            training_tensorboard: None,
+            default_model_path: None,
+            transport_config: None,
+        };
+        builder.set_training_tensorboard_params(true, "MetricA;MetricB", "Step");
+        let loader = builder.build();
+        let tb = loader.get_training_tensorboard();
+        assert!(tb.launch_tb_on_startup);
+        assert_eq!(
+            tb.scalar_tags,
+            vec!["MetricA".to_string(), "MetricB".to_string()]
+        );
+        assert_eq!(tb.global_step_tag, "Step");
+    }
+
+    #[test]
+    fn server_load_config_from_valid_json_file() {
+        let temp = write_temp_file(VALID_SERVER_CONFIG_JSON);
+        let path = temp.path().to_path_buf();
+        let loader = TrainingServerConfigLoader::load_config(&path);
+        assert_eq!(
+            loader.get_config_path(),
+            &PathBuf::from("/tmp/server_config.json")
+        );
+        assert!(loader.get_hyperparameters().is_some());
+        assert_eq!(
+            loader.get_default_model_path(),
+            &PathBuf::from("/tmp/model.pt")
+        );
+    }
+
+    #[test]
+    fn server_load_config_tensorboard_tags_parsed_from_semicolon() {
+        let temp = write_temp_file(VALID_SERVER_CONFIG_JSON);
+        let path = temp.path().to_path_buf();
+        let loader = TrainingServerConfigLoader::load_config(&path);
+        let tb = loader.get_training_tensorboard();
+        assert!(tb.launch_tb_on_startup);
+        assert_eq!(
+            tb.scalar_tags,
+            vec!["AverageEpRet".to_string(), "LossQ".to_string()]
+        );
+        assert_eq!(tb.global_step_tag, "Epoch");
+    }
+
+    #[test]
+    fn server_load_config_fallback_on_malformed_json() {
+        let temp = write_temp_file("NOT VALID JSON {{{{");
+        let path = temp.path().to_path_buf();
+        let loader = TrainingServerConfigLoader::load_config(&path);
+        // Hardcoded fallback values
+        assert_eq!(
+            loader.get_config_path(),
+            &PathBuf::from("server_config.json")
+        );
+        assert!(loader.get_hyperparameters().is_none());
+        assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
+    }
+}
