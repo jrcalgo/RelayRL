@@ -22,8 +22,8 @@ use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
-use log::*;
 use bincode::config;
+use log::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -411,7 +411,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 .map_err(|e| {
                                     log::error!(
                                         "[Actor {:?}] Failed to reload model: {:?}",
-                                        actor_id, e
+                                        actor_id,
+                                        e
                                     );
                                     ActorError::from(e)
                                 })?;
@@ -480,7 +481,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 if let Err(e) = validate_module::<B>(&ok_model).map_err(ActorError::from) {
                     log::error!(
                         "[ActorEntity {:?}] Failed to validate model: {:?}",
-                        self.actor_id, e
+                        self.actor_id,
+                        e
                     );
                     return Err(e);
                 }
@@ -488,7 +490,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 if let Err(e) = ok_model.save(&model_path).map_err(ActorError::from) {
                     log::error!(
                         "[ActorEntity {:?}] Failed to save model: {:?}",
-                        self.actor_id, e
+                        self.actor_id,
+                        e
                     );
                     return Err(e);
                 }
@@ -558,20 +561,19 @@ mod unit_tests {
 
     use active_uuid_registry::registry_uuid::Uuid;
     use relayrl_types::data::tensor::DeviceType;
-    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
     use relayrl_types::data::tensor::NdArrayDType;
     use relayrl_types::prelude::tensor::relayrl::DType;
-    
+    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
+
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{RwLock, mpsc, oneshot};
 
     use burn_ndarray::NdArray;
     use burn_ndarray::NdArrayDevice;
-     
+
     #[cfg(feature = "tch-backend")]
     use burn_tch::LibTorch;
-
 
     type NdArrayBackend = NdArray<f32>;
 
@@ -597,7 +599,14 @@ mod unit_tests {
         Arc::new(RwLock::new(None))
     }
 
-    async fn create_ndarray_actor(max_traj_length: u128, device: DeviceType) -> (Actor<NdArrayBackend, D_IN, D_OUT>, mpsc::Sender<RoutedMessage>, mpsc::Receiver<RoutedMessage>) {
+    async fn create_ndarray_actor(
+        max_traj_length: u128,
+        device: DeviceType,
+    ) -> (
+        Actor<NdArrayBackend, D_IN, D_OUT>,
+        mpsc::Sender<RoutedMessage>,
+        mpsc::Receiver<RoutedMessage>,
+    ) {
         let actor_id = Uuid::new_v4();
         let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
@@ -618,14 +627,21 @@ mod unit_tests {
             rx_from_router,
             tx_to_buffer,
             disabled_data_mode(),
-        ).await;
+        )
+        .await;
 
         (actor, tx_to_actor, rx_from_buffer)
-
     }
 
     #[cfg(feature = "tch-backend")]
-    async fn create_tch_actor(max_traj_length: u128, device: DeviceType) -> (Actor<TchBackend, D_IN, D_OUT>, mpsc::Sender<RoutedMessage>, mpsc::Receiver<RoutedMessage>) {
+    async fn create_tch_actor(
+        max_traj_length: u128,
+        device: DeviceType,
+    ) -> (
+        Actor<TchBackend, D_IN, D_OUT>,
+        mpsc::Sender<RoutedMessage>,
+        mpsc::Receiver<RoutedMessage>,
+    ) {
         let actor_id = Uuid::new_v4();
         let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
@@ -646,12 +662,17 @@ mod unit_tests {
             rx_from_router,
             tx_to_buffer,
             disabled_data_mode(),
-        ).await;
+        )
+        .await;
 
         (actor, tx_to_actor, rx_from_buffer)
     }
 
-    fn build_msg(actor_id: ActorUuid, protocol: RoutingProtocol, payload: RoutedPayload) -> RoutedMessage {
+    fn build_msg(
+        actor_id: ActorUuid,
+        protocol: RoutingProtocol,
+        payload: RoutedPayload,
+    ) -> RoutedMessage {
         RoutedMessage {
             actor_id,
             protocol,
@@ -671,7 +692,10 @@ mod unit_tests {
             .expect("spawn_loop did not exit in time")
             .expect("join error");
 
-        assert!(result.is_ok(), "spawn_loop did not exit in time on channel close for NdArray, CPU actor");
+        assert!(
+            result.is_ok(),
+            "spawn_loop did not exit in time on channel close for NdArray, CPU actor"
+        );
     }
 
     #[tokio::test]
@@ -680,16 +704,23 @@ mod unit_tests {
         let actor_id = actor.actor_id;
         let handle = tokio::spawn(async move { actor.spawn_loop().await });
 
-        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
-            .await
-            .unwrap();
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::Shutdown,
+            RoutedPayload::Shutdown,
+        ))
+        .await
+        .unwrap();
 
         let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
             .await
             .expect("spawn_loop did not exit on Shutdown")
             .expect("join error");
 
-        assert!(result.is_ok(), "spawn_loop did not exit on Shutdown for NdArray, CPU actor");
+        assert!(
+            result.is_ok(),
+            "spawn_loop did not exit on Shutdown for NdArray, CPU actor"
+        );
     }
 
     #[tokio::test]
@@ -707,20 +738,21 @@ mod unit_tests {
         .await
         .unwrap();
 
-        let version = tokio::time::timeout(
-            tokio::time::Duration::from_millis(200),
-            reply_rx,
-        )
-        .await
-        .expect("timeout waiting for model version")
-        .expect("oneshot cancelled");
+        let version = tokio::time::timeout(tokio::time::Duration::from_millis(200), reply_rx)
+            .await
+            .expect("timeout waiting for model version")
+            .expect("oneshot cancelled");
 
         assert_eq!(version, -1, "Unloaded model should report version -1");
 
         // Shutdown the actor
-        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
-            .await
-            .unwrap();
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::Shutdown,
+            RoutedPayload::Shutdown,
+        ))
+        .await
+        .unwrap();
         let _ = handle.await;
     }
 
@@ -740,20 +772,24 @@ mod unit_tests {
         .unwrap();
 
         // Wait for the FlagLastInference to produce a SendTrajectory
-        let traj_msg = tokio::time::timeout(
-            tokio::time::Duration::from_millis(200),
-            rx_buf.recv(),
-        )
-        .await
-        .expect("timeout waiting for trajectory after FlagLastInference")
-        .expect("buffer rx closed");
+        let traj_msg = tokio::time::timeout(tokio::time::Duration::from_millis(200), rx_buf.recv())
+            .await
+            .expect("timeout waiting for trajectory after FlagLastInference")
+            .expect("buffer rx closed");
 
-        assert!(matches!(traj_msg.payload, RoutedPayload::SendTrajectory { .. }));
+        assert!(matches!(
+            traj_msg.payload,
+            RoutedPayload::SendTrajectory { .. }
+        ));
 
         // Now send Shutdown
-        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
-            .await
-            .unwrap();
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::Shutdown,
+            RoutedPayload::Shutdown,
+        ))
+        .await
+        .unwrap();
         let _ = handle.await;
     }
 
@@ -764,9 +800,13 @@ mod unit_tests {
         let handle = tokio::spawn(async move { actor.spawn_loop().await });
 
         // Send Shutdown immediately without adding any actions
-        tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
-            .await
-            .unwrap();
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::Shutdown,
+            RoutedPayload::Shutdown,
+        ))
+        .await
+        .unwrap();
         let _ = handle.await;
 
         // Buffer should be empty
@@ -781,8 +821,14 @@ mod unit_tests {
         let (mut actor, tx, mut rx_buf) = create_ndarray_actor(1, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
 
-        let obs = Arc::new(AnyBurnTensor::Float(FloatBurnTensor::<NdArrayBackend, D_IN> {
-            tensor: Arc::new(Tensor::zeros(burn_tensor::Shape::new([4; D_IN]), &NdArrayDevice::default())),
+        let obs = Arc::new(AnyBurnTensor::Float(FloatBurnTensor::<
+            NdArrayBackend,
+            D_IN,
+        > {
+            tensor: Arc::new(Tensor::zeros(
+                burn_tensor::Shape::new([4; D_IN]),
+                &NdArrayDevice::default(),
+            )),
             dtype: DType::NdArray(NdArrayDType::F32),
         }));
         let mask = None::<Arc<AnyBurnTensor<NdArrayBackend, D_OUT>>>;
@@ -795,17 +841,23 @@ mod unit_tests {
             reply_to: oneshot::channel().0,
         };
 
-        tx.send(build_msg(actor_id, RoutingProtocol::RequestInference, RoutedPayload::RequestInference(Box::new(inference_request)))).await.unwrap();
-
-        let msg = tokio::time::timeout(
-            tokio::time::Duration::from_millis(300),
-            rx_buf.recv(),
-        )
+        tx.send(build_msg(
+            actor_id,
+            RoutingProtocol::RequestInference,
+            RoutedPayload::RequestInference(Box::new(inference_request)),
+        ))
         .await
-        .expect("timeout waiting for trajectory")
-        .expect("buffer rx closed");
+        .unwrap();
 
-        assert!(matches!(msg.payload, RoutedPayload::SendTrajectory { .. }), "RequestInference should produce a SendTrajectory message");
+        let msg = tokio::time::timeout(tokio::time::Duration::from_millis(300), rx_buf.recv())
+            .await
+            .expect("timeout waiting for trajectory")
+            .expect("buffer rx closed");
+
+        assert!(
+            matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
+            "RequestInference should produce a SendTrajectory message"
+        );
     }
 
     #[tokio::test]
@@ -822,13 +874,10 @@ mod unit_tests {
         .await
         .unwrap();
 
-        let msg = tokio::time::timeout(
-            tokio::time::Duration::from_millis(300),
-            rx_buf.recv(),
-        )
-        .await
-        .expect("timeout waiting for trajectory")
-        .expect("buffer rx closed");
+        let msg = tokio::time::timeout(tokio::time::Duration::from_millis(300), rx_buf.recv())
+            .await
+            .expect("timeout waiting for trajectory")
+            .expect("buffer rx closed");
 
         assert!(
             matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
@@ -845,9 +894,13 @@ mod unit_tests {
             let actor_id = actor.actor_id;
             let h = tokio::spawn(async move { actor.spawn_loop().await });
             // Immediately shut each actor down
-            tx.send(build_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
-                .await
-                .unwrap();
+            tx.send(build_msg(
+                actor_id,
+                RoutingProtocol::Shutdown,
+                RoutedPayload::Shutdown,
+            ))
+            .await
+            .unwrap();
             handles.push(h);
         }
 
@@ -907,5 +960,4 @@ mod unit_tests {
             result
         );
     }
-        
 }

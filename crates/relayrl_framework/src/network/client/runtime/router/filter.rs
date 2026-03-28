@@ -148,7 +148,10 @@ mod unit_tests {
     }
 
     /// Create a minimal StateManager (no transport, no model).
-    fn make_state_manager() -> (StateManager<TestBackend, D_IN, D_OUT>, tokio::sync::mpsc::Receiver<RoutedMessage>) {
+    fn make_state_manager() -> (
+        StateManager<TestBackend, D_IN, D_OUT>,
+        tokio::sync::mpsc::Receiver<RoutedMessage>,
+    ) {
         StateManager::<TestBackend, D_IN, D_OUT>::new(
             Arc::from("test-filter-ns"),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -181,8 +184,16 @@ mod unit_tests {
         (Arc::new(RwLock::new(sm)), actor_id, actor_rx)
     }
 
-    fn make_msg(actor_id: Uuid, protocol: RoutingProtocol, payload: RoutedPayload) -> RoutedMessage {
-        RoutedMessage { actor_id, protocol, payload }
+    fn make_msg(
+        actor_id: Uuid,
+        protocol: RoutingProtocol,
+        payload: RoutedPayload,
+    ) -> RoutedMessage {
+        RoutedMessage {
+            actor_id,
+            protocol,
+            payload,
+        }
     }
 
     fn make_filter(
@@ -202,20 +213,23 @@ mod unit_tests {
         let (_shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1000);
         let filter = make_filter(ns.clone(), filter_rx, shared).with_shutdown(shutdown_rx);
 
-        let _handle = tokio::spawn(async move { let _ = filter.spawn_loop().await; });
+        let _handle = tokio::spawn(async move {
+            let _ = filter.spawn_loop().await;
+        });
 
         filter_tx
-            .send(make_msg(actor_id, RoutingProtocol::ModelHandshake, RoutedPayload::ModelHandshake))
+            .send(make_msg(
+                actor_id,
+                RoutingProtocol::ModelHandshake,
+                RoutedPayload::ModelHandshake,
+            ))
             .await
             .unwrap();
 
-        let received = tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            actor_rx.recv(),
-        )
-        .await
-        .expect("timeout waiting for actor message")
-        .expect("actor rx closed");
+        let received = tokio::time::timeout(tokio::time::Duration::from_secs(30), actor_rx.recv())
+            .await
+            .expect("timeout waiting for actor message")
+            .expect("actor rx closed");
 
         assert!(matches!(received.protocol, RoutingProtocol::ModelHandshake));
     }
@@ -232,7 +246,11 @@ mod unit_tests {
         let handle = tokio::spawn(async move { filter.spawn_loop().await });
 
         filter_tx
-            .send(make_msg(actor_id, RoutingProtocol::ModelHandshake, RoutedPayload::ModelHandshake))
+            .send(make_msg(
+                actor_id,
+                RoutingProtocol::ModelHandshake,
+                RoutedPayload::ModelHandshake,
+            ))
             .await
             .unwrap();
 
@@ -255,7 +273,11 @@ mod unit_tests {
         let handle = tokio::spawn(async move { filter.spawn_loop().await });
 
         filter_tx
-            .send(make_msg(unknown, RoutingProtocol::ModelHandshake, RoutedPayload::ModelHandshake))
+            .send(make_msg(
+                unknown,
+                RoutingProtocol::ModelHandshake,
+                RoutedPayload::ModelHandshake,
+            ))
             .await
             .unwrap();
 
@@ -316,17 +338,18 @@ mod unit_tests {
         let handle = tokio::spawn(async move { filter.spawn_loop().await });
 
         filter_tx
-            .send(make_msg(actor_id, RoutingProtocol::Shutdown, RoutedPayload::Shutdown))
+            .send(make_msg(
+                actor_id,
+                RoutingProtocol::Shutdown,
+                RoutedPayload::Shutdown,
+            ))
             .await
             .unwrap();
 
-        let msg = tokio::time::timeout(
-            tokio::time::Duration::from_millis(200),
-            actor_rx.recv(),
-        )
-        .await
-        .expect("timeout waiting for shutdown msg")
-        .expect("actor rx closed");
+        let msg = tokio::time::timeout(tokio::time::Duration::from_millis(200), actor_rx.recv())
+            .await
+            .expect("timeout waiting for shutdown msg")
+            .expect("actor rx closed");
 
         assert!(matches!(msg.protocol, RoutingProtocol::Shutdown));
 
@@ -350,7 +373,11 @@ mod unit_tests {
         let handle = tokio::spawn(async move { filter.spawn_loop().await });
 
         filter_tx
-            .send(make_msg(actor_id, RoutingProtocol::ModelHandshake, RoutedPayload::ModelHandshake))
+            .send(make_msg(
+                actor_id,
+                RoutingProtocol::ModelHandshake,
+                RoutedPayload::ModelHandshake,
+            ))
             .await
             .unwrap();
 
@@ -359,6 +386,9 @@ mod unit_tests {
             .expect("timeout")
             .expect("join error");
 
-        assert!(result.is_err(), "Filter should error when actor inbox is closed");
+        assert!(
+            result.is_err(),
+            "Filter should error when actor inbox is closed"
+        );
     }
 }

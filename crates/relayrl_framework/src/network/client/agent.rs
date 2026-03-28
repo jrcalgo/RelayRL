@@ -306,7 +306,10 @@ impl Default for ActorTrainingDataMode {
 
 pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode) -> bool {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _));
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _)
+    );
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     return matches!(training_data_mode, ActorTrainingDataMode::Offline(_));
 }
@@ -1024,10 +1027,7 @@ impl<
                         &self.coordinator.client_modes.actor_inference_mode
                     {
                         self.coordinator
-                            .send_inference_model_init_request(
-                                actor_entries,
-                                default_model.clone(),
-                            )
+                            .send_inference_model_init_request(actor_entries, default_model.clone())
                             .await?;
                     }
                 }
@@ -1132,13 +1132,15 @@ mod unit_tests {
     use super::*;
     use burn_ndarray::{NdArray, NdArrayDevice};
     use burn_tensor::{Bool, Float, Int, Tensor, TensorData};
-    use relayrl_types::data::tensor::{NdArrayDType, DeviceType};
+    use relayrl_types::data::tensor::{DeviceType, NdArrayDType};
 
     type TestBackend = NdArray<f32>;
 
     #[test]
     fn offline_returns_true() {
-        assert!(uses_local_file_writing(&ActorTrainingDataMode::Offline(None)));
+        assert!(uses_local_file_writing(&ActorTrainingDataMode::Offline(
+            None
+        )));
     }
 
     #[test]
@@ -1191,21 +1193,33 @@ mod unit_tests {
 
     #[tokio::test]
     async fn scale_throughput_zero_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default());
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            ClientModes::default(),
+        );
         let result = agent.scale_throughput(0).await;
         assert!(matches!(result, Err(ClientError::NoopRouterScale(_))));
     }
 
     #[tokio::test]
     async fn new_actors_zero_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default());
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            ClientModes::default(),
+        );
         let result = agent.new_actors(0, DeviceType::Cpu, None).await;
         assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
     }
 
     #[tokio::test]
     async fn remove_actors_empty_vec_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default());
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            ClientModes::default(),
+        );
         let result = agent.remove_actors(vec![]).await;
         assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
     }

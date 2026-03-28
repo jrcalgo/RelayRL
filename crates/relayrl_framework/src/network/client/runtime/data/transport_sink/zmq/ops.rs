@@ -1,7 +1,7 @@
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    SharedZmqInferenceAddresses, SharedZmqTrainingAddresses, SharedTransportAddresses,
+    SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::zmq::{
@@ -23,7 +23,7 @@ use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
 use relayrl_types::model::utils::validate_module;
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::io::Write;
@@ -227,7 +227,11 @@ impl ZmqPool {
                             != new_address
                     }
                     CacheAddressType::ModelServer => {
-                        addr_guard.zmq_training_addresses.model_server_address.as_ref() != new_address
+                        addr_guard
+                            .zmq_training_addresses
+                            .model_server_address
+                            .as_ref()
+                            != new_address
                     }
                     CacheAddressType::TrajectoryServer => {
                         addr_guard
@@ -841,13 +845,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
                         if model_bytes.is_empty() {
                             log::warn!("[ZmqClient] Model bytes are empty");
-                            continue;  // drops the message
+                            continue; // drops the message
                         }
 
                         let actor_id = {
                             if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
                                 log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
-                                continue;  // drops the message
+                                continue; // drops the message
                             } else {
                                 let actor_array = actor_id_bytes.as_array::<16>().cloned().unwrap(); // safe because we know the length is 16
                                 Uuid::from_bytes(actor_array)
@@ -920,7 +924,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         let scaling_entry_string =
             format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
-        let actor_entries_string = actor_entries.iter().map(|entry| format!("{}:{}:{}", client_namespace, entry.1, entry.2)).collect::<Vec<String>>().join(",");
+        let actor_entries_string = actor_entries
+            .iter()
+            .map(|entry| format!("{}:{}:{}", client_namespace, entry.1, entry.2))
+            .collect::<Vec<String>>()
+            .join(",");
 
         let algorithm_name_string = algorithm.as_str().to_string();
         let hyperparams_string = serde_json::to_string(&hyperparams).map_err(|e| {
@@ -1230,7 +1238,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .traj_push_socket
             .as_ref()
             .ok_or_else(|| {
-                TransportError::SendTrajError("Trajectory push socket pool not initialized".to_string())
+                TransportError::SendTrajError(
+                    "Trajectory push socket pool not initialized".to_string(),
+                )
             })?
             .get(&buffer_id)
             .ok_or_else(|| {
@@ -1247,13 +1257,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .try_lock()
             .map_err(|e| {
                 TransportError::SendTrajError(format!("Failed to lock push socket: {}", e))
-            })?.send_multipart([
-                &empty_frame,
-                transport_entry_frame,
-                buffer_entry_frame,
-                serialized_traj_frame,
-            ], 0)
-        {
+            })?
+            .send_multipart(
+                [
+                    &empty_frame,
+                    transport_entry_frame,
+                    buffer_entry_frame,
+                    serialized_traj_frame,
+                ],
+                0,
+            ) {
             Ok(_) => {
                 log::info!("[ZmqClient] Trajectory sent successfully");
                 Ok(())
@@ -1746,7 +1759,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                             log::info!("[ZmqClient] Server acknowledged scaling complete");
                         }
                         ServerResponse::Failure => {
-                            log::error!("[ZmqClient] Server failed to acknowledge scaling complete");
+                            log::error!(
+                                "[ZmqClient] Server failed to acknowledge scaling complete"
+                            );
                             return Err(TransportError::SendScalingCompleteError(
                                 "Server failed to acknowledge scaling complete".to_string(),
                             ));

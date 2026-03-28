@@ -1,6 +1,7 @@
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ModelMode};
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::data::transport_sink::combine_scaling_results;
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
 };
@@ -11,7 +12,6 @@ use crate::network::client::runtime::data::transport_sink::{
 };
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
-use crate::network::client::runtime::data::transport_sink::combine_scaling_results;
 
 use active_uuid_registry::interface::reserve_id_with;
 use relayrl_types::HyperparameterArgs;
@@ -34,7 +34,7 @@ use super::policies::{
 };
 use super::{ZmqInferenceExecution, ZmqTrainingExecution};
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 struct ZmqProtocol {
     circuit_breaker: CircuitBreaker,

@@ -2,20 +2,21 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::AlgorithmArgs;
+use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::prelude::config::TransportConfigParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::Algorithm;
+#[cfg(feature = "metrics")]
+use crate::utilities::configuration::OtlpEndpointParams;
 use crate::utilities::configuration::{ClientConfigLoader, LocalModelModuleParams};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
-
+use log::*;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use std::collections::HashMap;
-use log::*;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ pub(crate) struct SharedZmqTrainingAddresses {
 }
 
 /// Shared transport addresses for both NATS and ZMQ transports.
-/// 
+///
 /// I was going to store these in an enum but I realized I don't hate myself enough to do that. Would have to pattern match everywhere that uses this instead of just storing shared pointers to empty strings for unused fields, memory be damned.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
@@ -90,29 +91,47 @@ pub(crate) fn construct_transport_addresses(
             zmq_inference_addresses: SharedZmqInferenceAddresses {
                 inference_server_address: construct_address(
                     transport_type,
-                    &transport_config.zmq_addresses.inference_addresses.inference_server_address,
+                    &transport_config
+                        .zmq_addresses
+                        .inference_addresses
+                        .inference_server_address,
                 ),
                 inference_scaling_server_address: construct_address(
                     transport_type,
-                    &transport_config.zmq_addresses.inference_addresses.inference_scaling_server_address,
+                    &transport_config
+                        .zmq_addresses
+                        .inference_addresses
+                        .inference_scaling_server_address,
                 ),
             },
             zmq_training_addresses: SharedZmqTrainingAddresses {
                 agent_listener_address: construct_address(
                     transport_type,
-                    &transport_config.zmq_addresses.training_addresses.agent_listener_address,
+                    &transport_config
+                        .zmq_addresses
+                        .training_addresses
+                        .agent_listener_address,
                 ),
                 model_server_address: construct_address(
                     transport_type,
-                    &transport_config.zmq_addresses.training_addresses.model_server_address,
+                    &transport_config
+                        .zmq_addresses
+                        .training_addresses
+                        .model_server_address,
                 ),
                 trajectory_server_address: construct_address(
                     transport_type,
-                    &transport_config.zmq_addresses.training_addresses.trajectory_server_address,
+                    &transport_config
+                        .zmq_addresses
+                        .training_addresses
+                        .trajectory_server_address,
                 ),
                 training_scaling_server_address: construct_address(
                     transport_type,
-                    &transport_config.zmq_addresses.training_addresses.training_scaling_server_address,
+                    &transport_config
+                        .zmq_addresses
+                        .training_addresses
+                        .training_scaling_server_address,
                 ),
             },
             #[cfg(feature = "nats-transport")]
@@ -134,11 +153,26 @@ pub(crate) fn construct_transport_addresses(
                 trajectory_server_address: Arc::<str>::from(""),
                 training_scaling_server_address: Arc::<str>::from(""),
             },
-            nats_inference_address: construct_address(transport_type, &transport_config.nats_addresses.inference_server_address),
-            nats_training_address: construct_address(transport_type, &transport_config.nats_addresses.training_server_address),
+            nats_inference_address: construct_address(
+                transport_type,
+                &transport_config.nats_addresses.inference_server_address,
+            ),
+            nats_training_address: construct_address(
+                transport_type,
+                &transport_config.nats_addresses.training_server_address,
+            ),
         },
     }
+}
 
+#[cfg(feature = "metrics")]
+pub(crate) fn construct_metrics_otlp_endpoint(
+    metrics_otlp_endpoint: &OtlpEndpointParams,
+) -> String {
+    format!(
+        "{}{}:{}",
+        metrics_otlp_endpoint.prefix, metrics_otlp_endpoint.host, metrics_otlp_endpoint.port
+    )
 }
 
 pub(crate) fn construct_local_model_path(local_model_module: &LocalModelModuleParams) -> PathBuf {
@@ -238,7 +272,7 @@ impl LifeCycleManager {
             #[cfg(feature = "metrics")]
             metrics_args: Arc::new(RwLock::new((
                 config.client_config.metrics_meter_name.clone(),
-                config.client_config.metrics_otlp_endpoint.clone(),
+                construct_metrics_otlp_endpoint(&config.client_config.metrics_otlp_endpoint),
             ))),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             init_hyperparameters: Arc::new(RwLock::new(
@@ -332,13 +366,16 @@ impl LifeCycleManager {
     pub(crate) async fn set_metrics_args(
         &self,
         metrics_meter_name: &str,
-        metrics_otlp_endpoint: &str,
+        metrics_otlp_endpoint: &OtlpEndpointParams,
     ) -> Result<(), LifeCycleManagerError> {
         let mut metrics_args_guard = self.metrics_args.write().await;
-        *metrics_args_guard = (metrics_meter_name.to_string(), metrics_otlp_endpoint.to_string());
+        *metrics_args_guard = (
+            metrics_meter_name.to_string(),
+            construct_metrics_otlp_endpoint(metrics_otlp_endpoint),
+        );
         Ok(())
     }
-    
+
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn set_init_hyperparameters(
         &self,
@@ -415,7 +452,10 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    #[cfg(all(any(feature = "nats-transport", feature = "zmq-transport"), not(feature = "metrics")))]
+    #[cfg(all(
+        any(feature = "nats-transport", feature = "zmq-transport"),
+        not(feature = "metrics")
+    ))]
     pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
@@ -436,7 +476,10 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    #[cfg(all(any(feature = "nats-transport", feature = "zmq-transport"), feature = "metrics"))]
+    #[cfg(all(
+        any(feature = "nats-transport", feature = "zmq-transport"),
+        feature = "metrics"
+    ))]
     pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
@@ -449,7 +492,10 @@ impl LifeCycleManager {
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
             self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),
-            self.set_metrics_args(&new_config.client_config.metrics_meter_name, &new_config.client_config.metrics_otlp_endpoint),
+            self.set_metrics_args(
+                &new_config.client_config.metrics_meter_name,
+                &new_config.client_config.metrics_otlp_endpoint
+            ),
         )
         .map_err(|e| {
             LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
@@ -458,7 +504,10 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    #[cfg(all(not(any(feature = "nats-transport", feature = "zmq-transport")), not(feature = "metrics")))]
+    #[cfg(all(
+        not(any(feature = "nats-transport", feature = "zmq-transport")),
+        not(feature = "metrics")
+    ))]
     pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
@@ -477,7 +526,10 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    #[cfg(all(not(any(feature = "nats-transport", feature = "zmq-transport")), feature = "metrics"))]
+    #[cfg(all(
+        not(any(feature = "nats-transport", feature = "zmq-transport")),
+        feature = "metrics"
+    ))]
     pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
@@ -488,7 +540,10 @@ impl LifeCycleManager {
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_metrics_args(&new_config.client_config.metrics_meter_name, &new_config.client_config.metrics_otlp_endpoint),
+            self.set_metrics_args(
+                &new_config.client_config.metrics_meter_name,
+                &new_config.client_config.metrics_otlp_endpoint
+            ),
         )
         .map_err(|e| {
             LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
@@ -507,7 +562,7 @@ impl LifeCycleManager {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    use crate::network::client::agent::{LocalTrajectoryFileType, LocalTrajectoryFileParams};
+    use crate::network::client::agent::{LocalTrajectoryFileParams, LocalTrajectoryFileType};
     use crate::utilities::configuration::LocalModelModuleParams;
 
     #[test]
@@ -588,7 +643,10 @@ mod unit_tests {
         // Simulate handle_shutdown_signal: sends () on tx
         tx.send(()).unwrap();
         let result = rx.try_recv();
-        assert!(result.is_ok(), "Subscriber should receive the shutdown signal");
+        assert!(
+            result.is_ok(),
+            "Subscriber should receive the shutdown signal"
+        );
     }
 
     #[test]
@@ -608,7 +666,14 @@ mod unit_tests {
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(tmp, "{{}}").expect("write temp config");
         let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
-        let lm = LifeCycleManager::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] AlgorithmArgs::default(), &config, tmp.path().to_path_buf(), #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default());
+        let lm = LifeCycleManager::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            AlgorithmArgs::default(),
+            &config,
+            tmp.path().to_path_buf(),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+        );
         // keep tempfile alive until LifeCycleManager is constructed
         drop(tmp);
         lm
@@ -642,8 +707,14 @@ mod unit_tests {
         lm.set_local_model_path(&params).await.unwrap();
         let path = lm.get_local_model_path().read().await.clone();
         let path_str = path.to_str().unwrap();
-        assert!(path_str.contains("test_dir"), "path should contain directory");
-        assert!(path_str.contains("my_net"), "path should contain model name");
+        assert!(
+            path_str.contains("test_dir"),
+            "path should contain directory"
+        );
+        assert!(
+            path_str.contains("my_net"),
+            "path should contain model name"
+        );
         assert!(path_str.contains(".pt"), "path should contain extension");
     }
 
@@ -657,7 +728,10 @@ mod unit_tests {
         lm.set_trajectory_file_path(&params).await.unwrap();
         let output = lm.get_trajectory_file_output().read().await.clone();
         let dir_str = output.directory.to_str().unwrap();
-        assert!(dir_str.contains("exp_output"), "directory should be preserved");
+        assert!(
+            dir_str.contains("exp_output"),
+            "directory should be preserved"
+        );
         assert!(
             matches!(output.file_type, LocalTrajectoryFileType::Arrow),
             "file type should be Arrow"

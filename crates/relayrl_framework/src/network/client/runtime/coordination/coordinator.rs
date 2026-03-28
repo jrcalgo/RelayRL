@@ -2,20 +2,19 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::{InferenceAddressesArgs, TrainingAddressesArgs, AlgorithmArgs};
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
 };
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::{AlgorithmArgs, InferenceAddressesArgs, TrainingAddressesArgs};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
-use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::scale_manager::
-    ProcessInitFlag;
+use crate::network::client::runtime::coordination::scale_manager::ProcessInitFlag;
+use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::scale_manager::{
     ScaleManager, ScaleManagerError,
 };
@@ -47,11 +46,11 @@ use thiserror::Error;
 
 use burn_tensor::backend::Backend;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 use active_uuid_registry::interface::{
     clear_namespace, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
     reserve_id_with, reserve_namespace,
 };
+use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
@@ -192,11 +191,8 @@ pub trait ClientInterface<
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         send_algorithm_init: bool,
     ) -> Result<Uuid, CoordinatorError>;
-    async fn remove_actor(
-        &mut self,
-        id: ActorUuid,
-        send_ids: bool,
-    ) -> Result<(), CoordinatorError>;
+    async fn remove_actor(&mut self, id: ActorUuid, send_ids: bool)
+    -> Result<(), CoordinatorError>;
     async fn set_actor_id(
         &mut self,
         current_id: ActorUuid,
@@ -418,7 +414,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 #[cfg(feature = "zmq-transport")]
                                 InferenceAddressesArgs::ZMQ(_) => None,
                             } {
-                                transport_params_for_packing.nats_addresses.inference_server_address = inference_server_address;
+                                transport_params_for_packing
+                                    .nats_addresses
+                                    .inference_server_address = inference_server_address;
                             }
                         }
                         #[cfg(feature = "zmq-transport")]
@@ -427,18 +425,31 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 #[cfg(feature = "nats-transport")]
                                 InferenceAddressesArgs::NATS(_) => None,
                                 #[cfg(feature = "zmq-transport")]
-                                InferenceAddressesArgs::ZMQ(ref params) => params.inference_server_address.clone(),
+                                InferenceAddressesArgs::ZMQ(ref params) => {
+                                    params.inference_server_address.clone()
+                                }
                             } {
-                                transport_params_for_packing.zmq_addresses.inference_addresses.inference_server_address = inference_server_address;
-                            } 
+                                transport_params_for_packing
+                                    .zmq_addresses
+                                    .inference_addresses
+                                    .inference_server_address = inference_server_address;
+                            }
 
-                            if let Some(inference_scaling_server_address) = match inference_addresses {
-                                #[cfg(feature = "nats-transport")]
-                                InferenceAddressesArgs::NATS(_) => None,
-                                #[cfg(feature = "zmq-transport")]
-                                InferenceAddressesArgs::ZMQ(ref params) => params.inference_scaling_server_address.clone(),
-                            } {
-                                transport_params_for_packing.zmq_addresses.inference_addresses.inference_scaling_server_address = inference_scaling_server_address;
+                            if let Some(inference_scaling_server_address) =
+                                match inference_addresses {
+                                    #[cfg(feature = "nats-transport")]
+                                    InferenceAddressesArgs::NATS(_) => None,
+                                    #[cfg(feature = "zmq-transport")]
+                                    InferenceAddressesArgs::ZMQ(ref params) => {
+                                        params.inference_scaling_server_address.clone()
+                                    }
+                                }
+                            {
+                                transport_params_for_packing
+                                    .zmq_addresses
+                                    .inference_addresses
+                                    .inference_scaling_server_address =
+                                    inference_scaling_server_address;
                             }
                         }
                     }
@@ -454,7 +465,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 #[cfg(feature = "zmq-transport")]
                                 TrainingAddressesArgs::ZMQ(_) => None,
                             } {
-                                transport_params_for_packing.nats_addresses.training_server_address = training_server_address;
+                                transport_params_for_packing
+                                    .nats_addresses
+                                    .training_server_address = training_server_address;
                             }
                         }
                         #[cfg(feature = "zmq-transport")]
@@ -463,36 +476,58 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 #[cfg(feature = "nats-transport")]
                                 TrainingAddressesArgs::NATS(_) => None,
                                 #[cfg(feature = "zmq-transport")]
-                                TrainingAddressesArgs::ZMQ(ref params) => params.agent_listener_address.clone(),
+                                TrainingAddressesArgs::ZMQ(ref params) => {
+                                    params.agent_listener_address.clone()
+                                }
                             } {
-                                transport_params_for_packing.zmq_addresses.training_addresses.agent_listener_address = agent_listener_address;
+                                transport_params_for_packing
+                                    .zmq_addresses
+                                    .training_addresses
+                                    .agent_listener_address = agent_listener_address;
                             }
 
                             if let Some(model_server_address) = match training_addresses {
                                 #[cfg(feature = "nats-transport")]
                                 TrainingAddressesArgs::NATS(_) => None,
                                 #[cfg(feature = "zmq-transport")]
-                                TrainingAddressesArgs::ZMQ(ref params) => params.model_server_address.clone(),
+                                TrainingAddressesArgs::ZMQ(ref params) => {
+                                    params.model_server_address.clone()
+                                }
                             } {
-                                transport_params_for_packing.zmq_addresses.training_addresses.model_server_address = model_server_address;
+                                transport_params_for_packing
+                                    .zmq_addresses
+                                    .training_addresses
+                                    .model_server_address = model_server_address;
                             }
 
                             if let Some(trajectory_server_address) = match training_addresses {
                                 #[cfg(feature = "nats-transport")]
                                 TrainingAddressesArgs::NATS(_) => None,
                                 #[cfg(feature = "zmq-transport")]
-                                TrainingAddressesArgs::ZMQ(ref params) => params.trajectory_server_address.clone(),
+                                TrainingAddressesArgs::ZMQ(ref params) => {
+                                    params.trajectory_server_address.clone()
+                                }
                             } {
-                                transport_params_for_packing.zmq_addresses.training_addresses.trajectory_server_address = trajectory_server_address;
+                                transport_params_for_packing
+                                    .zmq_addresses
+                                    .training_addresses
+                                    .trajectory_server_address = trajectory_server_address;
                             }
 
-                            if let Some(training_scaling_server_address) = match training_addresses {
+                            if let Some(training_scaling_server_address) = match training_addresses
+                            {
                                 #[cfg(feature = "nats-transport")]
                                 TrainingAddressesArgs::NATS(_) => None,
                                 #[cfg(feature = "zmq-transport")]
-                                TrainingAddressesArgs::ZMQ(ref params) => params.training_scaling_server_address.clone(),
+                                TrainingAddressesArgs::ZMQ(ref params) => {
+                                    params.training_scaling_server_address.clone()
+                                }
                             } {
-                                transport_params_for_packing.zmq_addresses.training_addresses.training_scaling_server_address = training_scaling_server_address;
+                                transport_params_for_packing
+                                    .zmq_addresses
+                                    .training_addresses
+                                    .training_scaling_server_address =
+                                    training_scaling_server_address;
                             }
                         }
                     }
@@ -539,7 +574,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 self.transport_type,
                 client_namespace.clone(),
                 shared_client_modes.clone(),
-            ).await
+            )
+            .await
             .map_err(|e| CoordinatorError::TransportError(e))?;
 
             let shared_transport: Arc<ClientTransportInterface<B>> = Arc::new(transport);
@@ -578,7 +614,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         {
             let shared_max_traj_length = lifecycle.get_max_traj_length();
-            
+
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             let shared_transport_addresses = if let ActorInferenceMode::Server(_) =
                 shared_client_modes.actor_inference_mode
@@ -818,7 +854,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .map_err(|e| CoordinatorError::UuidPoolError(e))?;
 
                 #[cfg(feature = "metrics")]
-                params.metrics.record_counter("actors_created", 1, &[]).await;
+                params
+                    .metrics
+                    .record_counter("actors_created", 1, &[])
+                    .await;
 
                 // Get router runtime params
                 let router_runtime_params =
@@ -918,7 +957,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         match &self.runtime_params {
             Some(params) => {
                 #[cfg(feature = "metrics")]
-                params.metrics.record_counter("actors_removed", 1, &[]).await;
+                params
+                    .metrics
+                    .record_counter("actors_removed", 1, &[])
+                    .await;
                 params
                     .shared_state
                     .write()
@@ -1278,7 +1320,11 @@ mod unit_tests {
     type TestBackend = NdArray<f32>;
 
     fn make_coordinator() -> ClientCoordinator<TestBackend, 4, 1> {
-        ClientCoordinator::<TestBackend, 4, 1>::new(#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] TransportType::default(), ClientModes::default())
+        ClientCoordinator::<TestBackend, 4, 1>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            ClientModes::default(),
+        )
     }
 
     #[test]

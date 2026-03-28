@@ -1,8 +1,10 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
-use crate::network::client::agent::{LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::ModelMode;
 use crate::network::client::agent::{ActorTrainingDataMode, ClientModes};
+use crate::network::client::agent::{
+    LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
@@ -21,8 +23,8 @@ use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory, Traj
 use relayrl_types::prelude::action::CodecConfig;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
-use active_uuid_registry::registry_uuid::Uuid;
 use active_uuid_registry::interface::{get_context_entries, list_ids};
+use active_uuid_registry::registry_uuid::Uuid;
 
 use arrow::array::BinaryBuilder;
 use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
@@ -736,10 +738,17 @@ mod unit_tests {
         let last_sent: DashMap<Uuid, i64> = DashMap::new();
         // Very fresh timestamp (near now) → age_millis ≈ 0 → priority ≈ 0
         let ts = now_millis();
-        let priority =
-            ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (ts, 0));
+        let priority = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(
+            &actor_id,
+            &last_sent,
+            (ts, 0),
+        );
         // With no burden and nearly zero age the priority is small (≥ -5ms tolerance)
-        assert!(priority >= -100, "Priority {} is unexpectedly low", priority);
+        assert!(
+            priority >= -100,
+            "Priority {} is unexpectedly low",
+            priority
+        );
     }
 
     #[test]
@@ -750,15 +759,22 @@ mod unit_tests {
         let fresh_ts = now_millis();
         let old_ts = now_millis().saturating_sub(60_000); // 1 minute ago
 
-        let fresh_priority =
-            ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (fresh_ts, 0));
-        let old_priority =
-            ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (old_ts, 0));
+        let fresh_priority = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(
+            &actor_id,
+            &last_sent,
+            (fresh_ts, 0),
+        );
+        let old_priority = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(
+            &actor_id,
+            &last_sent,
+            (old_ts, 0),
+        );
 
         assert!(
             old_priority < fresh_priority,
             "Older trajectory should have lower priority rank: old={} fresh={}",
-            old_priority, fresh_priority
+            old_priority,
+            fresh_priority
         );
     }
 
@@ -771,13 +787,22 @@ mod unit_tests {
         let high_burden: DashMap<Uuid, i64> = DashMap::new();
         high_burden.insert(actor_id, 10_000_000); // large recent_sends
 
-        let low = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &low_burden, (ts, 0));
-        let high = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &high_burden, (ts, 0));
+        let low = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(
+            &actor_id,
+            &low_burden,
+            (ts, 0),
+        );
+        let high = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(
+            &actor_id,
+            &high_burden,
+            (ts, 0),
+        );
 
         assert!(
             high > low,
             "High-burden actor should have higher priority rank: high={} low={}",
-            high, low
+            high,
+            low
         );
     }
 
@@ -791,22 +816,30 @@ mod unit_tests {
         // 6 minutes ago (360_000 ms) — also above cap, same result expected
         let ts_6min = now_millis().saturating_sub(360_000);
 
-        let p10 = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (ts_10min, 0));
-        let p6  = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(&actor_id, &last_sent, (ts_6min,  0));
+        let p10 = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(
+            &actor_id,
+            &last_sent,
+            (ts_10min, 0),
+        );
+        let p6 = ClientTrajectoryBuffer::<TestBackend>::_compute_priority(
+            &actor_id,
+            &last_sent,
+            (ts_6min, 0),
+        );
 
         // Both exceed the 300_000 cap, so both should yield the same priority
-        assert_eq!(p10, p6, "Priority should be identical when age exceeds the 300s cap");
+        assert_eq!(
+            p10, p6,
+            "Priority should be identical when age exceeds the 300s cap"
+        );
     }
 
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     #[tokio::test]
     async fn spawn_loop_double_call_returns_err() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
-            test_namespace(),
-            rx,
-            disabled_modes(),
-        );
+        let mut buf =
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
         assert!(buf.spawn_loop().is_ok());
         // Second call: rx already taken, must return Err
         assert!(buf.spawn_loop().is_err());
@@ -817,11 +850,8 @@ mod unit_tests {
     #[tokio::test]
     async fn receiver_ignores_non_trajectory_payloads() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
-            test_namespace(),
-            rx,
-            disabled_modes(),
-        );
+        let mut buf =
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
         buf.spawn_loop().unwrap();
 
         let actor_id = Uuid::new_v4();
@@ -846,11 +876,8 @@ mod unit_tests {
     async fn shutdown_signal_stops_receiver() {
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
-            test_namespace(),
-            rx,
-            disabled_modes(),
-        );
+        let mut buf =
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
         buf.with_shutdown(shutdown_rx);
         buf.spawn_loop().unwrap();
 
@@ -867,11 +894,8 @@ mod unit_tests {
     #[tokio::test]
     async fn dropped_tx_breaks_receiver_loop() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(4);
-        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
-            test_namespace(),
-            rx,
-            disabled_modes(),
-        );
+        let mut buf =
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
         buf.spawn_loop().unwrap();
 
         // Drop the sender — the receiver should observe channel close and exit
@@ -886,16 +910,15 @@ mod unit_tests {
     #[tokio::test]
     async fn partial_trajectory_still_forwarded() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
-            test_namespace(),
-            rx,
-            disabled_modes(),
-        );
+        let mut buf =
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
         buf.spawn_loop().unwrap();
 
         let actor_id = Uuid::new_v4();
         // Send a trajectory with only 1 action
-        tx.send(make_send_trajectory_msg(actor_id, 1)).await.unwrap();
+        tx.send(make_send_trajectory_msg(actor_id, 1))
+            .await
+            .unwrap();
 
         // No error expected; allow processing time
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -906,11 +929,8 @@ mod unit_tests {
     #[tokio::test]
     async fn concurrent_actors_send_trajectories_safely() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(256);
-        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
-            test_namespace(),
-            rx,
-            disabled_modes(),
-        );
+        let mut buf =
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
         buf.spawn_loop().unwrap();
 
         const NUM_ACTORS: usize = 8;

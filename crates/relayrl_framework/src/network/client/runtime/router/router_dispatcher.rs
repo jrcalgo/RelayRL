@@ -247,7 +247,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                     Ok(()) => {
                                         log::info!(
                                             "[RouterDispatcher] Successfully dispatched queued message for actor {} after {} retries",
-                                            actor_id, retry_count
+                                            actor_id,
+                                            retry_count
                                         );
                                         // Message successfully sent, don't add back to queue
                                     }
@@ -379,7 +380,10 @@ mod unit_tests {
         })
     }
 
-    fn make_state_manager() -> (StateManager<TestBackend, D_IN, D_OUT>, mpsc::Receiver<RoutedMessage>) {
+    fn make_state_manager() -> (
+        StateManager<TestBackend, D_IN, D_OUT>,
+        mpsc::Receiver<RoutedMessage>,
+    ) {
         StateManager::<TestBackend, D_IN, D_OUT>::new(
             Arc::from("test-dispatcher"),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -424,7 +428,6 @@ mod unit_tests {
         );
         (dispatcher, global_tx, router_channels, shared_state)
     }
-
 
     #[test]
     fn get_timeout_for_protocol_correct_values() {
@@ -471,7 +474,7 @@ mod unit_tests {
             Duration::from_secs(60)
         );
     }
-  
+
     #[tokio::test]
     async fn dispatches_to_assigned_router() {
         let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
@@ -497,17 +500,18 @@ mod unit_tests {
         let _handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
 
         global_tx
-            .send(make_routed_message(actor_id, RoutingProtocol::ModelHandshake))
+            .send(make_routed_message(
+                actor_id,
+                RoutingProtocol::ModelHandshake,
+            ))
             .await
             .unwrap();
 
-        let received = tokio::time::timeout(
-            tokio::time::Duration::from_millis(300),
-            router_rx.recv(),
-        )
-        .await
-        .expect("timeout waiting for router to receive message")
-        .expect("router rx closed");
+        let received =
+            tokio::time::timeout(tokio::time::Duration::from_millis(300), router_rx.recv())
+                .await
+                .expect("timeout waiting for router to receive message")
+                .expect("router rx closed");
 
         assert_eq!(received.actor_id, actor_id);
         shutdown_tx.send(()).ok();
@@ -553,7 +557,10 @@ mod unit_tests {
 
         // Send message before actor is assigned → queued
         global_tx
-            .send(make_routed_message(actor_id, RoutingProtocol::ModelHandshake))
+            .send(make_routed_message(
+                actor_id,
+                RoutingProtocol::ModelHandshake,
+            ))
             .await
             .unwrap();
 
@@ -568,13 +575,11 @@ mod unit_tests {
         router_channels.insert(ns, router_tx);
 
         // Wait for retry loop to deliver (up to 500ms)
-        let received = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
-            router_rx.recv(),
-        )
-        .await
-        .expect("timeout: retry did not deliver message")
-        .expect("router rx closed");
+        let received =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), router_rx.recv())
+                .await
+                .expect("timeout: retry did not deliver message")
+                .expect("router rx closed");
 
         assert_eq!(received.actor_id, actor_id);
         shutdown_tx.send(()).ok();
@@ -590,13 +595,10 @@ mod unit_tests {
 
         shutdown_tx.send(()).unwrap();
 
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(300),
-            handle,
-        )
-        .await
-        .expect("dispatcher did not exit in time")
-        .expect("join error");
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
+            .await
+            .expect("dispatcher did not exit in time")
+            .expect("join error");
 
         assert!(result.is_ok());
     }
@@ -608,13 +610,10 @@ mod unit_tests {
 
         drop(global_tx); // closed channel → dispatcher sees None → exits
 
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(300),
-            handle,
-        )
-        .await
-        .expect("dispatcher did not exit in time")
-        .expect("join error");
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
+            .await
+            .expect("dispatcher did not exit in time")
+            .expect("join error");
 
         assert!(result.is_ok());
     }
@@ -642,21 +641,24 @@ mod unit_tests {
 
         // This should log an error but not panic
         global_tx
-            .send(make_routed_message(actor_id, RoutingProtocol::ModelHandshake))
+            .send(make_routed_message(
+                actor_id,
+                RoutingProtocol::ModelHandshake,
+            ))
             .await
             .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         shutdown_tx.send(()).ok();
 
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(300),
-            handle,
-        )
-        .await
-        .expect("timeout")
-        .expect("join error");
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
+            .await
+            .expect("timeout")
+            .expect("join error");
 
-        assert!(result.is_ok(), "Dispatcher should not panic on closed router channel");
+        assert!(
+            result.is_ok(),
+            "Dispatcher should not panic on closed router channel"
+        );
     }
 }

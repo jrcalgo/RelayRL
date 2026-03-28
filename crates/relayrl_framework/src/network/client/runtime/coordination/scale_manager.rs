@@ -1,9 +1,9 @@
 use crate::network::HyperparameterArgs;
-use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::AlgorithmArgs;
+use crate::network::client::agent::LocalTrajectoryFileParams;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, uses_local_file_writing
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, uses_local_file_writing,
 };
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -23,18 +23,18 @@ use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, Tra
 use crate::network::client::runtime::router::receiver::{
     ClientTransportModelReceiver, TransportReceiverError,
 };
+use crate::network::client::runtime::router::router_dispatcher::RouterDispatcher;
 use crate::network::client::runtime::router::{
     RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
 };
-use crate::network::client::runtime::router::router_dispatcher::RouterDispatcher;
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::HyperparameterConfig;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 use active_uuid_registry::interface::{
     add_id, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
     reserve_id_with, reserve_namespace,
 };
+use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
 use burn_tensor::backend::Backend;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
@@ -276,9 +276,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn send_shutdown_signal_to_server(
-        &mut self,
-    ) -> Result<(), ScaleManagerError> {
+    pub(crate) async fn send_shutdown_signal_to_server(&mut self) -> Result<(), ScaleManagerError> {
         if let (Some(scaling_dispatcher), Some(transport_addresses)) =
             (&self.scaling_dispatcher, &self.shared_transport_addresses)
         {
@@ -648,7 +646,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         log::info!(
             "Scale up successful: {} new router(s) added, total routers: {}",
-            router_add, current_router_count
+            router_add,
+            current_router_count
         );
 
         Ok(())
@@ -701,7 +700,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if initial_router_count < router_remove {
             log::error!(
                 "Cannot remove {} routers: only {} routers exist",
-                router_remove, initial_router_count
+                router_remove,
+                initial_router_count
             );
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             if let Some(transport_addresses) = transport_addresses_opt {
@@ -851,7 +851,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         log::info!(
             "Scale down successful: {} router(s) removed, total routers: {}",
-            router_remove, current_router_count
+            router_remove,
+            current_router_count
         );
         Ok(())
     }

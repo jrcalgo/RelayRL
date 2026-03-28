@@ -17,21 +17,21 @@ use super::training_subjects::{
 use super::{NatsInferenceExecution, NatsTrainingExecution};
 
 use relayrl_types::HyperparameterArgs;
+use relayrl_types::model::utils::validate_module;
 use relayrl_types::prelude::action::RelayRLAction;
 use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
-use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use bytes::Bytes;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
@@ -39,10 +39,10 @@ use tokio_stream::StreamExt;
 // Every payload struct is serialized to `bytes::Bytes` via bincode v2 and sent
 // as the body of a NATS/JetStream message.
 mod payloads {
-    use serde::{Deserialize, Serialize};
+    use crate::utilities::configuration::Algorithm;
     use relayrl_types::HyperparameterArgs;
     use relayrl_types::prelude::trajectory::EncodedTrajectory;
-    use crate::utilities::configuration::Algorithm;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
     #[derive(Serialize, Deserialize)]
@@ -228,10 +228,9 @@ fn serialize_model_module_to_bundle<B: Backend + BackendMatcher<Backend = B>>(
             ))
         })?;
 
-    let raw_metadata_json_string =
-        String::from_utf8_lossy(&metadata_json_bytes).into_owned();
-    let metadata_value: serde_json::Value =
-        serde_json::from_str(&raw_metadata_json_string).map_err(|json_parse_error| {
+    let raw_metadata_json_string = String::from_utf8_lossy(&metadata_json_bytes).into_owned();
+    let metadata_value: serde_json::Value = serde_json::from_str(&raw_metadata_json_string)
+        .map_err(|json_parse_error| {
             TransportError::InvalidState(format!(
                 "Failed to parse metadata.json for model file name extraction: {}",
                 json_parse_error
@@ -275,17 +274,20 @@ fn deserialize_model_module_from_bundle<B: Backend + BackendMatcher<Backend = B>
         })?;
 
     let metadata_json_file_path = model_deserialization_temp_dir.path().join("metadata.json");
-    std::fs::write(&metadata_json_file_path, &model_files_bundle.metadata_json_bytes).map_err(
-        |metadata_write_error| {
-            TransportError::ModelHandshakeError(format!(
-                "Failed to write metadata.json to temporary directory: {}",
-                metadata_write_error
-            ))
-        },
-    )?;
+    std::fs::write(
+        &metadata_json_file_path,
+        &model_files_bundle.metadata_json_bytes,
+    )
+    .map_err(|metadata_write_error| {
+        TransportError::ModelHandshakeError(format!(
+            "Failed to write metadata.json to temporary directory: {}",
+            metadata_write_error
+        ))
+    })?;
 
-    let model_file_path =
-        model_deserialization_temp_dir.path().join(&model_files_bundle.model_file_name);
+    let model_file_path = model_deserialization_temp_dir
+        .path()
+        .join(&model_files_bundle.model_file_name);
     std::fs::write(&model_file_path, &model_files_bundle.model_file_bytes).map_err(
         |model_file_write_error| {
             TransportError::ModelHandshakeError(format!(
@@ -295,15 +297,15 @@ fn deserialize_model_module_from_bundle<B: Backend + BackendMatcher<Backend = B>
         },
     )?;
 
-    let loaded_model_module =
-        ModelModule::<B>::load_from_path(model_deserialization_temp_dir.path()).map_err(
-            |model_load_error| {
-                TransportError::ModelHandshakeError(format!(
-                    "Failed to load model module from temporary directory: {:?}",
-                    model_load_error
-                ))
-            },
-        )?;
+    let loaded_model_module = ModelModule::<B>::load_from_path(
+        model_deserialization_temp_dir.path(),
+    )
+    .map_err(|model_load_error| {
+        TransportError::ModelHandshakeError(format!(
+            "Failed to load model module from temporary directory: {:?}",
+            model_load_error
+        ))
+    })?;
 
     validate_module::<B>(&loaded_model_module).map_err(|model_validation_error| {
         TransportError::ModelHandshakeError(format!(
@@ -374,15 +376,14 @@ impl NatsConnectionManager {
                     })?;
             }
 
-            let new_inference_client =
-                async_nats::connect(nats_inference_server_address)
-                    .await
-                    .map_err(|nats_connection_error| {
-                        TransportError::NatsClientError(format!(
-                            "Failed to connect inference NATS client to '{}': {}",
-                            nats_inference_server_address, nats_connection_error
-                        ))
-                    })?;
+            let new_inference_client = async_nats::connect(nats_inference_server_address)
+                .await
+                .map_err(|nats_connection_error| {
+                    TransportError::NatsClientError(format!(
+                        "Failed to connect inference NATS client to '{}': {}",
+                        nats_inference_server_address, nats_connection_error
+                    ))
+                })?;
 
             self.inference_client = Some(new_inference_client);
             self.inference_address_fingerprint = Some(incoming_address_fingerprint);
@@ -426,15 +427,14 @@ impl NatsConnectionManager {
             }
             self.training_jetstream_context = None;
 
-            let new_training_client =
-                async_nats::connect(nats_training_server_address)
-                    .await
-                    .map_err(|nats_connection_error| {
-                        TransportError::NatsClientError(format!(
-                            "Failed to connect training NATS client to '{}': {}",
-                            nats_training_server_address, nats_connection_error
-                        ))
-                    })?;
+            let new_training_client = async_nats::connect(nats_training_server_address)
+                .await
+                .map_err(|nats_connection_error| {
+                    TransportError::NatsClientError(format!(
+                        "Failed to connect training NATS client to '{}': {}",
+                        nats_training_server_address, nats_connection_error
+                    ))
+                })?;
 
             let new_training_jetstream_context =
                 async_nats::jetstream::new(new_training_client.clone());
@@ -613,10 +613,8 @@ impl NatsInferenceExecution for NatsInferenceOps {
 
         let model_files_bundle_bytes: Vec<u8> = match model_module {
             Some(model_module_reference) => {
-                let model_files_bundle =
-                    serialize_model_module_to_bundle(model_module_reference)?;
-                serialize_payload_to_nats_bytes(&model_files_bundle, "model files bundle")?
-                    .to_vec()
+                let model_files_bundle = serialize_model_module_to_bundle(model_module_reference)?;
+                serialize_payload_to_nats_bytes(&model_files_bundle, "model files bundle")?.to_vec()
             }
             None => vec![],
         };
@@ -676,11 +674,13 @@ impl NatsInferenceExecution for NatsInferenceOps {
 
         let client_id_entries: Vec<ClientIdEntry> = client_ids
             .iter()
-            .map(|(client_namespace, client_context, client_id)| ClientIdEntry {
-                namespace: client_namespace.to_string(),
-                context: client_context.to_string(),
-                id: client_id.to_string(),
-            })
+            .map(
+                |(client_namespace, client_context, client_id)| ClientIdEntry {
+                    namespace: client_namespace.to_string(),
+                    context: client_context.to_string(),
+                    id: client_id.to_string(),
+                },
+            )
             .collect();
 
         let inference_client_ids_payload = ClientIdsPayload {
@@ -692,10 +692,8 @@ impl NatsInferenceExecution for NatsInferenceOps {
             client_id_entries,
         };
 
-        let serialized_inference_client_ids_payload = serialize_payload_to_nats_bytes(
-            &inference_client_ids_payload,
-            "inference client IDs",
-        )?;
+        let serialized_inference_client_ids_payload =
+            serialize_payload_to_nats_bytes(&inference_client_ids_payload, "inference client IDs")?;
 
         let nats_inference_client = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -950,14 +948,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
                 ))
             })?;
 
-        let received_nats_message = model_update_subscriber
-            .next()
-            .await
-            .ok_or_else(|| {
-                TransportError::ListenForModelError(
-                    "Model update subscriber closed without yielding a message".to_string(),
-                )
-            })?;
+        let received_nats_message = model_update_subscriber.next().await.ok_or_else(|| {
+            TransportError::ListenForModelError(
+                "Model update subscriber closed without yielding a message".to_string(),
+            )
+        })?;
 
         let deserialized_model_update_broadcast: ModelUpdateBroadcastMessage =
             deserialize_nats_response_bytes(
@@ -983,15 +978,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             )));
         }
 
-        let actor_id_byte_array: [u8; 16] = actor_id_bytes_vector
-            .as_slice()
-            .try_into()
-            .map_err(|conversion_error| {
-                TransportError::ListenForModelError(format!(
-                    "Failed to convert actor ID bytes to fixed-size array: {}",
-                    conversion_error
-                ))
-            })?;
+        let actor_id_byte_array: [u8; 16] =
+            actor_id_bytes_vector
+                .as_slice()
+                .try_into()
+                .map_err(|conversion_error| {
+                    TransportError::ListenForModelError(format!(
+                        "Failed to convert actor ID bytes to fixed-size array: {}",
+                        conversion_error
+                    ))
+                })?;
 
         let actor_uuid = Uuid::from_bytes(actor_id_byte_array);
 
@@ -1147,7 +1143,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
                 "model handshake response",
             )?;
 
-        if deserialized_handshake_response.model_files_bundle_bytes.is_empty() {
+        if deserialized_handshake_response
+            .model_files_bundle_bytes
+            .is_empty()
+        {
             return Ok(None);
         }
 
@@ -1185,10 +1184,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             encoded_trajectory: encoded_trajectory.clone(),
         };
 
-        let serialized_trajectory_publish_payload = serialize_payload_to_nats_bytes(
-            &trajectory_publish_payload,
-            "trajectory publish",
-        )?;
+        let serialized_trajectory_publish_payload =
+            serialize_payload_to_nats_bytes(&trajectory_publish_payload, "trajectory publish")?;
 
         let (_nats_training_client, nats_training_jetstream_context) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -1237,11 +1234,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
 
         let client_id_entries: Vec<ClientIdEntry> = client_ids
             .iter()
-            .map(|(client_namespace, client_context, client_id)| ClientIdEntry {
-                namespace: client_namespace.to_string(),
-                context: client_context.to_string(),
-                id: client_id.to_string(),
-            })
+            .map(
+                |(client_namespace, client_context, client_id)| ClientIdEntry {
+                    namespace: client_namespace.to_string(),
+                    context: client_context.to_string(),
+                    id: client_id.to_string(),
+                },
+            )
             .collect();
 
         let training_client_ids_payload = ClientIdsPayload {
@@ -1253,10 +1252,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             client_id_entries,
         };
 
-        let serialized_training_client_ids_payload = serialize_payload_to_nats_bytes(
-            &training_client_ids_payload,
-            "training client IDs",
-        )?;
+        let serialized_training_client_ids_payload =
+            serialize_payload_to_nats_bytes(&training_client_ids_payload, "training client IDs")?;
 
         let (nats_training_client, _training_jetstream_context) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -1430,10 +1427,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             scaling_id: scaling_id.to_string(),
         };
 
-        let serialized_training_shutdown_payload = serialize_payload_to_nats_bytes(
-            &training_shutdown_payload,
-            "training shutdown",
-        )?;
+        let serialized_training_shutdown_payload =
+            serialize_payload_to_nats_bytes(&training_shutdown_payload, "training shutdown")?;
 
         let (nats_training_client, _training_jetstream_context) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;

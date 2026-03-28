@@ -3,8 +3,8 @@
 //! This module provides metrics and telemetry capabilities for the RelayRL framework,
 //! enabling performance monitoring, profiling, and distributed tracing.
 
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 // Expose submodules
@@ -30,7 +30,11 @@ pub async fn init_metrics(metrics_args: Arc<RwLock<(String, String)>>) -> Metric
     let initial_metrics_args = metrics_args.read().await.clone();
 
     let mgr_ref = METRICS_MANAGER.get_or_init(move || {
-        MetricsManager::new(metrics_args.clone(), initial_metrics_args, prometheus_registry)
+        MetricsManager::new(
+            metrics_args.clone(),
+            initial_metrics_args,
+            prometheus_registry,
+        )
     });
 
     mgr_ref.clone()

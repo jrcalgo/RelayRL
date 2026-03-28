@@ -2,10 +2,10 @@ use crate::network::TransportType;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
-#[cfg(feature = "zmq-transport")]
-use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
 #[cfg(feature = "nats-transport")]
 use crate::network::client::runtime::data::transport_sink::nats::interface::NatsInterface;
+#[cfg(feature = "zmq-transport")]
+use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
 #[cfg(feature = "zmq-transport")]
 use crate::network::client::runtime::data::transport_sink::zmq::interface::ZmqInterface;
 use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
@@ -18,7 +18,7 @@ use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::data::trajectory::EncodedTrajectory;
 use relayrl_types::model::ModelModule;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
+use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;
@@ -319,7 +319,7 @@ pub(crate) async fn client_transport_factory<B: Backend + BackendMatcher<Backend
         TransportType::NATS => Ok(ClientTransportInterface::<B>::Async(Box::new(
             NatsInterface::<B>::new(client_namespace, shared_client_modes)
                 .await
-                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?
+                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
         ))),
     }
 }

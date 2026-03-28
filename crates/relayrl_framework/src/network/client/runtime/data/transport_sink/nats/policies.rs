@@ -1,10 +1,10 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Semaphore, SemaphorePermit, OwnedSemaphorePermit};
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -90,7 +90,10 @@ impl CircuitBreaker {
     }
 
     pub fn is_open(&self) -> bool {
-        let state = *self.state.read().expect("CircuitBreaker state lock poisoned");
+        let state = *self
+            .state
+            .read()
+            .expect("CircuitBreaker state lock poisoned");
         match state {
             CircuitState::Closed => false,
             CircuitState::Open => {
@@ -100,8 +103,10 @@ impl CircuitBreaker {
                     .expect("CircuitBreaker opened_at lock poisoned")
                 {
                     if opened_at.elapsed() >= self.open_duration {
-                        *self.state.write().expect("CircuitBreaker state lock poisoned") =
-                            CircuitState::HalfOpen;
+                        *self
+                            .state
+                            .write()
+                            .expect("CircuitBreaker state lock poisoned") = CircuitState::HalfOpen;
                         return false;
                     }
                 }
@@ -113,25 +118,41 @@ impl CircuitBreaker {
 
     pub fn record_success(&self) {
         self.failure_count.store(0, Ordering::SeqCst);
-        *self.state.write().expect("CircuitBreaker state lock poisoned") = CircuitState::Closed;
-        *self.opened_at.write().expect("CircuitBreaker opened_at lock poisoned") = None;
+        *self
+            .state
+            .write()
+            .expect("CircuitBreaker state lock poisoned") = CircuitState::Closed;
+        *self
+            .opened_at
+            .write()
+            .expect("CircuitBreaker opened_at lock poisoned") = None;
     }
 
     pub fn record_failure(&self) {
         let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
         if failures >= self.failure_threshold {
-            let current = *self.state.read().expect("CircuitBreaker state lock poisoned");
+            let current = *self
+                .state
+                .read()
+                .expect("CircuitBreaker state lock poisoned");
             if current != CircuitState::Open {
-                *self.state.write().expect("CircuitBreaker state lock poisoned") =
-                    CircuitState::Open;
-                *self.opened_at.write().expect("CircuitBreaker opened_at lock poisoned") =
-                    Some(Instant::now());
+                *self
+                    .state
+                    .write()
+                    .expect("CircuitBreaker state lock poisoned") = CircuitState::Open;
+                *self
+                    .opened_at
+                    .write()
+                    .expect("CircuitBreaker opened_at lock poisoned") = Some(Instant::now());
             }
         }
     }
 
     pub fn state(&self) -> CircuitState {
-        *self.state.read().expect("CircuitBreaker state lock poisoned")
+        *self
+            .state
+            .read()
+            .expect("CircuitBreaker state lock poisoned")
     }
 
     pub fn failure_count(&self) -> u64 {
@@ -170,7 +191,6 @@ impl BackpressureController {
         self.max_concurrent
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct NatsPolicyConfig {
