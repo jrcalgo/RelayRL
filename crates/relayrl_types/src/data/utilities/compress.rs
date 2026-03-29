@@ -91,16 +91,55 @@ impl std::fmt::Display for CompressionError {
 impl std::error::Error for CompressionError {}
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     #[test]
     #[cfg(feature = "compression")]
-    fn test_lz4_compression() {
+    fn lz4_compression_round_trip() {
         let data = vec![42u8; 1000];
         let compressed = CompressedData::compress(&data, CompressionScheme::Lz4).unwrap();
         assert!(compressed.data.len() < data.len());
         let decompressed = compressed.decompress().unwrap();
         assert_eq!(data, decompressed);
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn zstd_compression_round_trip() {
+        let data = vec![7u8; 512];
+        let compressed = CompressedData::compress(&data, CompressionScheme::Zstd(3)).unwrap();
+
+        assert!(compressed.compression_ratio() >= 1.0);
+        assert!(compressed.space_saved() >= 0);
+        assert_eq!(compressed.decompress().unwrap(), data);
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn no_compression_keeps_original_size() {
+        let data = b"relayrl".to_vec();
+        let compressed = CompressedData::compress(&data, CompressionScheme::None).unwrap();
+
+        assert_eq!(compressed.data, data);
+        assert_eq!(compressed.original_size, 7);
+        assert_eq!(compressed.compression_ratio(), 1.0);
+        assert_eq!(compressed.space_saved(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn invalid_lz4_payload_returns_error() {
+        let compressed = CompressedData {
+            data: vec![1, 2, 3, 4],
+            original_size: 16,
+            scheme: CompressionScheme::Lz4,
+        };
+
+        let err = compressed
+            .decompress()
+            .expect_err("invalid compressed bytes should fail to decompress");
+
+        assert!(matches!(err, CompressionError::Lz4Error(_)));
     }
 }

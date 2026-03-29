@@ -109,3 +109,81 @@ impl std::fmt::Display for ChunkError {
 }
 
 impl std::error::Error for ChunkError {}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn from_data_splits_and_reassembles_payloads() {
+        let data = b"relayrl-chunking".to_vec();
+        let chunked = ChunkedTensor::from_data(&data, 4);
+
+        assert_eq!(chunked.chunks().len(), 4);
+        assert_eq!(ChunkedTensor::reassemble(chunked.chunks()).unwrap(), data);
+    }
+
+    #[test]
+    fn reassemble_requires_at_least_one_chunk() {
+        let err = ChunkedTensor::reassemble(&[])
+            .expect_err("reassembly should fail when no chunks are provided");
+
+        assert!(matches!(err, ChunkError::NoChunks));
+    }
+
+    #[test]
+    fn reassemble_detects_missing_chunks() {
+        let data = b"relayrl".to_vec();
+        let chunked = ChunkedTensor::from_data(&data, 2);
+        let missing = &chunked.chunks()[..2];
+
+        let err = ChunkedTensor::reassemble(missing)
+            .expect_err("dropping chunks should report a missing-chunk error");
+
+        assert!(matches!(
+            err,
+            ChunkError::MissingChunks {
+                expected: 4,
+                received: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn reassemble_detects_duplicate_or_out_of_order_chunk_ids() {
+        let chunk = TensorChunk {
+            chunk_id: 0,
+            total_chunks: 2,
+            data: vec![1, 2],
+            #[cfg(feature = "integrity")]
+            checksum: crate::data::utilities::integrity::compute_checksum(&[1, 2]),
+            offset: 0,
+        };
+        let duplicate = TensorChunk {
+            chunk_id: 0,
+            total_chunks: 2,
+            data: vec![3, 4],
+            #[cfg(feature = "integrity")]
+            checksum: crate::data::utilities::integrity::compute_checksum(&[3, 4]),
+            offset: 2,
+        };
+
+        let err = ChunkedTensor::reassemble(&[chunk, duplicate])
+            .expect_err("duplicate chunk ids should fail reassembly");
+
+        assert!(matches!(err, ChunkError::OutOfOrder));
+    }
+
+    #[test]
+    #[cfg(feature = "integrity")]
+    fn reassemble_rejects_corrupted_chunks() {
+        let data = b"relayrl".to_vec();
+        let mut chunks = ChunkedTensor::from_data(&data, 3).chunks().to_vec();
+        chunks[0].data[0] ^= 0xFF;
+
+        let err = ChunkedTensor::reassemble(&chunks)
+            .expect_err("checksum mismatches should report the corrupted chunk");
+
+        assert!(matches!(err, ChunkError::CorruptedChunk(0)));
+    }
+}

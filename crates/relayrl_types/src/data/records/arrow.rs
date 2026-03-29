@@ -562,3 +562,166 @@ fn reconstruct_tensor(
         TensorData::get_backend_from_dtype(&dtype),
     )))
 }
+
+#[cfg(all(test, feature = "ndarray-backend"))]
+mod unit_tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_arrow_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("relayrl-arrow-{label}-{}.arrow", Uuid::new_v4()))
+    }
+
+    fn f32_tensor(shape: Vec<usize>, values: &[f32]) -> TensorData {
+        TensorData::new(
+            shape,
+            DType::NdArray(NdArrayDType::F32),
+            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::F32)),
+        )
+    }
+
+    fn f64_tensor(shape: Vec<usize>, values: &[f64]) -> TensorData {
+        TensorData::new(
+            shape,
+            DType::NdArray(NdArrayDType::F64),
+            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::F64)),
+        )
+    }
+
+    fn i32_tensor(shape: Vec<usize>, values: &[i32]) -> TensorData {
+        TensorData::new(
+            shape,
+            DType::NdArray(NdArrayDType::I32),
+            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::I32)),
+        )
+    }
+
+    #[test]
+    fn arrow_round_trip_preserves_float_and_binary_tensors() {
+        let path = temp_arrow_path("roundtrip");
+        let agent_id = Uuid::new_v4();
+        let mut trajectory = RelayRLTrajectory::with_metadata(4, Some(agent_id), Some(7), Some(11));
+        trajectory.add_action(RelayRLAction::new(
+            Some(f32_tensor(vec![2], &[1.0, 2.0])),
+            Some(i32_tensor(vec![2], &[3, 4])),
+            Some(f64_tensor(vec![2], &[0.5, 1.5])),
+            1.25,
+            true,
+            None,
+            Some(agent_id),
+        ));
+
+        ArrowTrajectory::new(Some(trajectory))
+            .to_arrow(&path)
+            .expect("writing the Arrow file should succeed");
+
+        let loaded = ArrowTrajectory::new(None)
+            .from_arrow(&path, Some(7), Some(11))
+            .expect("reading the Arrow file should succeed");
+        let loaded_trajectory = loaded.trajectory.expect("trajectory should be reconstructed");
+        let loaded_action = &loaded_trajectory.actions[0];
+
+        assert_eq!(loaded_trajectory.get_episode(), Some(7));
+        assert_eq!(loaded_trajectory.get_training_step(), Some(11));
+        assert_eq!(loaded_trajectory.get_agent_id(), Some(&agent_id));
+        assert_eq!(loaded_action.get_rew(), 1.25);
+        assert!(loaded_action.get_done());
+        assert_eq!(loaded_action.get_obs().unwrap().data, f32_tensor(vec![2], &[1.0, 2.0]).data);
+        assert_eq!(loaded_action.get_act().unwrap().data, i32_tensor(vec![2], &[3, 4]).data);
+        assert_eq!(loaded_action.get_mask().unwrap().data, f64_tensor(vec![2], &[0.5, 1.5]).data);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn writing_an_empty_trajectory_creates_a_readable_arrow_file() {
+        let path = temp_arrow_path("empty");
+        let trajectory = RelayRLTrajectory::new(4);
+
+        ArrowTrajectory::new(Some(trajectory))
+            .to_arrow(&path)
+            .expect("writing an empty trajectory should still succeed");
+
+        let reader = FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+        assert_eq!(reader.count(), 0);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn build_trajectory_rejects_invalid_agent_ids() {
+        let batch = RecordBatch::try_new(
+            create_arrow_schema(),
+            vec![
+                Arc::new(StringArray::from(vec!["NdArray"])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![1.0])) as ArrayRef,
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![1])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["not-a-uuid"])) as ArrayRef,
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+                build_shape_list_array(vec![None::<Vec<u64>>]),
+                build_f32_list_array(vec![None::<Vec<f32>>]),
+                build_f64_list_array(vec![None::<Vec<f64>>]),
+                build_binary_array(vec![None::<Vec<u8>>]),
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+                build_shape_list_array(vec![None::<Vec<u64>>]),
+                build_f32_list_array(vec![None::<Vec<f32>>]),
+                build_f64_list_array(vec![None::<Vec<f64>>]),
+                build_binary_array(vec![None::<Vec<u8>>]),
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+                build_shape_list_array(vec![None::<Vec<u64>>]),
+                build_f32_list_array(vec![None::<Vec<f32>>]),
+                build_f64_list_array(vec![None::<Vec<f64>>]),
+                build_binary_array(vec![None::<Vec<u8>>]),
+            ],
+        )
+        .unwrap();
+
+        let err = ArrowTrajectory::new(None)
+            .build_trajectory(batch, None, None)
+            .expect_err("invalid UUIDs should be rejected");
+
+        assert!(matches!(
+            err,
+            ArrowDataError::RecordBatchBuildFailure(message) if message.contains("Invalid agent_id UUID")
+        ));
+    }
+
+    #[test]
+    fn reconstruct_tensor_requires_a_payload_for_non_null_tensors() {
+        let dtype_array = StringArray::from(vec!["NdArray(F32)"]);
+        let shape_array = build_shape_list_array(vec![Some(vec![2u64])]);
+        let f32_array = build_f32_list_array(vec![None::<Vec<f32>>]);
+        let f64_array = build_f64_list_array(vec![None::<Vec<f64>>]);
+        let binary_array = build_binary_array(vec![None::<Vec<u8>>]);
+
+        let err = reconstruct_tensor(
+            &dtype_array,
+            shape_array.as_any().downcast_ref::<ListArray>().unwrap(),
+            f32_array.as_any().downcast_ref::<ListArray>().unwrap(),
+            f64_array.as_any().downcast_ref::<ListArray>().unwrap(),
+            binary_array.as_any().downcast_ref::<BinaryArray>().unwrap(),
+            0,
+        )
+        .expect_err("missing payloads should be reported");
+
+        assert!(matches!(
+            err,
+            ArrowDataError::RecordBatchBuildFailure(message) if message.contains("missing data payload")
+        ));
+    }
+
+    #[test]
+    fn parse_dtype_rejects_unknown_strings() {
+        let err = parse_dtype("RelayRL(F128)")
+            .expect_err("unsupported dtype strings should not parse");
+
+        assert!(matches!(
+            err,
+            ArrowDataError::RecordBatchBuildFailure(message) if message.contains("Unsupported dtype string")
+        ));
+    }
+}

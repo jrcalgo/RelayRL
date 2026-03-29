@@ -125,3 +125,62 @@ impl std::fmt::Display for IntegrityError {
 }
 
 impl std::error::Error for IntegrityError {}
+
+#[cfg(all(test, feature = "integrity"))]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn verified_data_round_trip_succeeds() {
+        let payload = b"relayrl".to_vec();
+        let verified = VerifiedData::new(payload.clone());
+
+        assert!(verified.timestamp.is_some());
+        assert_eq!(verified.clone().into_verified().unwrap(), payload);
+    }
+
+    #[test]
+    fn verified_data_without_timestamp_skips_age_tracking() {
+        let verified = VerifiedData::new_without_timestamp(vec![1, 2, 3]);
+
+        assert!(verified.timestamp.is_none());
+        assert!(verified.verify_with_age(0).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_tampered_payloads() {
+        let mut verified = VerifiedData::new(vec![1, 2, 3]);
+        verified.data[1] ^= 0xFF;
+
+        let err = verified
+            .verify()
+            .expect_err("tampered data should fail checksum verification");
+
+        assert!(matches!(err, IntegrityError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn verify_with_age_rejects_stale_payloads() {
+        let data = vec![9, 8, 7];
+        let verified = VerifiedData {
+            data: data.clone(),
+            checksum: compute_checksum(&data),
+            timestamp: Some(0),
+        };
+
+        let err = verified
+            .verify_with_age(1)
+            .expect_err("very old payloads should be rejected");
+
+        assert!(matches!(err, IntegrityError::DataTooOld { .. }));
+    }
+
+    #[test]
+    fn keyed_hash_depends_on_the_supplied_key() {
+        let data = b"relayrl";
+        let left = compute_keyed_hash(data, &[1; 32]);
+        let right = compute_keyed_hash(data, &[2; 32]);
+
+        assert_ne!(left, right);
+    }
+}

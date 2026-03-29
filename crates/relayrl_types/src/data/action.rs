@@ -498,11 +498,54 @@ impl RelayRLAction {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
+    #[cfg(feature = "ndarray-backend")]
+    use burn_ndarray::NdArray;
+    use uuid::Uuid;
+
+    use crate::data::tensor::{
+        DType, DeviceType, NdArrayDType, SupportedTensorBackend, TensorData, TensorError,
+    };
+    #[cfg(feature = "encryption")]
+    use crate::data::utilities::encrypt::generate_key;
+
+    fn f32_tensor(values: &[f32]) -> TensorData {
+        TensorData::new(
+            vec![values.len()],
+            DType::NdArray(NdArrayDType::F32),
+            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            SupportedTensorBackend::NdArray,
+        )
+    }
+
+    fn bool_tensor(values: &[bool]) -> TensorData {
+        TensorData::new(
+            vec![values.len()],
+            DType::NdArray(NdArrayDType::Bool),
+            values.iter().map(|value| u8::from(*value)).collect(),
+            SupportedTensorBackend::NdArray,
+        )
+    }
+
+    fn rich_action() -> RelayRLAction {
+        let mut aux = HashMap::new();
+        aux.insert("score".to_string(), RelayRLData::F32(7.5));
+        aux.insert("label".to_string(), RelayRLData::String("policy".to_string()));
+
+        RelayRLAction::new(
+            Some(f32_tensor(&[1.0, 2.0])),
+            Some(f32_tensor(&[3.0, 4.0])),
+            Some(bool_tensor(&[true, false])),
+            1.5,
+            true,
+            Some(aux),
+            Some(Uuid::from_u128(7)),
+        )
+    }
 
     #[test]
-    fn test_minimal_action() {
+    fn minimal_action_has_expected_defaults() {
         let action = RelayRLAction::minimal(1.0, false);
         assert_eq!(action.get_rew(), 1.0);
         assert!(!action.get_done());
@@ -511,7 +554,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "metadata")]
-    fn test_action_serialization() {
+    fn action_serialization_round_trip() {
         let action = RelayRLAction::minimal(1.5, true);
         let bytes = action.to_bytes().unwrap();
         let (decoded, decoded_bytes_read) = RelayRLAction::from_bytes(&bytes).unwrap();
@@ -522,9 +565,146 @@ mod tests {
     }
 
     #[test]
-    fn test_action_age() {
-        let action = RelayRLAction::minimal(0.0, false);
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        assert!(action.age_seconds() >= 1);
+    fn setters_update_action_metadata() {
+        let mut action = RelayRLAction::minimal(0.0, false);
+        let agent_id = Uuid::from_u128(11);
+
+        action.update_reward(2.5);
+        action.set_done(true);
+        action.set_agent_id(agent_id);
+
+        assert_eq!(action.get_rew(), 2.5);
+        assert!(action.get_done());
+        assert_eq!(action.get_agent_id(), Some(&agent_id));
+    }
+
+    #[test]
+    #[cfg(feature = "ndarray-backend")]
+    fn tensor_accessors_return_tensors_for_matching_backend() {
+        let action = rich_action();
+
+        assert!(action.get_obs_tensor::<NdArray>(&DeviceType::Cpu).is_some());
+        assert!(action.get_act_tensor::<NdArray>(&DeviceType::Cpu).is_some());
+        assert!(action.get_mask_tensor::<NdArray>(&DeviceType::Cpu).is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "ndarray-backend")]
+    fn to_tensor_rejects_missing_backend() {
+        let tensor = TensorData::new(
+            vec![2],
+            DType::NdArray(NdArrayDType::F32),
+            [1.0f32, 2.0]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            SupportedTensorBackend::None,
+        );
+
+        let err = RelayRLAction::to_tensor::<NdArray>(&tensor, &DeviceType::Cpu)
+            .expect_err("tensor conversion should reject the missing backend");
+
+        assert!(matches!(err, TensorError::BackendError(message) if message.contains("Backend mismatch")));
+    }
+
+    #[test]
+    fn codec_config_defaults_match_enabled_features() {
+        let config = CodecConfig::default();
+
+        #[cfg(feature = "compression")]
+        assert!(config.compression.is_some());
+
+        #[cfg(feature = "encryption")]
+        assert!(config.encryption_key.is_none());
+
+        #[cfg(feature = "integrity")]
+        assert!(config.verify_integrity);
+
+        #[cfg(feature = "metadata")]
+        assert!(config.include_metadata);
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn encode_decode_round_trip_preserves_action_payloads() {
+        let action = rich_action();
+        let config = CodecConfig::default();
+
+        let encoded = action.encode(&config).unwrap();
+        let decoded = RelayRLAction::decode(&encoded, &config).unwrap();
+
+        assert_eq!(decoded.get_rew(), action.get_rew());
+        assert_eq!(decoded.get_done(), action.get_done());
+        assert_eq!(decoded.get_agent_id(), action.get_agent_id());
+        assert_eq!(decoded.get_obs().unwrap().data, action.get_obs().unwrap().data);
+        assert_eq!(decoded.get_act().unwrap().data, action.get_act().unwrap().data);
+        assert_eq!(decoded.get_mask().unwrap().data, action.get_mask().unwrap().data);
+        assert!(matches!(
+            decoded.get_data().unwrap().get("score"),
+            Some(RelayRLData::F32(value)) if (*value - 7.5).abs() < f32::EPSILON
+        ));
+
+        #[cfg(feature = "compression")]
+        assert!(encoded.compressed);
+
+        #[cfg(feature = "integrity")]
+        assert!(encoded.checksum.is_some());
+    }
+
+    #[test]
+    #[cfg(all(feature = "metadata", feature = "integrity"))]
+    fn decode_rejects_checksum_mismatch() {
+        let action = rich_action();
+        let config = CodecConfig::default();
+        let mut encoded = action.encode(&config).unwrap();
+
+        encoded.data[0] ^= 0xFF;
+
+        let err = RelayRLAction::decode(&encoded, &config)
+            .expect_err("tampering should invalidate the checksum");
+
+        assert!(matches!(err, ActionError::IntegrityError(message) if message.contains("Checksum mismatch")));
+    }
+
+    #[test]
+    #[cfg(all(feature = "metadata", feature = "encryption"))]
+    fn decode_requires_encryption_key_when_payload_is_encrypted() {
+        let action = rich_action();
+        let mut encode_config = CodecConfig::default();
+        encode_config.encryption_key = Some(generate_key());
+        let encoded = action.encode(&encode_config).unwrap();
+
+        let mut decode_config = CodecConfig::default();
+        decode_config.encryption_key = None;
+
+        let err = RelayRLAction::decode(&encoded, &decode_config)
+            .expect_err("decoding encrypted payloads should require the key");
+
+        assert!(matches!(
+            err,
+            ActionError::EncryptionError(message) if message.contains("Encryption key required")
+        ));
+    }
+
+    #[test]
+    #[cfg(all(feature = "metadata", feature = "integrity"))]
+    fn chunked_encode_decode_round_trip_preserves_action() {
+        let action = rich_action();
+        let config = CodecConfig::default();
+
+        let chunks = action.encode_chunked(&config, 8).unwrap();
+        assert!(chunks.len() > 1);
+
+        let decoded = RelayRLAction::decode_chunked(&chunks, &config).unwrap();
+        assert_eq!(decoded.get_rew(), action.get_rew());
+        assert_eq!(decoded.get_obs().unwrap().data, action.get_obs().unwrap().data);
+    }
+
+    #[test]
+    fn age_seconds_uses_action_timestamp() {
+        let mut action = RelayRLAction::minimal(0.0, false);
+        action.timestamp = action.timestamp.saturating_sub(2);
+
+        assert!(action.age_seconds() >= 2);
     }
 }

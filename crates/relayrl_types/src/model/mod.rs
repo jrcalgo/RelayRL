@@ -1335,3 +1335,174 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         })
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use std::marker::PhantomData;
+
+    use uuid::Uuid;
+
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    use burn_ndarray::NdArray;
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    use burn_tensor::{Float, Tensor};
+
+    fn temp_dir_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("relayrl-model-{label}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn model_file_type_parses_supported_extensions() {
+        assert_eq!(
+            ModelFileType::from_path(Path::new("policy.pt")).unwrap(),
+            ModelFileType::Pt
+        );
+        assert_eq!(
+            ModelFileType::from_path(Path::new("policy.onnx")).unwrap(),
+            ModelFileType::Onnx
+        );
+        assert!(matches!(
+            ModelFileType::from_path(Path::new("policy.bin")),
+            Err(ModelError::UnsupportedModelType(message)) if message.contains("Unsupported extension")
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "ndarray-backend")]
+    fn model_metadata_save_load_round_trip_preserves_paths() {
+        let dir = temp_dir_path("metadata-roundtrip");
+        let metadata = ModelMetadata {
+            model_file: "policy.onnx".to_string(),
+            model_type: ModelFileType::Onnx,
+            input_dtype: DType::NdArray(NdArrayDType::F32),
+            output_dtype: DType::NdArray(NdArrayDType::F32),
+            input_shape: vec![2],
+            output_shape: vec![2],
+            default_device: Some(DeviceType::Cpu),
+        };
+
+        metadata.save_to_dir(&dir).unwrap();
+        let loaded = ModelMetadata::load_from_dir(&dir).unwrap();
+
+        assert_eq!(loaded.model_file, "policy.onnx");
+        assert_eq!(loaded.resolve_model_path(&dir), dir.join("policy.onnx"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(feature = "ndarray-backend")]
+    fn model_metadata_load_rejects_invalid_fields() {
+        let dir = temp_dir_path("metadata-invalid");
+        let metadata = ModelMetadata {
+            model_file: String::new(),
+            model_type: ModelFileType::Onnx,
+            input_dtype: DType::NdArray(NdArrayDType::F32),
+            output_dtype: DType::NdArray(NdArrayDType::F32),
+            input_shape: vec![2],
+            output_shape: vec![2],
+            default_device: Some(DeviceType::Cpu),
+        };
+
+        metadata.save_to_dir(&dir).unwrap();
+        let err = ModelMetadata::load_from_dir(&dir)
+            .expect_err("metadata with an empty model file should be rejected");
+
+        assert!(matches!(
+            err,
+            ModelError::InvalidMetadata(message) if message.contains("model_file is empty")
+        ));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn stub_module(output_shape: Vec<usize>) -> ModelModule<NdArray> {
+        ModelModule {
+            model: Model {
+                file_type: ModelFileType::Onnx,
+                raw_bytes: Arc::<[u8]>::from(vec![1u8, 2, 3]),
+                inference: InferenceModel::Unsupported,
+                _phantom: PhantomData,
+            },
+            metadata: ModelMetadata {
+                model_file: "test.onnx".to_string(),
+                model_type: ModelFileType::Onnx,
+                input_dtype: DType::NdArray(NdArrayDType::F32),
+                output_dtype: DType::NdArray(NdArrayDType::F32),
+                input_shape: vec![2],
+                output_shape,
+                default_device: Some(DeviceType::Cpu),
+            },
+        }
+    }
+
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArray, 1>> {
+        let device = NdArray::get_device(&DeviceType::Cpu).unwrap();
+        let tensor = Tensor::<NdArray, 1, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [values.len()]),
+            &device,
+        );
+
+        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }))
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn model_module_save_writes_metadata_and_model_bytes() {
+        let dir = temp_dir_path("module-save");
+        let module = stub_module(vec![2]);
+
+        module.save(&dir).unwrap();
+
+        assert!(dir.join("metadata.json").exists());
+        assert_eq!(fs::read(dir.join("test.onnx")).unwrap(), vec![1, 2, 3]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn resolve_device_returns_cpu_for_ndarray_models() {
+        let module = stub_module(vec![2]);
+        assert!(matches!(module.resolve_device(), burn_tensor::Device::<NdArray>::Cpu));
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn zeros_action_matches_output_shape_dtype_and_backend() {
+        let module = stub_module(vec![2]);
+        let zero_action = module.zeros_action::<1>().unwrap();
+
+        assert_eq!(zero_action.shape, vec![2]);
+        assert_eq!(zero_action.dtype, DType::NdArray(NdArrayDType::F32));
+        assert_eq!(zero_action.supported_backend, SupportedTensorBackend::NdArray);
+        assert_eq!(zero_action.data, vec![0; 8]);
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn step_falls_back_to_zero_actions_when_inference_is_unavailable() {
+        let module = stub_module(vec![2]);
+        let observation = float_any_tensor(&[1.0, 2.0]);
+        let mask = float_any_tensor(&[1.0, 0.0]);
+
+        let (action, mask_data, aux) = module.step::<1, 1>(observation, Some(mask));
+
+        assert!(aux.is_empty());
+        assert_eq!(action.shape, vec![2]);
+        assert_eq!(action.data, vec![0; 8]);
+        assert_eq!(
+            mask_data.expect("mask data should be preserved").data,
+            [1.0f32, 0.0]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+    }
+}

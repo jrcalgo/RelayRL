@@ -26,7 +26,8 @@ use crate::data::utilities::metadata::TensorMetadata;
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("Failed to get current timestamp")
+        .map_err(|e| eprintln!("Failed to get current timestamp: {}; Returning 0", e))
+        .unwrap_or(std::time::Duration::from_secs(0))
         .as_secs()
 }
 
@@ -417,11 +418,14 @@ impl RelayRLTrajectoryTrait for RelayRLTrajectory {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
+    #[cfg(feature = "encryption")]
+    use crate::data::utilities::encrypt::generate_key;
+    use uuid::Uuid;
 
     #[test]
-    fn test_trajectory_creation() {
+    fn trajectory_creation_starts_empty() {
         let traj = RelayRLTrajectory::new(100);
         assert_eq!(traj.len(), 0);
         assert!(traj.is_empty());
@@ -429,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_actions() {
+    fn add_action_returns_false_for_non_terminal_non_full_trajectory() {
         let mut traj = RelayRLTrajectory::new(10);
         let action = RelayRLAction::minimal(1.0, false);
 
@@ -439,20 +443,36 @@ mod tests {
     }
 
     #[test]
-    fn test_trajectory_completion() {
+    fn add_action_flushes_when_episode_is_done() {
         let mut traj = RelayRLTrajectory::new(10);
 
-        for _ in 0..5 {
-            traj.add_action(RelayRLAction::minimal(1.0, false));
-        }
-        assert!(!traj.is_complete());
+        let should_flush = traj.add_action(RelayRLAction::minimal(1.0, true));
 
-        traj.add_action(RelayRLAction::minimal(1.0, true));
+        assert!(should_flush);
         assert!(traj.is_complete());
     }
 
     #[test]
-    fn test_trajectory_rewards() {
+    fn add_action_flushes_when_capacity_is_reached() {
+        let mut traj = RelayRLTrajectory::new(2);
+
+        assert!(!traj.add_action(RelayRLAction::minimal(1.0, false)));
+        assert!(traj.add_action(RelayRLAction::minimal(2.0, false)));
+        assert!(traj.is_full());
+    }
+
+    #[test]
+    fn is_complete_only_checks_the_last_action() {
+        let mut traj = RelayRLTrajectory::new(10);
+
+        traj.add_action(RelayRLAction::minimal(1.0, true));
+        traj.add_action(RelayRLAction::minimal(1.0, false));
+
+        assert!(!traj.is_complete());
+    }
+
+    #[test]
+    fn trajectory_reward_helpers_report_total_and_average() {
         let mut traj = RelayRLTrajectory::new(10);
 
         for i in 1..=5 {
@@ -464,8 +484,61 @@ mod tests {
     }
 
     #[test]
+    fn avg_reward_is_zero_for_empty_trajectories() {
+        let traj = RelayRLTrajectory::new(4);
+        assert_eq!(traj.avg_reward(), 0.0);
+    }
+
+    #[test]
+    fn metadata_setters_and_getters_round_trip() {
+        let agent_id = Uuid::from_u128(42);
+        let mut traj = RelayRLTrajectory::with_metadata(8, Some(agent_id), Some(9), Some(12));
+
+        assert_eq!(traj.get_agent_id(), Some(&agent_id));
+        assert_eq!(traj.get_episode(), Some(9));
+        assert_eq!(traj.get_training_step(), Some(12));
+
+        traj.set_episode(10);
+        traj.set_training_step(13);
+
+        assert_eq!(traj.get_episode(), Some(10));
+        assert_eq!(traj.get_training_step(), Some(13));
+    }
+
+    #[test]
+    fn clear_removes_actions_but_preserves_capacity_settings() {
+        let mut traj = RelayRLTrajectory::new(3);
+        traj.add_action(RelayRLAction::minimal(1.0, false));
+        traj.add_action(RelayRLAction::minimal(2.0, false));
+
+        traj.clear();
+
+        assert!(traj.is_empty());
+        assert_eq!(traj.max_length, 3);
+    }
+
+    #[test]
+    fn relayrl_trajectory_trait_add_action_delegates_to_clone_path() {
+        let mut traj = RelayRLTrajectory::new(5);
+        let action = RelayRLAction::minimal(1.25, false);
+
+        <RelayRLTrajectory as RelayRLTrajectoryTrait>::add_action(&mut traj, &action);
+
+        assert_eq!(traj.len(), 1);
+        assert_eq!(traj.get_actions()[0].get_rew(), 1.25);
+    }
+
+    #[test]
+    fn age_seconds_uses_trajectory_timestamp() {
+        let mut traj = RelayRLTrajectory::new(2);
+        traj.timestamp = traj.timestamp.saturating_sub(3);
+
+        assert!(traj.age_seconds() >= 3);
+    }
+
+    #[test]
     #[cfg(feature = "metadata")]
-    fn test_trajectory_serialization() {
+    fn trajectory_serialization_round_trip() {
         let mut traj = RelayRLTrajectory::new(10);
         traj.add_action(RelayRLAction::minimal(1.5, true));
 
@@ -475,5 +548,81 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded.get_actions()[0].get_rew(), 1.5);
         assert_eq!(decoded_bytes_read, bytes.len());
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn encode_decode_round_trip_preserves_metadata_and_actions() {
+        let agent_id = Uuid::from_u128(99);
+        let mut traj = RelayRLTrajectory::with_metadata(4, Some(agent_id), Some(7), Some(8));
+        traj.add_action(RelayRLAction::minimal(0.5, false));
+        traj.add_action(RelayRLAction::minimal(1.5, true));
+
+        let config = CodecConfig::default();
+        let encoded = traj.encode(&config).unwrap();
+        let (decoded, _) = RelayRLTrajectory::decode(&encoded, &config).unwrap();
+
+        assert_eq!(decoded.get_episode(), Some(7));
+        assert_eq!(decoded.get_training_step(), Some(8));
+        assert_eq!(decoded.get_agent_id(), Some(&agent_id));
+        assert_eq!(decoded.len(), 2);
+        assert!(decoded.is_complete());
+    }
+
+    #[test]
+    #[cfg(all(feature = "metadata", feature = "integrity"))]
+    fn decode_rejects_checksum_mismatch() {
+        let mut traj = RelayRLTrajectory::new(4);
+        traj.add_action(RelayRLAction::minimal(1.0, true));
+
+        let config = CodecConfig::default();
+        let mut encoded = traj.encode(&config).unwrap();
+        encoded.data[0] ^= 0xFF;
+
+        let err = RelayRLTrajectory::decode(&encoded, &config)
+            .expect_err("tampered payload should fail integrity verification");
+
+        assert!(matches!(
+            err,
+            TrajectoryError::IntegrityError(message) if message.contains("Checksum mismatch")
+        ));
+    }
+
+    #[test]
+    #[cfg(all(feature = "metadata", feature = "encryption"))]
+    fn decode_requires_key_when_trajectory_is_encrypted() {
+        let mut traj = RelayRLTrajectory::new(4);
+        traj.add_action(RelayRLAction::minimal(1.0, true));
+
+        let mut encode_config = CodecConfig::default();
+        encode_config.encryption_key = Some(generate_key());
+        let encoded = traj.encode(&encode_config).unwrap();
+
+        let mut decode_config = CodecConfig::default();
+        decode_config.encryption_key = None;
+
+        let err = RelayRLTrajectory::decode(&encoded, &decode_config)
+            .expect_err("encrypted payload should require a key to decode");
+
+        assert!(matches!(
+            err,
+            TrajectoryError::EncryptionError(message) if message.contains("Encryption key required")
+        ));
+    }
+
+    #[test]
+    #[cfg(all(feature = "metadata", feature = "integrity"))]
+    fn chunked_encode_decode_round_trip_reassembles_trajectory() {
+        let mut traj = RelayRLTrajectory::new(8);
+        traj.add_action(RelayRLAction::minimal(1.0, false));
+        traj.add_action(RelayRLAction::minimal(2.0, true));
+
+        let config = CodecConfig::default();
+        let chunks = traj.encode_chunked(&config, 8).unwrap();
+        assert!(chunks.len() > 1);
+
+        let decoded = RelayRLTrajectory::decode_chunked(&chunks, &config).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded.total_reward(), 3.0);
     }
 }
