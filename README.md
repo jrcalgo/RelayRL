@@ -2,7 +2,7 @@
 
 # RelayRL
 
-**Multi-Agent Distributed Reinforcement Learning Framework**
+**Multi-Agent Reinforcement Learning Framework**
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
