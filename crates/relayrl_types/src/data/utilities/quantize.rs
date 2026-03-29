@@ -114,3 +114,73 @@ impl QuantizedData {
         original_size as f32 / self.data.len() as f32
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    fn assert_close(left: &[f32], right: &[f32], tolerance: f32) {
+        assert_eq!(left.len(), right.len());
+        for (lhs, rhs) in left.iter().zip(right.iter()) {
+            assert!((lhs - rhs).abs() <= tolerance, "{lhs} != {rhs}");
+        }
+    }
+
+    #[test]
+    fn none_scheme_dequantizes_raw_f32_bytes() {
+        let values = [1.0f32, -2.0, 3.5];
+        let data = QuantizedData {
+            data: values
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            scheme: QuantizationScheme::None,
+            scale: 1.0,
+            zero_point: 0,
+            shape: vec![3],
+        };
+
+        assert_eq!(data.dequantize(), values.to_vec());
+    }
+
+    #[test]
+    fn int8_symmetric_quantization_round_trips_approximately() {
+        let values = [-3.5f32, -1.0, 0.5, 2.25];
+        let quantized = QuantizedData::quantize_int8_symmetric(&values);
+
+        assert_eq!(quantized.scheme, QuantizationScheme::Int8Symmetric);
+        assert_eq!(quantized.shape, vec![4]);
+        assert_eq!(quantized.size_reduction_ratio(), 4.0);
+        assert_close(&quantized.dequantize(), &values, 0.05);
+    }
+
+    #[test]
+    fn int8_asymmetric_quantization_round_trips_approximately() {
+        let values = [0.25f32, 1.5, 2.75, 4.0];
+        let quantized = QuantizedData::quantize_int8_asymmetric(&values);
+
+        assert_eq!(quantized.scheme, QuantizationScheme::Int8Asymmetric);
+        assert_eq!(quantized.data.len(), values.len());
+        assert_close(&quantized.dequantize(), &values, 0.1);
+    }
+
+    #[test]
+    #[cfg(feature = "quantization")]
+    fn float16_quantization_round_trips_approximately() {
+        let values = [1.25f32, -2.5, 4.75];
+        let quantized = QuantizedData::quantize_f16(&values);
+
+        assert_eq!(quantized.scheme, QuantizationScheme::Float16);
+        assert_close(&quantized.dequantize(), &values, 0.01);
+    }
+
+    #[test]
+    #[cfg(feature = "quantization")]
+    fn bfloat16_quantization_round_trips_approximately() {
+        let values = [1.25f32, -2.5, 4.75];
+        let quantized = QuantizedData::quantize_bf16(&values);
+
+        assert_eq!(quantized.scheme, QuantizationScheme::BFloat16);
+        assert_close(&quantized.dequantize(), &values, 0.05);
+    }
+}
