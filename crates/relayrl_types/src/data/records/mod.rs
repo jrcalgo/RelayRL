@@ -2,7 +2,9 @@ pub mod csv;
 pub mod arrow;
 
 use crate::data::action::RelayRLAction;
-use crate::data::tensor::{DType, NdArrayDType, TensorData};
+use crate::data::tensor::{DType, TensorData};
+#[cfg(feature = "ndarray-backend")]
+use crate::data::tensor::NdArrayDType;
 #[cfg(feature = "tch-backend")]
 use crate::data::tensor::TchDType;
 use crate::data::trajectory::RelayRLTrajectory;
@@ -20,6 +22,7 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
     let shape: Vec<u64> = tensor.shape.iter().map(|&s| s as u64).collect();
 
     match &tensor.dtype {
+        #[cfg(feature = "ndarray-backend")]
         DType::NdArray(NdArrayDType::F32) => {
             let floats: Vec<f32> = tensor.data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
@@ -31,6 +34,7 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
                 binary_data: None,
             }
         }
+        #[cfg(feature = "ndarray-backend")]
         DType::NdArray(NdArrayDType::F64) => {
             let floats: Vec<f64> = tensor.data.chunks_exact(8).map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
             .collect();

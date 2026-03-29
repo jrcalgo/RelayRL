@@ -1,6 +1,8 @@
 use super::{get_backend_str, tensor_to_data_frame};
 use crate::data::action::RelayRLAction;
-use crate::data::tensor::{DType, NdArrayDType, TensorData};
+use crate::data::tensor::{DType, TensorData};
+#[cfg(feature = "ndarray-backend")]
+use crate::data::tensor::NdArrayDType;
 #[cfg(feature = "tch-backend")]
 use crate::data::tensor::TchDType;
 use crate::data::trajectory::RelayRLTrajectory;

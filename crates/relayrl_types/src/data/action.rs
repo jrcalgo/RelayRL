@@ -144,6 +144,7 @@ impl RelayRLAction {
                         .to_bool_tensor::<B, 1>(device)
                         .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
                 },
+                #[cfg(feature = "ndarray-backend")]
                 _ => Err(TensorError::DTypeError(format!(
                     "Unsupported dtype for Tch backend: {}",
                     tensor_data.dtype

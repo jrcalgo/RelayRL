@@ -646,6 +646,7 @@ impl TensorData {
         let shape: Shape = Shape::from(self.shape.as_slice());
 
         match &self.dtype {
+            #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::I8 => {
                     let values: &[i8] = bytemuck::cast_slice(&self.data);
@@ -750,6 +751,7 @@ impl TensorData {
         let shape: Shape = Shape::from(self.shape.as_slice());
 
         match &self.dtype {
+            #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::Bool => {
                     let values: &[u8] = bytemuck::cast_slice(&self.data);

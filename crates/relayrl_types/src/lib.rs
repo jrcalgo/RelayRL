@@ -1,5 +1,5 @@
 pub mod data;
-#[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+#[cfg(all(any(feature = "tch-model", feature = "onnx-model"), any(feature = "ndarray-backend", feature = "tch-backend")))]
 pub mod model;
 
 pub mod prelude {
