@@ -9,11 +9,7 @@ use std::collections::HashMap;
 use bincode::config;
 use uuid::Uuid;
 
-#[cfg(feature = "ndarray-backend")]
-use burn_ndarray::NdArray;
-#[cfg(feature = "tch-backend")]
-use burn_tch::LibTorch as Tch;
-use burn_tensor::{backend::Backend, Bool, Float, Int, Tensor};
+use burn_tensor::backend::Backend;
 
 #[cfg(feature = "integrity")]
 use crate::data::utilities::chunking::{ChunkedTensor, TensorChunk};
@@ -26,10 +22,15 @@ use crate::data::utilities::integrity::{compute_checksum, Checksum};
 #[cfg(feature = "metadata")]
 use crate::data::utilities::metadata::TensorMetadata;
 
-use super::tensor::{
-    BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
-    TensorError,
-};
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
+#[cfg(feature = "ndarray-backend")]
+use crate::data::tensor::NdArrayDType;
+
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+use super::tensor::{BackendMatcher, DeviceType, SupportedTensorBackend };
+
+use super::tensor::{DType, TensorData, TensorError};
 
 /// Additional data types that can be attached to actions via the `data` parameter
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,11 +124,8 @@ impl RelayRLAction {
                     NdArrayDType::Bool => tensor_data
                         .to_bool_tensor::<B, 1>(device)
                         .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
-                    _ => Err(TensorError::DTypeError(format!(
-                        "NdArray dtype not supported: {:?}",
-                        tensor_data.dtype
-                    ))),
                 },
+                #[cfg(feature = "tch-backend")]
                 _ => Err(TensorError::DTypeError(format!(
                     "Unsupported dtype for NdArray backend: {}",
                     tensor_data.dtype
@@ -139,16 +137,12 @@ impl RelayRLAction {
                     TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => tensor_data
                         .to_float_tensor::<B, 1>(device)
                         .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
-                    TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 => tensor_data
+                    TchDType::U8 | TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 => tensor_data
                         .to_int_tensor::<B, 1>(device)
                         .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
                     TchDType::Bool => tensor_data
                         .to_bool_tensor::<B, 1>(device)
                         .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
-                    _ => Err(TensorError::DTypeError(format!(
-                        "Tch dtype not supported: {:?}",
-                        tensor_data.dtype
-                    ))),
                 },
                 _ => Err(TensorError::DTypeError(format!(
                     "Unsupported dtype for Tch backend: {}",
@@ -405,9 +399,9 @@ impl RelayRLAction {
         let mut data = encoded.data.clone();
 
         #[cfg(feature = "integrity")]
-        if config.verify_integrity && encoded.checksum.is_some() {
+        if config.verify_integrity && let Some(checksum) = encoded.checksum {
             let computed = compute_checksum(&data);
-            if computed != encoded.checksum.unwrap() {
+            if computed != checksum {
                 return Err(ActionError::IntegrityError("Checksum mismatch".to_string()));
             }
         }

@@ -19,13 +19,15 @@ pub struct TensorChunk {
 #[derive(Debug, Clone)]
 pub struct ChunkedTensor {
     chunks: Vec<TensorChunk>,
+    #[allow(unused)]
     chunk_size: usize,
+    #[allow(unused)]
     total_size: usize,
 }
 
 impl ChunkedTensor {
     pub fn from_data(data: &[u8], chunk_size: usize) -> Self {
-        let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
+        let total_chunks = data.len().div_ceil(chunk_size);
         let mut chunks = Vec::with_capacity(total_chunks);
         for (i, chunk_data) in data.chunks(chunk_size).enumerate() {
             let chunk = TensorChunk {

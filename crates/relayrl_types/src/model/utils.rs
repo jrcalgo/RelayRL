@@ -5,12 +5,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
+#[cfg(feature = "ndarray-backend")]
+use crate::data::tensor::NdArrayDType;
+
 use crate::data::action::RelayRLData;
 use crate::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-    IntBurnTensor, NdArrayDType, TchDType,
+    IntBurnTensor
 };
-use burn_tensor::{Shape, Tensor, backend::Backend};
+use burn_tensor::{Shape, backend::Backend};
 
 use crate::model::{ModelError, ModelModule};
 

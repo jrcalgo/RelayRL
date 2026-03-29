@@ -1,4 +1,4 @@
-use half::{bf16, f16};
+use half::f16;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -6,6 +6,8 @@ use std::sync::Arc;
 use burn_ndarray::NdArray;
 #[cfg(feature = "tch-backend")]
 use burn_tch::LibTorch as Tch;
+#[cfg(feature = "tch-backend")]
+use half::bf16;
 
 use burn_tensor::{
     BasicOps, Bool, Float, Int, Shape, Tensor, TensorData as BurnTensorData, TensorKind,
@@ -50,30 +52,29 @@ pub enum SupportedTensorBackend {
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+#[allow(clippy::derivable_impls)]
 impl Default for SupportedTensorBackend {
     fn default() -> Self {
-        #[cfg(feature = "ndarray-backend")]
+        #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
         return SupportedTensorBackend::NdArray;
 
-        #[cfg(feature = "tch-backend")]
+        #[cfg(all(not(feature = "ndarray-backend"), feature = "tch-backend"))]
         return SupportedTensorBackend::Tch;
+
+        #[allow(unreachable_code)]
+        SupportedTensorBackend::None
     }
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DeviceType {
+    #[default]
     Cpu,
     #[cfg(feature = "tch-backend")]
     Cuda(usize),
     #[cfg(feature = "tch-backend")]
     Mps,
-}
-
-impl Default for DeviceType {
-    fn default() -> Self {
-        DeviceType::Cpu
-    }
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
@@ -100,6 +101,7 @@ impl BackendMatcher for NdArray {
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
         match device {
             DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),
+            #[cfg(feature = "tch-backend")]
             _ => Err(TensorError::BackendError(
                 "Unsupported device type".to_string(),
             )),
@@ -290,6 +292,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    #[cfg(feature = "tch-backend")]
     pub fn into_bf16_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_float();
         let conversion_dtype = match backend {
@@ -404,6 +407,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    #[cfg(feature = "tch-backend")]
     pub fn into_u8_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_int();
         let conversion_dtype = match backend {
@@ -866,11 +870,6 @@ impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>>
                     }
                 };
                 (SupportedTensorBackend::Tch, bytes)
-            }
-            _ => {
-                return Err(TensorError::BackendError(
-                    "Unsupported or missing target backend for conversion".into(),
-                ));
             }
         };
 

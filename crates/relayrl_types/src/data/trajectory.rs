@@ -14,9 +14,9 @@ use crate::data::action::CodecConfig;
 #[cfg(feature = "integrity")]
 use crate::data::utilities::chunking::{ChunkedTensor, TensorChunk};
 #[cfg(feature = "compression")]
-use crate::data::utilities::compress::{CompressedData, CompressionScheme};
+use crate::data::utilities::compress::CompressedData;
 #[cfg(feature = "encryption")]
-use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};
+use crate::data::utilities::encrypt::EncryptedData;
 #[cfg(feature = "integrity")]
 use crate::data::utilities::integrity::{compute_checksum, Checksum};
 #[cfg(feature = "metadata")]
@@ -315,9 +315,9 @@ impl RelayRLTrajectory {
         let mut data = encoded.data.clone();
 
         #[cfg(feature = "integrity")]
-        if config.verify_integrity && encoded.checksum.is_some() {
+        if config.verify_integrity && let Some(checksum) = encoded.checksum {
             let computed = compute_checksum(&data);
-            if computed != encoded.checksum.unwrap() {
+            if computed != checksum {
                 return Err(TrajectoryError::IntegrityError(
                     "Checksum mismatch".to_string(),
                 ));

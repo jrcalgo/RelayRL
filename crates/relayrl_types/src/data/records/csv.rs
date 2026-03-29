@@ -120,7 +120,9 @@ struct TrajectoryValidationCache {
     backend: Option<String>,
     actor_id: Option<Uuid>,
     timestamp: Option<u64>,
+    #[allow(unused)]
     episode: Option<u64>,
+    #[allow(unused)]
     training_step: Option<u64>,
 }
 

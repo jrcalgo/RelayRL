@@ -4,9 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "integrity")]
-use blake3::{Hash, Hasher};
-
 pub type Checksum = [u8; 32]; // 256-bit BLAKE3 hash
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

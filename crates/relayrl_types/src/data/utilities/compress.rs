@@ -12,18 +12,13 @@ use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 #[cfg(feature = "compression")]
 use zstd::bulk::{compress as zstd_compress, decompress as zstd_decompress};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CompressionScheme {
     /// No compression (passthrough)
     None,
+    #[default]
     Lz4,
     Zstd(i32),
-}
-
-impl Default for CompressionScheme {
-    fn default() -> Self {
-        Self::Lz4
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

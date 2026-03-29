@@ -1,7 +1,6 @@
 pub mod hot_reloadable;
 pub mod utils;
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
@@ -11,9 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use ndarray::{ArrayBase, CowRepr, Dim, IxDynImpl};
 
-use burn_tensor::{Tensor, TensorData as BurnTensorData, TensorKind, backend::Backend};
+use burn_tensor::{backend::Backend};
 use ort::tensor::IntoTensorElementType;
 use serde::{Deserialize, Serialize};
 
@@ -21,26 +19,26 @@ use thiserror::Error;
 
 use crate::data::action::RelayRLData;
 use crate::data::tensor::{
-    AnyBurnTensor, BackendMatcher, BoolBurnTensor, ConversionBurnTensor, DType, DeviceType,
-    FloatBurnTensor, IntBurnTensor, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
+    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, DType, DeviceType,
+    SupportedTensorBackend, TensorData,
 };
-use half::{bf16, f16};
+use half::f16;
+
+#[cfg(feature = "tch-backend")]
+use half::bf16;
 
 #[cfg(feature = "tch-model")]
-use tch::{CModule, Kind, Tensor as TchTensor, no_grad};
-
+use tch::{CModule, Tensor as TchTensor, no_grad};
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
 #[cfg(feature = "ndarray-backend")]
-use ndarray::{ArrayD, CowArray, IxDyn};
+use crate::data::tensor::NdArrayDType;
 
 #[cfg(feature = "onnx-model")]
 use ort::{
-    environment::Environment,
     session::{Session, SessionInputValue},
     value::Value as OrtValue,
 };
-
-#[cfg(feature = "onnx-model")]
-use uuid::Uuid;
 
 pub use burn_tensor::Shape;
 pub use hot_reloadable::HotReloadableModel;
@@ -454,10 +452,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                         SupportedTensorBackend::NdArray,
                     ))
                 }
-                _ => Err(ModelError::UnsupportedModelType(format!(
-                    "Unsupported dtype: {}",
-                    dtype
-                ))),
             },
             #[cfg(feature = "tch-backend")]
             DType::Tch(dtype) => match dtype {
@@ -571,10 +565,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                         SupportedTensorBackend::Tch,
                     ))
                 }
-                _ => Err(ModelError::UnsupportedModelType(format!(
-                    "Unsupported dtype: {}",
-                    dtype
-                ))),
             },
         }
     }
@@ -841,7 +831,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
         // Step 3
         let act_tensor: TchTensor = no_grad(|| module.forward_ts(&[&obs_tensor]))
-            .ok()
             .expect("Failed to run forward pass");
 
         // Step 4
@@ -853,49 +842,41 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::F16 => {
                     let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::F32 => {
                     let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::F64 => {
                     let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I8 => {
                     let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i8");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I16 => {
                     let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I32 => {
                     let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I64 => {
                     let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::Bool => {
                     let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to bool");
                     vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
                 }
@@ -904,61 +885,51 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             DType::Tch(dtype) => match dtype {
                 TchDType::F16 => {
                     let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::Bf16 => {
                     let vec: Vec<bf16> = Vec::<bf16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to bf16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::F32 => {
                     let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::F64 => {
                     let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I8 => {
                     let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i8");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I16 => {
                     let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I32 => {
                     let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I64 => {
                     let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::U8 => {
                     let vec: Vec<u8> = Vec::<u8>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to u8");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::Bool => {
                     let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to bool");
                     vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
                 }
@@ -1340,6 +1311,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 mod unit_tests {
     use super::*;
     use std::marker::PhantomData;
+
+    use burn_tensor::TensorData as BurnTensorData;
+    use crate::model::FloatBurnTensor;
 
     use uuid::Uuid;
 

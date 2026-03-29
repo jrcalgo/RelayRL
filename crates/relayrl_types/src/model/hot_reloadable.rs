@@ -1,5 +1,4 @@
 use crate::data::tensor::DeviceType;
-use std::arch::is_aarch64_feature_detected;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,16 +6,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use burn_tensor::Tensor;
 use burn_tensor::backend::Backend;
 
-use crate::data::action::{RelayRLAction, RelayRLData};
+use crate::data::action::RelayRLAction;
 use crate::data::tensor::{
-    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData, TensorError,
+    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData,
 };
-use crate::data::tensor::{
-    BoolBurnTensor, DType, FloatBurnTensor, IntBurnTensor, NdArrayDType, TchDType,
-};
+use crate::data::tensor::{DType};
 use crate::model::utils::validate_module;
 use crate::model::{ModelError, ModelModule};
 
@@ -155,15 +151,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
     }
 }
 
+#[allow(unused)]
 fn default_dtype() -> DType {
     #[cfg(feature = "tch-backend")]
     {
-        DType::Tch(TchDType::F32)
+        DType::Tch(crate::model::TchDType::F32)
     }
 
     #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
     {
-        DType::NdArray(NdArrayDType::F32)
+        DType::NdArray(crate::model::NdArrayDType::F32)
     }
 
     #[cfg(all(not(feature = "tch-backend"), not(feature = "ndarray-backend")))]
@@ -247,14 +244,10 @@ mod unit_tests {
         assert_eq!(reloadable.version(), 7);
     }
 
-    #[test]
-    fn forward_returns_actions_with_observation_mask_and_zero_fallback() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let reloadable = runtime
-            .block_on(HotReloadableModel::new_from_module(
-                stub_module(vec![2]),
-                DeviceType::Cpu,
-            ))
+    #[tokio::test]
+    async fn forward_returns_actions_with_observation_mask_and_zero_fallback() {
+        let reloadable = HotReloadableModel::new_from_module(stub_module(vec![2]), DeviceType::Cpu)
+            .await
             .unwrap();
         let actor_id = Uuid::new_v4();
 
