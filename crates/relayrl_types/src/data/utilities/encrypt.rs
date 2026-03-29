@@ -112,3 +112,53 @@ impl std::fmt::Display for EncryptionError {
 }
 
 impl std::error::Error for EncryptionError {}
+
+#[cfg(all(test, feature = "encryption"))]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_decrypt_round_trip_preserves_plaintext() {
+        let key = generate_key();
+        let plaintext = b"relayrl-encryption";
+
+        let encrypted = EncryptedData::encrypt(plaintext, &key).unwrap();
+
+        assert_eq!(
+            encrypted.ciphertext.len(),
+            plaintext.len() + EncryptedData::OVERHEAD_BYTES
+        );
+        assert_eq!(encrypted.decrypt(&key).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn encrypt_with_aad_preserves_associated_data() {
+        let key = generate_key();
+        let aad = b"relayrl";
+        let encrypted = EncryptedData::encrypt_with_aad(b"payload", &key, aad).unwrap();
+
+        assert_eq!(encrypted.aad.as_deref(), Some(aad.as_slice()));
+        assert_eq!(encrypted.decrypt(&key).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn decrypt_with_the_wrong_key_fails() {
+        let plaintext = b"secret";
+        let key = generate_key();
+        let encrypted = EncryptedData::encrypt(plaintext, &key).unwrap();
+        let mut wrong_key = key;
+        wrong_key[0] ^= 0xFF;
+
+        let err = encrypted
+            .decrypt(&wrong_key)
+            .expect_err("ciphertext should not decrypt with the wrong key");
+
+        assert!(matches!(err, EncryptionError::DecryptionFailed(_)));
+    }
+
+    #[test]
+    fn generated_keys_have_expected_length() {
+        let key = generate_key();
+        assert_eq!(key.len(), 32);
+    }
+}

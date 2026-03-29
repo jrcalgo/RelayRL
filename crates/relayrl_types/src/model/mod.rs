@@ -1,7 +1,6 @@
 pub mod hot_reloadable;
 pub mod utils;
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
@@ -11,9 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use ndarray::{ArrayBase, CowRepr, Dim, IxDynImpl};
 
-use burn_tensor::{Tensor, TensorData as BurnTensorData, TensorKind, backend::Backend};
+use burn_tensor::{backend::Backend};
 use ort::tensor::IntoTensorElementType;
 use serde::{Deserialize, Serialize};
 
@@ -21,26 +19,26 @@ use thiserror::Error;
 
 use crate::data::action::RelayRLData;
 use crate::data::tensor::{
-    AnyBurnTensor, BackendMatcher, BoolBurnTensor, ConversionBurnTensor, DType, DeviceType,
-    FloatBurnTensor, IntBurnTensor, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
+    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, DType, DeviceType,
+    SupportedTensorBackend, TensorData,
 };
-use half::{bf16, f16};
+use half::f16;
+
+#[cfg(feature = "tch-backend")]
+use half::bf16;
 
 #[cfg(feature = "tch-model")]
-use tch::{CModule, Kind, Tensor as TchTensor, no_grad};
-
+use tch::{CModule, Tensor as TchTensor, no_grad};
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
 #[cfg(feature = "ndarray-backend")]
-use ndarray::{ArrayD, CowArray, IxDyn};
+use crate::data::tensor::NdArrayDType;
 
 #[cfg(feature = "onnx-model")]
 use ort::{
-    environment::Environment,
     session::{Session, SessionInputValue},
     value::Value as OrtValue,
 };
-
-#[cfg(feature = "onnx-model")]
-use uuid::Uuid;
 
 pub use burn_tensor::Shape;
 pub use hot_reloadable::HotReloadableModel;
@@ -454,10 +452,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                         SupportedTensorBackend::NdArray,
                     ))
                 }
-                _ => Err(ModelError::UnsupportedModelType(format!(
-                    "Unsupported dtype: {}",
-                    dtype
-                ))),
             },
             #[cfg(feature = "tch-backend")]
             DType::Tch(dtype) => match dtype {
@@ -571,10 +565,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                         SupportedTensorBackend::Tch,
                     ))
                 }
-                _ => Err(ModelError::UnsupportedModelType(format!(
-                    "Unsupported dtype: {}",
-                    dtype
-                ))),
             },
         }
     }
@@ -841,7 +831,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
         // Step 3
         let act_tensor: TchTensor = no_grad(|| module.forward_ts(&[&obs_tensor]))
-            .ok()
             .expect("Failed to run forward pass");
 
         // Step 4
@@ -853,49 +842,41 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::F16 => {
                     let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::F32 => {
                     let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::F64 => {
                     let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I8 => {
                     let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i8");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I16 => {
                     let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I32 => {
                     let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::I64 => {
                     let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 NdArrayDType::Bool => {
                     let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to bool");
                     vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
                 }
@@ -904,61 +885,51 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             DType::Tch(dtype) => match dtype {
                 TchDType::F16 => {
                     let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::Bf16 => {
                     let vec: Vec<bf16> = Vec::<bf16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to bf16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::F32 => {
                     let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::F64 => {
                     let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to f64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I8 => {
                     let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i8");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I16 => {
                     let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i16");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I32 => {
                     let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i32");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::I64 => {
                     let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to i64");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::U8 => {
                     let vec: Vec<u8> = Vec::<u8>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to u8");
                     bytemuck::cast_slice(&vec).to_vec()
                 }
                 TchDType::Bool => {
                     let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .ok()
                         .expect("Failed to convert flattened_act to bool");
                     vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
                 }
@@ -1333,5 +1304,179 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             data: act_bytes,
             supported_backend: TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
         })
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use std::marker::PhantomData;
+
+    use burn_tensor::TensorData as BurnTensorData;
+    use crate::model::FloatBurnTensor;
+
+    use uuid::Uuid;
+
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    use burn_ndarray::NdArray;
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    use burn_tensor::{Float, Tensor};
+
+    fn temp_dir_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("relayrl-model-{label}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn model_file_type_parses_supported_extensions() {
+        assert_eq!(
+            ModelFileType::from_path(Path::new("policy.pt")).unwrap(),
+            ModelFileType::Pt
+        );
+        assert_eq!(
+            ModelFileType::from_path(Path::new("policy.onnx")).unwrap(),
+            ModelFileType::Onnx
+        );
+        assert!(matches!(
+            ModelFileType::from_path(Path::new("policy.bin")),
+            Err(ModelError::UnsupportedModelType(message)) if message.contains("Unsupported extension")
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "ndarray-backend")]
+    fn model_metadata_save_load_round_trip_preserves_paths() {
+        let dir = temp_dir_path("metadata-roundtrip");
+        let metadata = ModelMetadata {
+            model_file: "policy.onnx".to_string(),
+            model_type: ModelFileType::Onnx,
+            input_dtype: DType::NdArray(NdArrayDType::F32),
+            output_dtype: DType::NdArray(NdArrayDType::F32),
+            input_shape: vec![2],
+            output_shape: vec![2],
+            default_device: Some(DeviceType::Cpu),
+        };
+
+        metadata.save_to_dir(&dir).unwrap();
+        let loaded = ModelMetadata::load_from_dir(&dir).unwrap();
+
+        assert_eq!(loaded.model_file, "policy.onnx");
+        assert_eq!(loaded.resolve_model_path(&dir), dir.join("policy.onnx"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(feature = "ndarray-backend")]
+    fn model_metadata_load_rejects_invalid_fields() {
+        let dir = temp_dir_path("metadata-invalid");
+        let metadata = ModelMetadata {
+            model_file: String::new(),
+            model_type: ModelFileType::Onnx,
+            input_dtype: DType::NdArray(NdArrayDType::F32),
+            output_dtype: DType::NdArray(NdArrayDType::F32),
+            input_shape: vec![2],
+            output_shape: vec![2],
+            default_device: Some(DeviceType::Cpu),
+        };
+
+        metadata.save_to_dir(&dir).unwrap();
+        let err = ModelMetadata::load_from_dir(&dir)
+            .expect_err("metadata with an empty model file should be rejected");
+
+        assert!(matches!(
+            err,
+            ModelError::InvalidMetadata(message) if message.contains("model_file is empty")
+        ));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn stub_module(output_shape: Vec<usize>) -> ModelModule<NdArray> {
+        ModelModule {
+            model: Model {
+                file_type: ModelFileType::Onnx,
+                raw_bytes: Arc::<[u8]>::from(vec![1u8, 2, 3]),
+                inference: InferenceModel::Unsupported,
+                _phantom: PhantomData,
+            },
+            metadata: ModelMetadata {
+                model_file: "test.onnx".to_string(),
+                model_type: ModelFileType::Onnx,
+                input_dtype: DType::NdArray(NdArrayDType::F32),
+                output_dtype: DType::NdArray(NdArrayDType::F32),
+                input_shape: vec![2],
+                output_shape,
+                default_device: Some(DeviceType::Cpu),
+            },
+        }
+    }
+
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArray, 1>> {
+        let device = NdArray::get_device(&DeviceType::Cpu).unwrap();
+        let tensor = Tensor::<NdArray, 1, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [values.len()]),
+            &device,
+        );
+
+        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }))
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn model_module_save_writes_metadata_and_model_bytes() {
+        let dir = temp_dir_path("module-save");
+        let module = stub_module(vec![2]);
+
+        module.save(&dir).unwrap();
+
+        assert!(dir.join("metadata.json").exists());
+        assert_eq!(fs::read(dir.join("test.onnx")).unwrap(), vec![1, 2, 3]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn resolve_device_returns_cpu_for_ndarray_models() {
+        let module = stub_module(vec![2]);
+        assert!(matches!(module.resolve_device(), burn_tensor::Device::<NdArray>::Cpu));
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn zeros_action_matches_output_shape_dtype_and_backend() {
+        let module = stub_module(vec![2]);
+        let zero_action = module.zeros_action::<1>().unwrap();
+
+        assert_eq!(zero_action.shape, vec![2]);
+        assert_eq!(zero_action.dtype, DType::NdArray(NdArrayDType::F32));
+        assert_eq!(zero_action.supported_backend, SupportedTensorBackend::NdArray);
+        assert_eq!(zero_action.data, vec![0; 8]);
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    fn step_falls_back_to_zero_actions_when_inference_is_unavailable() {
+        let module = stub_module(vec![2]);
+        let observation = float_any_tensor(&[1.0, 2.0]);
+        let mask = float_any_tensor(&[1.0, 0.0]);
+
+        let (action, mask_data, aux) = module.step::<1, 1>(observation, Some(mask));
+
+        assert!(aux.is_empty());
+        assert_eq!(action.shape, vec![2]);
+        assert_eq!(action.data, vec![0; 8]);
+        assert_eq!(
+            mask_data.expect("mask data should be preserved").data,
+            [1.0f32, 0.0]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
     }
 }

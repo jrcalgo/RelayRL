@@ -1,5 +1,4 @@
 use crate::data::tensor::DeviceType;
-use std::arch::is_aarch64_feature_detected;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,16 +6,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use burn_tensor::Tensor;
 use burn_tensor::backend::Backend;
 
-use crate::data::action::{RelayRLAction, RelayRLData};
+use crate::data::action::RelayRLAction;
 use crate::data::tensor::{
-    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData, TensorError,
+    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData,
 };
-use crate::data::tensor::{
-    BoolBurnTensor, DType, FloatBurnTensor, IntBurnTensor, NdArrayDType, TchDType,
-};
+use crate::data::tensor::{DType};
 use crate::model::utils::validate_module;
 use crate::model::{ModelError, ModelModule};
 
@@ -155,19 +151,139 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
     }
 }
 
+#[allow(unused)]
 fn default_dtype() -> DType {
     #[cfg(feature = "tch-backend")]
     {
-        DType::Tch(TchDType::F32)
+        DType::Tch(crate::model::TchDType::F32)
     }
 
     #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
     {
-        DType::NdArray(NdArrayDType::F32)
+        DType::NdArray(crate::model::NdArrayDType::F32)
     }
 
     #[cfg(all(not(feature = "tch-backend"), not(feature = "ndarray-backend")))]
     {
-        panic!("No tensor backend enabled for RelayRL");
+        // effectively enforces an invariant that a backend must be enabled
+        panic!("No tensor backend enabled for RelayRL"); // without a backend, we can't return anything, so we panic to be safe (bro, why would you not compile without a backend anyways?)
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "ndarray-backend",
+    any(feature = "tch-model", feature = "onnx-model")
+))]
+mod unit_tests {
+    use super::*;
+    use std::marker::PhantomData;
+
+    use burn_ndarray::NdArray;
+    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
+
+    use crate::model::{InferenceModel, Model, ModelFileType, ModelMetadata, ModelModule};
+
+    fn stub_module(output_shape: Vec<usize>) -> ModelModule<NdArray> {
+        ModelModule {
+            model: Model {
+                file_type: ModelFileType::Onnx,
+                raw_bytes: Arc::<[u8]>::from(vec![1u8, 2, 3]),
+                inference: InferenceModel::Unsupported,
+                _phantom: PhantomData,
+            },
+            metadata: ModelMetadata {
+                model_file: "test.onnx".to_string(),
+                model_type: ModelFileType::Onnx,
+                input_dtype: DType::NdArray(NdArrayDType::F32),
+                output_dtype: DType::NdArray(NdArrayDType::F32),
+                input_shape: vec![2],
+                output_shape,
+                default_device: Some(DeviceType::Cpu),
+            },
+        }
+    }
+
+    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArray, 1>> {
+        let device = NdArray::get_device(&DeviceType::Cpu).unwrap();
+        let tensor = Tensor::<NdArray, 1, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [values.len()]),
+            &device,
+        );
+
+        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }))
+    }
+
+    #[tokio::test]
+    async fn new_from_module_exposes_dimensions_and_version() {
+        let reloadable = HotReloadableModel::new_from_module(stub_module(vec![2]), DeviceType::Cpu)
+            .await
+            .unwrap();
+
+        assert_eq!(reloadable.version(), 0);
+        assert_eq!(*reloadable.input_dim(), 1);
+        assert_eq!(*reloadable.output_dim(), 1);
+        assert_eq!(reloadable.default_device(), &DeviceType::Cpu);
+    }
+
+    #[tokio::test]
+    async fn reload_from_module_updates_the_visible_version() {
+        let reloadable = HotReloadableModel::new_from_module(stub_module(vec![2]), DeviceType::Cpu)
+            .await
+            .unwrap();
+
+        let version = reloadable
+            .reload_from_module(stub_module(vec![2]), 7)
+            .await
+            .unwrap();
+
+        assert_eq!(version, 7);
+        assert_eq!(reloadable.version(), 7);
+    }
+
+    #[tokio::test]
+    async fn forward_returns_actions_with_observation_mask_and_zero_fallback() {
+        let reloadable = HotReloadableModel::new_from_module(stub_module(vec![2]), DeviceType::Cpu)
+            .await
+            .unwrap();
+        let actor_id = Uuid::new_v4();
+
+        let action = reloadable
+            .forward::<1, 1>(
+                float_any_tensor(&[1.0, 2.0]),
+                Some(float_any_tensor(&[1.0, 0.0])),
+                3.5,
+                actor_id,
+            )
+            .unwrap();
+
+        assert_eq!(action.get_rew(), 3.5);
+        assert!(!action.get_done());
+        assert_eq!(action.get_agent_id(), Some(&actor_id));
+        assert_eq!(
+            action.get_obs().unwrap().data,
+            [1.0f32, 2.0]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(action.get_act().unwrap().data, vec![0; 8]);
+        assert_eq!(
+            action.get_mask().unwrap().data,
+            [1.0f32, 0.0]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert!(action.get_data().unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
+    fn default_dtype_prefers_ndarray_when_tch_is_unavailable() {
+        assert_eq!(default_dtype(), DType::NdArray(NdArrayDType::F32));
     }
 }

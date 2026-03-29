@@ -1,4 +1,4 @@
-use half::{bf16, f16};
+use half::f16;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -6,6 +6,8 @@ use std::sync::Arc;
 use burn_ndarray::NdArray;
 #[cfg(feature = "tch-backend")]
 use burn_tch::LibTorch as Tch;
+#[cfg(feature = "tch-backend")]
+use half::bf16;
 
 use burn_tensor::{
     BasicOps, Bool, Float, Int, Shape, Tensor, TensorData as BurnTensorData, TensorKind,
@@ -50,30 +52,29 @@ pub enum SupportedTensorBackend {
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+#[allow(clippy::derivable_impls)]
 impl Default for SupportedTensorBackend {
     fn default() -> Self {
-        #[cfg(feature = "ndarray-backend")]
+        #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
         return SupportedTensorBackend::NdArray;
 
-        #[cfg(feature = "tch-backend")]
+        #[cfg(all(not(feature = "ndarray-backend"), feature = "tch-backend"))]
         return SupportedTensorBackend::Tch;
+
+        #[allow(unreachable_code)]
+        SupportedTensorBackend::None
     }
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DeviceType {
+    #[default]
     Cpu,
     #[cfg(feature = "tch-backend")]
     Cuda(usize),
     #[cfg(feature = "tch-backend")]
     Mps,
-}
-
-impl Default for DeviceType {
-    fn default() -> Self {
-        DeviceType::Cpu
-    }
 }
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
@@ -100,6 +101,7 @@ impl BackendMatcher for NdArray {
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
         match device {
             DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),
+            #[cfg(feature = "tch-backend")]
             _ => Err(TensorError::BackendError(
                 "Unsupported device type".to_string(),
             )),
@@ -236,7 +238,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
                 let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
                 (wrapper.tensor.clone(), supported_backend)
             }
-            _ => panic!("Unsupported tensor type"),
+            _ => panic!("Unsupported tensor type"), // this should never happen, but we panic to be safe
         }
     }
 
@@ -249,7 +251,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
                 let supported_backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
                 (wrapper.tensor.clone(), supported_backend)
             }
-            _ => panic!("Unsupported tensor type"),
+            _ => panic!("Unsupported tensor type"), // this should never happen, but we panic to be safe
         }
     }
 
@@ -262,7 +264,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
                 let backend = TensorData::get_backend_from_dtype(&wrapper.dtype);
                 (wrapper.tensor.clone(), backend)
             }
-            _ => panic!("Unsupported tensor type"),
+            _ => panic!("Unsupported tensor type"), // this should never happen, but we panic to be safe
         }
     }
 
@@ -290,6 +292,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    #[cfg(feature = "tch-backend")]
     pub fn into_bf16_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_float();
         let conversion_dtype = match backend {
@@ -404,6 +407,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    #[cfg(feature = "tch-backend")]
     pub fn into_u8_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_int();
         let conversion_dtype = match backend {
@@ -642,6 +646,7 @@ impl TensorData {
         let shape: Shape = Shape::from(self.shape.as_slice());
 
         match &self.dtype {
+            #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::I8 => {
                     let values: &[i8] = bytemuck::cast_slice(&self.data);
@@ -746,6 +751,7 @@ impl TensorData {
         let shape: Shape = Shape::from(self.shape.as_slice());
 
         match &self.dtype {
+            #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::Bool => {
                     let values: &[u8] = bytemuck::cast_slice(&self.data);
@@ -867,11 +873,6 @@ impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>>
                 };
                 (SupportedTensorBackend::Tch, bytes)
             }
-            _ => {
-                return Err(TensorError::BackendError(
-                    "Unsupported or missing target backend for conversion".into(),
-                ));
-            }
         };
 
         Ok(TensorData {
@@ -880,5 +881,222 @@ impl<B: Backend + 'static, const D: usize, K: TensorKind<B> + BasicOps<B>>
             data: bytes,
             supported_backend,
         })
+    }
+}
+
+#[cfg(all(test, feature = "ndarray-backend"))]
+mod unit_tests {
+    use std::sync::Arc;
+
+    use burn_ndarray::NdArray;
+    use burn_tensor::{Bool, Float, Int, Tensor, TensorData as BurnTensorData};
+
+    use super::*;
+
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn i64_bytes(values: &[i64]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn bool_bytes(values: &[bool]) -> Vec<u8> {
+        values.iter().map(|value| u8::from(*value)).collect()
+    }
+
+    fn ndarray_device() -> burn_tensor::Device<NdArray> {
+        NdArray::get_device(&DeviceType::Cpu).expect("CPU should always be available")
+    }
+
+    fn ndarray_f32_tensor_data(values: &[f32]) -> TensorData {
+        TensorData::new(
+            vec![values.len()],
+            DType::NdArray(NdArrayDType::F32),
+            f32_bytes(values),
+            SupportedTensorBackend::NdArray,
+        )
+    }
+
+    fn ndarray_i64_tensor_data(values: &[i64]) -> TensorData {
+        TensorData::new(
+            vec![values.len()],
+            DType::NdArray(NdArrayDType::I64),
+            i64_bytes(values),
+            SupportedTensorBackend::NdArray,
+        )
+    }
+
+    fn ndarray_bool_tensor_data(values: &[bool]) -> TensorData {
+        TensorData::new(
+            vec![values.len()],
+            DType::NdArray(NdArrayDType::Bool),
+            bool_bytes(values),
+            SupportedTensorBackend::NdArray,
+        )
+    }
+
+    fn build_any_float_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArray, 1>> {
+        let tensor = Tensor::<NdArray, 1, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [values.len()]),
+            &ndarray_device(),
+        );
+
+        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }))
+    }
+
+    #[test]
+    fn tensor_data_helpers_report_shape_size_and_backend() {
+        let tensor = ndarray_f32_tensor_data(&[1.0, 2.0, 3.0]);
+
+        assert_eq!(tensor.num_el(), 3);
+        assert_eq!(tensor.size_in_bytes(), 12);
+        assert_eq!(
+            TensorData::get_backend_from_dtype(&tensor.dtype),
+            SupportedTensorBackend::NdArray
+        );
+    }
+
+    #[test]
+    fn ndarray_backend_matcher_reports_backend_and_cpu_device() {
+        assert!(NdArray::matches_backend(&SupportedTensorBackend::NdArray));
+        assert_eq!(NdArray::get_supported_backend(), SupportedTensorBackend::NdArray);
+        assert!(matches!(NdArray::get_device(&DeviceType::Cpu), Ok(_)));
+    }
+
+    #[test]
+    fn float_tensor_round_trip_preserves_bytes() {
+        let tensor_data = ndarray_f32_tensor_data(&[1.0, -2.5]);
+
+        let tensor = tensor_data
+            .to_float_tensor::<NdArray, 1>(&DeviceType::Cpu)
+            .unwrap();
+        let round_trip = TensorData::try_from(ConversionBurnTensor {
+            inner: tensor.tensor.clone(),
+            conversion_dtype: tensor.dtype.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(round_trip.shape, vec![2]);
+        assert_eq!(round_trip.data, tensor_data.data);
+    }
+
+    #[test]
+    fn int_tensor_round_trip_preserves_bytes() {
+        let tensor_data = ndarray_i64_tensor_data(&[4, -3, 2]);
+
+        let tensor = tensor_data
+            .to_int_tensor::<NdArray, 1>(&DeviceType::Cpu)
+            .unwrap();
+        let round_trip = TensorData::try_from(ConversionBurnTensor {
+            inner: tensor.tensor.clone(),
+            conversion_dtype: tensor.dtype.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(round_trip.shape, vec![3]);
+        assert_eq!(round_trip.data, tensor_data.data);
+    }
+
+    #[test]
+    fn bool_tensor_round_trip_preserves_boolean_encoding() {
+        let tensor_data = ndarray_bool_tensor_data(&[true, false, true]);
+
+        let tensor = tensor_data
+            .to_bool_tensor::<NdArray, 1>(&DeviceType::Cpu)
+            .unwrap();
+        let round_trip = TensorData::try_from(ConversionBurnTensor {
+            inner: tensor.tensor.clone(),
+            conversion_dtype: tensor.dtype.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(round_trip.shape, vec![3]);
+        assert_eq!(round_trip.data, vec![1, 0, 1]);
+    }
+
+    #[test]
+    fn to_float_tensor_rejects_non_float_dtypes() {
+        let tensor_data = ndarray_i64_tensor_data(&[1, 2]);
+
+        let err = tensor_data
+            .to_float_tensor::<NdArray, 1>(&DeviceType::Cpu)
+            .expect_err("integer tensors cannot be converted to float tensors");
+
+        assert!(matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert")));
+    }
+
+    #[test]
+    fn to_bool_tensor_rejects_non_bool_dtypes() {
+        let tensor_data = ndarray_f32_tensor_data(&[1.0, 2.0]);
+
+        let err = tensor_data
+            .to_bool_tensor::<NdArray, 1>(&DeviceType::Cpu)
+            .expect_err("float tensors cannot be converted to bool tensors");
+
+        assert!(matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert")));
+    }
+
+    #[test]
+    fn any_burn_tensor_reports_its_kind_and_dtype() {
+        let tensor = Tensor::<NdArray, 1, Float>::from_data(
+            BurnTensorData::new(vec![0.5f32, 1.5], [2]),
+            &ndarray_device(),
+        );
+        let any_tensor = AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        });
+
+        let (kind, dtype) = any_tensor.get_tensor_type();
+
+        assert_eq!(kind, "float");
+        assert_eq!(dtype, DType::NdArray(NdArrayDType::F32));
+    }
+
+    #[test]
+    fn any_burn_tensor_into_f32_data_uses_the_tensor_backend() {
+        let any_tensor = build_any_float_tensor(&[3.0, 6.0]);
+
+        let tensor_data = any_tensor.into_f32_data().unwrap();
+
+        assert_eq!(tensor_data.shape, vec![2]);
+        assert_eq!(tensor_data.supported_backend, SupportedTensorBackend::NdArray);
+        assert_eq!(tensor_data.data, f32_bytes(&[3.0, 6.0]));
+    }
+
+    #[test]
+    fn conversion_burn_tensor_packs_integers_and_bools() {
+        let int_tensor = Tensor::<NdArray, 1, Int>::from_data(
+            BurnTensorData::new(vec![1i64, -2, 3], [3]),
+            &ndarray_device(),
+        );
+        let bool_tensor = Tensor::<NdArray, 1, Bool>::from_data(
+            BurnTensorData::new(vec![true, false], [2]),
+            &ndarray_device(),
+        );
+
+        let int_data = TensorData::try_from(ConversionBurnTensor {
+            inner: Arc::new(int_tensor),
+            conversion_dtype: DType::NdArray(NdArrayDType::I64),
+        })
+        .unwrap();
+        let bool_data = TensorData::try_from(ConversionBurnTensor {
+            inner: Arc::new(bool_tensor),
+            conversion_dtype: DType::NdArray(NdArrayDType::Bool),
+        })
+        .unwrap();
+
+        assert_eq!(int_data.data, i64_bytes(&[1, -2, 3]));
+        assert_eq!(bool_data.data, vec![1, 0]);
     }
 }

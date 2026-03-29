@@ -1,5 +1,7 @@
 use crate::data::action::{RelayRLAction, RelayRLData};
-use crate::data::tensor::{DType, NdArrayDType, TensorData};
+use crate::data::tensor::{DType, TensorData};
+#[cfg(feature = "ndarray-backend")]
+use crate::data::tensor::NdArrayDType;
 #[cfg(feature = "tch-backend")]
 use crate::data::tensor::TchDType;
 use crate::data::trajectory::RelayRLTrajectory;
@@ -120,7 +122,9 @@ struct TrajectoryValidationCache {
     backend: Option<String>,
     actor_id: Option<Uuid>,
     timestamp: Option<u64>,
+    #[allow(unused)]
     episode: Option<u64>,
+    #[allow(unused)]
     training_step: Option<u64>,
 }
 
@@ -840,5 +844,197 @@ fn is_f64_dtype(dtype: &DType) -> bool {
         #[cfg(feature = "tch-backend")]
         DType::Tch(TchDType::F64) => true,
         _ => false,
+    }
+}
+
+#[cfg(all(test, feature = "ndarray-backend"))]
+mod unit_tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_csv_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("relayrl-csv-{label}-{}.csv", Uuid::new_v4()))
+    }
+
+    fn f32_tensor(shape: Vec<usize>, values: &[f32]) -> TensorData {
+        TensorData::new(
+            shape,
+            DType::NdArray(NdArrayDType::F32),
+            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::F32)),
+        )
+    }
+
+    fn i32_tensor(shape: Vec<usize>, values: &[i32]) -> TensorData {
+        TensorData::new(
+            shape,
+            DType::NdArray(NdArrayDType::I32),
+            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::I32)),
+        )
+    }
+
+    fn bool_tensor(shape: Vec<usize>, values: &[bool]) -> TensorData {
+        TensorData::new(
+            shape,
+            DType::NdArray(NdArrayDType::Bool),
+            values.iter().map(|value| u8::from(*value)).collect(),
+            TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::Bool)),
+        )
+    }
+
+    fn sample_action() -> RelayRLAction {
+        let mut aux = HashMap::new();
+        aux.insert("policy".to_string(), RelayRLData::String("ppo".to_string()));
+
+        RelayRLAction::new(
+            Some(f32_tensor(vec![2], &[1.0, 2.0])),
+            Some(i32_tensor(vec![2], &[3, 4])),
+            Some(bool_tensor(vec![2], &[true, false])),
+            1.5,
+            true,
+            Some(aux),
+            Some(Uuid::from_u128(9)),
+        )
+    }
+
+    fn write_records(path: &Path, records: &[StringRecord]) {
+        let mut writer = WriterBuilder::new()
+            .has_headers(false)
+            .from_path(path)
+            .unwrap();
+        writer.write_record(HEADER_NAMES).unwrap();
+        for record in records {
+            writer.write_record(record).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+
+    fn with_field(record: &StringRecord, field: CsvHeaderFields, value: &str) -> StringRecord {
+        let mut fields: Vec<String> = record.iter().map(str::to_string).collect();
+        fields[field as usize] = value.to_string();
+        StringRecord::from(fields)
+    }
+
+    #[test]
+    fn csv_round_trip_preserves_auxiliary_and_binary_tensor_data() {
+        let path = temp_csv_path("roundtrip");
+        let agent_id = Uuid::from_u128(9);
+        let mut trajectory = RelayRLTrajectory::with_metadata(4, Some(agent_id), Some(3), Some(4));
+        trajectory.add_action(sample_action());
+
+        CsvTrajectory::new(Some(trajectory))
+            .to_csv(&path, 256)
+            .expect("writing CSV should succeed");
+
+        let loaded = CsvTrajectory::new(None)
+            .from_csv(&path, 256, Some(3), Some(4))
+            .expect("reading CSV should succeed");
+        let records_len = loaded.get_records().unwrap().len();
+        let loaded_trajectory = loaded.trajectory.expect("trajectory should be reconstructed");
+        let action = &loaded_trajectory.actions[0];
+
+        assert_eq!(records_len, 1);
+        assert_eq!(loaded_trajectory.get_episode(), Some(3));
+        assert_eq!(loaded_trajectory.get_training_step(), Some(4));
+        assert_eq!(loaded_trajectory.get_agent_id(), Some(&agent_id));
+        assert_eq!(action.get_rew(), 1.5);
+        assert!(action.get_done());
+        assert_eq!(action.get_obs().unwrap().data, f32_tensor(vec![2], &[1.0, 2.0]).data);
+        assert_eq!(action.get_act().unwrap().data, i32_tensor(vec![2], &[3, 4]).data);
+        assert_eq!(action.get_mask().unwrap().data, bool_tensor(vec![2], &[true, false]).data);
+        assert!(matches!(
+            action.get_data().unwrap().get("policy"),
+            Some(RelayRLData::String(value)) if value == "ppo"
+        ));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn to_csv_reuses_the_writer_cache_and_only_appends_new_rows() {
+        let path = temp_csv_path("append");
+        let mut trajectory = RelayRLTrajectory::new(4);
+        trajectory.add_action(sample_action());
+
+        let mut csv = CsvTrajectory::new(Some(trajectory)).to_csv(&path, 128).unwrap();
+        assert_eq!(csv.writer_cache.as_ref().unwrap().rows_written, 1);
+
+        csv.trajectory.as_mut().unwrap().add_action(sample_action());
+        csv = csv.to_csv(&path, 128).unwrap();
+
+        assert_eq!(csv.writer_cache.as_ref().unwrap().rows_written, 2);
+        let rows = ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(&path)
+            .unwrap()
+            .records()
+            .count();
+        assert_eq!(rows, 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_csv_rejects_non_monotonic_timestamps() {
+        let path = temp_csv_path("timestamps");
+        let base = <RelayRLAction as CsvAction>::to_csv_data(&sample_action()).unwrap();
+        let first = with_field(&base, CsvHeaderFields::Timestamp, "20");
+        let second = with_field(&base, CsvHeaderFields::Timestamp, "10");
+        write_records(&path, &[first, second]);
+
+        let err = match CsvTrajectory::new(None).from_csv(&path, 128, None, None) {
+            Ok(_) => panic!("timestamps must be monotonic"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            CsvDataError::TrajectoryBuildFailure(message) if message.contains("Timestamp must be monotonic")
+        ));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_csv_rejects_backend_mismatches() {
+        let path = temp_csv_path("backend");
+        let base = <RelayRLAction as CsvAction>::to_csv_data(&sample_action()).unwrap();
+        let first = with_field(&base, CsvHeaderFields::Timestamp, "1");
+        let second = with_field(
+            &with_field(&base, CsvHeaderFields::Timestamp, "2"),
+            CsvHeaderFields::Backend,
+            "OtherBackend",
+        );
+        write_records(&path, &[first, second]);
+
+        let err = match CsvTrajectory::new(None).from_csv(&path, 128, None, None) {
+            Ok(_) => panic!("rows with different backend markers should fail validation"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            CsvDataError::TrajectoryBuildFailure(message) if message.contains("Backend mismatch")
+        ));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn byte_length_guards_reject_invalid_float_payloads() {
+        let f32_err = bytes_to_f32_vec(&[1, 2, 3])
+            .expect_err("f32 payloads must be a multiple of four bytes");
+        let f64_err = bytes_to_f64_vec(&[1, 2, 3, 4])
+            .expect_err("f64 payloads must be a multiple of eight bytes");
+
+        assert!(matches!(
+            f32_err,
+            CsvDataError::TrajectoryBuildFailure(message) if message.contains("multiple of 4")
+        ));
+        assert!(matches!(
+            f64_err,
+            CsvDataError::TrajectoryBuildFailure(message) if message.contains("multiple of 8")
+        ));
     }
 }
