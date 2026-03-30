@@ -38,6 +38,12 @@ pub struct ReinforceReplayBuffer {
     metadata: Arc<BufferMetadata>,
 }
 
+impl Default for ReinforceReplayBuffer {
+    fn default() -> Self {
+        Self::new(1_000_000, 0.98, 0.97, false)
+    }
+}
+
 impl ReinforceReplayBuffer {
     pub fn new(buffer_size: usize, gamma: f32, lambda: f32, with_vf_baseline: bool) -> Self {
         let buffers = Buffers {
