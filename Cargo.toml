@@ -18,6 +18,8 @@ burn-ndarray = "0.20.1"
 burn-tch = "0.20.1"
 burn-autodiff = "0.20.1"
 burn-core = "0.20.1"
+burn-optim = "0.20.1"
+burn-nn = "0.20.1"
 
 tokio = "1.50.0"
 
