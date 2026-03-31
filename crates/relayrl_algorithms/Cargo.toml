@@ -2,10 +2,10 @@
 name = "relayrl_algorithms"
 version = "0.1.0"
 edition = "2024"
-description = "A collection of Deep Reinforcement Learning Algorithms"
+description = "A collection of Multi-Agent Deep Reinforcement Learning Algorithms (IPPO, MAPPO, etc.)"
 repository = "https://github.com/jrcalgo/relayrl"
 documentation = "https://docs.rs/crate/relayrl_algorithms"
-keywords = ['reinforcement-learning', 'deep-learning', 'algorithms']
+keywords = ['reinforcement-learning', 'deep-learning', 'algorithms', 'ai', 'multi-agent']
 categories = ['science', 'algorithms', 'simulation', 'concurrency', 'mathematics']
 license = "Apache-2.0"
 
@@ -33,4 +33,5 @@ rand = { workspace = true }
 
 tokio = { workspace = true }
 thiserror = { workspace = true }
+log = { workspace = true }
 async-trait = { workspace = true }
