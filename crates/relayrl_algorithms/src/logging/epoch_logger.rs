@@ -64,8 +64,18 @@ impl EpochLogger {
         }
 
         // Determine column widths
-        let key_width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(10).max(10);
-        let val_width = rows.iter().map(|(_, v)| v.len()).max().unwrap_or(10).max(10);
+        let key_width = rows
+            .iter()
+            .map(|(k, _)| k.len())
+            .max()
+            .unwrap_or(10)
+            .max(10);
+        let val_width = rows
+            .iter()
+            .map(|(_, v)| v.len())
+            .max()
+            .unwrap_or(10)
+            .max(10);
         let total_width = key_width + val_width + 5;
 
         let sep = "-".repeat(total_width);

@@ -222,13 +222,13 @@ mod training {
             }
         }
 
-        pub fn add_agent(
-            &mut self,
-            hidden_sizes: &[usize],
-            device: &<TB as Backend>::Device,
-        ) {
-            self.actors
-                .push(TrainMlp::new(self.obs_dim, hidden_sizes, self.act_dim, device));
+        pub fn add_agent(&mut self, hidden_sizes: &[usize], device: &<TB as Backend>::Device) {
+            self.actors.push(TrainMlp::new(
+                self.obs_dim,
+                hidden_sizes,
+                self.act_dim,
+                device,
+            ));
         }
     }
 
@@ -392,8 +392,7 @@ mod training {
                 None => loss_vf.clone() * vf_scale,
             };
             let grads = total_loss.backward();
-            let grads_params =
-                GradientsParams::from_grads::<TB, SharedTrainModule>(grads, &module);
+            let grads_params = GradientsParams::from_grads::<TB, SharedTrainModule>(grads, &module);
             let module = self.optimizer.step(self.pi_lr, module, grads_params);
             self.module = Some(module);
 

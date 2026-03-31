@@ -131,10 +131,7 @@ impl MultiagentPPOKernel {
     }
 
     pub fn concat_sample_count(agent_batches: &[AgentBatch]) -> usize {
-        agent_batches
-            .iter()
-            .map(sample_count_for_batch)
-            .sum()
+        agent_batches.iter().map(sample_count_for_batch).sum()
     }
 
     #[allow(dead_code)]
@@ -253,13 +250,13 @@ mod training {
             }
         }
 
-        pub fn add_agent(
-            &mut self,
-            hidden_sizes: &[usize],
-            device: &<TB as Backend>::Device,
-        ) {
-            self.actors
-                .push(TrainMlp::new(self.obs_dim, hidden_sizes, self.act_dim, device));
+        pub fn add_agent(&mut self, hidden_sizes: &[usize], device: &<TB as Backend>::Device) {
+            self.actors.push(TrainMlp::new(
+                self.obs_dim,
+                hidden_sizes,
+                self.act_dim,
+                device,
+            ));
         }
     }
 
@@ -405,8 +402,7 @@ mod training {
                             &device,
                         );
                         let ratio = (logp.clone() - logp_old).exp();
-                        let clipped_ratio =
-                            ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
+                        let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
                         let unclipped = ratio.clone() * adv.clone();
                         let clipped = clipped_ratio * adv;
                         let loss_pi = unclipped.min_pair(clipped).mean().neg();

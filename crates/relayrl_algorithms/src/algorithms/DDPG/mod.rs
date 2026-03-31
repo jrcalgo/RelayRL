@@ -1,7 +1,6 @@
 use burn_tensor::backend::Backend;
 use burn_tensor::TensorKind;
 use crate::templates::base_algorithm::StepKernelTrait;
-use crate::templates::base_replay_buffer::DDPGReplayBuffer;
 use crate::logging::EpochLogger;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use std::path::PathBuf;
@@ -63,18 +62,16 @@ struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
     epoch_count: u64,
     #[allow(dead_code)]
     kernel: KN,
-    replay_buffer: DDPGReplayBuffer,
     _phantom: PhantomData<(B, InK, OutK)>,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for RuntimeComponents<B, InK, OutK, KN> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK> + Default> Default for RuntimeComponents<B, InK, OutK, KN> {
     fn default() -> Self {
         Self {
             epoch_logger: EpochLogger::new(),
             trajectory_count: 0,
             epoch_count: 0,
             kernel: Default::default(),
-            replay_buffer: Default::default(),
             _phantom: PhantomData,
         }
     }
@@ -86,7 +83,7 @@ struct RuntimeParams<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: Tens
     components: RuntimeComponents<B, InK, OutK, KN>
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for RuntimeParams<B, InK, OutK, KN> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK> + Default> Default for RuntimeParams<B, InK, OutK, KN> {
     fn default() -> Self {
         Self {
             args: Default::default(),
@@ -100,7 +97,7 @@ pub struct DDPGAlgorithm<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
     hyperparams: DDPGParams,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for DDPGAlgorithm<B, InK, OutK, KN> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK> + Default> Default for DDPGAlgorithm<B, InK, OutK, KN> {
     fn default() -> Self {
         Self {
             runtime: Default::default(),

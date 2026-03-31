@@ -264,20 +264,26 @@ where
             self.hyperparams.lambda,
         );
         let index = self.runtime.components.agent_slots.len();
-        self.runtime.components.agent_slots.push(AgentRuntimeSlot::new(
-            agent_key.clone(),
-            replay_buffer,
-        ));
-        self.runtime.components.agent_registry.insert(agent_key, index);
+        self.runtime
+            .components
+            .agent_slots
+            .push(AgentRuntimeSlot::new(agent_key.clone(), replay_buffer));
+        self.runtime
+            .components
+            .agent_registry
+            .insert(agent_key, index);
         self.runtime.components.kernel.register_agent();
         index
     }
 
     fn all_agents_ready(&self) -> bool {
         self.runtime.components.agent_registry.len() > 0
-            && self.runtime.components.agent_slots.iter().all(|slot| {
-                slot.trajectory_count >= self.hyperparams.traj_per_epoch
-            })
+            && self
+                .runtime
+                .components
+                .agent_slots
+                .iter()
+                .all(|slot| slot.trajectory_count >= self.hyperparams.traj_per_epoch)
     }
 
     fn reset_agent_counts(&mut self) {
@@ -379,12 +385,27 @@ where
             .components
             .epoch_logger
             .log_tabular("Epoch", Some(self.runtime.components.epoch_count as f32));
-        self.runtime.components.epoch_logger.log_tabular("EpRet", None);
-        self.runtime.components.epoch_logger.log_tabular("EpLen", None);
-        self.runtime.components.epoch_logger.log_tabular("LossPi", None);
-        self.runtime.components.epoch_logger.log_tabular("LossV", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("EpRet", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("EpLen", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("LossPi", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("LossV", None);
         self.runtime.components.epoch_logger.log_tabular("KL", None);
-        self.runtime.components.epoch_logger.log_tabular("Entropy", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("Entropy", None);
         self.runtime.components.epoch_logger.dump_tabular();
     }
 }

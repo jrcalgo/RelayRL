@@ -1,7 +1,6 @@
 use burn_tensor::backend::Backend;
 use burn_tensor::TensorKind;
 use crate::templates::base_algorithm::StepKernelTrait;
-use crate::templates::base_replay_buffer::TD3ReplayBuffer;
 use crate::logging::EpochLogger;
 
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
@@ -65,18 +64,16 @@ struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
     epoch_count: u64,
     #[allow(dead_code)]
     kernel: KN,
-    replay_buffer: TD3ReplayBuffer,
     _phantom: PhantomData<(B, InK, OutK)>,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for RuntimeComponents<B, InK, OutK, KN> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK> + Default> Default for RuntimeComponents<B, InK, OutK, KN> {
     fn default() -> Self {
         Self {
             epoch_logger: EpochLogger::new(),
             trajectory_count: 0,
             epoch_count: 0,
             kernel: Default::default(),
-            replay_buffer: Default::default(),
             _phantom: PhantomData,
         }
     }
@@ -88,7 +85,7 @@ struct RuntimeParams<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: Tens
     components: RuntimeComponents<B, InK, OutK, KN>
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for RuntimeParams<B, InK, OutK, KN> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK> + Default> Default for RuntimeParams<B, InK, OutK, KN> {
     fn default() -> Self {
         Self {
             args: Default::default(),
@@ -101,7 +98,7 @@ pub struct TD3Algorithm<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: T
     hyperparams: TD3Params,
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK>> Default for TD3Algorithm<B, InK, OutK, KN> {
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN: StepKernelTrait<B, InK, OutK> + Default> Default for TD3Algorithm<B, InK, OutK, KN> {
     fn default() -> Self {
         Self {
             runtime: Default::default(),

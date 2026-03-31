@@ -5,7 +5,9 @@ pub use kernel::*;
 pub use replay_buffer::*;
 
 use crate::logging::{EpochLogger, SessionLogger};
-use crate::templates::base_algorithm::{AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData};
+use crate::templates::base_algorithm::{
+    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData,
+};
 use crate::templates::base_replay_buffer::{
     Batch, BatchKey, BufferSample, GenericReplayBuffer, ReplayBufferError, SampleScalars,
 };
@@ -280,14 +282,25 @@ where
             self.hyperparams.gamma,
             self.hyperparams.lam,
         );
-        let kernel = self.runtime.components.seed_kernel.take().unwrap_or_default();
+        let kernel = self
+            .runtime
+            .components
+            .seed_kernel
+            .take()
+            .unwrap_or_default();
         let index = self.runtime.components.agent_slots.len();
-        self.runtime.components.agent_slots.push(AgentRuntimeSlot::new(
-            agent_key.clone(),
-            kernel,
-            replay_buffer,
-        ));
-        self.runtime.components.agent_registry.insert(agent_key, index);
+        self.runtime
+            .components
+            .agent_slots
+            .push(AgentRuntimeSlot::new(
+                agent_key.clone(),
+                kernel,
+                replay_buffer,
+            ));
+        self.runtime
+            .components
+            .agent_registry
+            .insert(agent_key, index);
         index
     }
 
@@ -472,16 +485,43 @@ where
             .components
             .epoch_logger
             .log_tabular("Epoch", Some(self.runtime.components.epoch_count as f32));
-        self.runtime.components.epoch_logger.log_tabular("EpRet", None);
-        self.runtime.components.epoch_logger.log_tabular("EpLen", None);
-        self.runtime.components.epoch_logger.log_tabular("LossPi", None);
-        self.runtime.components.epoch_logger.log_tabular("DeltaLossPi", None);
-        self.runtime.components.epoch_logger.log_tabular("LossV", None);
-        self.runtime.components.epoch_logger.log_tabular("DeltaLossV", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("EpRet", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("EpLen", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("LossPi", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("DeltaLossPi", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("LossV", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("DeltaLossV", None);
         self.runtime.components.epoch_logger.log_tabular("KL", None);
-        self.runtime.components.epoch_logger.log_tabular("Entropy", None);
-        self.runtime.components.epoch_logger.log_tabular("ClipFrac", None);
-        self.runtime.components.epoch_logger.log_tabular("StopIter", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("Entropy", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("ClipFrac", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("StopIter", None);
         self.runtime.components.epoch_logger.dump_tabular();
     }
 }

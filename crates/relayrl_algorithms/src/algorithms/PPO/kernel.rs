@@ -23,9 +23,7 @@ fn backend_f32_dtype<B: Backend + BackendMatcher>() -> Result<DType, TensorError
             relayrl_types::data::tensor::NdArrayDType::F32,
         )),
         #[cfg(feature = "tch-backend")]
-        SupportedTensorBackend::Tch => Ok(DType::Tch(
-            relayrl_types::data::tensor::TchDType::F32,
-        )),
+        SupportedTensorBackend::Tch => Ok(DType::Tch(relayrl_types::data::tensor::TchDType::F32)),
         _ => Err(TensorError::BackendError(
             "Unsupported backend for f32 TensorData conversion".to_string(),
         )),
@@ -63,12 +61,7 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         clip_ratio: f32,
     ) -> (f32, HashMap<String, f32>);
 
-    fn ppo_vf_loss(
-        &mut self,
-        obs: &[TensorData],
-        mask: &[TensorData],
-        ret: &[f32],
-    ) -> f32;
+    fn ppo_vf_loss(&mut self, obs: &[TensorData], mask: &[TensorData], ret: &[f32]) -> f32;
 }
 
 #[cfg(feature = "ndarray-backend")]
@@ -347,8 +340,11 @@ mod training {
     }
 }
 
-pub struct PPOPolicyWithBaseline<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
-where
+pub struct PPOPolicyWithBaseline<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+> where
     OutK: BasicOps<B>,
     InK: BasicOps<B>,
 {
@@ -473,8 +469,9 @@ where
         match &self.policy {
             PolicyHead::Discrete(policy) => {
                 let (probs, logits) = policy.distribution(obs.clone(), mask.clone());
-                let probs_rank2 =
-                    probs.clone().reshape([probs.dims()[0], probs.dims()[OUT_D - 1]]);
+                let probs_rank2 = probs
+                    .clone()
+                    .reshape([probs.dims()[0], probs.dims()[OUT_D - 1]]);
                 let act = policy.sample_for_action(probs_rank2);
                 let act_for_log_prob = act.clone().reshape(logits.dims());
                 let logp_a = policy.log_prob_from_distribution(logits, act_for_log_prob);
@@ -538,12 +535,7 @@ where
         (0.0, info)
     }
 
-    fn ppo_vf_loss(
-        &mut self,
-        obs: &[TensorData],
-        _mask: &[TensorData],
-        ret: &[f32],
-    ) -> f32 {
+    fn ppo_vf_loss(&mut self, obs: &[TensorData], _mask: &[TensorData], ret: &[f32]) -> f32 {
         #[cfg(feature = "ndarray-backend")]
         if let Some(trainer) = &mut self.vf_trainer {
             return trainer.train_step(obs, ret);

@@ -9,8 +9,8 @@ use relayrl_types::prelude::tensor::relayrl::TensorData;
 use relayrl_types::prelude::trajectory::RelayRLTrajectory;
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 struct Buffers {
@@ -187,7 +187,9 @@ impl GenericReplayBuffer for PPOReplayBuffer {
 
         // Reset buffer for next epoch
         self.metadata.buffer_pointer.store(0, Ordering::SeqCst);
-        self.metadata.buffer_path_start_idx.store(0, Ordering::SeqCst);
+        self.metadata
+            .buffer_path_start_idx
+            .store(0, Ordering::SeqCst);
         buffers.observations.clear();
         buffers.actions.clear();
         buffers.masks.clear();
@@ -200,7 +202,10 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         let mut batch: HashMap<BatchKey, BufferSample> = HashMap::new();
         batch.insert(BatchKey::Obs, BufferSample::Tensors(obs.into_boxed_slice()));
         batch.insert(BatchKey::Act, BufferSample::Tensors(act.into_boxed_slice()));
-        batch.insert(BatchKey::Mask, BufferSample::Tensors(mask.into_boxed_slice()));
+        batch.insert(
+            BatchKey::Mask,
+            BufferSample::Tensors(mask.into_boxed_slice()),
+        );
         batch.insert(
             BatchKey::Custom("Adv".to_string()),
             BufferSample::Scalars(SampleScalars::F32(adv_norm.into_boxed_slice())),

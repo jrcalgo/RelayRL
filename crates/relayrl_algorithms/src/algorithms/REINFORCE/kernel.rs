@@ -7,13 +7,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use burn_nn::{Linear, LinearConfig, Relu, Tanh};
+use burn_tensor::Distribution;
 use burn_tensor::activation::{log_softmax, softmax};
 use burn_tensor::backend::Backend;
 use burn_tensor::{BasicOps, Float, Int, Tensor, TensorData as BurnTensorData, TensorKind};
-use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution as RandDistribution;
+use rand::distr::weighted::WeightedIndex;
 use std::marker::PhantomData;
-use burn_tensor::Distribution;
 
 use relayrl_types::data::tensor::{
     BackendMatcher, ConversionBurnTensor, DType, SupportedTensorBackend, TensorData, TensorError,
@@ -95,9 +95,7 @@ fn backend_f32_dtype<B: Backend + BackendMatcher>() -> Result<DType, TensorError
             relayrl_types::data::tensor::NdArrayDType::F32,
         )),
         #[cfg(feature = "tch-backend")]
-        SupportedTensorBackend::Tch => Ok(DType::Tch(
-            relayrl_types::data::tensor::TchDType::F32,
-        )),
+        SupportedTensorBackend::Tch => Ok(DType::Tch(relayrl_types::data::tensor::TchDType::F32)),
         _ => Err(TensorError::BackendError(
             "Unsupported backend for f32 TensorData conversion".to_string(),
         )),
@@ -120,8 +118,7 @@ pub struct DiscretePolicyNetwork<B: Backend, InK: TensorKind<B>, OutK: TensorKin
     _out_k: PhantomData<OutK>,
 }
 
-impl<B: Backend, InK: TensorKind<B>, OutK: TensorKind<B>>
-    DiscretePolicyNetwork<B, InK, OutK>
+impl<B: Backend, InK: TensorKind<B>, OutK: TensorKind<B>> DiscretePolicyNetwork<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
@@ -225,8 +222,7 @@ where
     _out_k: PhantomData<OutK>,
 }
 
-impl<B: Backend, InK: TensorKind<B>, OutK: TensorKind<B>>
-    ContinuousPolicyNetwork<B, InK, OutK>
+impl<B: Backend, InK: TensorKind<B>, OutK: TensorKind<B>> ContinuousPolicyNetwork<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
@@ -275,7 +271,8 @@ where
         );
 
         let std_rank2 = std.reshape([batch_size, act_dim]);
-        let std_broadcast = Tensor::from_data(std_rank2.into_data().convert::<f32>(), &mean.device());
+        let std_broadcast =
+            Tensor::from_data(std_rank2.into_data().convert::<f32>(), &mean.device());
 
         // Reparameterization: a = mean + std * ε
         mean.add(std_broadcast.mul(epsilon))
@@ -335,8 +332,7 @@ pub struct BaselineValueNetwork<B: Backend, InK: TensorKind<B>, OutK: TensorKind
     _out_k: PhantomData<OutK>,
 }
 
-impl<B: Backend, InK: TensorKind<B>, OutK: TensorKind<B>>
-    BaselineValueNetwork<B, InK, OutK>
+impl<B: Backend, InK: TensorKind<B>, OutK: TensorKind<B>> BaselineValueNetwork<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
@@ -388,8 +384,8 @@ mod training {
     use burn_core::module::Module;
     use burn_ndarray::NdArray;
     use burn_nn::{Linear, LinearConfig, Relu};
-    use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
     use burn_optim::adaptor::OptimizerAdaptor;
+    use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 
     pub type TB = Autodiff<NdArray>;
 
@@ -402,7 +398,12 @@ mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> TrainMlp<B> {
-        pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            hidden_sizes: &[usize],
+            act_dim: usize,
+            device: &B::Device,
+        ) -> Self {
             let mut dims = vec![obs_dim];
             dims.extend_from_slice(hidden_sizes);
             dims.push(act_dim);
@@ -410,7 +411,12 @@ mod training {
                 .windows(2)
                 .map(|w| LinearConfig::new(w[0], w[1]).init(device))
                 .collect();
-            Self { layers, relu: Relu::new(), obs_dim, act_dim }
+            Self {
+                layers,
+                relu: Relu::new(),
+                obs_dim,
+                act_dim,
+            }
         }
 
         /// Float forward pass (used for both inference and training).
@@ -440,7 +446,11 @@ mod training {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = TrainMlp::new(obs_dim, hidden_sizes, act_dim, &device);
             let optimizer = AdamConfig::new().init::<TB, TrainMlp<TB>>();
-            Self { network: Some(network), optimizer, pi_lr }
+            Self {
+                network: Some(network),
+                optimizer,
+                pi_lr,
+            }
         }
 
         /// REINFORCE policy gradient step: loss_pi = -mean(logp * adv)
@@ -453,12 +463,20 @@ mod training {
         ) -> (f32, HashMap<String, f32>) {
             let n = obs_tensors.len().min(act_tensors.len()).min(adv.len());
             if n == 0 {
-                return (0.0, HashMap::from([("kl".to_string(), 0.0), ("entropy".to_string(), 0.0)]));
+                return (
+                    0.0,
+                    HashMap::from([("kl".to_string(), 0.0), ("entropy".to_string(), 0.0)]),
+                );
             }
 
             let net = match self.network.take() {
                 Some(n) => n,
-                None => return (0.0, HashMap::from([("kl".to_string(), 0.0), ("entropy".to_string(), 0.0)])),
+                None => {
+                    return (
+                        0.0,
+                        HashMap::from([("kl".to_string(), 0.0), ("entropy".to_string(), 0.0)]),
+                    );
+                }
             };
 
             let obs_dim = net.obs_dim;
@@ -486,22 +504,26 @@ mod training {
                 .iter()
                 .map(|td| {
                     if td.data.len() >= 8 {
-                        bytemuck::cast_slice::<u8, i64>(&td.data[..8]).first().copied().unwrap_or(0)
+                        bytemuck::cast_slice::<u8, i64>(&td.data[..8])
+                            .first()
+                            .copied()
+                            .unwrap_or(0)
                     } else if td.data.len() >= 4 {
-                        bytemuck::cast_slice::<u8, f32>(&td.data[..4]).first().copied().unwrap_or(0.0) as i64
+                        bytemuck::cast_slice::<u8, f32>(&td.data[..4])
+                            .first()
+                            .copied()
+                            .unwrap_or(0.0) as i64
                     } else {
                         0
                     }
                 })
                 .collect();
-            let act = Tensor::<TB, 2, Int>::from_data(
-                BurnTensorData::new(act_flat, [n, 1]),
-                &device,
-            );
+            let act =
+                Tensor::<TB, 2, Int>::from_data(BurnTensorData::new(act_flat, [n, 1]), &device);
 
             // Gather log probs at chosen actions [n, 1]
             let logp = log_probs.gather(1, act); // [n, 1]
-            let logp_1d = logp.reshape([n]);      // [n]
+            let logp_1d = logp.reshape([n]); // [n]
 
             let adv_tensor = Tensor::<TB, 1, Float>::from_data(
                 BurnTensorData::new(adv[..n].to_vec(), [n]),
@@ -512,7 +534,8 @@ mod training {
             let loss = (logp_1d.clone() * adv_tensor).mean().neg();
 
             // Scalar metrics (before backward — clone data out)
-            let logp_data: Vec<f32> = logp_1d.clone()
+            let logp_data: Vec<f32> = logp_1d
+                .clone()
                 .into_data()
                 .to_vec::<f32>()
                 .unwrap_or_else(|_| vec![0.0; n]);
@@ -528,14 +551,21 @@ mod training {
                             .unwrap_or(0.0)
                     })
                     .collect();
-                logp_old_vals.iter().zip(logp_data.iter())
+                logp_old_vals
+                    .iter()
+                    .zip(logp_data.iter())
                     .map(|(lp_old, lp_new)| lp_old - lp_new)
-                    .sum::<f32>() / n as f32
+                    .sum::<f32>()
+                    / n as f32
             } else {
                 0.0
             };
 
-            let loss_val = loss.clone().into_data().to_vec::<f32>().unwrap_or(vec![0.0])[0];
+            let loss_val = loss
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or(vec![0.0])[0];
 
             // Backward + optimizer step
             let grads = loss.backward();
@@ -561,17 +591,19 @@ mod training {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = TrainMlp::new(obs_dim, hidden_sizes, 1, &device); // output_dim=1 for V(s)
             let optimizer = AdamConfig::new().init::<TB, TrainMlp<TB>>();
-            Self { network: Some(network), optimizer, vf_lr }
+            Self {
+                network: Some(network),
+                optimizer,
+                vf_lr,
+            }
         }
 
         /// Value function MSE loss: mean((V(obs) - ret)^2)
-        pub fn train_step(
-            &mut self,
-            obs_tensors: &[TensorData],
-            ret: &[f32],
-        ) -> f32 {
+        pub fn train_step(&mut self, obs_tensors: &[TensorData], ret: &[f32]) -> f32 {
             let n = obs_tensors.len().min(ret.len());
-            if n == 0 { return 0.0; }
+            if n == 0 {
+                return 0.0;
+            }
 
             let net = match self.network.take() {
                 Some(n) => n,
@@ -599,7 +631,11 @@ mod training {
             );
 
             let loss = (v_pred_1d - ret_tensor).powf_scalar(2.0).mean();
-            let loss_val = loss.clone().into_data().to_vec::<f32>().unwrap_or(vec![0.0])[0];
+            let loss_val = loss
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or(vec![0.0])[0];
 
             let grads = loss.backward();
             let grads_params = GradientsParams::from_grads(grads, &net);
@@ -645,15 +681,30 @@ where
         device: &B::Device,
     ) -> Self {
         let policy = if discrete {
-            PolicyHead::Discrete(DiscretePolicyNetwork::new(obs_dim, hidden_sizes, act_dim, device))
+            PolicyHead::Discrete(DiscretePolicyNetwork::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                device,
+            ))
         } else {
-            PolicyHead::Continuous(ContinuousPolicyNetwork::new(obs_dim, hidden_sizes, act_dim, device))
+            PolicyHead::Continuous(ContinuousPolicyNetwork::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                device,
+            ))
         };
         let baseline = BaselineValueNetwork::new(obs_dim, hidden_sizes, activation, device);
 
         #[cfg(feature = "ndarray-backend")]
         let pi_trainer = if discrete {
-            Some(training::DiscretePiTrainer::new(obs_dim, hidden_sizes, act_dim, pi_lr))
+            Some(training::DiscretePiTrainer::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                pi_lr,
+            ))
         } else {
             None // Continuous trainer uses a separate path (not yet implemented)
         };
@@ -704,7 +755,9 @@ where
         match &self.policy {
             PolicyHead::Discrete(policy) => {
                 let (probs, logits) = policy.distribution(obs.clone(), mask.clone());
-                let probs_rank2 = probs.clone().reshape([probs.dims()[0], probs.dims()[OUT_D - 1]]);
+                let probs_rank2 = probs
+                    .clone()
+                    .reshape([probs.dims()[0], probs.dims()[OUT_D - 1]]);
                 let act = policy.sample_for_action(probs_rank2);
                 let act_for_log_prob = act.clone().reshape(logits.dims());
                 let logp_a = policy.log_prob_from_distribution(logits, act_for_log_prob);
@@ -732,12 +785,16 @@ where
         }
     }
 
-    fn get_input_dim(&self) -> usize { self.input_dim }
-    fn get_output_dim(&self) -> usize { self.output_dim }
+    fn get_input_dim(&self) -> usize {
+        self.input_dim
+    }
+    fn get_output_dim(&self) -> usize {
+        self.output_dim
+    }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
-    TrainableKernelTrait for PolicyWithBaseline<B, InK, OutK>
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> TrainableKernelTrait
+    for PolicyWithBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
@@ -761,12 +818,7 @@ where
         (0.0, info)
     }
 
-    fn train_vf_step(
-        &mut self,
-        obs: &[TensorData],
-        _mask: &[TensorData],
-        ret: &[f32],
-    ) -> f32 {
+    fn train_vf_step(&mut self, obs: &[TensorData], _mask: &[TensorData], ret: &[f32]) -> f32 {
         #[cfg(feature = "ndarray-backend")]
         if let Some(trainer) = &mut self.vf_trainer {
             return trainer.train_step(obs, ret);
@@ -775,8 +827,11 @@ where
     }
 }
 
-pub struct PolicyWithoutBaseline<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
-where
+pub struct PolicyWithoutBaseline<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+> where
     OutK: BasicOps<B>,
 {
     policy: PolicyHead<B, InK, OutK>,
@@ -803,14 +858,29 @@ where
         device: &B::Device,
     ) -> Self {
         let policy = if discrete {
-            PolicyHead::Discrete(DiscretePolicyNetwork::new(obs_dim, hidden_sizes, act_dim, device))
+            PolicyHead::Discrete(DiscretePolicyNetwork::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                device,
+            ))
         } else {
-            PolicyHead::Continuous(ContinuousPolicyNetwork::new(obs_dim, hidden_sizes, act_dim, device))
+            PolicyHead::Continuous(ContinuousPolicyNetwork::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                device,
+            ))
         };
 
         #[cfg(feature = "ndarray-backend")]
         let pi_trainer = if discrete {
-            Some(training::DiscretePiTrainer::new(obs_dim, hidden_sizes, act_dim, pi_lr))
+            Some(training::DiscretePiTrainer::new(
+                obs_dim,
+                hidden_sizes,
+                act_dim,
+                pi_lr,
+            ))
         } else {
             None
         };
@@ -852,7 +922,9 @@ where
         match &self.policy {
             PolicyHead::Discrete(policy) => {
                 let (probs, logits) = policy.distribution(obs, mask);
-                let probs_rank2 = probs.clone().reshape([probs.dims()[0], probs.dims()[OUT_D - 1]]);
+                let probs_rank2 = probs
+                    .clone()
+                    .reshape([probs.dims()[0], probs.dims()[OUT_D - 1]]);
                 let act = policy.sample_for_action(probs_rank2);
                 let act_for_log_prob = act.clone().reshape(logits.dims());
                 let logp_a = policy.log_prob_from_distribution(logits, act_for_log_prob);
@@ -870,12 +942,16 @@ where
         }
     }
 
-    fn get_input_dim(&self) -> usize { self.input_dim }
-    fn get_output_dim(&self) -> usize { self.output_dim }
+    fn get_input_dim(&self) -> usize {
+        self.input_dim
+    }
+    fn get_output_dim(&self) -> usize {
+        self.output_dim
+    }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
-    TrainableKernelTrait for PolicyWithoutBaseline<B, InK, OutK>
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> TrainableKernelTrait
+    for PolicyWithoutBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,

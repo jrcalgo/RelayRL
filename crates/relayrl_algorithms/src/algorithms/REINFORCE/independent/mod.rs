@@ -6,7 +6,7 @@ pub use replay_buffer::*;
 
 use crate::logging::{EpochLogger, SessionLogger};
 use crate::templates::base_algorithm::{
-    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData, TrainableKernelTrait,
+    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrainableKernelTrait, TrajectoryData,
 };
 use crate::templates::base_replay_buffer::{
     Batch, BatchKey, BufferSample, GenericReplayBuffer, ReplayBufferError, SampleScalars,
@@ -137,7 +137,11 @@ where
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
 {
-    fn new(agent_key: AgentKey, kernel: KN, replay_buffer: IndependentReinforceReplayBuffer) -> Self {
+    fn new(
+        agent_key: AgentKey,
+        kernel: KN,
+        replay_buffer: IndependentReinforceReplayBuffer,
+    ) -> Self {
         Self {
             agent_key,
             trajectory_count: 0,
@@ -205,10 +209,8 @@ pub struct IndependentReinforceAlgorithm<
     hyperparams: IREINFORCEParams,
 }
 
-pub type IREINFORCEAlgorithm<B, InK, OutK, KN> =
-    IndependentReinforceAlgorithm<B, InK, OutK, KN>;
-pub type ReinforceAlgorithm<B, InK, OutK, KN> =
-    IndependentReinforceAlgorithm<B, InK, OutK, KN>;
+pub type IREINFORCEAlgorithm<B, InK, OutK, KN> = IndependentReinforceAlgorithm<B, InK, OutK, KN>;
+pub type ReinforceAlgorithm<B, InK, OutK, KN> = IndependentReinforceAlgorithm<B, InK, OutK, KN>;
 
 impl<B, InK, OutK, KN> Default for IndependentReinforceAlgorithm<B, InK, OutK, KN>
 where
@@ -290,20 +292,29 @@ where
             .take()
             .unwrap_or_default();
         let index = self.runtime.components.agent_slots.len();
-        self.runtime.components.agent_slots.push(AgentRuntimeSlot::new(
-            agent_key.clone(),
-            kernel,
-            replay_buffer,
-        ));
-        self.runtime.components.agent_registry.insert(agent_key, index);
+        self.runtime
+            .components
+            .agent_slots
+            .push(AgentRuntimeSlot::new(
+                agent_key.clone(),
+                kernel,
+                replay_buffer,
+            ));
+        self.runtime
+            .components
+            .agent_registry
+            .insert(agent_key, index);
         index
     }
 
     fn all_agents_ready(&self) -> bool {
         self.runtime.components.agent_registry.len() > 0
-            && self.runtime.components.agent_slots.iter().all(|slot| {
-                slot.trajectory_count >= self.hyperparams.traj_per_epoch
-            })
+            && self
+                .runtime
+                .components
+                .agent_slots
+                .iter()
+                .all(|slot| slot.trajectory_count >= self.hyperparams.traj_per_epoch)
     }
 
     fn reset_agent_counts(&mut self) {
@@ -417,14 +428,14 @@ where
                 .components
                 .epoch_logger
                 .store("LossPi", policy_loss);
-            self.runtime.components.epoch_logger.store(
-                "KL",
-                *policy_info.get("kl").unwrap_or(&0.0),
-            );
-            self.runtime.components.epoch_logger.store(
-                "Entropy",
-                *policy_info.get("entropy").unwrap_or(&0.0),
-            );
+            self.runtime
+                .components
+                .epoch_logger
+                .store("KL", *policy_info.get("kl").unwrap_or(&0.0));
+            self.runtime
+                .components
+                .epoch_logger
+                .store("Entropy", *policy_info.get("entropy").unwrap_or(&0.0));
             if let Some(loss_v) = value_loss {
                 self.runtime.components.epoch_logger.store("LossV", loss_v);
             }
@@ -436,13 +447,28 @@ where
             .components
             .epoch_logger
             .log_tabular("Epoch", Some(self.runtime.components.epoch_count as f32));
-        self.runtime.components.epoch_logger.log_tabular("EpRet", None);
-        self.runtime.components.epoch_logger.log_tabular("EpLen", None);
-        self.runtime.components.epoch_logger.log_tabular("LossPi", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("EpRet", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("EpLen", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("LossPi", None);
         self.runtime.components.epoch_logger.log_tabular("KL", None);
-        self.runtime.components.epoch_logger.log_tabular("Entropy", None);
+        self.runtime
+            .components
+            .epoch_logger
+            .log_tabular("Entropy", None);
         if self.hyperparams.with_vf_baseline {
-            self.runtime.components.epoch_logger.log_tabular("LossV", None);
+            self.runtime
+                .components
+                .epoch_logger
+                .log_tabular("LossV", None);
         }
         self.runtime.components.epoch_logger.dump_tabular();
     }
