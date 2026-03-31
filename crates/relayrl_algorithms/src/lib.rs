@@ -36,15 +36,14 @@ pub mod algorithms;
 pub mod logging;
 pub mod templates;
 
-use burn_tensor::backend::Backend;
 use burn_tensor::TensorKind;
+use burn_tensor::backend::Backend;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
 use std::path::PathBuf;
 
 pub use algorithms::PPO::{
-    IPPOAlgorithm, IPPOParams, MAPPOAlgorithm, MAPPOParams, PPOAlgorithm, PPOKernelTrait,
-    PPOParams,
+    IPPOAlgorithm, IPPOParams, MAPPOAlgorithm, MAPPOParams, PPOAlgorithm, PPOKernelTrait, PPOParams,
 };
 pub use algorithms::REINFORCE::{
     IREINFORCEAlgorithm, IREINFORCEParams, MAREINFORCEAlgorithm, MAREINFORCEParams,
@@ -359,8 +358,8 @@ where
     /// Constructs a trainer from a [`ReinforceTrainerSpec`] and a kernel instance.
     pub fn new(spec: ReinforceTrainerSpec, kernel: K) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
-            ReinforceTrainerSpec::REINFORCE { args, hyperparams } => Self::REINFORCE(
-                ReinforceAlgorithm::<B, InK, OutK, K>::new(
+            ReinforceTrainerSpec::REINFORCE { args, hyperparams } => {
+                Self::REINFORCE(ReinforceAlgorithm::<B, InK, OutK, K>::new(
                     hyperparams,
                     &args.env_dir,
                     &args.save_model_path,
@@ -368,10 +367,10 @@ where
                     args.act_dim,
                     args.buffer_size,
                     kernel,
-                )?,
-            ),
-            ReinforceTrainerSpec::IREINFORCE { args, hyperparams } => Self::IREINFORCE(
-                IREINFORCEAlgorithm::<B, InK, OutK, K>::new(
+                )?)
+            }
+            ReinforceTrainerSpec::IREINFORCE { args, hyperparams } => {
+                Self::IREINFORCE(IREINFORCEAlgorithm::<B, InK, OutK, K>::new(
                     hyperparams,
                     &args.env_dir,
                     &args.save_model_path,
@@ -379,8 +378,8 @@ where
                     args.act_dim,
                     args.buffer_size,
                     kernel,
-                )?,
-            ),
+                )?)
+            }
         };
 
         Ok(trainer)
@@ -426,11 +425,7 @@ where
 /// Implements [`AlgorithmTrait`] by delegating to the inner [`MAPPOAlgorithm`] or
 /// [`MAREINFORCEAlgorithm`].
 #[allow(clippy::large_enum_variant)]
-pub enum MultiagentTrainer<
-    B: Backend + BackendMatcher,
-    InK: TensorKind<B>,
-    OutK: TensorKind<B>,
-> {
+pub enum MultiagentTrainer<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
     /// Multi-agent PPO; see field `trainer`.
     MAPPO {
         /// The constructed [`MAPPOAlgorithm`].
@@ -478,7 +473,10 @@ where
     }
 
     /// Shorthand for `MultiagentTrainer::new(MultiagentTrainerSpec::mappo(args, hyperparams))`.
-    pub fn mappo(args: TrainerArgs, hyperparams: Option<MAPPOParams>) -> Result<Self, AlgorithmError> {
+    pub fn mappo(
+        args: TrainerArgs,
+        hyperparams: Option<MAPPOParams>,
+    ) -> Result<Self, AlgorithmError> {
         Self::new(MultiagentTrainerSpec::mappo(args, hyperparams))
     }
 
