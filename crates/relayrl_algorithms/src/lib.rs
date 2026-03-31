@@ -31,6 +31,37 @@
 //! Fenced examples are **illustrative** (`ignore`): substitute your real `B`, `InK`, `OutK`, kernel
 //! `K`, and async runtime. They are not run as doctests by default so environments without optional
 //! backends (for example libtorch) still build docs cleanly.
+//!
+//! ### End-to-end training flow
+//!
+//! ```ignore
+//! use std::path::PathBuf;
+//!
+//! use relayrl_algorithms::{AlgorithmError, AlgorithmTrait, RelayRLTrainer, TrainerArgs};
+//! use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+//!
+//! async fn run_training_loop<B, InK, OutK>() -> Result<(), AlgorithmError> {
+//!     let args = TrainerArgs {
+//!         env_dir: PathBuf::from("./env"),
+//!         save_model_path: PathBuf::from("./checkpoints"),
+//!         obs_dim: 64,
+//!         act_dim: 8,
+//!         buffer_size: 1_000_000,
+//!     };
+//!
+//!     let mut trainer = RelayRLTrainer::mappo::<B, InK, OutK>(args, None)?;
+//!
+//!     let mut trajectory = RelayRLTrajectory::new(1024);
+//!     // Populate `trajectory` from your environment loop before handing it to the trainer.
+//!
+//!     trainer.receive_trajectory(trajectory).await?;
+//!     trainer.train_model();
+//!     trainer.log_epoch();
+//!     trainer.save("epoch-0001");
+//!
+//!     Ok(())
+//! }
+//! ```
 
 pub mod algorithms;
 pub mod logging;
