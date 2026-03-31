@@ -7,32 +7,32 @@
 //!
 //! Transport and database layers are optional feature flags gating additional functionality.
 
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::HyperparameterArgs;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
     ClientCoordinator, ClientInterface, CoordinatorError,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::network::client::runtime::coordination::scale_manager::AlgorithmArgs;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::prelude::config::ClientConfigLoader;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use crate::utilities::configuration::Algorithm;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::utilities::configuration::{Algorithm, NetworkParams};
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::get;
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use relayrl_types::types::data::action::CodecConfig;
-use relayrl_types::types::data::action::RelayRLAction;
-use relayrl_types::types::data::tensor::{
+use active_uuid_registry::interface::{get_context_entries, list_ids};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use relayrl_types::data::action::CodecConfig;
+use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, SupportedTensorBackend,
 };
-#[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-use relayrl_types::types::data::tensor::{NdArrayDType, TchDType};
-use relayrl_types::types::model::ModelModule;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use relayrl_types::data::tensor::{NdArrayDType, TchDType};
+use relayrl_types::model::ModelModule;
+
+use active_uuid_registry::registry_uuid::Uuid;
 
 use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 /// Errors returned by the client API.
 #[non_exhaustive]
@@ -87,37 +86,116 @@ pub enum RuntimeStatisticsReturnType {
     Hashmap(HashMap<String, String>),
 }
 
-/// Inference mode used by runtime actors.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
-pub enum ActorInferenceMode {
-    /// Inference occurs locally in the client process.
-    Local,
-    /// Inference occurs on external inference server.
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
-    )]
-    Server,
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone)]
+pub struct AlgorithmArgs {
+    pub algorithm: Algorithm,
+    pub hyperparams: Option<HyperparameterArgs>,
 }
 
-impl Default for ActorInferenceMode {
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+impl Default for AlgorithmArgs {
     fn default() -> Self {
-        Self::Local
+        Self {
+            algorithm: Algorithm::ConfigInit,
+            hyperparams: None,
+        }
     }
+}
+
+#[cfg(feature = "zmq-transport")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZmqInferenceAddressesArgs {
+    pub inference_server_address: Option<NetworkParams>,
+    pub inference_scaling_server_address: Option<NetworkParams>,
+}
+
+#[cfg(feature = "zmq-transport")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZmqTrainingAddressesArgs {
+    pub agent_listener_address: Option<NetworkParams>,
+    pub model_server_address: Option<NetworkParams>,
+    pub trajectory_server_address: Option<NetworkParams>,
+    pub training_scaling_server_address: Option<NetworkParams>,
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum InferenceAddressesArgs {
+    #[cfg(feature = "zmq-transport")]
+    ZMQ(ZmqInferenceAddressesArgs),
+    #[cfg(feature = "nats-transport")]
+    NATS(Option<NetworkParams>),
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrainingAddressesArgs {
+    #[cfg(feature = "zmq-transport")]
+    ZMQ(ZmqTrainingAddressesArgs),
+    #[cfg(feature = "nats-transport")]
+    NATS(Option<NetworkParams>),
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct InferenceParams {
+    pub model_mode: ModelMode,
+    pub inference_addresses: Option<InferenceAddressesArgs>,
+}
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+impl Default for InferenceParams {
+    fn default() -> Self {
+        Self {
+            model_mode: ModelMode::default(),
+            inference_addresses: None,
+        }
+    }
+}
+
+#[cfg(feature = "zmq-transport")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainingParams {
+    pub model_mode: ModelMode,
+    pub training_addresses: Option<TrainingAddressesArgs>,
+}
+
+#[cfg(feature = "zmq-transport")]
+impl Default for TrainingParams {
+    fn default() -> Self {
+        Self {
+            model_mode: ModelMode::default(),
+            training_addresses: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LocalTrajectoryFileType {
+    Csv,
+    Arrow,
 }
 
 /// File-based trajectory recording parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrajectoryFileParams {
-    pub enabled: bool,
-    pub encode: bool,
+pub struct LocalTrajectoryFileParams {
     pub directory: PathBuf,
+    pub file_type: LocalTrajectoryFileType,
 }
 
-impl TrajectoryFileParams {
-    pub fn new(enabled: bool, encode: bool, directory: PathBuf) -> Result<Self, ClientError> {
+impl LocalTrajectoryFileParams {
+    pub fn new(
+        directory: PathBuf,
+        file_type: LocalTrajectoryFileType,
+    ) -> Result<Self, ClientError> {
+        if directory.to_str().as_slice().is_empty() {
+            return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
+                "Path '{}' is empty",
+                directory.display()
+            )));
+        }
+
         if directory.extension().is_some() {
             return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
                 "Path '{}' appears to be a file, not a directory",
@@ -125,210 +203,127 @@ impl TrajectoryFileParams {
             )));
         }
 
+        {
+            const TOTAL_ATTEMPTS: i32 = 2;
+            let mut attempts: i32 = 1;
+            while !directory.exists() {
+                // loop until directory exists (since create_dir_all can fail) or we've tried too many times
+                match std::fs::create_dir_all(&directory) {
+                    Ok(_) => break,
+                    Err(_) if attempts < TOTAL_ATTEMPTS => {
+                        attempts += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(ClientError::InvalidTrajectoryFileDirectory(e.to_string()));
+                    }
+                }
+            }
+        }
+
         Ok(Self {
-            enabled,
-            encode,
             directory,
+            file_type,
         })
     }
 }
 
-impl Default for TrajectoryFileParams {
+impl Default for LocalTrajectoryFileParams {
     fn default() -> Self {
-        Self::new(false, false, PathBuf::from(".")).unwrap() // this will never fail
-    }
-}
-
-/// Trajectory recording mode for each router buffer
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
-pub enum TrajectoryPersistenceMode {
-    /// Trajectories are recorded to file on local device.
-    Local(Option<TrajectoryFileParams>),
-    /// Trajectory recording/persistence is disabled.
-    #[cfg(any(
-        feature = "async_transport",
-        feature = "sync_transport"
-    ))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(
-            feature = "async_transport",
-            feature = "sync_transport"
-        )))
-    )]
-    Disabled,
-}
-
-impl Default for TrajectoryPersistenceMode {
-    fn default() -> Self {
-        #[cfg(any(
-            feature = "async_transport",
-            feature = "sync_transport"
-        ))]
-        return Self::Disabled;
-        #[cfg(not(any(
-            feature = "async_transport",
-            feature = "sync_transport"
-        )))]
-        return Self::Local(Some(TrajectoryFileParams::default()));
+        Self::new(PathBuf::from("."), LocalTrajectoryFileType::Csv).unwrap() // this will never fail
     }
 }
 
 /// TODO: Add architecture support for independent/shared model inference/training requests to server(s).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
-pub enum ActorServerModelMode {
+pub enum ModelMode {
     /// Each actor has an independent server-side model
     Independent,
     /// All actors share the same server-side model.
     Shared,
-    /// Server-side mode disabled
-    Disabled,
 }
 
-impl Default for ActorServerModelMode {
+impl Default for ModelMode {
     fn default() -> Self {
         Self::Independent
     }
 }
 
-/// Contains a collection of capabilities for the client runtime.
-///
-/// By using `ClientModes`, you can determine the capabilities of the client runtime.
-#[derive(Debug, Clone)]
-pub struct ClientCapabilities {
-    /// Whether local inference is enabled
-    pub local_inference: bool,
-    /// Whether server inference is enabled
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+/// Inference mode used by local runtime actors.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActorInferenceMode {
+    /// Inference occurs locally in the local runtime actor.
+    Local(ModelMode),
+    /// Inference occurs on external inference server(s).
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    pub server_inference: bool,
-    /// Inference server allocation mode (when server inference is enabled)
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    Server(InferenceParams),
+}
+
+impl Default for ActorInferenceMode {
+    fn default() -> Self {
+        Self::Local(ModelMode::default())
+    }
+}
+
+/// Training mode used by runtime actors for training data collection and processing
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActorTrainingDataMode {
+    /// Training data is sent to the server for processing
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    pub inference_server_mode: ActorServerModelMode,
-    /// Whether local trajectory recording is enabled
-    pub local_trajectory_persistence: bool,
-    /// Training server allocation mode (when training server is enabled)
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    Online(TrainingParams),
+    /// Training data is recorded to local file
+    Offline(Option<LocalTrajectoryFileParams>),
+    /// Training data is sent to the server for processing and recorded to local file
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    pub training_server_mode: ActorServerModelMode,
+    Hybrid(TrainingParams, Option<LocalTrajectoryFileParams>),
+    /// Training data collection and processing is disabled
+    Disabled,
+}
+
+impl Default for ActorTrainingDataMode {
+    fn default() -> Self {
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        return Self::Online(TrainingParams::default());
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+        return Self::Offline(None);
+    }
+}
+
+pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode) -> bool {
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _));
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_));
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
-///
-/// Use [`ClientModes::capabilities`] to compute a concrete [`ClientCapabilities`] value.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClientModes {
-    /// Actor inference mode (local vs server)
     pub actor_inference_mode: ActorInferenceMode,
-    /// Inference server model mode (independent vs shared)
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
-    )]
-    pub inference_server_mode: ActorServerModelMode,
-    /// Training server model mode (independent vs shared)
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
-    )]
-    pub training_server_mode: ActorServerModelMode,
-    /// Trajectory recording mode (local vs disabled)
-    pub trajectory_persistence_mode: TrajectoryPersistenceMode,
+    pub actor_training_data_mode: ActorTrainingDataMode,
 }
 
 impl Default for ClientModes {
     fn default() -> Self {
         Self {
-            actor_inference_mode: ActorInferenceMode::Local,
-            #[cfg(any(
-                feature = "async_transport",
-                feature = "sync_transport"
-            ))]
-            trajectory_persistence_mode: TrajectoryPersistenceMode::Disabled,
-            #[cfg(not(any(
-                feature = "async_transport",
-                feature = "sync_transport"
-            )))]
-            trajectory_persistence_mode: TrajectoryPersistenceMode::Local(Some(
-                TrajectoryFileParams::default(),
-            )),
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            inference_server_mode: ActorServerModelMode::Disabled,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            training_server_mode: ActorServerModelMode::Independent,
+            actor_inference_mode: ActorInferenceMode::default(),
+            actor_training_data_mode: ActorTrainingDataMode::default(),
         }
-    }
-}
-
-impl ClientModes {
-    /// Validate internal consistency of mode selections.
-    ///
-    /// # Errors
-    /// Returns [`ClientError::InvalidInferenceMode`] if `actor_inference_mode` and
-    /// `inference_server_mode` conflict.
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    pub fn validate_modes(&self) -> Result<(), ClientError> {
-        if self.actor_inference_mode == ActorInferenceMode::Server
-            && self.inference_server_mode == ActorServerModelMode::Disabled
-        {
-            return Err(ClientError::InvalidInferenceMode(
-                "Inference server mode disabled for server-side inference: {:?}".to_string(),
-            ));
-        }
-        if self.actor_inference_mode == ActorInferenceMode::Local
-            && self.inference_server_mode != ActorServerModelMode::Disabled
-        {
-            return Err(ClientError::InvalidInferenceMode(
-                "Inference server mode enabled for client-side inference: {:?}".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Compute runtime capabilities from the configured modes.
-    ///
-    /// # Errors
-    /// Returns an error if the mode combination is invalid.
-    pub fn capabilities(&self) -> Result<ClientCapabilities, ClientError> {
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-        self.validate_modes()?;
-
-        let (local_inference, _server_inference) = match self.actor_inference_mode {
-            ActorInferenceMode::Local => (true, false),
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            ActorInferenceMode::Server => (false, true),
-        };
-
-        let local_trajectory_persistence =
-            match &self.trajectory_persistence_mode {
-                TrajectoryPersistenceMode::Local(_) => true,
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                TrajectoryPersistenceMode::Disabled => false,
-            };
-
-        Ok(ClientCapabilities {
-            local_inference,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            server_inference: _server_inference,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            inference_server_mode: self.inference_server_mode.clone(),
-            local_trajectory_persistence,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            training_server_mode: self.training_server_mode.clone(),
-        })
     }
 }
 
@@ -336,10 +331,10 @@ impl ClientModes {
 ///
 /// Typically constructed via [`AgentBuilder::build`].
 pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(feature = "async_transport", feature = "sync_transport")))
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
     pub algorithm_args: AlgorithmArgs,
     pub actor_count: u32,
@@ -355,7 +350,7 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     )]
     pub default_model: ModelModule<B>,
     pub config_path: Option<PathBuf>,
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub codec: CodecConfig,
 }
 
@@ -377,16 +372,16 @@ pub struct AgentBuilder<
     KindOut: TensorKind<B> + Send + Sync,
 > {
     pub client_modes: Option<ClientModes>,
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub transport_type: Option<TransportType>,
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub algorithm_args: Option<AlgorithmArgs>,
     pub actor_count: Option<u32>,
     pub router_scale: Option<u32>,
     pub default_device: Option<DeviceType>,
     pub default_model: Option<ModelModule<B>>,
     pub config_path: Option<PathBuf>,
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub codec: Option<CodecConfig>,
     _phantom: PhantomData<(KindIn, KindOut)>,
 }
@@ -408,16 +403,16 @@ impl<
     pub fn builder() -> Self {
         Self {
             client_modes: Some(ClientModes::default()),
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_type: Some(TransportType::default()),
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             algorithm_args: Some(AlgorithmArgs::default()),
             actor_count: None,
             router_scale: None,
             default_device: None,
             default_model: None,
             config_path: None,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec: None,
             _phantom: PhantomData,
         }
@@ -432,36 +427,18 @@ impl<
     }
 
     #[must_use]
-    pub fn trajectory_persistence_mode(
+    pub fn actor_training_data_mode(
         mut self,
-        trajectory_persistence_mode: TrajectoryPersistenceMode,
+        actor_training_data_mode: ActorTrainingDataMode,
     ) -> Self {
         if let Some(ref mut modes) = self.client_modes {
-            modes.trajectory_persistence_mode = trajectory_persistence_mode;
+            modes.actor_training_data_mode = actor_training_data_mode;
         }
         self
     }
 
     #[must_use]
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    pub fn inference_server_mode(mut self, inference_server_mode: ActorServerModelMode) -> Self {
-        if let Some(ref mut modes) = self.client_modes {
-            modes.inference_server_mode = inference_server_mode;
-        }
-        self
-    }
-
-    #[must_use]
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-    pub fn training_server_mode(mut self, training_server_mode: ActorServerModelMode) -> Self {
-        if let Some(ref mut modes) = self.client_modes {
-            modes.training_server_mode = training_server_mode;
-        }
-        self
-    }
-
-    #[must_use]
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn transport_type(mut self, transport_type: TransportType) -> Self {
         self.transport_type = Some(transport_type);
         self
@@ -492,7 +469,7 @@ impl<
     }
 
     #[must_use]
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn algorithm(mut self, algorithm: Algorithm) -> Self {
         let hyperparams = match self.algorithm_args {
             Some(args) => args.hyperparams,
@@ -506,7 +483,7 @@ impl<
     }
 
     #[must_use]
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn hyperparams(mut self, hyperparams: HyperparameterArgs) -> Self {
         let algorithm = match self.algorithm_args {
             Some(args) => args.algorithm,
@@ -527,7 +504,7 @@ impl<
     }
 
     #[must_use]
-    #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn codec(mut self, codec: CodecConfig) -> Self {
         self.codec = Some(codec);
         self
@@ -548,14 +525,14 @@ impl<
     > {
         // Initialize agent object
         let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             self.transport_type.unwrap_or(TransportType::ZMQ),
             self.client_modes.unwrap_or(ClientModes::default()),
-        )?;
+        );
 
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             algorithm_args: self.algorithm_args.unwrap_or(AlgorithmArgs::default()),
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
@@ -563,9 +540,9 @@ impl<
             #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
             default_model: self.default_model,
             #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
-            default_model: self.default_model.unwrap(), // this is guaranteed to panic if not set
+            default_model: self.default_model.unwrap(), // this is guaranteed to panic if not set; without transport available, the model must be set at build time
             config_path: self.config_path,
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec: self.codec.unwrap_or_default(),
         };
 
@@ -657,23 +634,21 @@ impl<
     ///
     /// Returns [`ClientError::CoordinatorError`] if the runtime coordinator fails to initialize.
     pub fn new(
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         transport_type: TransportType,
         client_modes: ClientModes,
-    ) -> Result<Self, ClientError> {
-        let supported_backend = B::get_supported_backend();
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 transport_type,
                 client_modes,
-            )?,
-            supported_backend,
+            ),
+            supported_backend: B::get_supported_backend(),
             input_dtype: None,
             output_dtype: None,
             _phantom: PhantomData,
-        })
+        }
     }
 
     /// Start the client runtime with the specified parameters.
@@ -696,22 +671,22 @@ impl<
     /// Returns an error if startup fails (configuration, runtime init, transport init, etc).
     pub async fn start(
         &mut self,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
             ModelModule<B>,
         >,
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
     ) -> Result<(), ClientError> {
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let (input_dtype, output_dtype) = if let Some(ref model_module) = default_model {
             (
                 Some(model_module.metadata.input_dtype.clone()),
@@ -721,7 +696,7 @@ impl<
             (None, None)
         };
 
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         let (input_dtype, output_dtype) = (
             Some(default_model.metadata.input_dtype.clone()),
             Some(default_model.metadata.output_dtype.clone()),
@@ -731,15 +706,15 @@ impl<
         self.output_dtype = output_dtype;
 
         self.coordinator
-            ._start(
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            .start(
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 algorithm_args,
                 actor_count,
                 router_scale,
                 default_device,
                 default_model,
                 config_path,
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 codec,
             )
             .await
@@ -754,31 +729,31 @@ impl<
     /// Returns an error if restart coordination fails.
     pub async fn restart(
         &mut self,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] default_model: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
             ModelModule<B>,
         >,
-        #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         default_model: ModelModule<B>,
         config_path: Option<PathBuf>,
-        #[cfg(any(feature = "async_transport", feature = "sync_transport"))] codec: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
     ) -> Result<(), ClientError> {
         self.coordinator
-            ._restart(
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+            .restart(
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 algorithm_args,
                 actor_count,
                 router_scale,
                 default_device,
                 default_model,
                 config_path,
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 codec,
             )
             .await?;
@@ -790,7 +765,7 @@ impl<
     /// # Errors
     /// Returns an error if shutdown coordination fails.
     pub async fn shutdown(&mut self) -> Result<(), ClientError> {
-        self.coordinator._shutdown().await?;
+        self.coordinator.shutdown().await?;
         Ok(())
     }
 
@@ -804,11 +779,11 @@ impl<
     pub async fn scale_throughput(&mut self, router_scale: i32) -> Result<(), ClientError> {
         match router_scale {
             add if router_scale > 0 => {
-                self.coordinator._scale_out(add as u32).await?;
+                self.coordinator.scale_out(add as u32).await?;
                 Ok(())
             }
             remove if router_scale < 0 => {
-                self.coordinator._scale_in(remove.unsigned_abs()).await?;
+                self.coordinator.scale_in(remove.unsigned_abs()).await?;
                 Ok(())
             }
             _ => Err(ClientError::NoopRouterScale(
@@ -847,7 +822,7 @@ impl<
 
                     let result = self
                         .coordinator
-                        ._request_action(ids, obs_tensor, mask_tensor, reward)
+                        .request_action(ids, obs_tensor, mask_tensor, reward)
                         .await?;
                     Ok(result)
                 } else {
@@ -857,7 +832,8 @@ impl<
                 }
             }
             false => Err(ClientError::BackendMismatchError(
-                "Backend mismatch".to_string(),
+                "Backend mismatch; Tensor backends not (currently) supported by RelayRL"
+                    .to_string(),
             )),
         }
     }
@@ -873,15 +849,18 @@ impl<
         ids: Vec<Uuid>,
         reward: Option<f32>,
     ) -> Result<(), ClientError> {
-        self.coordinator._flag_last_action(ids, reward).await?;
+        self.coordinator.flag_last_action(ids, reward).await?;
         Ok(())
     }
 
     /// Retrieves the model version for each actor ID listed (if instance IDs exist)
     ///
     /// Returns `(ActorID, ModelVersion)` pairs.
-    pub async fn get_model_version(&self, ids: Vec<Uuid>) -> Result<Vec<(Uuid, i64)>, ClientError> {
-        Ok(self.coordinator._get_model_version(ids).await?)
+    pub async fn get_model_version(
+        &self,
+        actor_ids: Vec<Uuid>,
+    ) -> Result<Vec<(Uuid, i64)>, ClientError> {
+        Ok(self.coordinator.get_model_version(actor_ids).await?)
     }
 
     /// Collect runtime statistics.
@@ -902,12 +881,12 @@ impl<
 
     /// Fetch the active client configuration.
     pub async fn get_config(&self) -> Result<ClientConfigLoader, ClientError> {
-        Ok(self.coordinator._get_config().await?)
+        Ok(self.coordinator.get_config().await?)
     }
 
     /// Set the configuration path used by the runtime.
     pub async fn set_config_path(&self, config_path: PathBuf) -> Result<(), ClientError> {
-        self.coordinator._set_config_path(config_path).await?;
+        self.coordinator.set_config_path(config_path).await?;
         Ok(())
     }
 }
@@ -936,6 +915,10 @@ pub trait RelayRLAgentActors<
         &mut self,
         id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>>;
+    fn remove_actors(
+        &mut self,
+        ids: Vec<Uuid>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>>;
     fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError>;
     fn set_actor_id(
         &mut self,
@@ -960,12 +943,13 @@ impl<
         default_model: Option<ModelModule<B>>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            self.coordinator
-                ._new_actor(device, default_model, true)
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            let _ = self
+                .coordinator
+                .new_actor(device, default_model, true, true)
                 .await?;
-            #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-            self.coordinator._new_actor(device, default_model).await?;
+            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+            let _ = self.coordinator.new_actor(device, default_model).await?;
             Ok(())
         })
     }
@@ -983,45 +967,149 @@ impl<
                     "Noop actor count: `count` set to zero".to_string(),
                 ))
             });
+        } else if count == 1 {
+            return self.new_actor(device, default_model);
+        } else {
+            Box::pin(async move {
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                let mut actor_ids: Vec<Uuid> = Vec::new();
+                for _ in 0..count {
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    actor_ids.push(
+                        self.coordinator
+                            .new_actor(device.clone(), default_model.clone(), false, false)
+                            .await?,
+                    );
+                    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+                    self.coordinator
+                        .new_actor(device.clone(), default_model.clone())
+                        .await?;
+                }
+
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                if let (
+                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorInferenceMode::Server(_),
+                ) = (
+                    &self.coordinator.client_modes.actor_training_data_mode,
+                    &self.coordinator.client_modes.actor_inference_mode,
+                ) {
+                    /// sends all new actor ids to the server
+                    let actor_entries = {
+                        let client_namespace = self
+                            .coordinator
+                            .runtime_params
+                            .as_ref()
+                            .ok_or(ClientError::CoordinatorError(
+                                CoordinatorError::NoRuntimeInstanceError,
+                            ))?
+                            .client_namespace
+                            .as_ref();
+                        get_context_entries(client_namespace, crate::network::ACTOR_CONTEXT)?
+                    };
+
+                    self.coordinator
+                        .send_client_ids_to_server(actor_entries.clone(), true)
+                        .await?;
+
+                    if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+                        &self.coordinator.client_modes.actor_training_data_mode
+                    {
+                        self.coordinator
+                            .send_algorithm_init_request(actor_entries.clone())
+                            .await?;
+                    }
+
+                    if let ActorInferenceMode::Server(_) =
+                        &self.coordinator.client_modes.actor_inference_mode
+                    {
+                        self.coordinator
+                            .send_inference_model_init_request(
+                                actor_entries,
+                                default_model.clone(),
+                            )
+                            .await?;
+                    }
+                }
+
+                Ok(())
+            })
         }
-        Box::pin(async move {
-            for _ in 0..count {
-                #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-                self.coordinator
-                    ._new_actor(device.clone(), default_model.clone(), false)
-                    .await?;
-                #[cfg(not(any(feature = "async_transport", feature = "sync_transport")))]
-                self.coordinator
-                    ._new_actor(device.clone(), default_model.clone())
-                    .await?;
-            }
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            let actor_ids = get("actor").map_err(ClientError::from)?;
-
-            #[cfg(any(feature = "async_transport", feature = "sync_transport"))]
-            self.coordinator
-                ._send_client_ids_to_server(actor_ids)
-                .await?;
-
-            Ok(())
-        })
     }
 
     /// Removes the actor instance with the specified ID from the current Agent instance
     fn remove_actor(
         &mut self,
-        id: ActorUuid,
+        actor_id: ActorUuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator._remove_actor(id).await?;
+            self.coordinator.remove_actor(actor_id, true).await?;
             Ok(())
         })
     }
 
+    fn remove_actors(
+        &mut self,
+        actor_ids: Vec<ActorUuid>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
+        if actor_ids.is_empty() {
+            return Box::pin(async move {
+                Err(ClientError::NoopActorCount(
+                    "Noop actor count: `actor_ids` is empty in `remove_actors()`".to_string(),
+                ))
+            });
+        } else if actor_ids.len() == 1 {
+            return self.remove_actor(actor_ids[0]);
+        } else {
+            Box::pin(async move {
+                for actor_id in actor_ids {
+                    self.coordinator.remove_actor(actor_id, false).await?;
+                }
+
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                if let (
+                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorInferenceMode::Server(_),
+                ) = (
+                    &self.coordinator.client_modes.actor_training_data_mode,
+                    &self.coordinator.client_modes.actor_inference_mode,
+                ) {
+                    let client_actor_ids = {
+                        let client_namespace = self
+                            .coordinator
+                            .runtime_params
+                            .as_ref()
+                            .ok_or(ClientError::CoordinatorError(
+                                CoordinatorError::NoRuntimeInstanceError,
+                            ))?
+                            .client_namespace
+                            .as_ref();
+                        get_context_entries(client_namespace, crate::network::ACTOR_CONTEXT)?
+                    };
+
+                    self.coordinator
+                        .send_client_ids_to_server(client_actor_ids, true)
+                        .await?;
+                }
+
+                Ok(())
+            })
+        }
+    }
+
     /// Retrieves the current actor instance IDs
     fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError> {
-        let ids = get("actor").map_err(ClientError::from)?;
-        Ok(ids.iter().map(|(_, id)| id.clone()).collect())
+        let client_namespace = self
+            .coordinator
+            .runtime_params
+            .as_ref()
+            .ok_or(ClientError::CoordinatorError(
+                CoordinatorError::NoRuntimeInstanceError,
+            ))?
+            .client_namespace
+            .as_ref();
+        let actor_ids = list_ids(client_namespace, "actor");
+        Ok(actor_ids)
     }
 
     /// Sets the ID of the actor instance with the specified current ID to the new ID
@@ -1033,8 +1121,11 @@ impl<
         new_id: ActorUuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator._set_actor_id(current_id, new_id).await?;
+            self.coordinator.set_actor_id(current_id, new_id).await?;
             Ok(())
         })
     }
 }
+
+#[cfg(test)]
+mod tests {}

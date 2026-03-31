@@ -1,12 +1,9 @@
 use super::ZmqClientError;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, RwLock};
 use std::time::Duration;
 use std::time::Instant;
-use tokio::sync::RwLock;
-use tokio::sync::Semaphore;
-use tokio::sync::SemaphorePermit;
 
 /// Configurable retry behavior with exponential backoff and jitter.
 #[derive(Debug, Clone)]
@@ -105,16 +102,26 @@ impl CircuitBreaker {
     }
 
     /// Check if the circuit is currently open (rejecting requests).
-    pub async fn is_open(&self) -> bool {
-        let state = *self.state.read().await;
+    pub fn is_open(&self) -> bool {
+        let state = *self
+            .state
+            .read()
+            .expect("CircuitBreaker state lock poisoned");
         match state {
             CircuitState::Closed => false,
             CircuitState::Open => {
                 // Check if we should transition to half-open
-                if let Some(opened_at) = *self.opened_at.read().await {
+                if let Some(opened_at) = *self
+                    .opened_at
+                    .read()
+                    .expect("CircuitBreaker opened_at lock poisoned")
+                {
                     if opened_at.elapsed() >= self.open_duration {
                         // Transition to half-open
-                        *self.state.write().await = CircuitState::HalfOpen;
+                        *self
+                            .state
+                            .write()
+                            .expect("CircuitBreaker state lock poisoned") = CircuitState::HalfOpen;
                         return false; // Allow the test request
                     }
                 }
@@ -125,28 +132,46 @@ impl CircuitBreaker {
     }
 
     /// Record a successful operation.
-    pub async fn record_success(&self) {
+    pub fn record_success(&self) {
         self.failure_count.store(0, Ordering::SeqCst);
-        *self.state.write().await = CircuitState::Closed;
-        *self.opened_at.write().await = None;
+        *self
+            .state
+            .write()
+            .expect("CircuitBreaker state lock poisoned") = CircuitState::Closed;
+        *self
+            .opened_at
+            .write()
+            .expect("CircuitBreaker opened_at lock poisoned") = None;
     }
 
     /// Record a failed operation.
-    pub async fn record_failure(&self) {
+    pub fn record_failure(&self) {
         let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
 
         if failures >= self.failure_threshold {
-            let current_state = *self.state.read().await;
+            let current_state = *self
+                .state
+                .read()
+                .expect("CircuitBreaker state lock poisoned");
             if current_state != CircuitState::Open {
-                *self.state.write().await = CircuitState::Open;
-                *self.opened_at.write().await = Some(Instant::now());
+                *self
+                    .state
+                    .write()
+                    .expect("CircuitBreaker state lock poisoned") = CircuitState::Open;
+                *self
+                    .opened_at
+                    .write()
+                    .expect("CircuitBreaker opened_at lock poisoned") = Some(Instant::now());
             }
         }
     }
 
     /// Get current state for monitoring.
-    pub async fn state(&self) -> CircuitState {
-        *self.state.read().await
+    pub fn state(&self) -> CircuitState {
+        *self
+            .state
+            .read()
+            .expect("CircuitBreaker state lock poisoned")
     }
 
     /// Get current failure count for monitoring.
@@ -163,36 +188,84 @@ impl Default for CircuitBreaker {
 
 /// Semaphore-based concurrency limiter for backpressure control.
 pub struct BackpressureController {
-    semaphore: Arc<Semaphore>,
+    available: AtomicUsize,
+    condvar: Condvar,
+    wait_mutex: Mutex<()>,
     max_concurrent: usize,
+}
+
+pub struct BackpressurePermit<'a> {
+    controller: &'a BackpressureController,
+}
+
+impl<'a> Drop for BackpressurePermit<'a> {
+    fn drop(&mut self) {
+        self.controller.available.fetch_add(1, Ordering::Release);
+        self.controller.condvar.notify_one();
+    }
 }
 
 impl BackpressureController {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            available: AtomicUsize::new(max_concurrent),
+            condvar: Condvar::new(),
+            wait_mutex: Mutex::new(()),
             max_concurrent,
         }
     }
 
-    /// Acquire a permit before sending. Blocks (async) if at capacity.
-    pub async fn acquire(&self) -> Result<SemaphorePermit<'_>, ZmqClientError> {
-        self.semaphore
-            .acquire()
-            .await
-            .map_err(|_| ZmqClientError::BackpressureExceeded)
+    fn try_decrement_available(&self) -> bool {
+        let mut current = self.available.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return false;
+            }
+            match self.available.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    /// Acquire a permit before sending. Blocks (sync) if at capacity.
+    pub fn acquire(&self) -> Result<BackpressurePermit<'_>, ZmqClientError> {
+        loop {
+            if self.try_decrement_available() {
+                return Ok(BackpressurePermit { controller: self });
+            }
+
+            let wait_guard = self
+                .wait_mutex
+                .lock()
+                .expect("Backpressure wait mutex poisoned");
+
+            if self.available.load(Ordering::Acquire) == 0 {
+                let _unused = self
+                    .condvar
+                    .wait(wait_guard)
+                    .expect("Backpressure wait mutex poisoned");
+            }
+        }
     }
 
     /// Try to acquire without blocking - useful for non-critical operations.
-    pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>, ZmqClientError> {
-        self.semaphore
-            .try_acquire()
-            .map_err(|_| ZmqClientError::BackpressureExceeded)
+    pub fn try_acquire(&self) -> Result<BackpressurePermit<'_>, ZmqClientError> {
+        if self.try_decrement_available() {
+            Ok(BackpressurePermit { controller: self })
+        } else {
+            Err(ZmqClientError::BackpressureExceeded)
+        }
     }
 
     /// Get current available permits for monitoring.
     pub fn available_permits(&self) -> usize {
-        self.semaphore.available_permits()
+        self.available.load(Ordering::Acquire)
     }
 
     /// Get max concurrent limit.

@@ -1,14 +1,16 @@
 pub mod data;
-#[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+#[cfg(all(any(feature = "tch-model", feature = "onnx-model"), any(feature = "ndarray-backend", feature = "tch-backend")))]
 pub mod model;
 
 pub mod prelude {
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     pub mod action {
         pub use crate::data::action::{
             ActionError, CodecConfig, EncodedAction, RelayRLAction, RelayRLData,
         };
     }
 
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     pub mod tensor {
         pub mod relayrl {
             pub use crate::data::tensor::{
@@ -22,19 +24,21 @@ pub mod prelude {
         }
     }
 
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     pub mod trajectory {
         pub use crate::data::trajectory::{
             EncodedTrajectory, RelayRLTrajectory, RelayRLTrajectoryTrait, TrajectoryError,
         };
     }
 
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     pub mod records {
         pub use crate::data::records::arrow::{ArrowTrajectory, ArrowTrajectoryError};
         pub use crate::data::records::csv::{CsvTrajectory, CsvTrajectoryError};
     }
 
+    #[cfg(all(any(feature = "tch-model", feature = "onnx-model"), any(feature = "ndarray-backend", feature = "tch-backend")))]
     pub mod model {
-        #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
         pub use crate::model::{HotReloadableModel, ModelError, ModelModule};
     }
 
@@ -43,7 +47,7 @@ pub mod prelude {
         pub use crate::data::utilities::compress::{CompressedData, CompressionScheme};
 
         #[cfg(feature = "integrity")]
-        pub use crate::data::utilities::integrity::{compute_checksum, VerifiedData};
+        pub use crate::data::utilities::integrity::{VerifiedData, compute_checksum};
 
         #[cfg(feature = "encryption")]
         pub use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};

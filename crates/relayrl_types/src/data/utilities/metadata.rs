@@ -134,3 +134,69 @@ pub fn current_timestamp() -> u64 {
         .unwrap()
         .as_secs()
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    fn sample_statistics() -> TensorStatistics {
+        TensorStatistics {
+            mean: 1.5,
+            std: 0.5,
+            min: 1.0,
+            max: 2.0,
+            shape: vec![2, 2],
+            dtype: "NdArray(F32)".to_string(),
+        }
+    }
+
+    #[test]
+    fn metadata_builder_helpers_populate_optional_fields() {
+        let transport = TransportMetadata::new(100, 50);
+        let metadata = TensorMetadata::new(3, 5)
+            .with_episode(7)
+            .with_agent_id("agent-1".to_string())
+            .with_statistics(sample_statistics())
+            .with_transport(transport.clone());
+
+        assert_eq!(metadata.model_version, 3);
+        assert_eq!(metadata.training_step, 5);
+        assert_eq!(metadata.episode, Some(7));
+        assert_eq!(metadata.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(metadata.statistics.as_ref().unwrap().shape, vec![2, 2]);
+        assert_eq!(metadata.transport.as_ref().unwrap().original_size, 100);
+    }
+
+    #[test]
+    fn metadata_age_uses_created_at_timestamp() {
+        let mut metadata = TensorMetadata::new(1, 1);
+        metadata.created_at = metadata.created_at.saturating_sub(2);
+
+        assert!(metadata.age_seconds() >= 2);
+    }
+
+    #[test]
+    fn transport_metadata_detects_compression() {
+        let compressed = TransportMetadata::new(200, 50);
+        let passthrough = TransportMetadata::new(128, 128);
+
+        assert!(compressed.compressed);
+        assert_eq!(compressed.compression_ratio, Some(4.0));
+        assert!(!passthrough.compressed);
+        assert!(passthrough.compression_ratio.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn metadata_binary_helpers_encode_and_reject_truncated_payloads() {
+        let metadata = TensorMetadata::new(2, 10)
+            .with_episode(3)
+            .with_agent_id("agent-2".to_string());
+
+        let bytes = metadata.to_binary().unwrap();
+        let err = TensorMetadata::from_binary(&bytes[..bytes.len() - 1])
+            .expect_err("truncated metadata payloads should fail to deserialize");
+
+        assert!(!bytes.is_empty());
+        assert!(matches!(err, MetadataError::DeserializationError(_)));
+    }
+}

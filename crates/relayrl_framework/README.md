@@ -3,7 +3,7 @@
 **Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
-**Version:** 0.5.0-alpha
+**Version:** 0.5.0-alpha.3
 
 **Status:** Under active development, expect broken functionality and breaking changes!
 
@@ -13,7 +13,7 @@
 
 With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `relayrl_framework` crate now provides a **multi-actor native** client runtime for deep reinforcement learning experiments. The training server (and new inference server) are under development and remain unavailable in this update.
 
-Without transport or database functionality being implemented yet, the client can only write data to an `arrow` file on your local device.
+Without transport being fully implemented yet, the client can write data to an `arrow` or `csv` file on your local device.
 
 As of now, the only way to perform inference is to provide your own `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
 
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - ### **v0.5.0:**
   - Client `ZMQ` transport interface completion
-  - Client `PostgreSQL` and `SQLite` database interface completion
+  - Client `NATS` transport interface completion
   - Comprehensive Client testing and benchmarking on common RL environments
   - Short Client stabilization period to enable focused server-side development
 

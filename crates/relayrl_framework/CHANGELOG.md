@@ -2,6 +2,93 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-alpha.3] - 2026-03-13
+
+### Added
+- **NATS Implementation** - Full NATS transport implementation replacing alpha.2 stubs; `nats/ops.rs` added (~1459 lines); `nats/interface.rs` and `nats/policies.rs` substantially completed with working send/receive logic, stream handling, and authentication policy enforcement
+- **`tokio-stream` dependency** - Added `tokio-stream 0.1.18` to support async NATS stream processing
+- **`combine_results` utility** - `combine_results` added to `transport_sink/mod.rs` for aggregating multi-transport results; `client_transport_factory` made `async`
+- **`is_local_file_writing_enabled` helper** - Crate-level helper on `RelayRLAgent` to query whether local file writing is active
+
+### Changed
+- **NATS `SharedTransportAddresses` init** - `lifecycle_manager.rs` updated to properly initialize `SharedTransportAddresses` when constructing a NATS transport client
+- **Transport dispatcher param ownership** - `send_client_ids` and `send_inference_model_init_request` parameters changed from references to owned values
+- **ZMQ model listener** - Model listener updated to receive multipart ZMQ messages carrying both the serialized model and `actor_id`
+- **Example config NATS addresses** - All three example configs updated to include the NATS address namespace
+- **`async_trait` on async transport traits** - `#[async_trait]` applied uniformly across async transport traits in `transport_sink`
+
+### Fixed
+- **Feature flag compilation** - Resolved compilation errors under `client` and `client zmq-transport` feature flag selections across `coordinator.rs`, `scale_manager.rs`, `transport_sink/mod.rs`, `zmq/ops.rs`, and `router/buffer.rs`
+- **Trailing comma in example configs** - Stray JSON trailing comma removed from all three example configs and `configuration.rs` that would have caused config parsing failures at runtime
+
+---
+
+## [0.5.0-alpha.2] - 2026-03-07
+
+### Changed
+- **relayrl_types** - Dependency updated from 0.5.2 to 0.5.3; fixes ort-related compilation error
+- **Workspace dependency hierarchy** - Dependency versions and shared crates (e.g. `relayrl_types`, `tokio`, `serde`, `burn-tensor`, `arrow`, etc.) reworked in root [Cargo.toml](Cargo.toml) via `[workspace.dependencies]`; framework crate uses `relayrl_types = { workspace = true, ... }` and other workspace-inherited deps
+- **ZMQ ops** - Removed `unwrap`/`expect` in [crates/relayrl_framework/src/network/client/runtime/data/transport_sink/zmq/ops.rs](crates/relayrl_framework/src/network/client/runtime/data/transport_sink/zmq/ops.rs); errors now propagated via `Result` and `map_err` where appropriate
+
+### Added
+- **NATS scaffolding** - Additional scaffold for NATS transport: [nats/policies.rs](crates/relayrl_framework/src/network/client/runtime/data/transport_sink/nats/policies.rs) placeholder (`NatsAuthentication`); [nats/interface.rs](crates/relayrl_framework/src/network/client/runtime/data/transport_sink/nats/interface.rs) implements `AsyncClientTransportInterface`, `AsyncClientScalingTransportOps`, `AsyncClientInferenceTransportOps`, and related execution traits with stub method bodies ready for implementation
+
+---
+
+## [0.5.0-alpha.1] - 2026-03-07
+
+### Added
+- **NATS Transport Scaffold** - `TransportType::NATS` variant with `nats-transport` feature and `async-nats` 0.46.0 dependency; scaffold modules for `NatsInterface` (not yet implemented)
+- **Trait-Based Transport Abstraction** - `SyncClientTransportInterface`, `AsyncClientTransportInterface` base traits; separate operation traits: `SyncClientInferenceTransportOps`, `SyncClientTrainingTransportOps`, `SyncClientScalingTransportOps` (and async variants)
+- **Training/Inference Dispatcher Split** - `InferenceDispatcher`, `TrainingDispatcher`, `ScalingDispatcher` replacing monolithic transport dispatcher; `ProcessInitRequest` enum for algorithm/inference init
+- **Actor Model Modes** - `ModelMode::Shared` (per-device model pool, reused across actors) and `ModelMode::Independent` (per-actor model handle)
+- **ClientModes System** - `ClientModes` struct with `ActorInferenceMode` (`Local(ModelMode)` / `Server`) and `ActorTrainingDataMode` (`Online` / `Offline` / `Hybrid` / `Disabled`) with invariant validation
+- **CSV Trajectory File Sink** - `LocalTrajectoryFileType` enum (`Arrow`, `Csv`); `write_local_trajectory_file()` supporting both formats via `relayrl_types` `ArrowTrajectory` and `CsvTrajectory`
+- **Transport Resilience Policies** - `RetryPolicy`, `CircuitBreaker`, `BackpressureController` in `zmq/policies` module with configurable backoff and concurrency limits
+- **Network Feature Presets** - `full-zmq-network`, `zmq-training-network`, `zmq-inference-network`, `full-nats-network`, `nats-training-network`, `nats-inference-network`
+- **tch-backend Feature** - Optional `tch-backend` feature flag (ndarray is now the default backend)
+- **Prelude Submodules** - `tensor::burn`, `tensor::relayrl`, `action`, `trajectory`, `model`, `config::network_codec` submodules in prelude
+
+### Changed
+- **Transport Layer Rewrite** - Monolithic `transport/` module replaced with modular `transport_sink/` architecture; ZMQ split into `interface`, `ops`, `policies` submodules
+- **Feature Flags Redesigned** - Old flags (`network`, `transport_layer`, `async_transport`, `sync_transport`, `database_layer`) replaced with transport-specific flags (`zmq-transport`, `nats-transport`) and server composition flags (`zmq-training-server`, `zmq-inference-server`, etc.)
+- **Default Features** - Changed from `["client"]` to `["client", "zmq-transport"]`
+- **Scaling System Rewrite** - `scale_in`/`scale_out` major rewrite; bare UUID args replaced with pool entries `(namespace, context, uuid)`; scaling protocol permits with backpressure; parallel scaling operations
+- **Router Namespaces** - `router_ids` replaced with `RouterNamespace` (`Arc<str>`) for namespace-based routing and actor distribution
+- **Server Addresses** - `server_addresses` renamed to `transport_addresses` / `SharedTransportAddresses`; split into `SharedInferenceAddresses` and `SharedTrainingAddresses`; address prefix system removed
+- **Dependencies to Workspace** - `relayrl_types`, `tokio`, `serde`, `dashmap`, `thiserror`, `async-trait`, `burn-tensor`, `arrow`, `arrow-schema`, `arrow-array` now use workspace inheritance
+- **Default Tensor Backend** - `ndarray-backend` is now the default compilation target; `tch-backend` made optional via feature flag
+- **active-uuid-registry** - Bumped 0.3.0 to 0.7.0; namespace/context-based pool entry model
+- **Actor Construction** - `new_actor(s)` / `remove_actor(s)` improved with `ClientModes` propagation through coordinator, scale manager, state manager, actor chain
+- **Trajectory Buffer** - `PersistentTrajectoryDataSinkTrait` renamed to `LocalFileTrajectorySinkTrait`; uses `TrainingDispatcher` instead of raw `TransportClient`; `TrajectoryFileParams` renamed to `LocalTrajectoryFileParams`
+- **Server Config Paths** - Distinct `training_server_config.json` and `inference_server_config.json` with dedicated macros (`resolve_training_server_config_json_path!`, `resolve_inference_server_config_json_path!`)
+- **Environment Traits** - `EnvironmentTrainingTrait` and `EnvironmentTestingTrait` methods now return `Result<_, EnvironmentError>` with `thiserror`-based error type
+- **Server Legacy Directory** - `server/old/` renamed to `server/legacy/`
+
+### Removed
+- **Database Layer** - `database_layer`, `postgres_db`, `sqlite_db` features removed; `postgres` and `sqlite` dependencies removed
+- **Old Transport Module** - Client-side `transport/` directory and monolithic `transport_dispatcher.rs` replaced by `transport_sink/`
+- **serde-pickle** - Dependency removed
+- **Profile Sections** - `[profile.dev]` and `[profile.release]` removed from crate `Cargo.toml` (moved to workspace)
+
+### Fixed
+- **Scaling Initialization** - Coordinator incorrectly called `scale_in` instead of `scale_out` when transport was disabled, preventing routers from being created and leaving actors unable to receive data payloads
+- **Prelude Struct Exports** - Stale `ServerConfigBuilder` / `ServerConfigLoader` / `ServerConfigParams` exports updated to match renamed `TrainingServerConfig*` types
+- **Tensor Re-exports** - `prelude::tensor::burn` corrected to re-export from `relayrl_types::prelude::tensor::burn` instead of raw `burn_tensor`; `prelude::tensor::relayrl` corrected to `relayrl_types::prelude::tensor::relayrl`
+- **Documentation URL** - Fixed `docs.rs` URL in `Cargo.toml` (`docs.rs/crates/...` to `docs.rs/crate/...`)
+
+### Breaking
+- Feature flags renamed: `transport_layer` / `async_transport` / `sync_transport` / `zmq_transport` to `zmq-transport` / `nats-transport` / `zmq-*-server` / `nats-*-server`
+- Default features changed from `["client"]` to `["client", "zmq-transport"]`
+- `ServerAddresses` renamed to `SharedTransportAddresses` with inference/training split
+- `RouterUuid` / `router_ids` replaced by `RouterNamespace`
+- `TrajectoryFileParams` renamed to `LocalTrajectoryFileParams`
+- `PersistentTrajectoryDataSinkTrait` renamed to `LocalFileTrajectorySinkTrait`
+- Database features and dependencies removed
+- `tch-backend` no longer included by default; must opt in via `tch-backend` feature
+
+---
+
 ## [0.5.0-alpha] - 2026-01-10
 
 ### Added

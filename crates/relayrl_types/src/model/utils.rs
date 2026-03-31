@@ -5,12 +5,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
+#[cfg(feature = "ndarray-backend")]
+use crate::data::tensor::NdArrayDType;
+
 use crate::data::action::RelayRLData;
 use crate::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-    IntBurnTensor, NdArrayDType, TchDType,
+    IntBurnTensor
 };
-use burn_tensor::{backend::Backend, Shape, Tensor};
+use burn_tensor::{Shape, backend::Backend};
 
 use crate::model::{ModelError, ModelModule};
 
@@ -45,7 +50,7 @@ pub fn validate_module<B: Backend + BackendMatcher<Backend = B> + 'static>(
     let input_shape = &module.metadata.input_shape;
     let output_shape = &module.metadata.output_shape;
 
-    if !(1..=8).contains(&input_shape.len()) || !(1..=8).contains(&output_shape.len()) {
+    if !(1..=9).contains(&input_shape.len()) || !(1..=9).contains(&output_shape.len()) {
         return Err(ModelError::UnsupportedRank(format!(
             "Unsupported ranks: input {} output {}",
             input_shape.len(),
@@ -290,4 +295,102 @@ pub fn deserialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
         ModelModule::<B>::load_from_path(temp_file.path())
             .expect("Failed to load model from bytes"),
     )
+}
+
+#[cfg(all(
+    test,
+    feature = "ndarray-backend",
+    any(feature = "tch-model", feature = "onnx-model")
+))]
+mod unit_tests {
+    use std::collections::HashMap;
+    use std::marker::PhantomData;
+    use std::sync::Arc;
+
+    use burn_ndarray::NdArray;
+
+    use super::{convert_generic_dict, validate_module};
+    use crate::data::action::RelayRLData;
+    use crate::data::tensor::{DType, DeviceType, NdArrayDType};
+    use crate::model::{
+        InferenceModel, Model, ModelError, ModelFileType, ModelMetadata, ModelModule,
+    };
+
+    fn stub_module(rank: usize) -> ModelModule<NdArray> {
+        let dims = vec![2; rank];
+
+        ModelModule {
+            model: Model {
+                file_type: ModelFileType::Onnx,
+                raw_bytes: Arc::<[u8]>::from(Vec::<u8>::new()),
+                inference: InferenceModel::Unsupported,
+                _phantom: PhantomData,
+            },
+            metadata: ModelMetadata {
+                model_file: "test.onnx".to_string(),
+                model_type: ModelFileType::Onnx,
+                input_dtype: DType::NdArray(NdArrayDType::F32),
+                output_dtype: DType::NdArray(NdArrayDType::F32),
+                input_shape: dims.clone(),
+                output_shape: dims,
+                default_device: Some(DeviceType::Cpu),
+            },
+        }
+    }
+
+    #[test]
+    fn convert_generic_dict_clones_auxiliary_data() {
+        let mut dict = HashMap::new();
+        dict.insert("reward".to_string(), RelayRLData::F32(1.25));
+
+        let cloned = convert_generic_dict(&dict).expect("the helper should always return data");
+        dict.insert("done".to_string(), RelayRLData::Bool(true));
+
+        assert_eq!(cloned.len(), 1);
+        assert!(matches!(
+            cloned.get("reward"),
+            Some(RelayRLData::F32(value)) if (*value - 1.25).abs() < f32::EPSILON
+        ));
+        assert!(!cloned.contains_key("done"));
+    }
+
+    #[test]
+    fn validate_module_accepts_rank_one() {
+        let module = stub_module(1);
+
+        assert!(validate_module::<NdArray>(&module).is_ok());
+    }
+
+    #[test]
+    fn validate_module_accepts_rank_nine() {
+        let module = stub_module(9);
+
+        assert!(validate_module::<NdArray>(&module).is_ok());
+    }
+
+    #[test]
+    fn validate_module_rejects_rank_zero() {
+        let module = stub_module(0);
+
+        let err = validate_module::<NdArray>(&module)
+            .expect_err("rank 0 should remain outside the supported range");
+
+        assert!(matches!(
+            err,
+            ModelError::UnsupportedRank(message) if message.contains("input 0 output 0")
+        ));
+    }
+
+    #[test]
+    fn validate_module_rejects_rank_ten() {
+        let module = stub_module(10);
+
+        let err = validate_module::<NdArray>(&module)
+            .expect_err("rank 10 should remain outside the supported range");
+
+        assert!(matches!(
+            err,
+            ModelError::UnsupportedRank(message) if message.contains("input 10 output 10")
+        ));
+    }
 }

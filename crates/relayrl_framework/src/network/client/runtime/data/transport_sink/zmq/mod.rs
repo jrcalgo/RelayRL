@@ -1,10 +1,13 @@
 pub(crate) mod interface;
-pub(crate) mod ops;
-pub(crate) mod policies;
+pub(super) mod ops;
+pub(super) mod policies;
 
-use crate::network::client::runtime::coordination::lifecycle_manager::ServerAddresses;
+use crate::network::client::agent::ModelMode;
+use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::TransportError;
+use crate::network::client::runtime::data::transport_sink::zmq::ops::ZmqPoolError;
+use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
 
 use relayrl_types::HyperparameterArgs;
@@ -13,13 +16,15 @@ use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
 
+use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use uuid::Uuid;
+use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Error, Clone)]
 pub enum ZmqClientError {
@@ -37,87 +42,105 @@ pub enum ZmqClientError {
     InvalidState(String),
     #[error("Task join error: {0}")]
     JoinError(String),
+    #[error(transparent)]
+    ZmqPoolError(#[from] ZmqPoolError),
 }
-
-pub(crate) trait ZmqInferenceExecution {
+pub(super) trait ZmqInferenceExecution {
     fn execute_send_inference_request(
         &self,
-        actor_id: &Uuid,
+        actor_entry: &(NamespaceString, ContextString, Uuid),
         obs_bytes: &[u8],
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError>;
     fn execute_send_flag_last_inference(
         &self,
-        actor_id: &Uuid,
-        reward: f32,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        actor_entry: &(NamespaceString, ContextString, Uuid),
+        reward: &f32,
+        inference_server_address: &str,
+    ) -> Result<(), TransportError>;
+    fn execute_send_inference_model_init_request<B: Backend + BackendMatcher<Backend = B>>(
+        &self,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        model_mode: &ModelMode,
+        model_module: &Option<ModelModule<B>>,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
         &self,
-        scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        client_ids: &[(NamespaceString, ContextString, Uuid)],
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_warning(
         &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        operation: &ScalingOperation,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        operation: &ScalingOperation,
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
         &self,
-        scaling_id: &Uuid,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        inference_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
 }
 
-pub(crate) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> {
+pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> {
+    fn execute_listen_for_model(
+        &self,
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
+        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_server_address: &str,
+    ) -> Result<(), TransportError>;
     fn execute_send_algorithm_init_request(
         &self,
-        scaling_id: &Uuid,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        actor_entries: &[(NamespaceString, ContextString, Uuid)],
+        model_mode: &ModelMode,
+        algorithm: &Algorithm,
+        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
+        agent_listener_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_initial_model_handshake(
         &self,
-        actor_id: &Uuid,
-        model_server_address: &str,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        actor_entry: &(NamespaceString, ContextString, Uuid),
+        agent_listener_address: &str,
     ) -> Result<Option<ModelModule<B>>, TransportError>;
     fn execute_send_trajectory(
         &self,
-        sender_id: &Uuid,
-        encoded_trajectory: EncodedTrajectory,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        buffer_entry: &(NamespaceString, ContextString, Uuid),
+        encoded_trajectory: &EncodedTrajectory,
+        trajectory_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_client_ids(
         &self,
-        scaling_id: &Uuid,
-        client_ids: &Vec<(String, Uuid)>,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        client_ids: &[(NamespaceString, ContextString, Uuid)],
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_warning(
         &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        operation: &ScalingOperation,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_scaling_complete(
         &self,
-        scaling_id: &Uuid,
-        operation: ScalingOperation,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        operation: &ScalingOperation,
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_shutdown_signal(
         &self,
-        scaling_id: &Uuid,
-        shared_server_addresses: Arc<RwLock<ServerAddresses>>,
+        scaling_entry: &(NamespaceString, ContextString, Uuid),
+        training_scaling_server_address: &str,
     ) -> Result<(), TransportError>;
 }
+
+#[cfg(test)]
+mod tests {}

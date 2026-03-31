@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.4] - 2026-03-29
+
+### Fixed
+- **tch-backend-only feature sets** - Correct compilation and warnings when using `tch-backend` without `ndarray-backend`
+  - Tch `to_tensor` match arms and records/tensor NdArray paths are feature-gated so `tch-backend`-only builds do not hit unreachable or inconsistent branches
+- **inference-models and prelude cfg** - Resolved warnings related to `inference-models` and tightened prelude `cfg` for model exports
+
+### Added
+- **Comprehensive unit testing** - Expanded `#[cfg(test)]` coverage across core data, records, utilities, and model code
+  - Data: `action`, `tensor`, `trajectory`; records (`csv`, `arrow`, shared helpers); utilities (`chunking`, `compress`, `encrypt`, `integrity`, `metadata`, `quantize`)
+  - Model: `mod`, `utils`, `hot_reloadable`
+  - Tests are feature-aware (`ndarray-backend`, `metadata`, `compression`, `encryption`, `integrity`, etc.) so optional stacks stay verified without breaking minimal feature sets
+
+### Changed
+- **Feature matrix for modules and prelude** - Stricter alignment between optional backends, inference features, and public surface
+  - `model` is built only when both an inference feature (`tch-model` / `onnx-model`) and a tensor backend (`ndarray-backend` / `tch-backend`) are enabled
+  - `action`, `tensor`, `trajectory`, and `records` (and their prelude namespaces) require at least one of `ndarray-backend` or `tch-backend`
+  - Prelude `model` exports require inference features plus a tensor backend
+  - NdArray-specific conversion and record paths compile only with `ndarray-backend`
+
+## [0.5.3] - 2026-03-08
+
+### Changed
+- **Dependency and workspace alignment** - Dependency updates and workspace inheritance
+  - Dependencies now use workspace inheritance where applicable (serde, serde_json, bytemuck, dashmap, uuid, tokio, tempfile, bincode)
+  - Exact version pins for `tch` (=0.22.0) and `ort` (=2.0.0-rc.11)
+  - Version bumps: blake3 1.8.2 → 1.8.3, bytes 1.10.1 → 1.11.1, lz4_flex 0.11.5 → 0.12.0, half 2.7.0 → 2.7.1
+
 ## [0.5.2] - 2026-02-19
 
 ### Added

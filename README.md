@@ -2,7 +2,7 @@
 
 # RelayRL
 
-**Multi-Agent Distributed Reinforcement Learning Framework**
+**Multi-Agent Reinforcement Learning Framework**
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -32,9 +32,9 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 
 | Crate | Version | Description |
 |-------|---------|-------------|
-| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-alpha` | Core library with client runtime, server scaffolding, and utilities |
-| [`relayrl_types`](crates/relayrl_types/) | `0.4.0` | Data types, tensor containers, and codec pipeline (compression, encryption, integrity) |
-| [`relayrl_algorithms`](crates/relayrl_algorithms/) | `0.1.0` | RL algorithms (PPO, REINFORCE) — *scaffolding only* |
+| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-alpha.3` | Core library with client runtime, server scaffolding, and utilities |
+| [`relayrl_types`](crates/relayrl_types/) | `0.5.4` | Data types, tensor containers, inference models, and codec pipeline (compression, encryption, integrity) |
+| [`relayrl_algorithms`](crates/relayrl_algorithms/) | `0.1.0` | Deep RL algorithms (PPO, REINFORCE) — *scaffolding only* |
 | [`relayrl_python`](crates/relayrl_python/) | `0.1.0` | Python bindings via PyO3 — *scaffolding only* |
 | [`relayrl_cli`](crates/relayrl_cli/) | `0.1.0` | Command-line interface with gRPC — *scaffolding only* |
 
@@ -58,8 +58,7 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 
 In your Cargo.toml:
 ```toml
-relayrl_framework = "0.5.0-alpha"
-relayrl_types = "0.3.21"
+relayrl_framework = "0.5.0-alpha.3"
 ```
 
 ### Basic Usage
@@ -103,11 +102,11 @@ For more usage details, see the [Framework README](crates/relayrl_framework/READ
 ## Framework Roadmap
 
 ### Near Term
-- **v0.5.0** — Client ZMQ transport, PostgreSQL/SQLite database layer, comprehensive testing
-- **v0.6.0** — Training Server with online/offline workflows, algorithm integration
+- **v0.5.0** — Client ZMQ transport, Client NATS transport, comprehensive testing
+- **v0.6.0** — Training Server for Online client workflows, algorithm integration
 
 ### Medium Term
-- **v0.7.0** — Inference Server for remote inference capabilities
+- **v0.7.0** — Inference Server for remote inference capabilities for clients
 - **v0.8.0** — Full system integration, performance optimizations, API stabilization
 
 ### Long Term
