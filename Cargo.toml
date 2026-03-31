@@ -16,6 +16,7 @@ relayrl_algorithms = { version = "0.1.0", path = "crates/relayrl_algorithms"}
 burn-tensor = "0.20.1"
 burn-ndarray = "0.20.1"
 burn-tch = "0.20.1"
+burn-autodiff = "0.20.1"
 
 tokio = "1.50.0"
 
