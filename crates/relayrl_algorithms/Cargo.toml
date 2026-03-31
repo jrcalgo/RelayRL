@@ -5,7 +5,7 @@ edition = "2024"
 description = "A collection of Multi-Agent Deep Reinforcement Learning Algorithms (IPPO, MAPPO, etc.)"
 repository = "https://github.com/jrcalgo/relayrl"
 documentation = "https://docs.rs/crate/relayrl_algorithms"
-keywords = ['reinforcement-learning', 'deep-learning', 'algorithms', 'ai', 'multi-agent']
+keywords = ['rl-algorithms', 'multi-agent', 'deep-learning', 'ai', 'training']
 categories = ['science', 'algorithms', 'simulation', 'concurrency', 'mathematics']
 license = "Apache-2.0"
 
