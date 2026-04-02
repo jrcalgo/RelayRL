@@ -27,12 +27,3 @@ pub fn get_metrics_as_string(registry: &Registry) -> String {
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap()
 }
-
-// No-op implementations for when the feature is disabled
-#[cfg(not(feature = "prometheus"))]
-pub fn create_prometheus_registry() -> () {}
-
-#[cfg(not(feature = "prometheus"))]
-pub fn get_metrics_as_string(_registry: &()) -> String {
-    "Prometheus metrics export is disabled (feature not enabled)".to_string()
-}

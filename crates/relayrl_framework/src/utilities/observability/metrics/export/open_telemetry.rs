@@ -3,7 +3,13 @@
 //! This module provides OpenTelemetry integration for the RelayRL metrics system,
 //! enabling distributed tracing and metrics collection.
 
-use opentelemetry::{KeyValue, global};
+use opentelemetry::{
+    KeyValue, global,
+    global::BoxedSpan,
+    trace::{Span, Tracer},
+};
+use opentelemetry_otlp::{MetricExporter, Protocol, WithExportConfig};
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use std::collections::HashMap;
 
 /// Initialize OpenTelemetry with OTLP exporter
@@ -12,18 +18,33 @@ use std::collections::HashMap;
 ///
 /// * `otlp_endpoint` - The OTLP endpoint URL
 #[cfg(feature = "opentelemetry")]
-pub fn init_opentelemetry_with_otlp(_otlp_endpoint: &str) {
-    // For the current dependency versions, the OTLP metrics pipeline setup is not used.
-    // We fallback to the default global meter provider.
-    log::warn!(
-        "OpenTelemetry OTLP metrics export not configured for current versions; using default meter provider"
-    );
-}
+pub fn init_opentelemetry_with_otlp(otlp_endpoint: &str) {
+    let exporter = match MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(otlp_endpoint)
+        .with_protocol(Protocol::Grpc)
+        .build()
+    {
+        Ok(exporter) => exporter,
+        Err(err) => {
+            log::error!(
+                "Failed to configure OpenTelemetry OTLP gRPC metrics exporter for endpoint `{}`: {}; leaving the current global meter provider unchanged",
+                otlp_endpoint,
+                err
+            );
+            return;
+        }
+    };
 
-// No-op implementations for when the feature is disabled
-#[cfg(not(feature = "opentelemetry"))]
-pub fn init_opentelemetry_with_otlp(_otlp_endpoint: &str) {
-    log::warn!("OpenTelemetry OTLP metrics export is disabled (feature not enabled)");
+    let meter_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .build();
+
+    global::set_meter_provider(meter_provider);
+    log::info!(
+        "Configured OpenTelemetry OTLP gRPC metrics exporter for endpoint `{}`",
+        otlp_endpoint
+    );
 }
 
 /// Track an RelayRL counter with OpenTelemetry
@@ -71,25 +92,16 @@ pub fn track_histogram(name: &str, value: f64, labels: &HashMap<String, String>)
 ///
 /// # Returns
 ///
-/// * `Option<opentelemetry::trace::Span>` - The created span, if OpenTelemetry is enabled
+/// * `BoxedSpan` - The created span
 #[cfg(feature = "opentelemetry")]
-pub fn create_span(_name: &str, _labels: &HashMap<String, String>) -> Option<()> {
+pub fn create_span(name: &str, labels: &HashMap<String, String>) -> BoxedSpan {
     // Tracing spans are not configured with the current dependency set.
-    None
-}
-
-// No-op implementations for when the feature is disabled
-#[cfg(not(feature = "opentelemetry"))]
-pub fn track_counter(_name: &str, _value: u64, _labels: &HashMap<String, String>) {
-    // No-op when feature is disabled
-}
-
-#[cfg(not(feature = "opentelemetry"))]
-pub fn track_histogram(_name: &str, _value: f64, _labels: &HashMap<String, String>) {
-    // No-op when feature is disabled
-}
-
-#[cfg(not(feature = "opentelemetry"))]
-pub fn create_span(_name: &str, _labels: &HashMap<String, String>) -> Option<()> {
-    None
+    let tracer = global::tracer("relay-rl");
+    let mut span = tracer.start(name.to_string());
+    let attributes: Vec<KeyValue> = labels
+        .iter()
+        .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+        .collect();
+    span.set_attributes(attributes);
+    span
 }
