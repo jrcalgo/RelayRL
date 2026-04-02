@@ -3,11 +3,11 @@ use crate::network::client::agent::LocalTrajectoryFileParams;
 
 use relayrl_types::HyperparameterArgs;
 
+use log::*;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::{fs, fs::File, io::Read, path::PathBuf};
-use log::*;
 
 #[macro_use]
 pub mod client_config_macros {
@@ -1325,7 +1325,10 @@ impl TrainingServerConfigLoader {
 }
 
 pub trait TrainingServerConfigBuildParams {
-    fn set_config_update_polling_seconds(&mut self, config_update_polling_seconds: f32) -> &mut Self;
+    fn set_config_update_polling_seconds(
+        &mut self,
+        config_update_polling_seconds: f32,
+    ) -> &mut Self;
     fn set_hyperparameters(
         &mut self,
         algorithm_name: &str,
@@ -1350,7 +1353,10 @@ pub struct TrainingServerConfigBuilder {
 }
 
 impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
-    fn set_config_update_polling_seconds(&mut self, config_update_polling_seconds: f32) -> &mut Self {
+    fn set_config_update_polling_seconds(
+        &mut self,
+        config_update_polling_seconds: f32,
+    ) -> &mut Self {
         self.config_update_polling_seconds = Some(config_update_polling_seconds);
         self
     }
@@ -1608,7 +1614,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
 
     fn build(&self) -> TrainingServerConfigLoader {
         let training_server_config: TrainingServerConfigParams = TrainingServerConfigParams {
-            config_update_polling_seconds: self.config_update_polling_seconds.clone().unwrap_or_else(|| 10.0),
+            config_update_polling_seconds: self
+                .config_update_polling_seconds
+                .clone()
+                .unwrap_or_else(|| 10.0),
             default_hyperparameters: self.default_hyperparameters.clone(),
             training_tensorboard: self.training_tensorboard.clone().unwrap_or_else(|| {
                 TensorboardParams {
@@ -2606,12 +2615,33 @@ mod unit_tests {
         assert_eq!(loader.get_config_update_polling_seconds(), 10.0);
         assert!(loader.get_hyperparameters().is_none());
         assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
-        assert_eq!(loader.get_transport_config().get_nats_inference_server_address().port, "50050");
-        assert_eq!(loader.get_transport_config().get_zmq_trajectory_server_address().port, "7776");
+        assert_eq!(
+            loader
+                .get_transport_config()
+                .get_nats_inference_server_address()
+                .port,
+            "50050"
+        );
+        assert_eq!(
+            loader
+                .get_transport_config()
+                .get_zmq_trajectory_server_address()
+                .port,
+            "7776"
+        );
         assert_eq!(loader.get_transport_config().max_traj_length, 100000000);
-        assert_eq!(loader.get_transport_config().local_model_module.directory, "model_module");
-        assert_eq!(loader.get_transport_config().local_model_module.model_name, "model");
-        assert_eq!(loader.get_transport_config().local_model_module.format, "pt");
+        assert_eq!(
+            loader.get_transport_config().local_model_module.directory,
+            "model_module"
+        );
+        assert_eq!(
+            loader.get_transport_config().local_model_module.model_name,
+            "model"
+        );
+        assert_eq!(
+            loader.get_transport_config().local_model_module.format,
+            "pt"
+        );
     }
 
     #[test]
@@ -2638,10 +2668,7 @@ mod unit_tests {
         let temp = write_temp_file(VALID_TRAINING_SERVER_CONFIG_JSON);
         let path = temp.path().to_path_buf();
         let loader = TrainingServerConfigLoader::load_config(&path);
-        assert_eq!(
-            loader.get_config_path(),
-            &path
-        );
+        assert_eq!(loader.get_config_path(), &path);
         assert!(loader.get_hyperparameters().is_some());
     }
 
@@ -2665,10 +2692,7 @@ mod unit_tests {
         let path = temp.path().to_path_buf();
         let loader = TrainingServerConfigLoader::load_config(&path);
         // Hardcoded fallback values
-        assert_eq!(
-            loader.get_config_path(),
-            &path
-        );
+        assert_eq!(loader.get_config_path(), &path);
         assert!(loader.get_hyperparameters().is_none());
         assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
     }
