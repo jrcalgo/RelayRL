@@ -186,12 +186,13 @@ pub mod utilities {
 /// use relayrl_framework::prelude::network::*;  // Agent API
 /// use relayrl_framework::prelude::config::*;  // Configuration
 /// use relayrl_framework::prelude::config::network_codec::*;  // Codec types
-/// use relayrl_framework::prelude::tensor::burn::*;  // Burn tensor types
-/// use relayrl_framework::prelude::tensor::relayrl::*;  // RelayRL tensor types
-/// use relayrl_framework::prelude::action::*;  // Action types
-/// use relayrl_framework::prelude::trajectory::*;  // Trajectory types
-/// use relayrl_framework::prelude::model::*;  // Model types
-/// use relayrl_framework::prelude::templates::*;  // Environment types
+/// use relayrl_framework::prelude::types::tensor::burn::*;  // Burn tensor types
+/// use relayrl_framework::prelude::types::tensor::relayrl::*;  // RelayRL tensor types
+/// use relayrl_framework::prelude::types::action::*;  // Action types
+/// use relayrl_framework::prelude::types::trajectory::*;  // Trajectory types
+/// use relayrl_framework::prelude::types::model::*;  // Model types
+/// use relayrl_framework::prelude::templates::environment::*;  // Environment types
+/// use relayrl_framework::prelude::templates::algorithms::*;  // Algorithm types
 /// ```
 pub mod prelude {
     pub mod algorithms {
@@ -228,9 +229,7 @@ pub mod prelude {
         }
 
         pub mod environment {
-            pub use crate::templates::environment_traits::{
-                EnvironmentError, EnvironmentTestingTrait, EnvironmentTrainingTrait,
-            };
+            pub use relayrl_env_trait::environment_traits::*;
         }
     }
 
@@ -243,15 +242,15 @@ pub mod prelude {
                 pub use relayrl_types::prelude::tensor::relayrl::*;
             }
         }
-    
+
         pub mod action {
             pub use relayrl_types::prelude::action::*;
         }
-    
+
         pub mod trajectory {
             pub use relayrl_types::prelude::trajectory::*;
         }
-    
+
         pub mod model {
             pub use relayrl_types::prelude::model::*;
         }

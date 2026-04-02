@@ -40,6 +40,7 @@ profile = ["flamegraph", "console-subscriber"]
 # Crates built/maintained by me
 relayrl_types = { workspace = true, features = ["ndarray-backend", "onnx-model"] }
 relayrl_algorithms = { workspace = true }
+relayrl_env_trait = "1.0.0"
 active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
