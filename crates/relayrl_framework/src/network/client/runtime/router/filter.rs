@@ -130,6 +130,8 @@ mod unit_tests {
     };
     use crate::network::client::runtime::coordination::state_manager::StateManager;
     use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+    #[cfg(feature = "metrics")]
+    use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
     use std::path::PathBuf;
@@ -163,6 +165,17 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
+            None,
+            #[cfg(feature = "metrics")]
+            test_metrics(),
+        )
+    }
+
+    #[cfg(feature = "metrics")]
+    fn test_metrics() -> MetricsManager {
+        MetricsManager::new(
+            Arc::new(RwLock::new(("test-filter".to_string(), String::new()))),
+            ("test-filter".to_string(), String::new()),
             None,
         )
     }
