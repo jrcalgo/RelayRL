@@ -158,15 +158,6 @@
 /// available via feature flags (`training_server`, `inference_server`).
 pub mod network;
 
-/// Environment trait definitions for RL training and testing.
-///
-/// This module provides:
-/// - [`EnvironmentTrainingTrait`](templates::environment_traits::EnvironmentTrainingTrait):
-///   Interface for training environments with performance metrics
-/// - [`EnvironmentTestingTrait`](templates::environment_traits::EnvironmentTestingTrait):
-///   Interface for inference/testing environments
-pub mod templates;
-
 /// Configuration, logging, metrics, and system utilities.
 ///
 /// This module contains:
