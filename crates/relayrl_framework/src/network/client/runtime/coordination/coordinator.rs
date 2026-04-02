@@ -1012,7 +1012,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .metrics
                         .record_histogram("remove_actor_latency", duration, &[])
                         .await;
-                    params.metrics.record_counter("remove_actor_calls", 1, &[]).await;
+                    params
+                        .metrics
+                        .record_counter("remove_actor_calls", 1, &[])
+                        .await;
                 }
 
                 Ok(())
@@ -1313,12 +1316,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let result = {
                     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                     {
-                        params.scaling.scale_out(router_add, true).await.map_err(CoordinatorError::from)
+                        params
+                            .scaling
+                            .scale_out(router_add, true)
+                            .await
+                            .map_err(CoordinatorError::from)
                     }
 
                     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                     {
-                        params.scaling.scale_out(router_add).await.map_err(CoordinatorError::from)
+                        params
+                            .scaling
+                            .scale_out(router_add)
+                            .await
+                            .map_err(CoordinatorError::from)
                     }
                 };
 
@@ -1353,9 +1364,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 let result = {
                     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    params.scaling.scale_in(router_remove, true).await?;
+                    {
+                        params
+                            .scaling
+                            .scale_in(router_remove, true)
+                            .await
+                            .map_err(CoordinatorError::from)?
+                    }
                     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                    params.scaling.scale_in(router_remove).await?;
+                    {
+                        params
+                            .scaling
+                            .scale_in(router_remove)
+                            .await
+                            .map_err(CoordinatorError::from)?
+                    }
                 };
 
                 #[cfg(feature = "metrics")]
@@ -1371,7 +1394,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .await;
                 }
 
-                Ok(())
+                Ok(result)
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(

@@ -242,7 +242,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
             self.scale_in(router_count).await?;
         }
-        self.router_dispatcher.take().map(|handle| handle.abort());
+        if let Some(handle) = self.router_dispatcher.take() {
+            handle.abort()
+        };
         self.router_filter_channels.clear();
         let _ = self.runtime_params.take();
         let _ = self.lifecycle.take();
@@ -545,16 +547,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 trajectory_buffer_tx,
             };
 
-            if let Some(ref params) = self.runtime_params {
-                if let Some(old_params) = params.insert(router_namespace.clone(), runtime_params) {
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    if let Some(h) = old_params.receiver_loop {
-                        h.abort();
-                    }
-                    old_params.filter_loop.abort();
-                    if let Some(h) = old_params.trajectory_buffer_loop {
-                        h.abort();
-                    }
+            if let Some(ref params) = self.runtime_params
+                && let Some(old_params) = params.insert(router_namespace.clone(), runtime_params)
+            {
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                if let Some(h) = old_params.receiver_loop {
+                    h.abort();
+                }
+                old_params.filter_loop.abort();
+                if let Some(h) = old_params.trajectory_buffer_loop {
+                    h.abort();
                 }
             }
 
@@ -842,7 +844,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 get_namespace_entries(router_namespace.as_ref())?;
 
             for (_, context, id) in namespace_entries.iter() {
-                remove_id(router_namespace, context, *id);
+                let _ = remove_id(router_namespace, context, *id);
             }
 
             remove_namespace(router_namespace.as_ref());

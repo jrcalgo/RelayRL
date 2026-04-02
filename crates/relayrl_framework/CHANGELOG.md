@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta] - 2026-04-01
+
+### Added
+
+### Changed
+
+### Fixed
+
 ## [0.5.0-alpha.3] - 2026-03-13
 
 ### Added

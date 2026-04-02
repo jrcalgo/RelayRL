@@ -631,9 +631,7 @@ impl HyperparameterConfig {
                     }
                     args
                 }
-                Algorithm::ConfigInit => {
-                    return HashMap::new();
-                }
+                Algorithm::ConfigInit => HashMap::new(),
             },
             None => {
                 let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
@@ -1157,18 +1155,9 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
                 .algorithm_name
                 .clone()
                 .unwrap_or_else(|| "REINFORCE".to_string()),
-            config_update_polling_seconds: self
-                .config_update_polling_seconds
-                .clone()
-                .unwrap_or_else(|| 10.0),
-            init_hyperparameters: self
-                .init_hyperparameters
-                .clone()
-                .unwrap_or_else(|| HyperparameterConfig::default()),
-            trajectory_file_output: self
-                .trajectory_file_output
-                .clone()
-                .unwrap_or_else(|| LocalTrajectoryFileParams::default()),
+            config_update_polling_seconds: self.config_update_polling_seconds.unwrap_or(10.0),
+            init_hyperparameters: self.init_hyperparameters.clone().unwrap_or_default(),
+            trajectory_file_output: self.trajectory_file_output.clone().unwrap_or_default(),
             metrics_meter_name: self
                 .metrics_name
                 .clone()
@@ -1614,10 +1603,7 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
 
     fn build(&self) -> TrainingServerConfigLoader {
         let training_server_config: TrainingServerConfigParams = TrainingServerConfigParams {
-            config_update_polling_seconds: self
-                .config_update_polling_seconds
-                .clone()
-                .unwrap_or_else(|| 10.0),
+            config_update_polling_seconds: self.config_update_polling_seconds.unwrap_or(10.0),
             default_hyperparameters: self.default_hyperparameters.clone(),
             training_tensorboard: self.training_tensorboard.clone().unwrap_or_else(|| {
                 TensorboardParams {

@@ -451,7 +451,10 @@ mod unit_tests {
     #[cfg(feature = "metrics")]
     fn test_metrics() -> MetricsManager {
         MetricsManager::new(
-            Arc::new(RwLock::new(("test-router-dispatcher".to_string(), String::new()))),
+            Arc::new(RwLock::new((
+                "test-router-dispatcher".to_string(),
+                String::new(),
+            ))),
             ("test-router-dispatcher".to_string(), String::new()),
             None,
         )

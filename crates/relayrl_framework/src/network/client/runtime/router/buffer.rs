@@ -432,8 +432,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                 }
                             }
 
-                            if uses_local_file_writing(&worker_modes.actor_training_data_mode) {
-                                if let Some(ref traj_output) = worker_trajectory_file_output {
+                            if uses_local_file_writing(&worker_modes.actor_training_data_mode) &&
+                                let Some(ref traj_output) = worker_trajectory_file_output {
                                     let local_job = job.clone();
                                     let local_actor_last = worker_actor_last_processed.clone();
                                     let traj_output_clone = traj_output.clone();
@@ -454,7 +454,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                             );
                                         }
                                     });
-                                }
+
                             }
                         }
                     }
@@ -490,17 +490,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
                 }
 
-                if uses_local_file_writing(&worker_modes.actor_training_data_mode) {
-                    if let Some(ref traj_output) = worker_trajectory_file_output {
-                        let params = traj_output.read().await;
+                if uses_local_file_writing(&worker_modes.actor_training_data_mode)
+                    && let Some(ref traj_output) = worker_trajectory_file_output
+                {
+                    let params = traj_output.read().await;
 
-                        let _ = Self::write_local_trajectory(
-                            &job,
-                            &params,
-                            &worker_actor_last_processed,
-                        )
-                        .await;
-                    }
+                    let _ =
+                        Self::write_local_trajectory(&job, &params, &worker_actor_last_processed)
+                            .await;
                 }
             }
         });
@@ -574,7 +571,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> LocalFileTrajectorySinkTrait<B>
             }
         }
 
-        tokio::task::spawn_blocking(move || {
+        let _ = tokio::task::spawn_blocking(move || {
             write_local_trajectory_file(trajectory, &path, &file_type)
         })
         .await

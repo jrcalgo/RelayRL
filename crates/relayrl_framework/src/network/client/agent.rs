@@ -236,18 +236,13 @@ impl Default for LocalTrajectoryFileParams {
 
 /// TODO: Add architecture support for independent/shared model inference/training requests to server(s).
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub enum ModelMode {
     /// Each actor has an independent server-side model
+    #[default]
     Independent,
     /// All actors share the same server-side model.
     Shared,
-}
-
-impl Default for ModelMode {
-    fn default() -> Self {
-        Self::Independent
-    }
 }
 
 /// Inference mode used by local runtime actors.
@@ -315,19 +310,10 @@ pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct ClientModes {
     pub actor_inference_mode: ActorInferenceMode,
     pub actor_training_data_mode: ActorTrainingDataMode,
-}
-
-impl Default for ClientModes {
-    fn default() -> Self {
-        Self {
-            actor_inference_mode: ActorInferenceMode::default(),
-            actor_training_data_mode: ActorTrainingDataMode::default(),
-        }
-    }
 }
 
 /// Parameters used to start a [`RelayRLAgent`].
@@ -965,11 +951,11 @@ impl<
         default_model: Option<ModelModule<B>>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         if count == 0 {
-            return Box::pin(async move {
+            Box::pin(async move {
                 Err(ClientError::NoopActorCount(
                     "Noop actor count: `count` set to zero".to_string(),
                 ))
-            });
+            })
         } else if count == 1 {
             return self.new_actor(device, default_model);
         } else {
@@ -1053,13 +1039,13 @@ impl<
         actor_ids: Vec<ActorUuid>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         if actor_ids.is_empty() {
-            return Box::pin(async move {
+            Box::pin(async move {
                 Err(ClientError::NoopActorCount(
                     "Noop actor count: `actor_ids` is empty in `remove_actors()`".to_string(),
                 ))
-            });
+            })
         } else if actor_ids.len() == 1 {
-            return self.remove_actor(actor_ids[0]);
+            self.remove_actor(actor_ids[0])
         } else {
             Box::pin(async move {
                 for actor_id in actor_ids {

@@ -47,11 +47,11 @@ impl MetricsManager {
     async fn current_meter(&self) -> Meter {
         let current_metrics_args = self.metrics_args.read().await.clone();
 
-        if let Ok(mut cached_metrics_args) = self.cached_metrics_args.lock() {
-            if *cached_metrics_args != current_metrics_args {
-                Self::init_meter_provider(current_metrics_args.1.as_str());
-                *cached_metrics_args = current_metrics_args.clone();
-            }
+        if let Ok(mut cached_metrics_args) = self.cached_metrics_args.lock()
+            && *cached_metrics_args != current_metrics_args
+        {
+            Self::init_meter_provider(current_metrics_args.1.as_str());
+            *cached_metrics_args = current_metrics_args.clone();
         }
 
         let scope = InstrumentationScope::builder(current_metrics_args.0.clone()).build();
@@ -78,10 +78,10 @@ impl MetricsManager {
             )
             .unwrap();
 
-            if let Ok(registry) = registry_arc.lock() {
-                if registry.register(Box::new(prom_counter.clone())).is_ok() {
-                    prom_counter.inc_by(value as f64);
-                }
+            if let Ok(registry) = registry_arc.lock()
+                && registry.register(Box::new(prom_counter.clone())).is_ok()
+            {
+                prom_counter.inc_by(value as f64);
             }
         }
     }
@@ -106,10 +106,10 @@ impl MetricsManager {
             )
             .unwrap();
 
-            if let Ok(registry) = registry_arc.lock() {
-                if registry.register(Box::new(prom_histogram.clone())).is_ok() {
-                    prom_histogram.observe(value);
-                }
+            if let Ok(registry) = registry_arc.lock()
+                && registry.register(Box::new(prom_histogram.clone())).is_ok()
+            {
+                prom_histogram.observe(value);
             }
         }
     }

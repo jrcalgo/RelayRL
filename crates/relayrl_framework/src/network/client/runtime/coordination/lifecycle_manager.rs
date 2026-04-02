@@ -428,15 +428,14 @@ impl LifeCycleManager {
                     break Ok(());
                 }
                 _ = interval.tick() => {
-                    if let Ok(metadata) = fs::metadata(&*self.config_path) {
-                        if let Ok(modified) = metadata.modified() {
+                    if let Ok(metadata) = fs::metadata(&*self.config_path) &&
+                        let Ok(modified) = metadata.modified() {
                             let mut last_modified = self.last_modified.write().await;
                             if modified > *last_modified {
                                 log::info!("[LifeCycleManager] Config file changed, reloading...");
                                 *last_modified = modified;
                                 self.handle_config_change(self.config_path.as_ref().clone()).await?;
                             }
-                        }
                     }
                 }
             }

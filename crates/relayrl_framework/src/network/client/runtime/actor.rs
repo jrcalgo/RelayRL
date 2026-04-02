@@ -186,7 +186,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let r4sa = tokio::task::spawn_blocking(move || -> Result<RelayRLAction, ModelError> {
                 let guard = model_handle.blocking_read();
                 let reloadable_model = guard.as_ref().ok_or_else(|| {
-                    ModelError::IoError("Model not loaded/available for actor inference".to_string())
+                    ModelError::IoError(
+                        "Model not loaded/available for actor inference".to_string(),
+                    )
                 })?;
                 reloadable_model.forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
             })
