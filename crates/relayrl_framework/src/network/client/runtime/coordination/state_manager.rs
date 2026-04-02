@@ -14,6 +14,8 @@ use crate::network::client::runtime::data::transport_sink::transport_dispatcher:
 };
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::ClientConfigLoader;
+#[cfg(feature = "metrics")]
+use crate::utilities::observability::metrics::MetricsManager;
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -86,6 +88,8 @@ pub(crate) struct StateManager<
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     default_model: Option<ModelModule<B>>,
     shared_local_models: Vec<(DeviceType, LocalModelHandle<B>)>,
+    #[cfg(feature = "metrics")]
+    metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
@@ -107,6 +111,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         default_model: Option<ModelModule<B>>,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) -> (Self, Receiver<RoutedMessage>) {
         let (global_dispatcher_tx, global_dispatcher_rx) =
             mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT * 2);
@@ -124,6 +129,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 shared_local_model_path,
                 default_model,
                 shared_local_models: Vec::new(),
+                #[cfg(feature = "metrics")]
+                metrics,
                 global_dispatcher_tx,
                 actor_inboxes: DashMap::new(),
                 actor_handles: DashMap::new(),
@@ -275,6 +282,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let shared_training_dispatcher = self.shared_training_dispatcher.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_transport_addresses = self.shared_transport_addresses.clone();
+        #[cfg(feature = "metrics")]
+        let metrics = self.metrics.clone();
 
         let client_namespace = self.client_namespace.clone();
 
@@ -299,6 +308,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 actor_inbox_rx,
                 tx_to_buffer,
                 shared_client_modes,
+                #[cfg(feature = "metrics")]
+                metrics,
             )
             .await;
 
@@ -562,12 +573,19 @@ mod unit_tests {
             None,
             Arc::new(RwLock::new(PathBuf::new())),
             None,
+            #[cfg(feature = "metrics")]
+            test_metrics(),
         )
     }
 
-    // -------------------------------------------------------------------------
-    // distribute_actors
-    // -------------------------------------------------------------------------
+    #[cfg(feature = "metrics")]
+    fn test_metrics() -> MetricsManager {
+        MetricsManager::new(
+            Arc::new(RwLock::new(("test-state-manager".to_string(), String::new()))),
+            ("test-state-manager".to_string(), String::new()),
+            None,
+        )
+    }
 
     #[tokio::test]
     async fn distribute_actors_round_robin_2_routers() {
