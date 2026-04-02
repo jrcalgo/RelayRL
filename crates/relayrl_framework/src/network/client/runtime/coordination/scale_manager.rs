@@ -29,6 +29,8 @@ use crate::network::client::runtime::router::{
 };
 use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::HyperparameterConfig;
+#[cfg(feature = "metrics")]
+use crate::utilities::observability::metrics::MetricsManager;
 
 use active_uuid_registry::interface::{
     add_id, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
@@ -157,6 +159,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
         lifecycle: LifeCycleManager,
     ) -> Result<Self, ScaleManagerError> {
         let scaling_id: ScaleManagerUuid = reserve_id_with(
@@ -174,6 +177,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             global_dispatcher_rx,
             router_filter_channels.clone(),
             shared_state.clone(),
+            #[cfg(feature = "metrics")]
+            metrics,
         );
 
         let dispatcher: RouterDispatcher<B, D_IN, D_OUT> = match lifecycle.subscribe_shutdown() {
