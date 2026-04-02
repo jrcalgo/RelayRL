@@ -25,16 +25,12 @@ crate-type = ["rlib"]
 [features]
 default = ["client", "tch-backend", "metrics", "logging"]
 
-tch-backend = ["relayrl_types/tch-backend", "relayrl_types/tch-model"]
-
 client = []
-zmq-training-server = ["zmq-transport"]
-zmq-inference-server = ["zmq-transport"]
-nats-training-server = ["nats-transport"]
-nats-inference-server = ["nats-transport"]
 
 zmq-transport = ["zmq", "relayrl_types/codec-full"]
 nats-transport = ["async-nats", "tokio-stream", "relayrl_types/codec-full"]
+
+tch-backend = ["relayrl_types/tch-backend", "relayrl_types/tch-model"]
 
 logging = ["log4rs"]
 metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]
@@ -43,7 +39,7 @@ profile = ["flamegraph", "console-subscriber"]
 [dependencies]
 # Crates built/maintained by me
 relayrl_types = { workspace = true, features = ["ndarray-backend", "onnx-model"] }
-# relayrl_algorithms = { workspace = true }
+relayrl_algorithms = { workspace = true }
 active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
@@ -71,7 +67,7 @@ arrow-array = { workspace = true }
 
 # Optional dependencies
 zmq = { version = "0.10.0", optional = true }
-async-nats = { version = "0.46.0", features = ["jetstream"], optional = true }
+async-nats = { version = "0.47.0", features = ["jetstream"], optional = true }
 prometheus = { version = "0.14.0", features = ["process"], optional = true }
 opentelemetry_sdk = { version = "0.31.0", features = ["metrics", "rt-tokio"], optional = true }
 opentelemetry = { version = "0.31.0", optional = true}
