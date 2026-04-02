@@ -16,6 +16,10 @@ relayrl_algorithms = { version = "0.1.0", path = "crates/relayrl_algorithms"}
 burn-tensor = "0.20.1"
 burn-ndarray = "0.20.1"
 burn-tch = "0.20.1"
+burn-autodiff = "0.20.1"
+burn-core = "0.20.1"
+burn-optim = "0.20.1"
+burn-nn = "0.20.1"
 
 tokio = "1.50.0"
 
@@ -25,6 +29,10 @@ serde_json = "1.0.149"
 dashmap = "6.1.0"
 
 uuid = "1.22.0"
+
+log = "0.4.29"
+
+rand = "0.10.0"
 
 ndarray = "0.17.2"
 
@@ -40,7 +48,6 @@ async-trait = "0.1.89"
 arrow = "57.3.0"
 arrow-schema = "57.3.0"
 arrow-array = "57.3.0"
-
 csv = "1.4.0"
 
 [profile.dev]
