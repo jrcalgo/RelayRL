@@ -12,6 +12,8 @@ use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
 use crate::utilities::configuration::ClientConfigLoader;
+#[cfg(feature = "metrics")]
+use crate::utilities::observability::metrics::MetricsManager;
 
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{BackendMatcher, ConversionBurnTensor, DeviceType};
@@ -26,6 +28,8 @@ use bincode::config;
 use log::*;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "metrics")]
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -80,6 +84,7 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
         rx_from_router: Receiver<RoutedMessage>,
         shared_tx_to_buffer: Sender<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) -> Self
     where
         Self: Sized;
@@ -112,6 +117,8 @@ pub(crate) struct Actor<
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_buffer: Sender<RoutedMessage>,
     shared_client_modes: Arc<ClientModes>,
+    #[cfg(feature = "metrics")]
+    metrics: MetricsManager,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -165,6 +172,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     async fn perform_local_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
+        #[cfg(feature = "metrics")]
+        let start_time = Instant::now();
+
         // Clone the Arc so the closure owns an independent reference count.
         // In Shared mode all actors clone the same underlying Arc; in Independent mode
         // each actor has its own Arc.
@@ -172,23 +182,46 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
         let actor_id = self.actor_id;
 
-        let r4sa = tokio::task::spawn_blocking(move || -> Result<RelayRLAction, ModelError> {
-            let guard = model_handle.blocking_read();
-            let reloadable_model = guard.as_ref().ok_or_else(|| {
-                ModelError::IoError("Model not loaded/available for actor inference".to_string())
+        let result = async {
+            let r4sa = tokio::task::spawn_blocking(move || -> Result<RelayRLAction, ModelError> {
+                let guard = model_handle.blocking_read();
+                let reloadable_model = guard.as_ref().ok_or_else(|| {
+                    ModelError::IoError("Model not loaded/available for actor inference".to_string())
+                })?;
+                reloadable_model.forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
+            })
+            .await
+            .map_err(|e| ActorError::SystemError(format!("spawn_blocking join error: {e}")))?
+            .map_err(ActorError::from)?;
+
+            self.current_traj.add_action(r4sa.clone());
+            reply_to.send(Arc::new(r4sa)).map_err(|e| {
+                ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
-            reloadable_model.forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
-        })
-        .await
-        .map_err(|e| ActorError::SystemError(format!("spawn_blocking join error: {e}")))?
-        .map_err(ActorError::from)?;
 
-        self.current_traj.add_action(r4sa.clone());
-        reply_to.send(Arc::new(r4sa)).map_err(|e| {
-            ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
-        })?;
+            Ok(())
+        }
+        .await;
 
-        Ok(())
+        #[cfg(feature = "metrics")]
+        match &result {
+            Ok(()) => {
+                let duration = start_time.elapsed().as_secs_f64();
+                self.metrics
+                    .record_histogram("actor_local_inference_latency", duration, &[])
+                    .await;
+                self.metrics
+                    .record_counter("actor_local_inferences", 1, &[])
+                    .await;
+            }
+            Err(_) => {
+                self.metrics
+                    .record_counter("actor_local_inference_failures", 1, &[])
+                    .await;
+            }
+        }
+
+        result
     }
 
     /// Server inference: serialize observation (and optionally mask) and send to server.
@@ -237,30 +270,58 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn perform_flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::FlagLastInference { reward } = msg.payload {
-            let actor_id = self.actor_id;
-            let mut last_action =
-                RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
-            last_action.update_reward(reward);
-            self.current_traj.add_action(last_action);
+            #[cfg(feature = "metrics")]
+            let start_time = Instant::now();
 
-            let traj_clone = self.current_traj.clone();
-            let now = SystemTime::now();
-            let duration = now
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
-            let send_traj_msg = RoutedMessage {
-                actor_id: self.actor_id,
-                protocol: RoutingProtocol::SendTrajectory,
-                payload: RoutedPayload::SendTrajectory {
-                    timestamp: (duration.as_millis(), duration.as_nanos()),
-                    trajectory: traj_clone,
-                },
-            };
+            let result = async {
+                let actor_id = self.actor_id;
+                let mut last_action =
+                    RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
+                last_action.update_reward(reward);
+                self.current_traj.add_action(last_action);
 
-            self.shared_tx_to_buffer
-                .send(send_traj_msg)
-                .await
-                .map_err(|e| ActorError::TrajectorySendError(format!("{e:?}")))?;
+                let traj_clone = self.current_traj.clone();
+                let now = SystemTime::now();
+                let duration = now
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
+                let send_traj_msg = RoutedMessage {
+                    actor_id: self.actor_id,
+                    protocol: RoutingProtocol::SendTrajectory,
+                    payload: RoutedPayload::SendTrajectory {
+                        timestamp: (duration.as_millis(), duration.as_nanos()),
+                        trajectory: traj_clone,
+                    },
+                };
+
+                self.shared_tx_to_buffer
+                    .send(send_traj_msg)
+                    .await
+                    .map_err(|e| ActorError::TrajectorySendError(format!("{e:?}")))?;
+
+                Ok(())
+            }
+            .await;
+
+            #[cfg(feature = "metrics")]
+            match &result {
+                Ok(()) => {
+                    let duration = start_time.elapsed().as_secs_f64();
+                    self.metrics
+                        .record_histogram("actor_flag_last_action_latency", duration, &[])
+                        .await;
+                    self.metrics
+                        .record_counter("actor_flag_last_actions", 1, &[])
+                        .await;
+                }
+                Err(_) => {
+                    self.metrics
+                        .record_counter("actor_flag_last_action_failures", 1, &[])
+                        .await;
+                }
+            }
+
+            return result;
         }
         Ok(())
     }
@@ -285,6 +346,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         rx_from_router: Receiver<RoutedMessage>,
         shared_tx_to_buffer: Sender<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) -> Self
     where
         Self: Sized,
@@ -315,6 +377,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             rx_from_router,
             shared_tx_to_buffer,
             shared_client_modes,
+            #[cfg(feature = "metrics")]
+            metrics,
         };
 
         actor
@@ -363,88 +427,136 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
             }
 
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            if let Some(training_dispatcher) = &self.shared_training_dispatcher {
-                log::info!(
-                    "[Actor {:?}] Starting training model handshake",
-                    self.actor_id
-                );
+            #[cfg(feature = "metrics")]
+            let start_time = Instant::now();
 
-                let shared_transport_addresses = self
-                    .shared_transport_addresses
-                    .as_ref()
-                    .ok_or_else(|| {
-                        ActorError::SystemError("Server addresses not available".into())
-                    })?
-                    .clone();
-
-                let actor_entry = (
-                    self.client_namespace.to_string(),
-                    crate::network::ACTOR_CONTEXT.to_string(),
-                    self.actor_id,
-                );
-
-                if let Ok(Some(model)) = training_dispatcher
-                    .initial_model_handshake(actor_entry, shared_transport_addresses)
-                    .await
+            let result: Result<bool, ActorError> = async {
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 {
-                    log::info!(
-                        "[Actor {:?}] Model handshake successful, received model data",
-                        self.actor_id
-                    );
+                    if let Some(training_dispatcher) = &self.shared_training_dispatcher {
+                        log::info!(
+                            "[Actor {:?}] Starting training model handshake",
+                            self.actor_id
+                        );
 
-                    if let Err(e) = model.save(&self.shared_local_model_path.read().await.clone()) {
-                        log::error!("[Actor {:?}] Failed to save model: {:?}", self.actor_id, e);
-                    }
+                        let shared_transport_addresses = self
+                            .shared_transport_addresses
+                            .as_ref()
+                            .ok_or_else(|| {
+                                ActorError::SystemError("Server addresses not available".into())
+                            })?
+                            .clone();
 
-                    let model_path = self.shared_local_model_path.clone();
-                    let model_device = self.model_device.clone();
-                    let actor_id = self.actor_id;
+                        let actor_entry = (
+                            self.client_namespace.to_string(),
+                            crate::network::ACTOR_CONTEXT.to_string(),
+                            self.actor_id,
+                        );
 
-                    let mut model_guard = self.reloadable_model.write().await;
-                    match model_guard.as_ref() {
-                        Some(existing_model) => {
-                            let version = existing_model.version() + 1;
-                            existing_model
-                                .reload_from_path(model_path.read().await.clone(), version)
-                                .await
-                                .map_err(|e| {
+                        match training_dispatcher
+                            .initial_model_handshake(actor_entry, shared_transport_addresses)
+                            .await
+                        {
+                            Ok(Some(model)) => {
+                                log::info!(
+                                    "[Actor {:?}] Model handshake successful, received model data",
+                                    self.actor_id
+                                );
+
+                                if let Err(e) =
+                                    model.save(&self.shared_local_model_path.read().await.clone())
+                                {
                                     log::error!(
-                                        "[Actor {:?}] Failed to reload model: {:?}",
-                                        actor_id,
+                                        "[Actor {:?}] Failed to save model: {:?}",
+                                        self.actor_id,
                                         e
                                     );
-                                    ActorError::from(e)
-                                })?;
+                                }
+
+                                let model_path = self.shared_local_model_path.clone();
+                                let model_device = self.model_device.clone();
+                                let actor_id = self.actor_id;
+
+                                let mut model_guard = self.reloadable_model.write().await;
+                                match model_guard.as_ref() {
+                                    Some(existing_model) => {
+                                        let version = existing_model.version() + 1;
+                                        existing_model
+                                            .reload_from_path(
+                                                model_path.read().await.clone(),
+                                                version,
+                                            )
+                                            .await
+                                            .map_err(|e| {
+                                                log::error!(
+                                                    "[Actor {:?}] Failed to reload model: {:?}",
+                                                    actor_id,
+                                                    e
+                                                );
+                                                ActorError::from(e)
+                                            })?;
+                                    }
+                                    None => {
+                                        *model_guard = Some(
+                                            HotReloadableModel::<B>::new_from_module(
+                                                model,
+                                                model_device,
+                                            )
+                                            .await
+                                            .map_err(ActorError::from)?,
+                                        );
+                                    }
+                                }
+
+                                Ok(true)
+                            }
+                            _ => {
+                                log::error!(
+                                    "[Actor {:?}] Model handshake failed or no model update needed",
+                                    self.actor_id
+                                );
+                                Ok(false)
+                            }
                         }
-                        None => {
-                            *model_guard = Some(
-                                HotReloadableModel::<B>::new_from_module(model, model_device)
-                                    .await
-                                    .map_err(ActorError::from)?,
-                            );
-                        }
+                    } else {
+                        log::error!(
+                            "[Actor {:?}] No transport dispatcher configured for model handshake",
+                            self.actor_id
+                        );
+                        Ok(false)
                     }
-                } else {
+                }
+
+                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+                {
                     log::error!(
-                        "[Actor {:?}] Model handshake failed or no model update needed",
+                        "[Actor {:?}] No transport dispatcher configured for model handshake",
                         self.actor_id
                     );
+                    Ok(false)
                 }
-            } else {
-                log::error!(
-                    "[Actor {:?}] No transport dispatcher configured for model handshake",
-                    self.actor_id
-                );
+            }
+            .await;
+
+            #[cfg(feature = "metrics")]
+            match &result {
+                Ok(true) => {
+                    let duration = start_time.elapsed().as_secs_f64();
+                    self.metrics
+                        .record_histogram("actor_model_handshake_latency", duration, &[])
+                        .await;
+                    self.metrics
+                        .record_counter("actor_model_handshakes", 1, &[])
+                        .await;
+                }
+                Ok(false) | Err(_) => {
+                    self.metrics
+                        .record_counter("actor_model_handshake_failures", 1, &[])
+                        .await;
+                }
             }
 
-            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-            {
-                log::error!(
-                    "[Actor {:?}] No transport dispatcher configured for model handshake",
-                    self.actor_id
-                );
-            }
+            return result.map(|_| ());
         }
 
         Ok(())
@@ -473,50 +585,80 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             version,
         } = msg.payload
         {
-            let model: Result<ModelModule<B>, ModelError> =
-                deserialize_model_module::<B>(model_bytes, self.model_device.clone());
-            let model_path: PathBuf = self.shared_local_model_path.read().await.clone();
+            #[cfg(feature = "metrics")]
+            let start_time = Instant::now();
 
-            if let Ok(ok_model) = model {
-                if let Err(e) = validate_module::<B>(&ok_model).map_err(ActorError::from) {
-                    log::error!(
-                        "[ActorEntity {:?}] Failed to validate model: {:?}",
-                        self.actor_id,
-                        e
-                    );
-                    return Err(e);
-                }
+            let result: Result<bool, ActorError> = async {
+                let model: Result<ModelModule<B>, ModelError> =
+                    deserialize_model_module::<B>(model_bytes, self.model_device.clone());
+                let model_path: PathBuf = self.shared_local_model_path.read().await.clone();
 
-                if let Err(e) = ok_model.save(&model_path).map_err(ActorError::from) {
-                    log::error!(
-                        "[ActorEntity {:?}] Failed to save model: {:?}",
-                        self.actor_id,
-                        e
-                    );
-                    return Err(e);
-                }
-
-                // Acquire the outer write lock; in Shared mode this also blocks other actors
-                // from running inference until the swap is complete.
-                let model_device = self.model_device.clone();
-                let mut model_guard = self.reloadable_model.write().await;
-                match model_guard.as_ref() {
-                    Some(existing_model) => {
-                        existing_model
-                            .reload_from_module(ok_model, version)
-                            .await
-                            .map_err(ActorError::from)?;
-                    }
-                    None => {
-                        // Model handle is empty; initialise it now so the actor can run.
-                        *model_guard = Some(
-                            HotReloadableModel::<B>::new_from_module(ok_model, model_device)
-                                .await
-                                .map_err(ActorError::from)?,
+                if let Ok(ok_model) = model {
+                    if let Err(e) = validate_module::<B>(&ok_model).map_err(ActorError::from) {
+                        log::error!(
+                            "[ActorEntity {:?}] Failed to validate model: {:?}",
+                            self.actor_id,
+                            e
                         );
+                        return Err(e);
                     }
+
+                    if let Err(e) = ok_model.save(&model_path).map_err(ActorError::from) {
+                        log::error!(
+                            "[ActorEntity {:?}] Failed to save model: {:?}",
+                            self.actor_id,
+                            e
+                        );
+                        return Err(e);
+                    }
+
+                    // Acquire the outer write lock; in Shared mode this also blocks other actors
+                    // from running inference until the swap is complete.
+                    let model_device = self.model_device.clone();
+                    let mut model_guard = self.reloadable_model.write().await;
+                    match model_guard.as_ref() {
+                        Some(existing_model) => {
+                            existing_model
+                                .reload_from_module(ok_model, version)
+                                .await
+                                .map_err(ActorError::from)?;
+                        }
+                        None => {
+                            // Model handle is empty; initialise it now so the actor can run.
+                            *model_guard = Some(
+                                HotReloadableModel::<B>::new_from_module(ok_model, model_device)
+                                    .await
+                                    .map_err(ActorError::from)?,
+                            );
+                        }
+                    }
+
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
             }
+            .await;
+
+            #[cfg(feature = "metrics")]
+            match &result {
+                Ok(true) => {
+                    let duration = start_time.elapsed().as_secs_f64();
+                    self.metrics
+                        .record_histogram("actor_model_refresh_latency", duration, &[])
+                        .await;
+                    self.metrics
+                        .record_counter("actor_model_refreshes", 1, &[])
+                        .await;
+                }
+                Ok(false) | Err(_) => {
+                    self.metrics
+                        .record_counter("actor_model_refresh_failures", 1, &[])
+                        .await;
+                }
+            }
+
+            return result.map(|_| ());
         }
 
         Ok(())
@@ -627,6 +769,8 @@ mod unit_tests {
             rx_from_router,
             tx_to_buffer,
             disabled_data_mode(),
+            #[cfg(feature = "metrics")]
+            test_metrics(),
         )
         .await;
 
@@ -662,6 +806,8 @@ mod unit_tests {
             rx_from_router,
             tx_to_buffer,
             disabled_data_mode(),
+            #[cfg(feature = "metrics")]
+            test_metrics(),
         )
         .await;
 
@@ -678,6 +824,15 @@ mod unit_tests {
             protocol,
             payload,
         }
+    }
+
+    #[cfg(feature = "metrics")]
+    fn test_metrics() -> MetricsManager {
+        MetricsManager::new(
+            Arc::new(RwLock::new(("test-actor".to_string(), String::new()))),
+            ("test-actor".to_string(), String::new()),
+            None,
+        )
     }
 
     #[tokio::test]
