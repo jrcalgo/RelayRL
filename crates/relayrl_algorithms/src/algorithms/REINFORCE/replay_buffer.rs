@@ -1,16 +1,27 @@
-;6use crate::templates::base_replay_buffer::*;
-
+use crate::algorithms::{compute_normed_advantages, discounted_cumsum, scalar_stats};
+use crate::templates::base_replay_buffer::{
+    Batch, BatchKey, BufferSample, BufferTensors, GenericReplayBuffer, ReplayBufferError,
+    SampleScalars,
+};
+use async_trait::async_trait;
+use relayrl_types::prelude::action::RelayRLData;
+use relayrl_types::prelude::tensor::relayrl::TensorData;
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 struct Buffers {
     observations: BufferTensors,
     actions: BufferTensors,
-    mask: BufferTensors,
+    masks: BufferTensors,
     rewards: Vec<f32>,
-    advantages: BufferTensors,
+    advantages: Vec<f32>,
     returns: Vec<f32>,
-    logprob: BufferTensors,
-    values: Option<BufferTensors>,
+    logprobs: BufferTensors,
+    values: Option<Vec<f32>>,
 }
 
 struct BufferMetadata {
@@ -24,208 +35,213 @@ struct BufferMetadata {
 
 pub struct ReinforceReplayBuffer {
     buffers: Arc<Mutex<Buffers>>,
-    metadata: Arc<BufferMetadata>
+    metadata: Arc<BufferMetadata>,
 }
 
-impl REINFORCEReplayBuffer {
-    fn new(buffer_size: usize, gamma: f32, lambda: f32, with_vf_baseline: bool) -> Self {
+impl Default for ReinforceReplayBuffer {
+    fn default() -> Self {
+        Self::new(1_000_000, 0.98, 0.97, false)
+    }
+}
+
+impl ReinforceReplayBuffer {
+    pub fn new(buffer_size: usize, gamma: f32, lambda: f32, with_vf_baseline: bool) -> Self {
         let buffers = Buffers {
-            observations: BufferTensors::new(),
-            actions: BufferTensors::new(),
-            masks: BufferTensors::new(),
-            advantages: BufferTensors::new(),
-            rewards: Vec::<f32>::new(),
-            returns: Vec::<f32>::new(),
-            logprobs: BufferTensors::new(),
-            values: {
-                match self.with_vf_baseline {
-                    true => Some(BufferTensors::new()),
-                    false => None,
-                }
-            }
-        }
+            observations: Vec::with_capacity(buffer_size),
+            actions: Vec::with_capacity(buffer_size),
+            masks: Vec::with_capacity(buffer_size),
+            rewards: Vec::with_capacity(buffer_size),
+            advantages: Vec::with_capacity(buffer_size),
+            returns: Vec::with_capacity(buffer_size),
+            logprobs: Vec::with_capacity(buffer_size),
+            values: with_vf_baseline.then(|| Vec::with_capacity(buffer_size)),
+        };
 
         Self {
-            buffers,
-            metadata: BufferMetadata {
+            buffers: Arc::new(Mutex::new(buffers)),
+            metadata: Arc::new(BufferMetadata {
                 gamma,
                 lambda,
                 with_vf_baseline,
                 buffer_size,
                 buffer_pointer: AtomicUsize::new(0),
-                buffer_path_start_idx: AtomicUsize::new(0)
-            }
+                buffer_path_start_idx: AtomicUsize::new(0),
+            }),
         }
-
     }
 
-    async fn compute_path_end(&self, final_value: Option<f32>) {
-        let buffer_lock = self.buffer.lock().await?;
+    fn tensor_scalar_f32(data: &TensorData) -> f32 {
+        let values: &[f32] = bytemuck::cast_slice(&data.data);
+        values.first().copied().unwrap_or(0.0)
+    }
 
-        let final_value.unwrap_or(0);
-
+    fn finish_path(&self, buffers: &mut Buffers, final_value: Option<f32>) {
+        let final_value = final_value.unwrap_or(0.0);
         let start = self.metadata.buffer_path_start_idx.load(Ordering::SeqCst);
         let end = self.metadata.buffer_pointer.load(Ordering::SeqCst);
-
+        if start >= end {
+            return;
+        }
         let slice = start..end;
 
         if self.metadata.with_vf_baseline {
-            let rewards = buffer_lock.rewards[slice.clone()].to_vec();
-            let values = buffer_lock.values[slice.clone()].to_vec();
+            let mut rewards = buffers.rewards[slice.clone()].to_vec();
+            let mut values = buffers
+                .values
+                .as_ref()
+                .map(|v| v[slice.clone()].to_vec())
+                .unwrap_or_default();
             rewards.push(final_value);
             values.push(final_value);
 
-            let deltas = (0..rewards.len()-1).map(|i| rewards[i] + self.metadata.gamma * vals[i+1] - values[i]).collect();
-
-            let advantages = discounted_cumsum(&deltas, self.metadata.gamma * self.metadata.lambda)?;
-            buffer_lock.advantages[slice.clone()].copy_from_slice(&advantages);
+            let deltas: Vec<f32> = (0..rewards.len() - 1)
+                .map(|i| rewards[i] + self.metadata.gamma * values[i + 1] - values[i])
+                .collect();
+            let advantages = discounted_cumsum(&deltas, self.metadata.gamma * self.metadata.lambda);
+            buffers.advantages[slice.clone()].copy_from_slice(&advantages);
+            buffers.returns[slice.clone()].copy_from_slice(&discounted_cumsum(
+                &buffers.rewards[slice.clone()],
+                self.metadata.gamma,
+            ));
         } else {
-            let rewards = buffer_writer.rewards[slice.clone()];
-
-            let advantages = discounted_cumsum(&rewards, self.metadata.gamma)?;
-            buffer_lock.advantages[slice.clone()].copy_from_slice(&advantages);
-
-            let returns = discounted_cumsum(&rewards, self.metadata.gamma)?;
-            buffer_lock.returns[slice.clone()].copy_from_slice(&returns);
+            let rewards = &buffers.rewards[slice.clone()];
+            let advantages = discounted_cumsum(rewards, self.metadata.gamma);
+            let returns = discounted_cumsum(rewards, self.metadata.gamma);
+            buffers.advantages[slice.clone()].copy_from_slice(&advantages);
+            buffers.returns[slice.clone()].copy_from_slice(&returns);
         }
 
-        self.metadata.buffer_path_start_idx.store(end, Ordering::SeqCst);
+        self.metadata
+            .buffer_path_start_idx
+            .store(end, Ordering::SeqCst);
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> GenericReplayBuffer<B> for REINFORCEReplayBuffer {
-    async fn insert_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(), ReplayBufferError> {
-        let buffer_lock = self.buffer.lock().await?;
-        for action in trajectory.actions.iter() {
-            match action.obs {
-                Some(obs) => {
-                    buffer_lock.observations.push(Some(obs));
-                },
-                None = buffer_lock.observations.push(None);
-            };
+#[async_trait]
+impl GenericReplayBuffer for ReinforceReplayBuffer {
+    async fn insert_trajectory(
+        &self,
+        trajectory: RelayRLTrajectory,
+    ) -> Result<Box<dyn Any>, ReplayBufferError> {
+        let mut buffers = self.buffers.lock().await;
+        let mut episode_return = 0.0f32;
+        let mut episode_length = 0i32;
 
-            match action.act {
-                Some(act) => {
-                    buffer_lock.actions.push(Some(act));
-                },
-                None => buffer_lock.actions.push(None);
-            };
+        for action in &trajectory.actions {
+            episode_length += 1;
+            let reward = action.get_rew();
+            episode_return += reward;
 
-            match action.mask {
-                Some(mask) => {
-                    buffer_lock.masks.push(Some(mask));
-                },
-                None => buffer_lock.masks.push(None);
-            };
+            buffers.observations.push(action.get_obs().cloned());
+            buffers.actions.push(action.get_act().cloned());
+            buffers.masks.push(action.get_mask().cloned());
+            buffers.logprobs.push(None);
+            buffers.rewards.push(reward);
+            buffers.advantages.push(0.0);
+            buffers.returns.push(0.0);
 
-            buffer_writer.rewards.push(action.rew);
-
-            match action.data {
-                Some(data_map) => {
-                    match data_map.get("logp_a") {
-                        Some(data) => {
-                                match data {
-                                    Tensor(logp_a) => {
-                                        buffer_lock.logprobs.push(Some(logp_a));
-                                    },
-                                    _ => Return Err(ReplayBufferError::TrajectoryInsertionError("`LogProb` expected to be RelayRLData::Tensor"));
-                                }
-                        },
-                        None => buffer_lock.logprobs.push(None);
-                    }
-
-                    if self.with_vf_baseline {
-                        match data_map.get("val") {
-                            Some(data) => {
-                                match data {
-                                    Tensor(val) => {
-                                        buffer_lock.values.push(val);
-                                    },
-                                    _ => Return Err(ReplayBufferError::TrajectoryInsertionError("`Val` expected to be RelayRLData::Tensor"));
-                                }
-                            },
-                            None => buffer_lock.values.push(None);
-                        }
-                    }
-                },
-                None => {
-                    buffer_lock.logprobs.push(None);
-
-                    if self.with_vf_baseline {
-                        buffer_writer.values.push(None);
+            if let Some(map) = action.get_data() {
+                if let Some(RelayRLData::Tensor(logp)) = map.get("logp_a")
+                    && let Some(slot) = buffers.logprobs.last_mut()
+                {
+                    *slot = Some(logp.clone());
+                }
+                if self.metadata.with_vf_baseline {
+                    let value = match map.get("val") {
+                        Some(RelayRLData::Tensor(val)) => Self::tensor_scalar_f32(val),
+                        _ => 0.0,
+                    };
+                    if let Some(values) = buffers.values.as_mut() {
+                        values.push(value);
                     }
                 }
-            };
+            } else if self.metadata.with_vf_baseline
+                && let Some(values) = buffers.values.as_mut()
+            {
+                values.push(0.0);
+            }
 
-            self.metadata.buffer_pointer.store((self.metadata.buffer_lock.load(Ordering::SeqCst) + 1) as usize, Ordering::SeqCst);
+            let next = self.metadata.buffer_pointer.load(Ordering::SeqCst) + 1;
+            self.metadata.buffer_pointer.store(next, Ordering::SeqCst);
+
+            if action.get_done() {
+                self.finish_path(&mut buffers, Some(reward));
+            }
         }
 
-        Ok(())
+        Ok(Box::new((episode_return, episode_length)))
     }
 
-    async fn sample_buffer<const N: usize>(&self) -> Result<Batch, ReplayBufferError> {
-        assert!(self.metadata.buffer_pointer < self.metadata.buffer_size);
-
-        let buffer_lock = self.buffer.lock().await?;
-
-        let capacity = self.metadata.buffer_pointer(load(Ordering::SeqCst));
-        self.metadata.buffer_pointer.store(0, Ordering::SeqCst);
-        self.metadata.buffer_path_start_idx(0, Ordering::SeqCst);
-
-        let boxed_adv: Box<[TensorData]> = {
-            let adv_buffer = &buffer_lock.advantages;
-            let adv_at_capacity = adv_buffer[..capacity];
-
-            let (adv_mean, adv_std) = scalar_stats(adv_at_capacity)?;
-
-            let advantages = compute_normed_advantages(&adv_at_capacity, adv_mean, adv_std)?;
-
-            advantages.to_vec().to_boxed_slice()
-        };
-
-        let boxed_obs: Box<[TensorData]> = {
-            let obs_buffer = &buffer_lock.observations;
-            let obs_at_capacity = obs_buffer[..capacity];
-
-            obs_at_capacity.to_vec().to_boxed_slice()
-        };
-
-        let boxed_act: Box<[TensorData]> = {
-            let act_buffer = &buffer_lock.actions;
-            let act_at_capacity = act_buffer[..capacity];
-
-            act_at_capacity.to_vec().to_boxed_slice()
-        };
-
-        let boxed_mask: Box<[TensorData]> = {
-            let mask_buffer = &buffer_lock.masks;
-            let mask_at_capacity = mask_buffer[..capacity];
-
-            mask_at_capacity.to_vec().to_boxed_slice()
-        };
-
-        let boxed_ret: Box<[f32]> = {
-            let ret_buffer = &buffer_lock.returns;
-            let ret_at_capacity = ret_buffer[..capacity];
-
-            ret_at_capacity.to_vec().to_boxed_slice()
-        };
-
-        let boxed_logp: Box<[TensorData]> = {
-            let logp_buffer = &buffer_lock.logprobs;
-            let logp_at_capacity = logp_buffer[..capacity];
-
-            logp_at_capacity.to_vec().to_boxed_slice()
+    async fn sample_buffer(&self) -> Result<Batch, ReplayBufferError> {
+        let mut buffers = self.buffers.lock().await;
+        let capacity = self.metadata.buffer_pointer.load(Ordering::SeqCst);
+        if capacity == 0 {
+            return Err(ReplayBufferError::BufferSamplingError(
+                "Replay buffer is empty".to_string(),
+            ));
+        }
+        if capacity > self.metadata.buffer_size {
+            return Err(ReplayBufferError::BufferSamplingError(
+                "Replay buffer capacity exceeded".to_string(),
+            ));
         }
 
-        let batch = Batch::new();
+        let adv_raw = &buffers.advantages[..capacity];
+        let (adv_mean, adv_std) = scalar_stats(adv_raw);
+        let adv_norm = compute_normed_advantages(adv_raw, adv_mean, adv_std.max(1e-8));
 
-        batch.insert(BatchKey::Obs, BufferSample::Tensors(boxed_obs));
-        batch.insert(BatchKey::Act, BufferSample::Tensors(boxed_act));
-        batch.insert(BatchKey::Mask, BufferSample::Tensors(boxed_mask));
-        batch.insert(BatchKey::Custom("Adv"), BufferSample::Tensors(boxed_adv));
-        batch.insert(BatchKey::Custom("Ret"), BufferSample::Scalars(SampleScalars::F32(boxed_ret)));
-        batch.insert(BatchKey::Custom("LogP"), BufferSample::Tensors(boxed_logp));
+        let obs: Vec<TensorData> = buffers.observations[..capacity]
+            .iter()
+            .filter_map(|x| x.clone())
+            .collect();
+        let act: Vec<TensorData> = buffers.actions[..capacity]
+            .iter()
+            .filter_map(|x| x.clone())
+            .collect();
+        let mask: Vec<TensorData> = buffers.masks[..capacity]
+            .iter()
+            .filter_map(|x| x.clone())
+            .collect();
+        let logp: Vec<TensorData> = buffers.logprobs[..capacity]
+            .iter()
+            .filter_map(|x| x.clone())
+            .collect();
+        let ret: Vec<f32> = buffers.returns[..capacity].to_vec();
+
+        self.metadata.buffer_pointer.store(0, Ordering::SeqCst);
+        self.metadata
+            .buffer_path_start_idx
+            .store(0, Ordering::SeqCst);
+        buffers.observations.clear();
+        buffers.actions.clear();
+        buffers.masks.clear();
+        buffers.rewards.clear();
+        buffers.advantages.clear();
+        buffers.returns.clear();
+        buffers.logprobs.clear();
+        if let Some(values) = buffers.values.as_mut() {
+            values.clear();
+        }
+
+        let mut batch: HashMap<BatchKey, BufferSample> = HashMap::new();
+        batch.insert(BatchKey::Obs, BufferSample::Tensors(obs.into_boxed_slice()));
+        batch.insert(BatchKey::Act, BufferSample::Tensors(act.into_boxed_slice()));
+        batch.insert(
+            BatchKey::Mask,
+            BufferSample::Tensors(mask.into_boxed_slice()),
+        );
+        batch.insert(
+            BatchKey::Custom("Adv".to_string()),
+            BufferSample::Scalars(SampleScalars::F32(adv_norm.into_boxed_slice())),
+        );
+        batch.insert(
+            BatchKey::Custom("Ret".to_string()),
+            BufferSample::Scalars(SampleScalars::F32(ret.into_boxed_slice())),
+        );
+        batch.insert(
+            BatchKey::Custom("LogP".to_string()),
+            BufferSample::Tensors(logp.into_boxed_slice()),
+        );
 
         Ok(batch)
     }
