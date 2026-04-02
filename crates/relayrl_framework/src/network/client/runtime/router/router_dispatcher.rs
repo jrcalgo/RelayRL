@@ -2,6 +2,8 @@ use crate::network::client::runtime::coordination::scale_manager::RouterNamespac
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol};
+#[cfg(feature = "metrics")]
+use crate::utilities::observability::metrics::MetricsManager;
 
 use thiserror::Error;
 
@@ -55,6 +57,8 @@ pub(crate) struct RouterDispatcher<
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     pending_messages: Arc<Mutex<HashMap<ActorUuid, PendingMessage>>>,
+    #[cfg(feature = "metrics")]
+    metrics: MetricsManager,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -64,6 +68,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         global_dispatcher_rx: Receiver<RoutedMessage>,
         router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) -> Self {
         Self {
             global_dispatcher_rx,
@@ -71,6 +76,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             shared_state,
             shutdown: None,
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "metrics")]
+            metrics,
         }
     }
 
@@ -93,9 +100,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let pending_messages = self.pending_messages.clone();
         let router_channels = self.router_channels.clone();
         let shared_state = self.shared_state.clone();
+        #[cfg(feature = "metrics")]
+        let metrics = self.metrics.clone();
         let retry_handle = tokio::spawn(async move {
-            Self::retry_pending_messages_loop(pending_messages, router_channels, shared_state)
-                .await;
+            Self::retry_pending_messages_loop(
+                pending_messages,
+                router_channels,
+                shared_state,
+                #[cfg(feature = "metrics")]
+                metrics,
+            )
+            .await;
         });
 
         loop {
@@ -155,6 +170,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         pending_messages: Arc<Mutex<HashMap<ActorUuid, PendingMessage>>>,
         router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) {
         const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
         const MAX_RETRY_DELAY: Duration = Duration::from_millis(800);
@@ -166,7 +182,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             interval.tick().await;
 
             // Batch operation: Lock once, process all actors, then release
-            let retry_messages = {
+            let (retry_messages, expired_count) = {
                 let mut pending_map = pending_messages.lock().await;
 
                 let mut to_remove: Vec<ActorUuid> = Vec::new();
@@ -224,8 +240,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 // Release lock before async operations
                 drop(pending_map);
 
-                retry_messages
+                (retry_messages, to_remove.len() as u64)
             };
+
+            #[cfg(feature = "metrics")]
+            if expired_count > 0 {
+                metrics
+                    .record_counter("router_messages_expired", expired_count, &[])
+                    .await;
+            }
 
             // Now process retries without holding the lock
             for (actor_id, pending_msg, first_attempt, retry_count) in retry_messages {
@@ -250,6 +273,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                             actor_id,
                                             retry_count
                                         );
+                                        #[cfg(feature = "metrics")]
+                                        metrics
+                                            .record_counter("router_messages_dispatched", 1, &[])
+                                            .await;
                                         // Message successfully sent, don't add back to queue
                                     }
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(msg)) => {
@@ -308,6 +335,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ///
     /// Messages for unassigned actors are queued for retry instead of being dropped.
     async fn dispatch_message(&mut self, msg: RoutedMessage) -> Result<(), RouterDispatcherError> {
+        #[cfg(feature = "metrics")]
+        let start_time = Instant::now();
         let actor_id = msg.actor_id;
 
         // Look up which router this actor is assigned to
@@ -328,6 +357,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             router_namespace, e
                         ))
                     })?;
+                    #[cfg(feature = "metrics")]
+                    {
+                        let duration = start_time.elapsed().as_secs_f64();
+                        self.metrics
+                            .record_histogram("router_dispatch_latency", duration, &[])
+                            .await;
+                        self.metrics
+                            .record_counter("router_messages_dispatched", 1, &[])
+                            .await;
+                    }
                     Ok(())
                 }
                 None => Err(RouterDispatcherError::RouterNotFoundError(format!(
@@ -337,15 +376,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             },
             None => {
                 // Actor not assigned to any router yet - queue for retry
-                let mut pending_map = self.pending_messages.lock().await;
-                pending_map.insert(
-                    actor_id,
-                    PendingMessage {
-                        message: msg,
-                        first_attempt: Instant::now(),
-                        retry_count: 0,
-                    },
-                );
+                {
+                    let mut pending_map = self.pending_messages.lock().await;
+                    pending_map.insert(
+                        actor_id,
+                        PendingMessage {
+                            message: msg,
+                            first_attempt: Instant::now(),
+                            retry_count: 0,
+                        },
+                    );
+                }
+                #[cfg(feature = "metrics")]
+                self.metrics
+                    .record_counter("router_messages_queued", 1, &[])
+                    .await;
                 Err(RouterDispatcherError::ActorNotAssignedError(format!(
                     "Actor {} not assigned to any router (message queued for retry)",
                     actor_id
@@ -363,6 +408,8 @@ mod unit_tests {
     };
     use crate::network::client::runtime::coordination::state_manager::StateManager;
     use crate::network::client::runtime::router::{RoutedPayload, RoutingProtocol};
+    #[cfg(feature = "metrics")]
+    use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
     use std::path::PathBuf;
@@ -396,6 +443,17 @@ mod unit_tests {
             None,
             Arc::new(RwLock::new(PathBuf::new())),
             None,
+            #[cfg(feature = "metrics")]
+            test_metrics(),
+        )
+    }
+
+    #[cfg(feature = "metrics")]
+    fn test_metrics() -> MetricsManager {
+        MetricsManager::new(
+            Arc::new(RwLock::new(("test-router-dispatcher".to_string(), String::new()))),
+            ("test-router-dispatcher".to_string(), String::new()),
+            None,
         )
     }
 
@@ -425,6 +483,8 @@ mod unit_tests {
             global_rx,
             router_channels.clone(),
             shared_state.clone(),
+            #[cfg(feature = "metrics")]
+            test_metrics(),
         );
         (dispatcher, global_tx, router_channels, shared_state)
     }
