@@ -2,11 +2,11 @@
 
 # RelayRL
 
-**Multi-Agent Distributed Reinforcement Learning Framework**
+**Multi-Agent Reinforcement Learning Framework**
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Alpha-red.svg)]()
+[![Status](https://img.shields.io/badge/Status-Beta-orange.svg)]()
 
 *A Rust-native framework for scalable deep reinforcement learning experiments*
 
@@ -17,8 +17,6 @@
 ## Overview
 
 RelayRL is a **monorepo** containing a suite of Rust crates designed for distributed multi-agent reinforcement learning. Built with a Rust-first philosophy, the framework prioritizes performance, type safety, and scalability while maintaining an ergonomic API for single- and multi-agent learning environments.
-
-> **Alpha Software:** This project is under active development. Expect breaking changes and incomplete functionality.
 
 ### Key Highlights
 
@@ -32,9 +30,10 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 
 | Crate | Version | Description |
 |-------|---------|-------------|
-| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-alpha.3` | Core library with client runtime, server scaffolding, and utilities |
-| [`relayrl_types`](crates/relayrl_types/) | `0.5.3` | Data types, tensor containers, inference models, and codec pipeline (compression, encryption, integrity) |
-| [`relayrl_algorithms`](crates/relayrl_algorithms/) | `0.1.0` | Deep RL algorithms (PPO, REINFORCE) — *scaffolding only* |
+| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-beta` | Core library with client runtime, server scaffolding, and utilities |
+| [`relayrl_types`](crates/relayrl_types/) | `0.5.4` | Data types, tensor containers, inference models, and codec pipeline (compression, encryption, integrity) |
+| [`relayrl_algorithms`](crates/relayrl_algorithms/) | `0.1.0` | Deep RL algorithms (PPO, REINFORCE, etc.) |
+| [`relayrl_env_trait`](crates/relayrl_env_trait/) | `1.0.0` | Stable trait impl. for integrating environment logic |
 | [`relayrl_python`](crates/relayrl_python/) | `0.1.0` | Python bindings via PyO3 — *scaffolding only* |
 | [`relayrl_cli`](crates/relayrl_cli/) | `0.1.0` | Command-line interface with gRPC — *scaffolding only* |
 
@@ -58,7 +57,7 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 
 In your Cargo.toml:
 ```toml
-relayrl_framework = "0.5.0-alpha.3"
+relayrl_framework = "0.5.0-beta"
 ```
 
 ### Basic Usage
