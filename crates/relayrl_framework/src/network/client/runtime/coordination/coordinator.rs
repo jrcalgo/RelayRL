@@ -648,6 +648,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     shared_transport_addresses.clone(),
                     shared_local_model_path,
                     state_default_model,
+                    #[cfg(feature = "metrics")]
+                    metrics.clone(),
                 )
             };
 
@@ -673,6 +675,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     shared_transport_addresses.clone(),
                     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                     codec,
+                    #[cfg(feature = "metrics")]
+                    metrics.clone(),
                     lifecycle.clone(),
                 )
                 .map_err(|e| CoordinatorError::ScaleManagerError(e))?
@@ -1010,7 +1014,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .await;
                     params.metrics.record_counter("remove_actor_calls", 1, &[]).await;
                 }
-                
+
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
@@ -1029,7 +1033,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         match &self.runtime_params {
             Some(params) => {
                 #[cfg(feature = "metrics")]
-                params.metrics.record_counter("actor_id_set", 1, &[]).await;
+                let start_time = Instant::now();
 
                 StateManager::<B, D_IN, D_OUT>::set_actor_id(
                     &*params.shared_state.write().await,
@@ -1307,20 +1311,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let start_time = Instant::now();
 
                 let result = {
-                    if cfg!(any(feature = "nats-transport", feature = "zmq-transport")) {
-                        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                        params
-                            .scaling
-                            .scale_out(router_add, true)
-                            .await
-                            .map_err(CoordinatorError::ScaleManagerError)
-                    } else {
-                        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                        params
-                            .scaling
-                            .scale_out(router_add)
-                            .await
-                            .map_err(CoordinatorError::ScaleManagerError)
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    {
+                        params.scaling.scale_out(router_add, true).await.map_err(CoordinatorError::from)
+                    }
+
+                    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+                    {
+                        params.scaling.scale_out(router_add).await.map_err(CoordinatorError::from)
                     }
                 };
 
