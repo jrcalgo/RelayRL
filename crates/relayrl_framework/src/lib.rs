@@ -194,10 +194,8 @@ pub mod utilities {
 /// use relayrl_framework::prelude::templates::*;  // Environment types
 /// ```
 pub mod prelude {
-    pub mod network {
-        pub use crate::network::client::agent::*;
-        // pub use crate::network::server::inference_server::*;
-        // pub use crate::network::server::training_server::*;
+    pub mod algorithms {
+        pub use relayrl_algorithms::algorithms::*;
     }
 
     pub mod config {
@@ -217,30 +215,45 @@ pub mod prelude {
         }
     }
 
-    pub mod tensor {
-        pub mod burn {
-            pub use relayrl_types::prelude::tensor::burn::*;
-        }
-        pub mod relayrl {
-            pub use relayrl_types::prelude::tensor::relayrl::*;
-        }
-    }
-
-    pub mod action {
-        pub use relayrl_types::prelude::action::*;
-    }
-
-    pub mod trajectory {
-        pub use relayrl_types::prelude::trajectory::*;
-    }
-
-    pub mod model {
-        pub use relayrl_types::prelude::model::*;
+    pub mod network {
+        pub use crate::network::client::agent::*;
+        // pub use crate::network::server::inference_server::*;
+        // pub use crate::network::server::training_server::*;
     }
 
     pub mod templates {
-        pub use crate::templates::environment_traits::{
-            EnvironmentError, EnvironmentTestingTrait, EnvironmentTrainingTrait,
-        };
+        pub mod algorithms {
+            pub use relayrl_algorithms::templates::base_algorithm::*;
+            pub use relayrl_algorithms::templates::base_replay_buffer::*;
+        }
+
+        pub mod environment {
+            pub use crate::templates::environment_traits::{
+                EnvironmentError, EnvironmentTestingTrait, EnvironmentTrainingTrait,
+            };
+        }
+    }
+
+    pub mod types {
+        pub mod tensor {
+            pub mod burn {
+                pub use relayrl_types::prelude::tensor::burn::*;
+            }
+            pub mod relayrl {
+                pub use relayrl_types::prelude::tensor::relayrl::*;
+            }
+        }
+    
+        pub mod action {
+            pub use relayrl_types::prelude::action::*;
+        }
+    
+        pub mod trajectory {
+            pub use relayrl_types::prelude::trajectory::*;
+        }
+    
+        pub mod model {
+            pub use relayrl_types::prelude::model::*;
+        }
     }
 }
