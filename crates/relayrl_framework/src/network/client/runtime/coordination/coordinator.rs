@@ -845,6 +845,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<Uuid, CoordinatorError> {
         match self.runtime_params.as_mut() {
             Some(params) => {
+                #[cfg(feature = "metrics")]
+                let start_time = Instant::now();
+
                 let actor_id: Uuid = reserve_id_with(
                     params.client_namespace.as_ref(),
                     crate::network::ACTOR_CONTEXT,
@@ -939,6 +942,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
                 }
 
+                #[cfg(feature = "metrics")]
+                {
+                    let duration: f64 = start_time.elapsed().as_secs_f64();
+                    params
+                        .metrics
+                        .record_histogram("new_actor_latency", duration, &[])
+                        .await;
+                    params
+                        .metrics
+                        .record_counter("new_actor_calls", 1, &[])
+                        .await;
+                }
+
                 Ok(actor_id)
             }
             None => Err(CoordinatorError::StateManagerError(
@@ -957,10 +973,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         match &self.runtime_params {
             Some(params) => {
                 #[cfg(feature = "metrics")]
-                params
-                    .metrics
-                    .record_counter("actors_removed", 1, &[])
-                    .await;
+                let start_time = Instant::now();
+
                 params
                     .shared_state
                     .write()
@@ -987,6 +1001,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .await?;
                 }
 
+                #[cfg(feature = "metrics")]
+                {
+                    let duration: f64 = start_time.elapsed().as_secs_f64();
+                    params
+                        .metrics
+                        .record_histogram("remove_actor_latency", duration, &[])
+                        .await;
+                    params.metrics.record_counter("remove_actor_calls", 1, &[]).await;
+                }
+                
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
@@ -1004,6 +1028,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
+                #[cfg(feature = "metrics")]
+                params.metrics.record_counter("actor_id_set", 1, &[]).await;
+
                 StateManager::<B, D_IN, D_OUT>::set_actor_id(
                     &*params.shared_state.write().await,
                     current_id,
@@ -1021,6 +1048,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .scaling
                         .send_client_ids_to_server(actor_ids, true)
                         .await?;
+                }
+
+                #[cfg(feature = "metrics")]
+                {
+                    let duration: f64 = start_time.elapsed().as_secs_f64();
+                    params
+                        .metrics
+                        .record_histogram("set_actor_id_latency", duration, &[])
+                        .await;
+                    params
+                        .metrics
+                        .record_counter("set_actor_id_calls", 1, &[])
+                        .await;
                 }
 
                 Ok(())
@@ -1042,8 +1082,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                let start_time: Instant = Instant::now();
-                let num_ids: u64 = ids.len() as u64;
+                #[cfg(feature = "metrics")]
+                let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
+
                 let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
 
                 // Extract router runtime params with clear error messages
@@ -1124,17 +1165,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
                 }
 
-                let duration: f64 = start_time.elapsed().as_secs_f64();
                 #[cfg(feature = "metrics")]
-                params
-                    .metrics
-                    .record_histogram("action_request_latency", duration, &[])
-                    .await;
-                #[cfg(feature = "metrics")]
-                params
-                    .metrics
-                    .record_counter("action_requests", num_ids, &[])
-                    .await;
+                {
+                    let duration: f64 = start_time.elapsed().as_secs_f64();
+                    params
+                        .metrics
+                        .record_histogram("action_request_latency", duration, &[])
+                        .await;
+                    params
+                        .metrics
+                        .record_counter("action_requests", num_ids, &[])
+                        .await;
+                }
 
                 Ok(actions)
             }
@@ -1153,6 +1195,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
+                #[cfg(feature = "metrics")]
+                let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
+
                 let global_dispatcher_tx = params
                     .shared_state
                     .read()
@@ -1178,6 +1223,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         ));
                     }
                 }
+
+                #[cfg(feature = "metrics")]
+                {
+                    let duration: f64 = start_time.elapsed().as_secs_f64();
+                    params
+                        .metrics
+                        .record_histogram("flag_last_action_latency", duration, &[])
+                        .await;
+                    params
+                        .metrics
+                        .record_counter("flag_last_action_calls", num_ids, &[])
+                        .await;
+                }
+
                 Ok(())
             }
             None => Err(CoordinatorError::ScaleManagerError(
@@ -1230,6 +1289,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         }
                     }
                 }
+
                 Ok(versions)
             }
             None => Err(CoordinatorError::ScaleManagerError(
@@ -1243,18 +1303,41 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                return params
-                    .scaling
-                    .scale_out(router_add, true)
-                    .await
-                    .map_err(CoordinatorError::ScaleManagerError);
-                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                return params
-                    .scaling
-                    .scale_out(router_add)
-                    .await
-                    .map_err(CoordinatorError::ScaleManagerError);
+                #[cfg(feature = "metrics")]
+                let start_time = Instant::now();
+
+                let result = {
+                    if cfg!(any(feature = "nats-transport", feature = "zmq-transport")) {
+                        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                        params
+                            .scaling
+                            .scale_out(router_add, true)
+                            .await
+                            .map_err(CoordinatorError::ScaleManagerError)
+                    } else {
+                        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+                        params
+                            .scaling
+                            .scale_out(router_add)
+                            .await
+                            .map_err(CoordinatorError::ScaleManagerError)
+                    }
+                };
+
+                #[cfg(feature = "metrics")]
+                {
+                    let duration: f64 = start_time.elapsed().as_secs_f64();
+                    params
+                        .metrics
+                        .record_histogram("scale_out_latency", duration, &[])
+                        .await;
+                    params
+                        .metrics
+                        .record_counter("scale_out_calls", 1, &[])
+                        .await;
+                }
+
+                result
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
@@ -1267,10 +1350,29 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError> {
         match &mut self.runtime_params {
             Some(params) => {
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                params.scaling.scale_in(router_remove, true).await?;
-                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                params.scaling.scale_in(router_remove).await?;
+                #[cfg(feature = "metrics")]
+                let start_time = Instant::now();
+
+                let result = {
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    params.scaling.scale_in(router_remove, true).await?;
+                    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+                    params.scaling.scale_in(router_remove).await?;
+                };
+
+                #[cfg(feature = "metrics")]
+                {
+                    let duration: f64 = start_time.elapsed().as_secs_f64();
+                    params
+                        .metrics
+                        .record_histogram("scale_in_latency", duration, &[])
+                        .await;
+                    params
+                        .metrics
+                        .record_counter("scale_in_calls", 1, &[])
+                        .await;
+                }
+
                 Ok(())
             }
             None => Err(CoordinatorError::ScaleManagerError(
