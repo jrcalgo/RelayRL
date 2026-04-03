@@ -7,7 +7,7 @@ use super::export;
 
 use opentelemetry::{
     InstrumentationScope, KeyValue, global,
-    metrics::{Meter, MeterProvider},
+    metrics::Meter,
 };
 use prometheus::{Counter as PrometheusCounter, Histogram as PrometheusHistogram, Registry};
 use std::sync::{Arc, Mutex};
@@ -115,6 +115,7 @@ impl MetricsManager {
     }
 
     /// Returns the Prometheus registry.
+    #[allow(unused)]
     pub fn prometheus_registry(&self) -> Option<Arc<Mutex<Registry>>> {
         self.prometheus_registry.clone()
     }

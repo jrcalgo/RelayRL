@@ -20,6 +20,7 @@ pub fn create_prometheus_registry() -> Registry {
 ///
 /// * `String` - The metrics in Prometheus text format
 #[cfg(feature = "prometheus")]
+#[allow(unused)]
 pub fn get_metrics_as_string(registry: &Registry) -> String {
     let mut buffer = Vec::new();
     let encoder = TextEncoder::new();

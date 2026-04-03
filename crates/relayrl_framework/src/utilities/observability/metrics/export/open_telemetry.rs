@@ -55,6 +55,7 @@ pub fn init_opentelemetry_with_otlp(otlp_endpoint: &str) {
 /// * `value` - The value to increment by
 /// * `labels` - Labels to attach to the counter
 #[cfg(feature = "opentelemetry")]
+#[allow(unused)]
 pub fn track_counter(name: &str, value: u64, labels: &HashMap<String, String>) {
     let meter = global::meter("relay-rl");
     let counter = meter.u64_counter(name.to_string()).build();
@@ -73,6 +74,7 @@ pub fn track_counter(name: &str, value: u64, labels: &HashMap<String, String>) {
 /// * `value` - The value to record
 /// * `labels` - Labels to attach to the histogram
 #[cfg(feature = "opentelemetry")]
+#[allow(unused)]
 pub fn track_histogram(name: &str, value: f64, labels: &HashMap<String, String>) {
     let meter = global::meter("relay-rl");
     let histogram = meter.f64_histogram(name.to_string()).build();
@@ -94,6 +96,7 @@ pub fn track_histogram(name: &str, value: f64, labels: &HashMap<String, String>)
 ///
 /// * `BoxedSpan` - The created span
 #[cfg(feature = "opentelemetry")]
+#[allow(unused)]
 pub fn create_span(name: &str, labels: &HashMap<String, String>) -> BoxedSpan {
     // Tracing spans are not configured with the current dependency set.
     let tracer = global::tracer("relay-rl");

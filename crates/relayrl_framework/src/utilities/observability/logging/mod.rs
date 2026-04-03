@@ -12,14 +12,6 @@ use log4rs::{
 };
 use std::sync::{Mutex, Once};
 
-// Re-export log to provide users with a consistent interface
-pub use log::{Level, debug, error, info, trace, warn};
-
-// Module exports
-pub mod builder;
-pub mod filters;
-pub mod sinks;
-
 // Global initialization guard
 static INIT: Once = Once::new();
 
@@ -59,6 +51,7 @@ pub fn init_logging() {
 /// # Returns
 ///
 /// * `Result<(), String>` - Success or error message
+#[allow(unused)]
 pub fn init_logging_from_file(config_path: &str) -> Result<(), String> {
     let result = Mutex::new(Ok(()));
     INIT.call_once(
@@ -75,23 +68,4 @@ pub fn init_logging_from_file(config_path: &str) -> Result<(), String> {
     );
 
     result.into_inner().unwrap()
-}
-
-/// Resets and reconfigures logging with builder-created configuration
-///
-/// # Arguments
-///
-/// * `config` - log4rs::Config to use for reconfiguration
-///
-/// # Returns
-///
-/// * `Result<(), String>` - Success or error message
-pub fn reconfigure_logging(config: Config) -> Result<(), String> {
-    match log4rs::init_config(config) {
-        Ok(_) => {
-            log::info!("RelayRL logging reconfigured successfully");
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to reconfigure logging: {}", e)),
-    }
 }
