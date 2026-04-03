@@ -563,6 +563,59 @@ fn validate_entry(
     Ok(entry)
 }
 
+fn build_routed_model_update_message(
+    message_parts: &[Vec<u8>],
+) -> Result<Option<RoutedMessage>, TransportError> {
+    if message_parts.len() < 4 {
+        return Err(TransportError::ListenForModelError(
+            "Malformed model update response".to_string(),
+        ));
+    }
+
+    let model_bytes = message_parts[1].clone();
+    let actor_id_bytes = message_parts[2].clone();
+    let model_version_bytes = &message_parts[3];
+
+    if model_bytes.is_empty() {
+        log::warn!("[ZmqClient] Model bytes are empty");
+        return Ok(None);
+    }
+
+    let actor_id = if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
+        log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
+        return Ok(None);
+    } else {
+        let actor_array: [u8; 16] = actor_id_bytes.as_slice().try_into().map_err(|conversion_error| {
+            TransportError::ListenForModelError(format!(
+                "Failed to convert actor ID bytes to fixed-size array: {}",
+                conversion_error
+            ))
+        })?;
+        Uuid::from_bytes(actor_array)
+    };
+
+    let model_version_byte_array: [u8; 8] =
+        model_version_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                TransportError::ListenForModelError(format!(
+                    "Malformed model update response: invalid version byte length: expected 8, got {}",
+                    model_version_bytes.len()
+                ))
+            })?;
+    let model_version = i64::from_be_bytes(model_version_byte_array);
+
+    Ok(Some(RoutedMessage {
+        actor_id,
+        protocol: RoutingProtocol::ModelUpdate,
+        payload: RoutedPayload::ModelUpdate {
+            model_bytes,
+            version: model_version,
+        },
+    }))
+}
+
 #[repr(i64)]
 enum ServerResponse {
     Success = 0,
@@ -625,63 +678,63 @@ impl ZmqInferenceOps {
 impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_inference_request(
         &self,
-        actor_entry: &(NamespaceString, ContextString, Uuid),
-        action_request: &[u8],
-        inference_server_address: &str,
+        _actor_entry: &(NamespaceString, ContextString, Uuid),
+        _action_request: &[u8],
+        _inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
         unimplemented!();
     }
 
     fn execute_send_flag_last_inference(
         &self,
-        actor_entry: &(NamespaceString, ContextString, Uuid),
-        reward: &f32,
-        inference_server_address: &str,
+        _actor_entry: &(NamespaceString, ContextString, Uuid),
+        _reward: &f32,
+        _inference_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_client_ids(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        client_ids: &[(NamespaceString, ContextString, Uuid)],
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _client_ids: &[(NamespaceString, ContextString, Uuid)],
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_inference_model_init_request<B: Backend + BackendMatcher<Backend = B>>(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        model_mode: &ModelMode,
-        model_module: &Option<ModelModule<B>>,
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _model_mode: &ModelMode,
+        _model_module: &Option<ModelModule<B>>,
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_scaling_warning(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        operation: &ScalingOperation,
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _operation: &ScalingOperation,
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_scaling_complete(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        operation: &ScalingOperation,
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _operation: &ScalingOperation,
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_shutdown_signal(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
@@ -941,38 +994,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 .recv_multipart(0)
             {
                 Ok(message_parts) => {
-                    if message_parts.len() < 3 {
-                        log::error!("[ZmqClient] Malformed model update response");
-                        break Err(TransportError::ListenForModelError(
-                            "Malformed model update response".to_string(),
-                        ));
-                    }
-
-                    let model_bytes = message_parts[1].clone();
-                    let actor_id_bytes = message_parts[2].clone();
-
-                    if model_bytes.is_empty() {
-                        log::warn!("[ZmqClient] Model bytes are empty");
-                        continue;
-                    }
-
-                    let actor_id = {
-                        if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
-                            log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
-                            continue;
-                        } else {
-                            let actor_array = actor_id_bytes.as_array::<16>().cloned().unwrap();
-                            Uuid::from_bytes(actor_array)
+                    let msg = match build_routed_model_update_message(&message_parts) {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            log::error!("[ZmqClient] {}", e);
+                            break Err(e);
                         }
-                    };
-
-                    let msg = RoutedMessage {
-                        actor_id,
-                        protocol: RoutingProtocol::ModelUpdate,
-                        payload: RoutedPayload::ModelUpdate {
-                            model_bytes,
-                            version: 0,
-                        },
                     };
 
                     if let Err(send_error) = global_dispatcher_tx.blocking_send(msg) {
@@ -2079,6 +2107,83 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_model_update_message_parts(
+        actor_id_bytes: [u8; 16],
+        version: i64,
+        model_bytes: &[u8],
+    ) -> Vec<Vec<u8>> {
+        vec![
+            b"model-update".to_vec(),
+            model_bytes.to_vec(),
+            actor_id_bytes.to_vec(),
+            version.to_be_bytes().to_vec(),
+        ]
+    }
+
+    #[test]
+    fn build_routed_model_update_message_parses_versioned_frames() {
+        let message_parts = make_model_update_message_parts([1; 16], 7, &[10, 20]);
+
+        let routed_message = build_routed_model_update_message(&message_parts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(routed_message.actor_id, Uuid::from_bytes([1; 16]));
+        assert!(matches!(routed_message.protocol, RoutingProtocol::ModelUpdate));
+        match routed_message.payload {
+            RoutedPayload::ModelUpdate {
+                model_bytes,
+                version,
+            } => {
+                assert_eq!(model_bytes, vec![10, 20]);
+                assert_eq!(version, 7);
+            }
+            _ => panic!("expected model update payload"),
+        }
+    }
+
+    #[test]
+    fn build_routed_model_update_message_rejects_missing_version_frame() {
+        let message_parts = vec![
+            b"model-update".to_vec(),
+            vec![10, 20],
+            vec![1; 16],
+        ];
+
+        let err = match build_routed_model_update_message(&message_parts) {
+            Ok(_) => panic!("expected malformed message to return an error"),
+            Err(err) => err,
+        };
+
+        match err {
+            TransportError::ListenForModelError(message) => {
+                assert_eq!(message, "Malformed model update response");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn build_routed_model_update_message_rejects_invalid_version_frame_length() {
+        let mut message_parts = make_model_update_message_parts([1; 16], 7, &[10, 20]);
+        message_parts[3] = vec![1, 2, 3, 4];
+
+        let err = match build_routed_model_update_message(&message_parts) {
+            Ok(_) => panic!("expected malformed version frame to return an error"),
+            Err(err) => err,
+        };
+
+        match err {
+            TransportError::ListenForModelError(message) => {
+                assert_eq!(
+                    message,
+                    "Malformed model update response: invalid version byte length: expected 8, got 4"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
 
     #[test]
     fn register_and_stop_model_listener_updates_flag() {
