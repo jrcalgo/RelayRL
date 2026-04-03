@@ -26,6 +26,8 @@ crate-type = ["rlib"]
 default = ["client", "tch-backend", "metrics", "logging"]
 
 client = []
+training-server = []
+inference-server = []
 
 zmq-transport = ["zmq", "relayrl_types/codec-full"]
 nats-transport = ["async-nats", "tokio-stream", "relayrl_types/codec-full"]
