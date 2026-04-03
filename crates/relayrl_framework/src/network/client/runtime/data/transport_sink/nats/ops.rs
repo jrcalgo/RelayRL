@@ -30,11 +30,12 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 
 // Every payload struct is serialized to `bytes::Bytes` via bincode v2 and sent
 // as the body of a NATS/JetStream message.
@@ -326,6 +327,86 @@ fn address_fingerprint(server_address: &str) -> u64 {
     address_hasher.finish()
 }
 
+fn build_routed_model_update_message(
+    model_update_payload_bytes: &[u8],
+) -> Result<RoutedMessage, TransportError> {
+    let deserialized_model_update_broadcast: ModelUpdateBroadcastMessage =
+        deserialize_nats_response_bytes(model_update_payload_bytes, "model update broadcast")?;
+
+    let model_bytes_vector = deserialized_model_update_broadcast.model_bytes;
+    let actor_id_bytes_vector = deserialized_model_update_broadcast.actor_id_bytes;
+    let model_version = deserialized_model_update_broadcast.model_version;
+
+    if model_bytes_vector.is_empty() {
+        return Err(TransportError::ListenForModelError(
+            "Received model update broadcast with empty model bytes".to_string(),
+        ));
+    }
+
+    if actor_id_bytes_vector.len() != 16 {
+        return Err(TransportError::ListenForModelError(format!(
+            "Received model update broadcast with invalid actor ID byte length: \
+             expected 16, got {}",
+            actor_id_bytes_vector.len()
+        )));
+    }
+
+    let actor_id_byte_array: [u8; 16] =
+        actor_id_bytes_vector
+            .as_slice()
+            .try_into()
+            .map_err(|conversion_error| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to convert actor ID bytes to fixed-size array: {}",
+                    conversion_error
+                ))
+            })?;
+
+    Ok(RoutedMessage {
+        actor_id: Uuid::from_bytes(actor_id_byte_array),
+        protocol: RoutingProtocol::ModelUpdate,
+        payload: RoutedPayload::ModelUpdate {
+            model_bytes: model_bytes_vector,
+            version: model_version,
+        },
+    })
+}
+
+async fn forward_model_update_payloads<S, F, Fut>(
+    mut payload_stream: S,
+    global_dispatcher_tx: &Sender<RoutedMessage>,
+    mut is_shutting_down: F,
+) -> Result<(), TransportError>
+where
+    S: Stream<Item = Bytes> + Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    while let Some(model_update_payload) = payload_stream.next().await {
+        let routed_model_update_message =
+            build_routed_model_update_message(model_update_payload.as_ref())?;
+
+        if let Err(send_error) = global_dispatcher_tx.send(routed_model_update_message).await {
+            if is_shutting_down().await {
+                return Ok(());
+            }
+
+            return Err(TransportError::ListenForModelError(format!(
+                "Failed to dispatch model update message to global dispatcher: {}",
+                send_error
+            )));
+        }
+    }
+
+    if is_shutting_down().await {
+        Ok(())
+    } else {
+        Err(TransportError::ListenForModelError(
+            "Model update subscriber closed unexpectedly".to_string(),
+        ))
+    }
+}
+
 pub(super) struct NatsConnectionManager {
     pub(super) client_namespace: Arc<str>,
     inference_client: Option<async_nats::Client>,
@@ -333,6 +414,13 @@ pub(super) struct NatsConnectionManager {
     training_client: Option<async_nats::Client>,
     training_jetstream_context: Option<async_nats::jetstream::Context>,
     training_address_fingerprint: Option<u64>,
+    shutting_down: bool,
+}
+
+struct NatsShutdownClients {
+    client_namespace: Arc<str>,
+    inference_client: Option<async_nats::Client>,
+    training_client: Option<async_nats::Client>,
 }
 
 impl NatsConnectionManager {
@@ -344,7 +432,29 @@ impl NatsConnectionManager {
             training_client: None,
             training_jetstream_context: None,
             training_address_fingerprint: None,
+            shutting_down: false,
         }
+    }
+
+    pub(super) fn is_shutting_down(&self) -> bool {
+        self.shutting_down
+    }
+
+    fn begin_shutdown(&mut self) -> Option<NatsShutdownClients> {
+        if self.shutting_down {
+            return None;
+        }
+
+        self.shutting_down = true;
+        self.inference_address_fingerprint = None;
+        self.training_jetstream_context = None;
+        self.training_address_fingerprint = None;
+
+        Some(NatsShutdownClients {
+            client_namespace: self.client_namespace.clone(),
+            inference_client: self.inference_client.take(),
+            training_client: self.training_client.take(),
+        })
     }
 
     /// Returns a clone of the cached inference `Client`, reconnecting first if
@@ -353,6 +463,12 @@ impl NatsConnectionManager {
         &mut self,
         nats_inference_server_address: &str,
     ) -> Result<async_nats::Client, TransportError> {
+        if self.shutting_down {
+            return Err(TransportError::InvalidState(
+                "NATS transport is shutting down".to_string(),
+            ));
+        }
+
         let incoming_address_fingerprint = address_fingerprint(nats_inference_server_address);
 
         let address_has_changed = match self.inference_address_fingerprint {
@@ -403,6 +519,12 @@ impl NatsConnectionManager {
         &mut self,
         nats_training_server_address: &str,
     ) -> Result<(async_nats::Client, async_nats::jetstream::Context), TransportError> {
+        if self.shutting_down {
+            return Err(TransportError::InvalidState(
+                "NATS transport is shutting down".to_string(),
+            ));
+        }
+
         let incoming_address_fingerprint = address_fingerprint(nats_training_server_address);
 
         let address_has_changed = match self.training_address_fingerprint {
@@ -909,6 +1031,51 @@ impl NatsTrainingOps {
             nats_connection_manager,
         }
     }
+
+    pub(super) async fn is_shutting_down(&self) -> bool {
+        self.nats_connection_manager.read().await.is_shutting_down()
+    }
+
+    pub(super) async fn shutdown(&self) -> Result<(), TransportError> {
+        let shutdown_clients = {
+            let mut nats_connection_manager = self.nats_connection_manager.write().await;
+            nats_connection_manager.begin_shutdown()
+        };
+
+        let Some(shutdown_clients) = shutdown_clients else {
+            return Ok(());
+        };
+
+        let mut drain_errors: Vec<String> = Vec::new();
+
+        if let Some(existing_inference_client) = shutdown_clients.inference_client {
+            if let Err(drain_error) = existing_inference_client.drain().await {
+                drain_errors.push(format!(
+                    "Failed to drain inference NATS client for '{}': {}",
+                    shutdown_clients.client_namespace, drain_error
+                ));
+            }
+        }
+
+        if let Some(existing_training_client) = shutdown_clients.training_client {
+            if let Err(drain_error) = existing_training_client.drain().await {
+                drain_errors.push(format!(
+                    "Failed to drain training NATS client for '{}': {}",
+                    shutdown_clients.client_namespace, drain_error
+                ));
+            }
+        }
+
+        match drain_errors.len() {
+            0 => Ok(()),
+            1 => Err(TransportError::InvalidState(drain_errors.remove(0))),
+            _ => {
+                let second = drain_errors.pop().unwrap_or_default();
+                let first = drain_errors.pop().unwrap_or_default();
+                Err(TransportError::MultipleErrors(first, second))
+            }
+        }
+    }
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for NatsTrainingOps {
@@ -930,6 +1097,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             ));
         }
 
+        if self.is_shutting_down().await {
+            return Ok(());
+        }
+
         let nats_training_client = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
             let (training_client, _training_jetstream_context) = nats_connection_manager
@@ -938,7 +1109,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             training_client
         };
 
-        let mut model_update_subscriber = nats_training_client
+        let model_update_subscriber = nats_training_client
             .subscribe(TRAINING_MODEL_LISTENING_SUBJECT)
             .await
             .map_err(|subscribe_error| {
@@ -948,69 +1119,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
                 ))
             })?;
 
-        let received_nats_message = model_update_subscriber.next().await.ok_or_else(|| {
-            TransportError::ListenForModelError(
-                "Model update subscriber closed without yielding a message".to_string(),
-            )
-        })?;
+        let payload_stream = model_update_subscriber.map(|received_nats_message| {
+            received_nats_message.payload
+        });
 
-        let deserialized_model_update_broadcast: ModelUpdateBroadcastMessage =
-            deserialize_nats_response_bytes(
-                &received_nats_message.payload,
-                "model update broadcast",
-            )?;
-
-        let model_bytes_vector = deserialized_model_update_broadcast.model_bytes;
-        let actor_id_bytes_vector = deserialized_model_update_broadcast.actor_id_bytes;
-        let model_version = deserialized_model_update_broadcast.model_version;
-
-        if model_bytes_vector.is_empty() {
-            return Err(TransportError::ListenForModelError(
-                "Received model update broadcast with empty model bytes".to_string(),
-            ));
-        }
-
-        if actor_id_bytes_vector.len() != 16 {
-            return Err(TransportError::ListenForModelError(format!(
-                "Received model update broadcast with invalid actor ID byte length: \
-                 expected 16, got {}",
-                actor_id_bytes_vector.len()
-            )));
-        }
-
-        let actor_id_byte_array: [u8; 16] =
-            actor_id_bytes_vector
-                .as_slice()
-                .try_into()
-                .map_err(|conversion_error| {
-                    TransportError::ListenForModelError(format!(
-                        "Failed to convert actor ID bytes to fixed-size array: {}",
-                        conversion_error
-                    ))
-                })?;
-
-        let actor_uuid = Uuid::from_bytes(actor_id_byte_array);
-
-        let routed_model_update_message = RoutedMessage {
-            actor_id: actor_uuid,
-            protocol: RoutingProtocol::ModelUpdate,
-            payload: RoutedPayload::ModelUpdate {
-                model_bytes: model_bytes_vector,
-                version: model_version,
-            },
-        };
-
-        global_dispatcher_tx
-            .send(routed_model_update_message)
-            .await
-            .map_err(|send_error| {
-                TransportError::ListenForModelError(format!(
-                    "Failed to dispatch model update message to global dispatcher: {}",
-                    send_error
-                ))
-            })?;
-
-        Ok(())
+        forward_model_update_payloads(payload_stream, global_dispatcher_tx, || async {
+            self.is_shutting_down().await
+        })
+        .await
     }
 
     async fn execute_send_algorithm_init_request(
@@ -1451,5 +1567,108 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    use tokio::sync::mpsc;
+
+    fn make_model_update_payload(actor_id_bytes: [u8; 16], version: i64, model_bytes: &[u8]) -> Bytes {
+        serialize_payload_to_nats_bytes(
+            &ModelUpdateBroadcastMessage {
+                model_bytes: model_bytes.to_vec(),
+                actor_id_bytes: actor_id_bytes.to_vec(),
+                model_version: version,
+            },
+            "model update broadcast",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn forward_model_update_payloads_dispatches_multiple_updates() {
+        let (tx, mut rx) = mpsc::channel::<RoutedMessage>(4);
+        let payload_stream = tokio_stream::iter(vec![
+            make_model_update_payload([1; 16], 3, &[10, 20]),
+            make_model_update_payload([2; 16], 4, &[30, 40]),
+        ]);
+
+        forward_model_update_payloads(payload_stream, &tx, || std::future::ready(true))
+            .await
+            .unwrap();
+
+        let first_message = rx.recv().await.unwrap();
+        assert_eq!(first_message.actor_id, Uuid::from_bytes([1; 16]));
+        assert!(matches!(first_message.protocol, RoutingProtocol::ModelUpdate));
+        match first_message.payload {
+            RoutedPayload::ModelUpdate {
+                model_bytes,
+                version,
+            } => {
+                assert_eq!(model_bytes, vec![10, 20]);
+                assert_eq!(version, 3);
+            }
+            _ => panic!("expected model update payload"),
+        }
+
+        let second_message = rx.recv().await.unwrap();
+        assert_eq!(second_message.actor_id, Uuid::from_bytes([2; 16]));
+        match second_message.payload {
+            RoutedPayload::ModelUpdate {
+                model_bytes,
+                version,
+            } => {
+                assert_eq!(model_bytes, vec![30, 40]);
+                assert_eq!(version, 4);
+            }
+            _ => panic!("expected model update payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_model_update_payloads_returns_ok_when_shutdown_closes_stream() {
+        let (tx, _rx) = mpsc::channel::<RoutedMessage>(1);
+        let payload_stream = tokio_stream::iter(Vec::<Bytes>::new());
+
+        let result =
+            forward_model_update_payloads(payload_stream, &tx, || std::future::ready(true)).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn forward_model_update_payloads_errors_when_stream_closes_unexpectedly() {
+        let (tx, _rx) = mpsc::channel::<RoutedMessage>(1);
+        let payload_stream = tokio_stream::iter(Vec::<Bytes>::new());
+
+        let result =
+            forward_model_update_payloads(payload_stream, &tx, || std::future::ready(false)).await;
+
+        assert!(matches!(
+            result,
+            Err(TransportError::ListenForModelError(message))
+                if message.contains("closed unexpectedly")
+        ));
+    }
+
+    #[tokio::test]
+    async fn connection_manager_shutdown_marks_state_and_blocks_reconnects() {
+        let mut connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        assert!(!connection_manager.is_shutting_down());
+
+        let shutdown_clients = connection_manager.begin_shutdown();
+
+        assert!(shutdown_clients.is_some());
+        assert!(connection_manager.is_shutting_down());
+        assert!(matches!(
+            connection_manager
+                .get_training_client("nats://127.0.0.1:4222")
+                .await,
+            Err(TransportError::InvalidState(message))
+                if message.contains("shutting down")
+        ));
     }
 }

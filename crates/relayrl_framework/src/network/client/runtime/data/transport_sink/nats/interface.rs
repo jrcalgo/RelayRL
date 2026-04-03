@@ -46,6 +46,12 @@ pub(crate) struct NatsInterface<B: Backend + BackendMatcher<Backend = B>> {
     _phantom: PhantomData<B>,
 }
 
+impl<B: Backend + BackendMatcher<Backend = B>> NatsInterface<B> {
+    async fn is_shutting_down(&self) -> bool {
+        self.nats_training_ops.is_shutting_down().await
+    }
+}
+
 #[async_trait]
 impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
     for NatsInterface<B>
@@ -137,7 +143,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
     }
 
     async fn shutdown(&self) -> Result<(), TransportError> {
-        unimplemented!("NatsInterface::shutdown")
+        self.nats_training_ops.shutdown().await
     }
 }
 
@@ -1330,26 +1336,36 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         if protocol.circuit_breaker.is_open() {
             return Err(TransportError::CircuitOpen);
         }
+        if self.is_shutting_down().await {
+            return Ok(());
+        }
 
         let nats_training_server_address: &str = transport_addresses.nats_training_address.as_ref();
         let mut attempts = 0u32;
 
         loop {
-            match tokio::time::timeout(
-                protocol.config.timeout,
-                self.execute_listen_for_model(
+            if self.is_shutting_down().await {
+                return Ok(());
+            }
+
+            match self
+                .execute_listen_for_model(
                     &receiver_entry,
                     &global_dispatcher_tx,
                     nats_training_server_address,
-                ),
-            )
-            .await
+                )
+                .await
             {
-                Ok(Ok(())) => {
+                Ok(()) => {
                     protocol.circuit_breaker.record_success();
                     return Ok(());
                 }
-                Ok(Err(e)) => {
+                Err(_) if self.is_shutting_down().await => {
+                    log::info!("[NatsInterface] Model listener stopped during shutdown");
+                    protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Err(e) => {
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
@@ -1364,27 +1380,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                         });
                     }
                 }
-                Err(timeout) => {
-                    protocol.circuit_breaker.record_failure();
-                    if attempts < protocol.config.retry_policy.max_attempts {
-                        attempts += 1;
-                        tokio::time::sleep(
-                            protocol.config.retry_policy.delay_for_attempt(attempts),
-                        )
-                        .await;
-                    } else {
-                        return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
-                            attempts,
-                        });
-                    }
-                }
             }
         }
     }
 }
-
-// ── NatsInferenceExecution delegation ────────────────────────────────────────
 
 impl<B: Backend + BackendMatcher<Backend = B>> NatsInferenceExecution for NatsInterface<B> {
     #[inline]
@@ -1501,8 +1500,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsInferenceExecution for NatsIn
         .await
     }
 }
-
-// ── NatsTrainingExecution delegation ─────────────────────────────────────────
 
 impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for NatsInterface<B> {
     #[inline]

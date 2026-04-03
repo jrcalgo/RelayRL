@@ -1,17 +1,25 @@
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::TransportError;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::TrainingDispatcher;
+use crate::network::client::runtime::router::{RoutedMessage, RouterError};
+use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 
+use relayrl_types::prelude::tensor::burn::backend::Backend;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+
+use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::UuidPoolError;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use thiserror::Error;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::{broadcast, RwLock};
+use tokio::time::Duration;
 
 #[derive(Debug, Error)]
 pub enum TransportReceiverError {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
     #[error(transparent)]
@@ -21,7 +29,6 @@ pub enum TransportReceiverError {
 }
 
 /// Listens & receives model bytes from a training server
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backend = B>> {
     associated_router_namespace: RouterNamespace,
     active: AtomicBool,
@@ -31,7 +38,6 @@ pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backe
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
     pub fn new(
         associated_router_namespace: RouterNamespace,
@@ -85,8 +91,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                 result = self.training_dispatcher.listen_for_model(receiver_entry.clone(), global_dispatcher_tx.clone(), self.shared_transport_addresses.clone()) => {
                     match result {
                         Ok(()) => {
-                            // this should never happen, but if it does, we need to break the loop
-                            log::warn!("[ClientTransportModelReceiver] listen_for_model returned Ok");
+                            log::warn!("[ClientTransportModelReceiver] Model listener stopped gracefully");
                             self.active.store(false, Ordering::SeqCst);
                         }
                         Err(e) => {
@@ -106,10 +111,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
 mod unit_tests {
     use super::*;
     use active_uuid_registry::UuidPoolError;
-
-    // -------------------------------------------------------------------------
-    // TransportReceiverError — non-transport-gated variants
-    // -------------------------------------------------------------------------
 
     #[test]
     fn no_entries_found_displays_non_empty_string() {
