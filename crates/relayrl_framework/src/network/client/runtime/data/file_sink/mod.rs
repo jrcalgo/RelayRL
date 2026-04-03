@@ -12,7 +12,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub(crate) enum FileSinkError {
+pub enum FileSinkError {
     #[error("Failed to write trajectory Arrow file: {0}")]
     WriteArrowTrajectoryFileError(#[from] ArrowTrajectoryError),
     #[error("Failed to write trajectory CSV file: {0}")]

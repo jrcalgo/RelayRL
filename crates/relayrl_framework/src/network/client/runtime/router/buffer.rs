@@ -1,7 +1,5 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::ModelMode;
-use crate::network::client::agent::{ActorTrainingDataMode, ClientModes};
+use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
     LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing,
 };
@@ -17,25 +15,17 @@ use crate::network::client::runtime::data::transport_sink::{
     TransportError, transport_dispatcher::TrainingDispatcher,
 };
 
-use relayrl_types::data::tensor::{DType, NdArrayDType, TchDType, TensorData};
-use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory, TrajectoryError};
+use relayrl_types::data::trajectory::{RelayRLTrajectory, TrajectoryError};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::prelude::action::CodecConfig;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
-use active_uuid_registry::interface::{get_context_entries, list_ids};
 use active_uuid_registry::registry_uuid::Uuid;
 
-use arrow::array::BinaryBuilder;
-use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt64Array};
-use arrow::array::{Float32Builder, Float64Builder, ListBuilder, UInt64Builder};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::FileWriter;
-use arrow::record_batch::RecordBatch;
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::collections::BinaryHeap;
-use std::fs::File;
+#[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,6 +64,7 @@ impl Ord for SinkQueueEntry {
 }
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum TrajectorySinkError {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[error("Transport error: {0}")]
@@ -644,12 +635,13 @@ mod unit_tests {
     use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
     use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
     use active_uuid_registry::registry_uuid::Uuid;
-    use relayrl_types::data::action::RelayRLAction;
+    
     use relayrl_types::data::trajectory::RelayRLTrajectory;
     use std::collections::BinaryHeap;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::sync::{RwLock, broadcast, mpsc};
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    use tokio::sync::{broadcast, mpsc};
 
     // The backend is only referenced through phantom data in the no-transport build.
     // We use NdArray from burn_ndarray which is always available.

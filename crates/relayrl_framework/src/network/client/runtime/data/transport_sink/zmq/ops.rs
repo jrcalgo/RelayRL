@@ -7,38 +7,32 @@ use crate::network::client::runtime::coordination::scale_manager::ScalingOperati
 use crate::network::client::runtime::data::transport_sink::zmq::{
     ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
 };
-use crate::network::client::runtime::data::transport_sink::{
-    SyncClientInferenceTransportOps, SyncClientTrainingTransportOps, TransportError, TransportUuid,
-};
-use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
-};
-use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
+use crate::network::client::runtime::data::transport_sink::TransportError;
+use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+use crate::utilities::configuration::Algorithm;
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{add_id, remove_id, reserve_id_with};
+use active_uuid_registry::interface::{remove_id, reserve_id_with};
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
-use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
+use relayrl_types::data::trajectory::EncodedTrajectory;
 use relayrl_types::model::utils::validate_module;
-use relayrl_types::model::{HotReloadableModel, ModelModule};
+use relayrl_types::model::ModelModule;
 
 use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::io::Write;
-use zmq::SocketType::PAIR;
 
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc::Sender;
 use tokio::task;
-use zmq::{Context, Socket, SocketType};
+use zmq::{Context, Socket};
 
 use thiserror::Error;
 

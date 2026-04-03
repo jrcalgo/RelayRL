@@ -2,13 +2,9 @@ use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ModelMode};
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::transport_sink::combine_scaling_results;
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
-    InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
-};
 use crate::network::client::runtime::data::transport_sink::{
     ScalingOperation, SyncClientInferenceTransportOps, SyncClientScalingTransportOps,
     SyncClientTrainingTransportOps, SyncClientTransportInterface, TransportError, TransportUuid,
-    ZmqClientError,
 };
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
@@ -25,13 +21,10 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 use std::thread::sleep;
-use tokio::sync::RwLock as TokioRwLock;
 use tokio::sync::mpsc::Sender;
 
 use super::ops::{ZmqInferenceOps, ZmqPool, ZmqTrainingOps};
-use super::policies::{
-    BackpressureController, CircuitBreaker, CircuitState, RetryPolicy, ZmqPolicyConfig,
-};
+use super::policies::{BackpressureController, CircuitBreaker, ZmqPolicyConfig};
 use super::{ZmqInferenceExecution, ZmqTrainingExecution};
 
 use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};

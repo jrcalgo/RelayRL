@@ -11,21 +11,17 @@ use crate::network::client::runtime::data::transport_sink::transport_dispatcher:
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
 use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::tensor::{BackendMatcher, ConversionBurnTensor, DeviceType};
+use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
-use active_uuid_registry::registry_uuid::Uuid;
 
-use bincode::config;
-use log::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
@@ -34,9 +30,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
-use tokio::time::{Duration, timeout};
 
-use burn_tensor::{Tensor, backend::Backend};
+use burn_tensor::backend::Backend;
 use thiserror::Error;
 
 /// Shared handle to a hot-reloadable model.
@@ -49,11 +44,13 @@ use thiserror::Error;
 pub(crate) type LocalModelHandle<B> = Arc<RwLock<Option<HotReloadableModel<B>>>>;
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum ActorError {
     #[error(transparent)]
     ModelError(#[from] ModelError),
     #[error("Trajectory send failed: {0}")]
     TrajectorySendError(String),
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[error("Inference request failed: {0}")]
     InferenceRequestError(String),
     #[error("Message handling failed: {0}")]
@@ -68,6 +65,7 @@ pub enum ActorError {
 }
 
 pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + 'static {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         client_namespace: Arc<str>,
         actor_id: ActorUuid,
@@ -101,10 +99,12 @@ pub(crate) struct Actor<
     const D_IN: usize,
     const D_OUT: usize,
 > {
+    #[allow(dead_code)]
     client_namespace: Arc<str>,
     actor_id: ActorUuid,
     reloadable_model: LocalModelHandle<B>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
+    #[allow(dead_code)]
     shared_max_traj_length: Arc<RwLock<u128>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
@@ -125,6 +125,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     Actor<B, D_IN, D_OUT>
 {
     #[inline(always)]
+    #[allow(clippy::type_complexity)]
     fn extract_inference_request(
         msg: RoutedMessage,
     ) -> Result<
@@ -353,7 +354,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     where
         Self: Sized,
     {
-        let max_traj_length: u128 = shared_max_traj_length.read().await.clone();
+        let max_traj_length: u128 = *shared_max_traj_length.read().await;
 
         let model_init_flag = model_handle.read().await.is_none();
         if model_init_flag {
@@ -715,6 +716,7 @@ mod unit_tests {
 
     use burn_ndarray::NdArray;
     use burn_ndarray::NdArrayDevice;
+    use burn_tensor::Tensor;
 
     #[cfg(feature = "tch-backend")]
     use burn_tch::LibTorch;
@@ -975,7 +977,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn handle_action_inference_appends_to_trajectory() {
-        let (mut actor, tx, mut rx_buf) = create_ndarray_actor(1, DeviceType::Cpu).await;
+        let (actor, tx, mut rx_buf) = create_ndarray_actor(1, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
 
         let obs = Arc::new(AnyBurnTensor::Float(FloatBurnTensor::<
@@ -1021,7 +1023,7 @@ mod unit_tests {
     async fn flag_last_action_appends_terminal_action_and_sends_traj() {
         let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
-        let handle = tokio::spawn(async move { actor.spawn_loop().await });
+        let _handle = tokio::spawn(async move { actor.spawn_loop().await });
 
         tx.send(build_msg(
             actor_id,

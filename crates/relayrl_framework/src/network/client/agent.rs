@@ -20,7 +20,7 @@ use crate::prelude::config::ClientConfigLoader;
 use crate::utilities::configuration::{Algorithm, NetworkParams};
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{get_context_entries, list_ids};
+use active_uuid_registry::interface::list_ids;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
@@ -28,8 +28,6 @@ use relayrl_types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, SupportedTensorBackend,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use relayrl_types::data::tensor::{NdArrayDType, TchDType};
 use relayrl_types::model::ModelModule;
 
 use active_uuid_registry::registry_uuid::Uuid;
@@ -44,7 +42,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::task::JoinHandle;
 
 /// Errors returned by the client API.
 #[non_exhaustive]
@@ -329,13 +326,13 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub actor_count: u32,
     pub router_scale: u32,
     pub default_device: DeviceType,
-    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "tch-model", feature = "onnx-model"))))]
+    #[cfg(any(feature = "training-server", feature = "inference-server"))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "training-server", feature = "inference-server"))))]
     pub default_model: Option<ModelModule<B>>,
-    #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(not(any(feature = "training-server", feature = "inference-server")))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(not(any(feature = "tch-model", feature = "onnx-model"))))
+        doc(cfg(not(any(feature = "training-server", feature = "inference-server"))))
     )]
     pub default_model: ModelModule<B>,
     pub config_path: Option<PathBuf>,
@@ -388,7 +385,6 @@ impl<
     /// Notes:
     /// - Modes default to local inference.
     /// - Transport default to `ZMQ` when enabled by feature flags.
-    #[must_use]
     pub fn builder() -> Self {
         Self {
             client_modes: Some(ClientModes::default()),
@@ -407,7 +403,6 @@ impl<
         }
     }
 
-    #[must_use]
     pub fn actor_inference_mode(mut self, actor_inference_mode: ActorInferenceMode) -> Self {
         if let Some(ref mut modes) = self.client_modes {
             modes.actor_inference_mode = actor_inference_mode;
@@ -415,7 +410,6 @@ impl<
         self
     }
 
-    #[must_use]
     pub fn actor_training_data_mode(
         mut self,
         actor_training_data_mode: ActorTrainingDataMode,
@@ -426,38 +420,32 @@ impl<
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn transport_type(mut self, transport_type: TransportType) -> Self {
         self.transport_type = Some(transport_type);
         self
     }
 
-    #[must_use]
     pub fn actor_count(mut self, count: u32) -> Self {
         self.actor_count = Some(count);
         self
     }
 
-    #[must_use]
     pub fn router_scale(mut self, count: u32) -> Self {
         self.router_scale = Some(count);
         self
     }
 
-    #[must_use]
     pub fn default_device(mut self, device: DeviceType) -> Self {
         self.default_device = Some(device);
         self
     }
 
-    #[must_use]
     pub fn default_model(mut self, model: ModelModule<B>) -> Self {
         self.default_model = Some(model);
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn algorithm(mut self, algorithm: Algorithm) -> Self {
         let hyperparams = match self.algorithm_args {
@@ -471,7 +459,6 @@ impl<
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn hyperparams(mut self, hyperparams: HyperparameterArgs) -> Self {
         let algorithm = match self.algorithm_args {
@@ -486,13 +473,11 @@ impl<
         self
     }
 
-    #[must_use]
     pub fn config_path(mut self, path: PathBuf) -> Self {
-        self.config_path = Some(path.into());
+        self.config_path = Some(path);
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn codec(mut self, codec: CodecConfig) -> Self {
         self.codec = Some(codec);
@@ -516,7 +501,7 @@ impl<
         let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             self.transport_type.unwrap_or(TransportType::default()),
-            self.client_modes.unwrap_or(ClientModes::default()),
+            self.client_modes.unwrap_or_default(),
         );
 
         // Tuple parameters
@@ -526,9 +511,9 @@ impl<
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
-            #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+            #[cfg(any(feature = "training-server", feature = "inference-server"))]
             default_model: self.default_model,
-            #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
+            #[cfg(not(any(feature = "training-server", feature = "inference-server")))]
             default_model: self.default_model.unwrap(), // this is guaranteed to panic if not set; without transport available, the model must be set at build time
             config_path: self.config_path,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -862,7 +847,7 @@ impl<
     #[cfg(any(feature = "metrics", feature = "logging"))]
     pub fn runtime_statistics(
         &self,
-        return_type: RuntimeStatisticsReturnType,
+        _return_type: RuntimeStatisticsReturnType,
     ) -> Result<RuntimeStatisticsReturnType, ClientError> {
         // stand-in for actual implementation
         Ok(RuntimeStatisticsReturnType::Hashmap(HashMap::new()))
@@ -957,7 +942,7 @@ impl<
                 ))
             })
         } else if count == 1 {
-            return self.new_actor(device, default_model);
+            self.new_actor(device, default_model)
         } else {
             Box::pin(async move {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

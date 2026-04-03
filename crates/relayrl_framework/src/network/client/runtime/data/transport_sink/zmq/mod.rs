@@ -3,7 +3,6 @@ pub(super) mod ops;
 pub(super) mod policies;
 
 use crate::network::client::agent::ModelMode;
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::zmq::ops::ZmqPoolError;
@@ -20,10 +19,8 @@ use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Error, Clone)]

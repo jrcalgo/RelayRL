@@ -1,9 +1,7 @@
-use crate::get_or_create_client_config_json_path;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 
 use relayrl_types::HyperparameterArgs;
 
-use log::*;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -464,6 +462,7 @@ pub enum Algorithm {
 }
 
 impl Algorithm {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "DDPG" => Some(Algorithm::DDPG),
@@ -975,12 +974,12 @@ pub struct ClientConfigLoader {
 
 impl ClientConfigLoader {
     pub fn new_config(algorithm_name: Option<String>, config_path: Option<PathBuf>) -> Self {
-        let _config_path: PathBuf = if config_path.is_none() {
+        let _config_path: PathBuf = if let Some(config_path_value) = config_path {
+            config_path_value
+        } else {
             DEFAULT_CLIENT_CONFIG_PATH
                 .clone()
                 .expect("[ClientConfigParams - new] Invalid config path")
-        } else {
-            config_path.expect("[ClientConfigParams - new] Invalid config path")
         };
 
         let config: ClientConfigLoader = Self::load_config(&_config_path);
@@ -1230,12 +1229,12 @@ pub struct TrainingServerConfigLoader {
 
 impl TrainingServerConfigLoader {
     pub fn new_config(config_path: Option<PathBuf>) -> Self {
-        let _config_path: PathBuf = if config_path.is_none() {
+        let _config_path: PathBuf = if let Some(config_path_value) = config_path {
+            config_path_value
+        } else {
             DEFAULT_TRAINING_SERVER_CONFIG_PATH
                 .clone()
                 .expect("[TrainingServerConfigParams - new] Invalid config path")
-        } else {
-            config_path.expect("[TrainingServerConfigParams - new] Invalid config path")
         };
 
         let config: TrainingServerConfigLoader = Self::load_config(&_config_path);
@@ -2587,7 +2586,7 @@ mod unit_tests {
 
     #[test]
     fn training_server_builder_build_default_config_path() {
-        let mut builder = TrainingServerConfigBuilder {
+        let builder = TrainingServerConfigBuilder {
             config_update_polling_seconds: None,
             default_hyperparameters: None,
             training_tensorboard: None,

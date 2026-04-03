@@ -3,7 +3,7 @@ use crate::network::HyperparameterArgs;
 use crate::network::client::agent::AlgorithmArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, uses_local_file_writing,
+    ActorTrainingDataMode, ClientModes, uses_local_file_writing,
 };
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -28,12 +28,11 @@ use crate::network::client::runtime::router::{
     RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
 };
 use crate::utilities::configuration::Algorithm;
-use crate::utilities::configuration::HyperparameterConfig;
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
 use active_uuid_registry::interface::{
-    add_id, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
+    get_namespace_entries, remove_id, remove_namespace,
     reserve_id_with, reserve_namespace,
 };
 use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
@@ -41,6 +40,7 @@ use burn_tensor::backend::Backend;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::tensor::BackendMatcher;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::model::ModelModule;
 
 use dashmap::DashMap;
@@ -53,6 +53,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum ScaleManagerError {
     #[error(transparent)]
     UuidPoolError(#[from] UuidPoolError),
@@ -93,6 +94,7 @@ pub(crate) enum ScalingOperation {
 }
 
 #[derive(Clone)]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) enum ProcessInitFlag<B: Backend + BackendMatcher<Backend = B>> {
     TrainingAlgorithmInit,
     InferenceModelInit(Option<ModelModule<B>>),
@@ -532,11 +534,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 None
             };
             let filter_loop: JoinHandle<()> = Self::spawn_central_filter(filter).await;
-            let trajectory_buffer_loop: Option<JoinHandle<()>> = if let Some(buf) = buffer {
-                Some(Self::spawn_trajectory_buffer(buf))
-            } else {
-                None
-            };
+            let trajectory_buffer_loop: Option<JoinHandle<()>> =
+                buffer.map(Self::spawn_trajectory_buffer);
 
             let runtime_params = RouterRuntimeParams {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

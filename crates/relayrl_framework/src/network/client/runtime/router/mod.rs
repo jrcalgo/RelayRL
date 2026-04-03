@@ -18,6 +18,7 @@ pub(crate) mod receiver;
 pub(crate) mod router_dispatcher;
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum RouterError {
     #[error(transparent)]
     FilterError(#[from] FilterError),

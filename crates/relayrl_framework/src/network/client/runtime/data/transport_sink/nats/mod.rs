@@ -18,10 +18,7 @@ use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 
 pub(super) mod inference_subjects {

@@ -14,7 +14,6 @@ use crate::utilities::configuration::OtlpEndpointParams;
 use crate::utilities::configuration::{ClientConfigLoader, LocalModelModuleParams};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
-use log::*;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use std::collections::HashMap;
 use std::env;
@@ -195,6 +194,7 @@ pub(crate) fn construct_trajectory_file_output(
 }
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum LifeCycleManagerError {
     #[error("File metadata error: {0}")]
     FileMetadataError(String),
@@ -255,10 +255,10 @@ impl LifeCycleManager {
                 SystemTime::now()
             });
 
-        let config_update_polling = config.client_config.config_update_polling_seconds.clone();
+        let config_update_polling = config.client_config.config_update_polling_seconds;
 
         let transport_config = config.get_transport_config();
-        let max_traj_length = transport_config.max_traj_length.clone();
+        let max_traj_length = transport_config.max_traj_length;
 
         Self {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -345,7 +345,7 @@ impl LifeCycleManager {
         max_traj_length: &u128,
     ) -> Result<(), LifeCycleManagerError> {
         let mut max_traj_length_guard = self.max_traj_length.write().await;
-        *max_traj_length_guard = max_traj_length.clone();
+        *max_traj_length_guard = *max_traj_length;
         Ok(())
     }
 
@@ -413,7 +413,7 @@ impl LifeCycleManager {
     pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
         loop {
             let config_update_polling_seconds =
-                self.config_update_polling_seconds.read().await.clone() as u64;
+                *self.config_update_polling_seconds.read().await as u64;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                 config_update_polling_seconds,
             ));

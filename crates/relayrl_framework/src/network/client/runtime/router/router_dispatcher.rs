@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::Duration;
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum RouterDispatcherError {
     #[error("Failed to dispatch message: {0}")]
     DispatchError(String),

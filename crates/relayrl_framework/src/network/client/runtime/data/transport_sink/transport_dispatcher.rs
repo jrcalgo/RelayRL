@@ -337,7 +337,6 @@ mod unit_tests {
     use crate::network::client::agent::ModelMode;
     use crate::utilities::configuration::Algorithm;
     use burn_ndarray::NdArray;
-    use relayrl_types::HyperparameterArgs;
     use std::collections::HashMap;
 
     type TestBackend = NdArray<f32>;

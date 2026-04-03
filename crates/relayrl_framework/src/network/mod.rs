@@ -5,19 +5,26 @@ use std::collections::HashMap;
 pub(super) const CLIENT_NAMESPACE_PREFIX: &str = "client";
 pub(super) const ACTOR_CONTEXT: &str = "actor";
 pub(super) const SCALE_MANAGER_CONTEXT: &str = "scaler";
+#[cfg(feature = "zmq-transport")]
 pub(super) const ZMQ_CLIENT_CONTEXT: &str = "zmq-client";
+#[cfg(feature = "nats-transport")]
 pub(super) const NATS_CLIENT_CONTEXT: &str = "nats-client";
 
 pub(super) const ROUTER_NAMESPACE_PREFIX: &str = "router";
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(super) const RECEIVER_CONTEXT: &str = "receiver";
-pub(super) const FILTER_CONTEXT: &str = "filter";
 pub(super) const BUFFER_CONTEXT: &str = "buffer";
 
 /// **Server Constants**: Constants for server-side runtime coordination and actor management.
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(super) const TRAINING_SERVER_NAMESPACE_PREFIX: &str = "training-server";
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(super) const INFERENCE_SERVER_NAMESPACE_PREFIX: &str = "inference-server";
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(super) const WORKER_CONTEXT: &str = "worker";
+#[cfg(feature = "zmq-transport")]
 pub(super) const ZMQ_SERVER_CONTEXT: &str = "zmq-server";
+#[cfg(feature = "nats-transport")]
 pub(super) const NATS_SERVER_CONTEXT: &str = "nats-server";
 
 /// **Client Modules**: Handles client-side runtime coordination and actor management.
@@ -46,7 +53,7 @@ pub mod client;
 ///   - `transport`: Network transport implementations (gRPC, ZeroMQ)
 ///   - `router`: Message routing between workers and transport layers
 ///   - `worker`: Individual training worker implementations
-#[cfg(any(feature = "inference_server", feature = "training_server"))]
+#[cfg(any(feature = "inference-server", feature = "training-server"))]
 pub mod server;
 
 /// Extend for future utility with other transport protocols (extend transport.rs accordingly)

@@ -4,16 +4,13 @@ use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::lifecycle_manager::{
-    LifeCycleManager, LifeCycleManagerError,
-};
+use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManagerError;
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
-use crate::utilities::configuration::ClientConfigLoader;
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
@@ -22,7 +19,7 @@ use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
-use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType};
+use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 
 use active_uuid_registry::registry_uuid::Uuid;
@@ -37,6 +34,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum StateManagerError {
     #[error(transparent)]
     UuidPoolError(#[from] UuidPoolError),

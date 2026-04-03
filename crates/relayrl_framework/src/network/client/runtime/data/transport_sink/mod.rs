@@ -8,9 +8,9 @@ use crate::network::client::runtime::data::transport_sink::nats::interface::Nats
 use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
 #[cfg(feature = "zmq-transport")]
 use crate::network::client::runtime::data::transport_sink::zmq::interface::ZmqInterface;
-use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
+use crate::network::client::runtime::router::RoutedMessage;
 use crate::prelude::network::ClientModes;
-use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
+use crate::utilities::configuration::Algorithm;
 
 use relayrl_types::HyperparameterArgs;
 use relayrl_types::data::action::RelayRLAction;
@@ -25,7 +25,6 @@ use burn_tensor::backend::Backend;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 
 #[cfg(feature = "nats-transport")]

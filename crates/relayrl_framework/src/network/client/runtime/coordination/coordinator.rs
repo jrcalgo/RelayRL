@@ -1,14 +1,10 @@
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::HyperparameterArgs;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    ActorTrainingDataMode, ClientModes,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{AlgorithmArgs, InferenceAddressesArgs, TrainingAddressesArgs};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifeCycleManager, LifeCycleManagerError,
 };
@@ -33,9 +29,6 @@ use crate::network::client::runtime::data::transport_sink::{
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
-use crate::prelude::config::TransportConfigParams;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::utilities::configuration::Algorithm;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 #[cfg(feature = "logging")]
 use crate::utilities::observability::logging::*;
@@ -47,27 +40,24 @@ use thiserror::Error;
 use burn_tensor::backend::Backend;
 
 use active_uuid_registry::interface::{
-    clear_namespace, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
+    clear_namespace, remove_id, remove_namespace,
     reserve_id_with, reserve_namespace,
 };
-use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
+use active_uuid_registry::{UuidPoolError, registry_uuid::Uuid};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, TensorData};
+use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher};
 use relayrl_types::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
 
-use log::*;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
@@ -109,6 +99,7 @@ impl From<String> for ClientConfigError {
 }
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum CoordinatorError {
     #[error("Client modes are invalid: {0}")]
     InvalidClientModesError(String),
@@ -368,7 +359,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             },
         };
 
-        let mut config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
+        let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -540,22 +531,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         {
-            /// if args are set in client mode init config, set lifecycle manager trajectory file path
+            // if args are set in client mode init config, set lifecycle manager trajectory file path
             let local_trajectory_file_params = match &shared_client_modes.actor_training_data_mode {
-                ActorTrainingDataMode::Offline(file_params) => match file_params {
-                    Some(params) => Some(params),
-                    None => None,
-                },
+                ActorTrainingDataMode::Offline(Some(params)) => Some(params),
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorTrainingDataMode::Hybrid(_, file_params) => match file_params {
-                    Some(params) => Some(params),
-                    None => None,
-                },
+                ActorTrainingDataMode::Hybrid(_, Some(params)) => Some(params),
                 _ => None,
             };
 
             if let Some(file_params) = local_trajectory_file_params {
-                lifecycle.set_trajectory_file_path(&file_params).await?;
+                lifecycle.set_trajectory_file_path(file_params).await?;
             }
         }
 
@@ -656,7 +641,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
                 Arc::from(RwLock::new(state));
 
-            let mut scaling = {
+            let scaling = {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 let shared_algorithm_args = lifecycle.get_algorithm_args();
 
@@ -679,7 +664,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     metrics.clone(),
                     lifecycle.clone(),
                 )
-                .map_err(|e| CoordinatorError::ScaleManagerError(e))?
+                .map_err(CoordinatorError::from)?
             };
 
             self.runtime_params = Some(CoordinatorParams {
@@ -800,9 +785,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         // if the above shutdown operations were successful, remove the runtime parameters from memory
-        if let Some(_) = &mut self.runtime_params {
+        if self.runtime_params.is_some() {
             let _ = self.runtime_params.take(); // sets the runtime parameters to None
         }
+
         Ok(())
     }
 
@@ -858,7 +844,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     117,
                     100,
                 )
-                .map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                .map_err(CoordinatorError::from)?;
 
                 #[cfg(feature = "metrics")]
                 params
@@ -912,7 +898,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .write()
                     .await
                     .new_actor(
-                        actor_id.clone(),
+                        actor_id,
                         router_namespace,
                         device,
                         default_model,
@@ -972,7 +958,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn remove_actor(
         &mut self,
         id: ActorUuid,
-        send_ids: bool,
+        _send_ids: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
@@ -991,7 +977,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     crate::network::ACTOR_CONTEXT,
                     id,
                 )
-                .map_err(|e| CoordinatorError::UuidPoolError(e))?;
+                .map_err(CoordinatorError::from)?;
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if send_ids {
@@ -1095,7 +1081,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
 
                 // Extract router runtime params with clear error messages
-                let router_runtime_params: &dashmap::DashMap<
+                let _router_runtime_params: &dashmap::DashMap<
                     RouterNamespace,
                     super::scale_manager::RouterRuntimeParams,
                 > = {
@@ -1363,21 +1349,22 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let start_time = Instant::now();
 
                 let result = {
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                     {
+                        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                         params
                             .scaling
                             .scale_in(router_remove, true)
                             .await
-                            .map_err(CoordinatorError::from)?
+                            .map_err(CoordinatorError::from)
                     }
-                    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+
                     {
+                        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                         params
                             .scaling
                             .scale_in(router_remove)
                             .await
-                            .map_err(CoordinatorError::from)?
+                            .map_err(CoordinatorError::from)
                     }
                 };
 
@@ -1394,7 +1381,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .await;
                 }
 
-                Ok(result)
+                result
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
@@ -1438,7 +1425,7 @@ mod unit_tests {
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    
 
     type TestBackend = NdArray<f32>;
 
