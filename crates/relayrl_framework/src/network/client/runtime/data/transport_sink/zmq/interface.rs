@@ -129,7 +129,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
     }
 
     fn shutdown(&self) -> Result<(), TransportError> {
-        unimplemented!()
+        let training_result = Some(self.zmq_training_ops.shutdown());
+        let inference_result = Some(self.zmq_inference_ops.shutdown());
+        combine_scaling_results(inference_result, training_result)
     }
 }
 
@@ -1321,6 +1323,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 "Training protocol not initialized".to_string(),
             ));
         }
+    }
+
+    fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        self.zmq_training_ops.stop_model_listener(&receiver_entry)
     }
 }
 

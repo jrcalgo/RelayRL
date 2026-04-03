@@ -1383,6 +1383,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
             }
         }
     }
+
+    async fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        self.nats_training_ops
+            .stop_model_listener(&receiver_entry)
+            .await
+    }
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> NatsInferenceExecution for NatsInterface<B> {

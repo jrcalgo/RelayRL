@@ -114,14 +114,41 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
 
         match &*self.transport {
             #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.listen_for_model(receiver_entry, global_dispatcher_tx, transport_addresses)
+            ClientTransportInterface::Sync(_) => {
+                let transport = self.transport.clone();
+                tokio::task::spawn_blocking(move || match &*transport {
+                    ClientTransportInterface::Sync(sync_tr) => {
+                        sync_tr.listen_for_model(
+                            receiver_entry,
+                            global_dispatcher_tx,
+                            transport_addresses,
+                        )
+                    }
+                    #[cfg(feature = "nats-transport")]
+                    ClientTransportInterface::Async(_) => unreachable!(),
+                })
+                .await
+                .map_err(|join_error| TransportError::JoinError(join_error.to_string()))?
             }
             #[cfg(feature = "nats-transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .listen_for_model(receiver_entry, global_dispatcher_tx, transport_addresses)
                     .await
+            }
+        }
+    }
+
+    pub(crate) async fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        match &*self.transport {
+            #[cfg(feature = "zmq-transport")]
+            ClientTransportInterface::Sync(sync_tr) => sync_tr.stop_model_listener(receiver_entry),
+            #[cfg(feature = "nats-transport")]
+            ClientTransportInterface::Async(async_tr) => {
+                async_tr.stop_model_listener(receiver_entry).await
             }
         }
     }

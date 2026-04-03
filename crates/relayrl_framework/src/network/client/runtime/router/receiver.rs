@@ -85,6 +85,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                         std::future::pending::<()>().await;
                     }
                 } => {
+                    if let Err(e) = self
+                        .training_dispatcher
+                        .stop_model_listener(receiver_entry.clone())
+                        .await
+                    {
+                        log::error!(
+                            "[ClientTransportModelReceiver] Failed to stop model listener: {}",
+                            e
+                        );
+                    }
                     self.active.store(false, Ordering::SeqCst);
                 }
 

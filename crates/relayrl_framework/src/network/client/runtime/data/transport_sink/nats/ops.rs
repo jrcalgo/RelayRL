@@ -27,11 +27,13 @@ use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use bytes::Bytes;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
@@ -407,6 +409,32 @@ where
     }
 }
 
+struct NatsModelListenerHandle {
+    receiver_id: Uuid,
+    listener_shutdown: Arc<AtomicBool>,
+    model_listener_shutdown_flags: Arc<DashMap<Uuid, Arc<AtomicBool>>>,
+}
+
+impl NatsModelListenerHandle {
+    fn is_stopping(&self) -> bool {
+        self.listener_shutdown.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for NatsModelListenerHandle {
+    fn drop(&mut self) {
+        let should_remove = self
+            .model_listener_shutdown_flags
+            .get(&self.receiver_id)
+            .map(|entry| Arc::ptr_eq(entry.value(), &self.listener_shutdown))
+            .unwrap_or(false);
+
+        if should_remove {
+            self.model_listener_shutdown_flags.remove(&self.receiver_id);
+        }
+    }
+}
+
 pub(super) struct NatsConnectionManager {
     pub(super) client_namespace: Arc<str>,
     inference_client: Option<async_nats::Client>,
@@ -414,6 +442,7 @@ pub(super) struct NatsConnectionManager {
     training_client: Option<async_nats::Client>,
     training_jetstream_context: Option<async_nats::jetstream::Context>,
     training_address_fingerprint: Option<u64>,
+    model_listener_shutdown_flags: Arc<DashMap<Uuid, Arc<AtomicBool>>>,
     shutting_down: bool,
 }
 
@@ -432,6 +461,7 @@ impl NatsConnectionManager {
             training_client: None,
             training_jetstream_context: None,
             training_address_fingerprint: None,
+            model_listener_shutdown_flags: Arc::new(DashMap::new()),
             shutting_down: false,
         }
     }
@@ -440,12 +470,36 @@ impl NatsConnectionManager {
         self.shutting_down
     }
 
+    fn register_model_listener(&self, receiver_id: &Uuid) -> NatsModelListenerHandle {
+        let listener_shutdown = self
+            .model_listener_shutdown_flags
+            .entry(*receiver_id)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
+        listener_shutdown.store(false, Ordering::SeqCst);
+
+        NatsModelListenerHandle {
+            receiver_id: *receiver_id,
+            listener_shutdown,
+            model_listener_shutdown_flags: self.model_listener_shutdown_flags.clone(),
+        }
+    }
+
+    fn stop_model_listener(&self, receiver_id: &Uuid) {
+        if let Some(listener_shutdown) = self.model_listener_shutdown_flags.get(receiver_id) {
+            listener_shutdown.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn begin_shutdown(&mut self) -> Option<NatsShutdownClients> {
         if self.shutting_down {
             return None;
         }
 
         self.shutting_down = true;
+        for listener_shutdown in self.model_listener_shutdown_flags.iter() {
+            listener_shutdown.value().store(true, Ordering::SeqCst);
+        }
         self.inference_address_fingerprint = None;
         self.training_jetstream_context = None;
         self.training_address_fingerprint = None;
@@ -1036,6 +1090,18 @@ impl NatsTrainingOps {
         self.nats_connection_manager.read().await.is_shutting_down()
     }
 
+    pub(super) async fn stop_model_listener(
+        &self,
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        let (_, _, receiver_id) = receiver_entry;
+        self.nats_connection_manager
+            .read()
+            .await
+            .stop_model_listener(receiver_id);
+        Ok(())
+    }
+
     pub(super) async fn shutdown(&self) -> Result<(), TransportError> {
         let shutdown_clients = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -1081,7 +1147,7 @@ impl NatsTrainingOps {
 impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for NatsTrainingOps {
     async fn execute_listen_for_model(
         &self,
-        _receiver_entry: &(NamespaceString, ContextString, Uuid),
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: &Sender<RoutedMessage>,
         nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
@@ -1101,12 +1167,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             return Ok(());
         }
 
-        let nats_training_client = {
+        let (_, _, receiver_id) = receiver_entry;
+
+        let (nats_training_client, listener_stop_flag, _listener_handle) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
+            let listener_handle = nats_connection_manager.register_model_listener(receiver_id);
+            let listener_stop_flag = listener_handle.listener_shutdown.clone();
             let (training_client, _training_jetstream_context) = nats_connection_manager
                 .get_training_client(nats_training_server_address)
                 .await?;
-            training_client
+            (training_client, listener_stop_flag, listener_handle)
         };
 
         let model_update_subscriber = nats_training_client
@@ -1124,7 +1194,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         });
 
         forward_model_update_payloads(payload_stream, global_dispatcher_tx, || async {
-            self.is_shutting_down().await
+            listener_stop_flag.load(Ordering::SeqCst) || self.is_shutting_down().await
         })
         .await
     }
@@ -1670,5 +1740,50 @@ mod unit_tests {
             Err(TransportError::InvalidState(message))
                 if message.contains("shutting down")
         ));
+    }
+
+    #[test]
+    fn register_and_stop_model_listener_updates_flag() {
+        let connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_handle = connection_manager.register_model_listener(&receiver_id);
+
+        assert!(!listener_handle.is_stopping());
+
+        connection_manager.stop_model_listener(&receiver_id);
+
+        assert!(listener_handle.is_stopping());
+    }
+
+    #[test]
+    fn listener_handle_drop_unregisters_listener_flag() {
+        let connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_handle = connection_manager.register_model_listener(&receiver_id);
+
+        assert!(connection_manager
+            .model_listener_shutdown_flags
+            .get(&receiver_id)
+            .is_some());
+
+        drop(listener_handle);
+
+        assert!(connection_manager
+            .model_listener_shutdown_flags
+            .get(&receiver_id)
+            .is_none());
+    }
+
+    #[test]
+    fn begin_shutdown_marks_registered_listeners_stopping() {
+        let mut connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_handle = connection_manager.register_model_listener(&receiver_id);
+
+        let shutdown_clients = connection_manager.begin_shutdown();
+
+        assert!(shutdown_clients.is_some());
+        assert!(connection_manager.is_shutting_down());
+        assert!(listener_handle.is_stopping());
     }
 }

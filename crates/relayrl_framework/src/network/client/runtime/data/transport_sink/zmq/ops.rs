@@ -26,12 +26,12 @@ use std::io::Write;
 
 use dashmap::DashMap;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc::Sender;
-use tokio::task;
 use zmq::{Context, Socket};
 
 use thiserror::Error;
@@ -72,6 +72,8 @@ pub(super) struct ZmqPool {
     pub(super) zmq_socket_context: Context,
     cached_addresses: Option<DashMap<Uuid, Arc<RwLock<SharedTransportAddresses>>>>,
     cached_sockets: Arc<ZmqSocketPool>,
+    model_listener_shutdown_flags: DashMap<Uuid, Arc<AtomicBool>>,
+    transport_shutting_down: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +108,8 @@ impl ZmqPool {
                 traj_push_socket: None,
                 scaling_dealer_socket: None,
             }),
+            model_listener_shutdown_flags: DashMap::new(),
+            transport_shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -180,10 +184,42 @@ impl ZmqPool {
         socket.set_identity(identity.as_bytes())?;
 
         socket.set_subscribe(b"")?;
+        socket.set_rcvtimeo(1000)?;
 
         socket.connect(address)?;
 
         Ok(socket)
+    }
+
+    fn register_model_listener(&self, receiver_id: &Uuid) -> Arc<AtomicBool> {
+        let listener_shutdown = self
+            .model_listener_shutdown_flags
+            .entry(*receiver_id)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
+        listener_shutdown.store(false, Ordering::SeqCst);
+        listener_shutdown
+    }
+
+    fn stop_model_listener(&self, receiver_id: &Uuid) {
+        if let Some(listener_shutdown) = self.model_listener_shutdown_flags.get(receiver_id) {
+            listener_shutdown.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn unregister_model_listener(&self, receiver_id: &Uuid) {
+        self.model_listener_shutdown_flags.remove(receiver_id);
+    }
+
+    fn begin_shutdown(&self) {
+        self.transport_shutting_down.store(true, Ordering::SeqCst);
+        for listener_shutdown in self.model_listener_shutdown_flags.iter() {
+            listener_shutdown.value().store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.transport_shutting_down.load(Ordering::SeqCst)
     }
 
     #[inline(always)]
@@ -560,7 +596,28 @@ impl ZmqInferenceOps {
     }
 
     pub(super) fn shutdown(&self) -> Result<(), TransportError> {
-        unimplemented!();
+        if let Some(sockets) = &self
+            .zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::InvalidState(format!(
+                    "Failed to read ZMQ pool during inference shutdown: {}",
+                    e
+                ))
+            })?
+            .cached_sockets
+            .inference_dealer_socket
+        {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                remove_id("client", "zmq_dealer_socket", socket_id)
+                    .map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -646,7 +703,47 @@ impl ZmqTrainingOps {
         }
     }
 
+    pub(super) fn stop_model_listener(
+        &self,
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        let (_, _, receiver_id) = validate_entry(receiver_entry)?;
+        self.zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during listener shutdown: {}",
+                    e
+                ))
+            })?
+            .stop_model_listener(&receiver_id);
+        Ok(())
+    }
+
+    pub(super) fn is_shutting_down(&self) -> Result<bool, TransportError> {
+        Ok(self
+            .zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during shutdown check: {}",
+                    e
+                ))
+            })?
+            .is_shutting_down())
+    }
+
     pub(super) fn shutdown(&self) -> Result<(), TransportError> {
+        self.zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during shutdown: {}",
+                    e
+                ))
+            })?
+            .begin_shutdown();
+
         if let Some(sockets) = &self
             .zmq_pool
             .read()
@@ -751,7 +848,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         model_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(receiver_entry)?;
-        let (client_namespace, router_context, receiver_id) = validated_entry.clone();
+        let (_, _, receiver_id) = validated_entry;
 
         if model_server_address.is_empty() {
             return Err(TransportError::ListenForModelError(
@@ -764,6 +861,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 "Global dispatcher is closed".to_string(),
             ));
         }
+
+        if self.is_shutting_down()? {
+            return Ok(());
+        }
+
+        let listener_shutdown = self
+            .zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during listener registration: {}",
+                    e
+                ))
+            })?
+            .register_model_listener(&receiver_id);
 
         let _ = self
             .zmq_pool
@@ -808,71 +920,92 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
 
         let model_server_address = model_server_address.to_string();
         let global_dispatcher_tx = global_dispatcher_tx.clone();
+        log::info!(
+            "[ZmqClient] Listening for model updates at {}",
+            model_server_address
+        );
 
-        task::spawn_blocking(move || {
-            log::info!(
-                "[ZmqClient] Listening for model updates at {}",
-                model_server_address
-            );
+        let result = loop {
+            if listener_shutdown.load(Ordering::SeqCst) || self.is_shutting_down()? {
+                break Ok(());
+            }
 
-            loop {
-                match socket
-                    .try_lock()
-                    .map_err(|e| {
-                        TransportError::ListenForModelError(format!(
-                            "Failed to lock sub socket: {}",
-                            e
-                        ))
-                    })?
-                    .recv_multipart(0)
-                {
-                    Ok(message_parts) => {
-                        if message_parts.len() < 3 {
-                            log::error!("[ZmqClient] Malformed model update response");
-                            return Err(TransportError::ListenForModelError(
-                                "Malformed model update response".to_string(),
-                            ));
-                        }
-
-                        let model_bytes = message_parts[1].clone();
-                        let actor_id_bytes = message_parts[2].clone();
-
-                        if model_bytes.is_empty() {
-                            log::warn!("[ZmqClient] Model bytes are empty");
-                            continue; // drops the message
-                        }
-
-                        let actor_id = {
-                            if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
-                                log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
-                                continue; // drops the message
-                            } else {
-                                let actor_array = actor_id_bytes.as_array::<16>().cloned().unwrap(); // safe because we know the length is 16
-                                Uuid::from_bytes(actor_array)
-                            }
-                        };
-
-                        let msg = RoutedMessage {
-                            actor_id,
-                            protocol: RoutingProtocol::ModelUpdate,
-                            payload: RoutedPayload::ModelUpdate {
-                                model_bytes,
-                                version: 0,
-                            },
-                        };
-                        let _ = global_dispatcher_tx.blocking_send(msg);
-                    }
-                    Err(e) => {
-                        log::error!("[ZmqClient] SUB socket recv error: {}", e);
-                        return Err::<(), TransportError>(TransportError::ListenForModelError(
-                            format!("SUB socket recv error: {}", e),
+            match socket
+                .try_lock()
+                .map_err(|e| {
+                    TransportError::ListenForModelError(format!(
+                        "Failed to lock sub socket: {}",
+                        e
+                    ))
+                })?
+                .recv_multipart(0)
+            {
+                Ok(message_parts) => {
+                    if message_parts.len() < 3 {
+                        log::error!("[ZmqClient] Malformed model update response");
+                        break Err(TransportError::ListenForModelError(
+                            "Malformed model update response".to_string(),
                         ));
                     }
+
+                    let model_bytes = message_parts[1].clone();
+                    let actor_id_bytes = message_parts[2].clone();
+
+                    if model_bytes.is_empty() {
+                        log::warn!("[ZmqClient] Model bytes are empty");
+                        continue;
+                    }
+
+                    let actor_id = {
+                        if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
+                            log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
+                            continue;
+                        } else {
+                            let actor_array = actor_id_bytes.as_array::<16>().cloned().unwrap();
+                            Uuid::from_bytes(actor_array)
+                        }
+                    };
+
+                    let msg = RoutedMessage {
+                        actor_id,
+                        protocol: RoutingProtocol::ModelUpdate,
+                        payload: RoutedPayload::ModelUpdate {
+                            model_bytes,
+                            version: 0,
+                        },
+                    };
+
+                    if let Err(send_error) = global_dispatcher_tx.blocking_send(msg) {
+                        if listener_shutdown.load(Ordering::SeqCst) || self.is_shutting_down()? {
+                            break Ok(());
+                        }
+
+                        break Err(TransportError::ListenForModelError(format!(
+                            "Failed to dispatch model update message to global dispatcher: {}",
+                            send_error
+                        )));
+                    }
+                }
+                Err(zmq::Error::EAGAIN) => {
+                    if listener_shutdown.load(Ordering::SeqCst) || self.is_shutting_down()? {
+                        break Ok(());
+                    }
+                }
+                Err(e) => {
+                    log::error!("[ZmqClient] SUB socket recv error: {}", e);
+                    break Err(TransportError::ListenForModelError(format!(
+                        "SUB socket recv error: {}",
+                        e
+                    )));
                 }
             }
-        });
+        };
 
-        Ok(())
+        if let Ok(pool) = self.zmq_pool.read() {
+            pool.unregister_model_listener(&receiver_id);
+        }
+
+        result
     }
 
     fn execute_send_algorithm_init_request(
@@ -1943,5 +2076,43 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
     }
 }
 
-#[cfg(tests)]
-mod tests {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_and_stop_model_listener_updates_flag() {
+        let pool = ZmqPool::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+
+        let listener_shutdown = pool.register_model_listener(&receiver_id);
+        assert!(!listener_shutdown.load(Ordering::SeqCst));
+
+        pool.stop_model_listener(&receiver_id);
+
+        assert!(listener_shutdown.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn begin_shutdown_marks_transport_and_active_listeners() {
+        let pool = ZmqPool::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_shutdown = pool.register_model_listener(&receiver_id);
+
+        pool.begin_shutdown();
+
+        assert!(pool.is_shutting_down());
+        assert!(listener_shutdown.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn unregister_model_listener_removes_flag_entry() {
+        let pool = ZmqPool::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+
+        let _ = pool.register_model_listener(&receiver_id);
+        pool.unregister_model_listener(&receiver_id);
+
+        assert!(pool.model_listener_shutdown_flags.get(&receiver_id).is_none());
+    }
+}

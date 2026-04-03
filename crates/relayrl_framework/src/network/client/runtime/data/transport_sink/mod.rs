@@ -208,6 +208,10 @@ pub(crate) trait AsyncClientTrainingTransportOps<B: Backend + BackendMatcher<Bac
         global_dispatcher_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
+    async fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError>;
 }
 
 #[cfg(feature = "zmq-transport")]
@@ -239,6 +243,10 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
         receiver_entry: (NamespaceString, ContextString, Uuid),
         global_dispatcher_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
+    ) -> Result<(), TransportError>;
+    fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
     ) -> Result<(), TransportError>;
 }
 
