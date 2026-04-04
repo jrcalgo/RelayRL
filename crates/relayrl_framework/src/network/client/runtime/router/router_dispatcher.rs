@@ -11,12 +11,11 @@ use burn_tensor::backend::Backend;
 use relayrl_types::data::tensor::BackendMatcher;
 
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 #[derive(Debug, Error)]
@@ -57,7 +56,7 @@ pub(crate) struct RouterDispatcher<
     router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     shutdown: Option<broadcast::Receiver<()>>,
-    pending_messages: Arc<Mutex<HashMap<ActorUuid, PendingMessage>>>,
+    pending_messages: Arc<DashMap<ActorUuid, PendingMessage>>,
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
 }
@@ -76,7 +75,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             router_channels,
             shared_state,
             shutdown: None,
-            pending_messages: Arc::new(Mutex::new(HashMap::new())),
+            pending_messages: Arc::new(DashMap::<ActorUuid, PendingMessage>::new()),
             #[cfg(feature = "metrics")]
             metrics,
         }
@@ -97,7 +96,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn spawn_loop(mut self) -> Result<(), RouterDispatcherError> {
         let mut shutdown = self.shutdown.take();
 
-        // Spawn background retry task
+        // Spawn background retry task;
         let pending_messages = self.pending_messages.clone();
         let router_channels = self.router_channels.clone();
         let shared_state = self.shared_state.clone();
@@ -168,7 +167,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Background task that periodically retries pending messages
     async fn retry_pending_messages_loop(
-        pending_messages: Arc<Mutex<HashMap<ActorUuid, PendingMessage>>>,
+        pending_messages: Arc<DashMap<ActorUuid, PendingMessage>>,
         router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
         shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
@@ -184,13 +183,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             // Batch operation: Lock once, process all actors, then release
             let retry_results = {
-                let mut pending_map = pending_messages.lock().await;
 
                 let mut to_remove: Vec<ActorUuid> = Vec::new();
                 let mut to_retry: Vec<(ActorUuid, Instant, u32)> = Vec::new();
 
                 // Process all actors in a single lock
-                for (actor_id, pending) in pending_map.iter_mut() {
+                for entry in pending_messages.iter() {
+                    let (actor_id, pending) = entry.pair();
                     let elapsed = pending.first_attempt.elapsed();
 
                     let max_retry_duration =
@@ -227,19 +226,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 // Remove expired messages while we still have the lock
                 for actor_id in &to_remove {
-                    pending_map.remove(actor_id);
+                    pending_messages.remove(actor_id);
                 }
 
                 // Extract messages ready to retry (move them out of the map)
                 let mut retry_messages = Vec::new();
                 for (actor_id, first_attempt, retry_count) in &to_retry {
-                    if let Some(pending_msg) = pending_map.remove(actor_id) {
-                        retry_messages.push((*actor_id, pending_msg, *first_attempt, *retry_count));
+                    if let Some(pending_msg) = pending_messages.remove(actor_id) {
+                        retry_messages.push((*actor_id, pending_msg.1, *first_attempt, *retry_count));
                     }
                 }
-
-                // Release lock before async operations
-                drop(pending_map);
 
                 #[cfg(feature = "metrics")]
                 {
@@ -294,8 +290,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                     }
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(msg)) => {
                                         // Channel full, put back in queue (need lock for write)
-                                        let mut pending_map = pending_messages.lock().await;
-                                        pending_map.insert(
+                                        pending_messages.insert(
                                             actor_id,
                                             PendingMessage {
                                                 message: msg,
@@ -315,8 +310,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             }
                             None => {
                                 // Router not found, put back in queue with incremented retry count
-                                let mut pending_map = pending_messages.lock().await;
-                                pending_map.insert(
+                                pending_messages.insert(
                                     actor_id,
                                     PendingMessage {
                                         message: pending_msg.message,
@@ -329,8 +323,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
                     None => {
                         // Actor still not assigned, put back in queue with incremented retry count
-                        let mut pending_map = pending_messages.lock().await;
-                        pending_map.insert(
+                        pending_messages.insert(
                             actor_id,
                             PendingMessage {
                                 message: pending_msg.message,
@@ -390,8 +383,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             None => {
                 // Actor not assigned to any router yet - queue for retry
                 {
-                    let mut pending_map = self.pending_messages.lock().await;
-                    pending_map.insert(
+                    self.pending_messages.insert(
                         actor_id,
                         PendingMessage {
                             message: msg,
@@ -608,9 +600,8 @@ mod unit_tests {
         );
 
         // Verify it ended up in pending_messages
-        let pending = dispatcher.pending_messages.lock().await;
         assert!(
-            pending.contains_key(&actor_id),
+            dispatcher.pending_messages.contains_key(&actor_id),
             "Message should be queued in pending_messages"
         );
     }
