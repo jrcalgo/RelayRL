@@ -107,7 +107,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
     pub(crate) async fn listen_for_model(
         &self,
         receiver_entry: (NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_update_tx: Sender<RoutedMessage>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
@@ -120,7 +120,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
                     ClientTransportInterface::Sync(sync_tr) => {
                         sync_tr.listen_for_model(
                             receiver_entry,
-                            global_dispatcher_tx,
+                            model_update_tx,
                             transport_addresses,
                         )
                     }
@@ -133,7 +133,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
             #[cfg(feature = "nats-transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .listen_for_model(receiver_entry, global_dispatcher_tx, transport_addresses)
+                    .listen_for_model(receiver_entry, model_update_tx, transport_addresses)
                     .await
             }
         }

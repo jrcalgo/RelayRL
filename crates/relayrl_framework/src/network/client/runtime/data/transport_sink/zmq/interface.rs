@@ -1277,7 +1277,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
     fn listen_for_model(
         &self,
         receiver_entry: (NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_update_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(protocol) = self.training_protocol.as_ref() {
@@ -1294,7 +1294,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
             loop {
                 let result = self.execute_listen_for_model(
                     &receiver_entry,
-                    &global_dispatcher_tx.clone(),
+                    &model_update_tx.clone(),
                     model_server_address,
                 );
 
@@ -1338,13 +1338,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
     fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqTrainingOps as ZmqTrainingExecution<B>>::execute_listen_for_model(
             &self.zmq_training_ops,
             receiver_entry,
-            global_dispatcher_tx,
+            model_update_tx,
             model_server_address,
         )
     }

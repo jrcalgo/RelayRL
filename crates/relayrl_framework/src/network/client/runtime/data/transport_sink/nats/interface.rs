@@ -1327,7 +1327,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
     async fn listen_for_model(
         &self,
         receiver_entry: (NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_update_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         let protocol = self.training_protocol.as_ref().ok_or_else(|| {
@@ -1351,7 +1351,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
             match self
                 .execute_listen_for_model(
                     &receiver_entry,
-                    &global_dispatcher_tx,
+                    &model_update_tx,
                     nats_training_server_address,
                 )
                 .await
@@ -1515,13 +1515,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
     async fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_listen_for_model(
             &self.nats_training_ops,
             receiver_entry,
-            global_dispatcher_tx,
+            model_update_tx,
             nats_training_server_address,
         )
         .await

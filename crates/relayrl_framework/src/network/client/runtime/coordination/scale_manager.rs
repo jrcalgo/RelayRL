@@ -1,6 +1,6 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::AlgorithmArgs;
+use crate::network::client::agent::{AlgorithmArgs, ActorInferenceMode};
 use crate::network::client::agent::LocalTrajectoryFileParams;
 use crate::network::client::agent::{
     ActorTrainingDataMode, ClientModes, uses_local_file_writing,
@@ -101,8 +101,6 @@ pub(crate) enum ProcessInitFlag<B: Backend + BackendMatcher<Backend = B>> {
 }
 
 pub(crate) struct RouterRuntimeParams {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) receiver_loop: Option<JoinHandle<()>>,
     pub(crate) filter_loop: JoinHandle<()>,
     pub(crate) trajectory_buffer_loop: Option<JoinHandle<()>>,
     pub(crate) filter_tx: Sender<RoutedMessage>,
@@ -133,6 +131,8 @@ pub(crate) struct ScaleManager<
     pub(crate) scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub(crate) router_receiver_loop: Option<JoinHandle<()>>,
     pub(crate) router_dispatcher: Option<JoinHandle<()>>,
     pub(crate) router_filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
     pub(crate) runtime_params: Option<DashMap<RouterNamespace, RouterRuntimeParams>>,
@@ -218,6 +218,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             training_dispatcher,
             router_dispatcher,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            router_receiver_loop: None,
             router_filter_channels,
             runtime_params: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -245,6 +247,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             self.scale_in(router_count).await?;
         }
         if let Some(handle) = self.router_dispatcher.take() {
+            handle.abort()
+        };
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        if let Some(handle) = self.router_receiver_loop.take() {
             handle.abort()
         };
         self.router_filter_channels.clear();
@@ -378,12 +384,58 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    async fn start_transport_receiver(&mut self) -> Result<(), ScaleManagerError> {
+        if self.router_receiver_loop.is_some() {
+            log::debug!("[ScaleManager] Transport receiver loop already started");
+            return Ok(());
+        }
+
+        match (&self.training_dispatcher, &self.shared_transport_addresses) {
+            (Some(training_dispatcher), Some(transport_addresses)) => {
+                let _ = reserve_id_with(self.client_namespace.as_ref(), crate::network::RECEIVER_CONTEXT, 1, 100).map_err(ScaleManagerError::from)?;
+
+                let global_dispatcher_tx = self.shared_state.read().await.global_dispatcher_tx.clone();
+                let receiver = ClientTransportModelReceiver::new(
+                    self.client_namespace.clone(),
+                    global_dispatcher_tx,
+                    transport_addresses.clone(),
+                    training_dispatcher.clone(),
+                );
+
+                let receiver = if let Some(lc) = &self.lifecycle {
+                    match lc.subscribe_shutdown() {
+                        Ok(rx) => receiver.with_shutdown(rx),
+                        Err(e) => {
+                            log::error!("[ScaleManager] Failed to subscribe transport receiver to shutdown: {}", e);
+                            receiver
+                        }
+                    }
+                } else {
+                    receiver
+                };
+
+                log::info!("[ScaleManager] Spawning transport receiver loop for client namespace: {}", self.client_namespace);
+                let receiver_loop = Self::spawn_transport_receiver(receiver).await;
+                self.router_receiver_loop = Some(receiver_loop);
+            }
+            _ => {
+                log::debug!("[ScaleManager] Transport receiver loop not started; training dispatcher or server addresses not found");
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) async fn scale_out(
         &mut self,
         router_add: u32,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
     ) -> Result<(), ScaleManagerError> {
         let router_add = router_add as usize;
+
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        self.start_transport_receiver().await?;
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let Some(transport_addresses) = self.get_transport_addresses()? {
@@ -425,40 +477,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
             let (trajectory_buffer_tx, trajectory_buffer_rx) =
                 tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let receiver = match (&self.training_dispatcher, &self.shared_transport_addresses) {
-                (Some(training_dispatcher), Some(transport_addresses)) => {
-                    let _ = reserve_id_with(
-                        router_namespace.as_ref(),
-                        crate::network::RECEIVER_CONTEXT,
-                        1,
-                        100,
-                    )
-                    .map_err(ScaleManagerError::from)?;
-
-                    let global_dispatcher_tx =
-                        self.shared_state.read().await.global_dispatcher_tx.clone();
-                    let receiver_init = ClientTransportModelReceiver::new(
-                        router_namespace.clone(),
-                        global_dispatcher_tx,
-                        transport_addresses.clone(),
-                        training_dispatcher.clone(),
-                    );
-
-                    if let Some(lc) = &self.lifecycle {
-                        Some(
-                            receiver_init.with_shutdown(
-                                lc.subscribe_shutdown()
-                                    .map_err(ScaleManagerError::SubscribeShutdownError)?,
-                            ),
-                        )
-                    } else {
-                        Some(receiver_init)
-                    }
-                }
-                _ => None,
-            };
 
             let filter = {
                 let shared_filter_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
@@ -527,19 +545,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
             };
 
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let receiver_loop: Option<JoinHandle<()>> = if let Some(rcv) = receiver {
-                Some(Self::spawn_transport_receiver(rcv).await)
-            } else {
-                None
-            };
             let filter_loop: JoinHandle<()> = Self::spawn_central_filter(filter).await;
             let trajectory_buffer_loop: Option<JoinHandle<()>> =
                 buffer.map(Self::spawn_trajectory_buffer);
 
             let runtime_params = RouterRuntimeParams {
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                receiver_loop,
                 filter_loop,
                 trajectory_buffer_loop,
                 filter_tx: filter_tx.clone(),
@@ -549,10 +559,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             if let Some(ref params) = self.runtime_params
                 && let Some(old_params) = params.insert(router_namespace.clone(), runtime_params)
             {
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                if let Some(h) = old_params.receiver_loop {
-                    h.abort();
-                }
                 old_params.filter_loop.abort();
                 if let Some(h) = old_params.trajectory_buffer_loop {
                     h.abort();
@@ -828,11 +834,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Phase 4: Server confirmed — safe to perform destructive teardown.
         for (router_namespace, router_params) in &removed_routers {
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            if let Some(receiver_loop) = &router_params.receiver_loop {
-                receiver_loop.abort();
-            }
-
             router_params.filter_loop.abort();
 
             if let Some(trajectory_buffer_loop) = &router_params.trajectory_buffer_loop {
@@ -867,11 +868,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if let Some(ref params) = self.runtime_params {
             for router_namespace in router_namespaces {
                 if let Some((_, router_params)) = params.remove(router_namespace) {
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    if let Some(receiver_loop) = &router_params.receiver_loop {
-                        receiver_loop.abort();
-                    }
-
                     router_params.filter_loop.abort();
 
                     if let Some(trajectory_buffer_loop) = &router_params.trajectory_buffer_loop {

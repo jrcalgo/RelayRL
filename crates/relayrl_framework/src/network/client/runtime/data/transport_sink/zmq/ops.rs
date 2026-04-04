@@ -897,7 +897,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
     fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(receiver_entry)?;
@@ -909,9 +909,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ));
         }
 
-        if global_dispatcher_tx.is_closed() {
+        if model_update_tx.is_closed() {
             return Err(TransportError::ListenForModelError(
-                "Global dispatcher is closed".to_string(),
+                "Model update transmitter is closed".to_string(),
             ));
         }
 
@@ -972,7 +972,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .clone();
 
         let model_server_address = model_server_address.to_string();
-        let global_dispatcher_tx = global_dispatcher_tx.clone();
+        let model_update_tx = model_update_tx.clone();
         log::info!(
             "[ZmqClient] Listening for model updates at {}",
             model_server_address
@@ -1003,13 +1003,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                         }
                     };
 
-                    if let Err(send_error) = global_dispatcher_tx.blocking_send(msg) {
+                    if let Err(send_error) = model_update_tx.blocking_send(msg) {
                         if listener_shutdown.load(Ordering::SeqCst) || self.is_shutting_down()? {
                             break Ok(());
                         }
 
                         break Err(TransportError::ListenForModelError(format!(
-                            "Failed to dispatch model update message to global dispatcher: {}",
+                            "Failed to dispatch model update message to model update transmitter: {}",
                             send_error
                         )));
                     }

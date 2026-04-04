@@ -1,8 +1,8 @@
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::TrainingDispatcher;
 use crate::network::client::runtime::router::{RoutedMessage, RouterError};
-use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
@@ -28,9 +28,9 @@ pub enum TransportReceiverError {
     NoEntriesFound,
 }
 
-/// Listens & receives model bytes from a training server
+/// Listens & receives model bytes from a training server. Created once per client runtime.
 pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backend = B>> {
-    associated_router_namespace: RouterNamespace,
+    client_namespace: Arc<str>,
     active: AtomicBool,
     global_dispatcher_tx: Sender<RoutedMessage>,
     training_dispatcher: Arc<TrainingDispatcher<B>>,
@@ -40,13 +40,13 @@ pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backe
 
 impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
     pub fn new(
-        associated_router_namespace: RouterNamespace,
+        client_namespace: Arc<str>,
         global_dispatcher_tx: Sender<RoutedMessage>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
         training_dispatcher: Arc<TrainingDispatcher<B>>,
     ) -> Self {
         Self {
-            associated_router_namespace,
+            client_namespace,
             active: AtomicBool::new(false),
             global_dispatcher_tx,
             training_dispatcher,
@@ -64,15 +64,33 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
         self.active.store(true, Ordering::SeqCst);
 
         let entries = get_context_entries(
-            self.associated_router_namespace.as_ref(),
+            self.client_namespace.as_ref(),
             crate::network::RECEIVER_CONTEXT,
         )
         .map_err(TransportReceiverError::from)?;
         let receiver_entry = entries
             .first()
-            .ok_or(TransportReceiverError::NoEntriesFound)?;
+            .ok_or(TransportReceiverError::NoEntriesFound)?.clone();
 
-        let global_dispatcher_tx = self.global_dispatcher_tx.clone();
+        let (model_update_tx, mut model_update_rx) = tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+
+        let training_dispatcher = self.training_dispatcher.clone();
+        let transport_addresses = self.shared_transport_addresses.clone();
+        let receiver_entry_for_task = receiver_entry.clone();
+        let listener_handle = tokio::spawn(async move {
+            loop {
+                match training_dispatcher.listen_for_model(receiver_entry_for_task.clone(), model_update_tx.clone(), transport_addresses.clone()).await {
+                    Ok(()) => {
+                        log::warn!("[ClientTransportModelReceiver] Model listener stopped gracefully");
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("[ClientTransportModelReceiver] Failed to listen for model: {}", e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                } 
+            }
+        });
 
         while self.active.load(Ordering::SeqCst) {
             tokio::select! {
@@ -95,18 +113,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
                             e
                         );
                     }
+                    listener_handle.abort();
                     self.active.store(false, Ordering::SeqCst);
                 }
 
-                result = self.training_dispatcher.listen_for_model(receiver_entry.clone(), global_dispatcher_tx.clone(), self.shared_transport_addresses.clone()) => {
-                    match result {
-                        Ok(()) => {
-                            log::warn!("[ClientTransportModelReceiver] Model listener stopped gracefully");
-                            self.active.store(false, Ordering::SeqCst);
+                msg = model_update_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            if let Err(e) = self.global_dispatcher_tx.send(msg).await {
+                                log::error!("[ClientTransportModelReceiver] Failed to send message to global dispatcher: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            log::error!("[ClientTransportModelReceiver] Failed to listen for model: {}", e);
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        None => {
+                            log::warn!("[ClientTransportModelReceiver] Model update channel closed, shutting down");
+                            listener_handle.abort();
+                            self.active.store(false, Ordering::SeqCst);
                         }
                     }
                 }

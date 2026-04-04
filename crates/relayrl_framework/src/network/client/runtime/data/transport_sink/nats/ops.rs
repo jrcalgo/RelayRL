@@ -1148,7 +1148,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
     async fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         if nats_training_server_address.is_empty() {
@@ -1157,9 +1157,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             ));
         }
 
-        if global_dispatcher_tx.is_closed() {
+        if model_update_tx.is_closed() {
             return Err(TransportError::ListenForModelError(
-                "Global dispatcher channel is closed".to_string(),
+                "Model update transmitter channel is closed".to_string(),
             ));
         }
 
@@ -1193,7 +1193,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             received_nats_message.payload
         });
 
-        forward_model_update_payloads(payload_stream, global_dispatcher_tx, || async {
+        forward_model_update_payloads(payload_stream, model_update_tx, || async {
             listener_stop_flag.load(Ordering::SeqCst) || self.is_shutting_down().await
         })
         .await
