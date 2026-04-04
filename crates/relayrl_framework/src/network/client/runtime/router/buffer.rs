@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast};
 
 type PriorityRank = i64;
 
@@ -259,8 +259,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let shared_trajectory_file_output = self.shared_trajectory_file_output.clone();
 
-        let worker_priority_queue: Arc<Mutex<BinaryHeap<SinkQueueEntry>>> =
-            Arc::new(Mutex::new(BinaryHeap::new()));
+        let worker_priority_queue: BinaryHeap<SinkQueueEntry> = BinaryHeap::new();
 
         let mut receiver_shutdown_rx = self.shutdown.take();
         let mut worker_shutdown_rx = receiver_shutdown_rx.as_mut().map(|rx| rx.resubscribe());
@@ -315,7 +314,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             receiver_active.store(false, Ordering::SeqCst);
         });
 
-        let worker_queue = worker_priority_queue.clone();
+        let mut worker_queue = worker_priority_queue.clone();
         let worker_actor_last_processed = actor_last_processed.clone();
         let worker_modes = shared_client_modes.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -349,8 +348,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     job_opt = traj_queue_rx.recv() => {
                         match job_opt {
                             Some(job) => {
-                                let mut queue = worker_queue.lock().await;
-                                queue.push(job);
+                                worker_queue.push(job);
                             }
                             None => {
                                 break;
@@ -359,19 +357,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
 
                     _ = worker_tick.tick() => {
-                        if !worker_active.load(Ordering::SeqCst) {
-                            let queue = worker_queue.lock().await;
-                            if queue.is_empty() {
+                        if !worker_active.load(Ordering::SeqCst) &&
+                             worker_queue.is_empty() {
                                 break;
                             }
-                            drop(queue);
-                        }
+                        
 
                         let mut jobs_to_process = Vec::with_capacity(BATCH_SIZE);
                         {
-                            let mut queue = worker_queue.lock().await;
                             for _ in 0..BATCH_SIZE {
-                                if let Some(job) = queue.pop() {
+                                if let Some(job) = worker_queue.pop() {
                                     jobs_to_process.push(job);
                                 } else {
                                     break;
@@ -458,8 +453,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             }
 
             // Process remaining jobs synchronously for graceful shutdown
-            let mut queue = worker_queue.lock().await;
-            while let Some(job) = queue.pop() {
+            while let Some(job) = worker_queue.pop() {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let Some(transport_addresses) = &worker_transport_addresses
                     && let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
