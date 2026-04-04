@@ -70,16 +70,16 @@ pub(crate) fn construct_transport_addresses(
             #[cfg(feature = "zmq-transport")]
             TransportType::ZMQ => Arc::<str>::from(
                 "tcp://".to_owned()
-                    + &network_params.host.clone()
+                    + &network_params.host
                     + ":"
-                    + &network_params.port.clone().to_string(),
+                    + &network_params.port.to_string(),
             ),
             #[cfg(feature = "nats-transport")]
             TransportType::NATS => Arc::<str>::from(
                 "nats://".to_owned()
-                    + &network_params.host.clone()
+                    + &network_params.host
                     + ":"
-                    + &network_params.port.clone().to_string(),
+                    + &network_params.port.to_string(),
             ),
         }
     }
