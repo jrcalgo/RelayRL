@@ -541,9 +541,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .collect()
     }
 
-    fn sorted_actor_ids_for_model_updates(&self) -> Vec<ActorUuid> {
-        let mut actor_ids = self.get_actor_id_list();
+    fn sorted_actor_ids_for_model_updates(&self, actor_ids: Option<&[ActorUuid]>) -> Vec<ActorUuid> {
+        let mut actor_ids = match actor_ids {
+            Some(ids) => ids
+                .iter()
+                .copied()
+                .filter(|actor_id| self.actor_handles.contains_key(actor_id))
+                .collect(),
+            None => self.get_actor_id_list(),
+        };
         actor_ids.sort_by_key(|actor_id| actor_id.to_string());
+        actor_ids.dedup();
         actor_ids
     }
 
@@ -579,12 +587,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn canonical_model_update_target(&self, actor_id: ActorUuid) -> ActorUuid {
-        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates();
+        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates(None);
         self.canonical_model_update_target_from_sorted_actor_ids(actor_id, &sorted_actor_ids)
     }
 
     pub(crate) fn model_update_dispatch_targets(&self) -> Vec<ActorUuid> {
-        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates();
+        self.model_update_dispatch_targets_for_subset(None)
+    }
+
+    pub(crate) fn model_update_dispatch_targets_for_subset(
+        &self,
+        actor_ids: Option<&[ActorUuid]>,
+    ) -> Vec<ActorUuid> {
+        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates(actor_ids);
         let mut dispatch_targets = Vec::new();
 
         for actor_id in sorted_actor_ids.iter().copied() {
@@ -680,6 +695,12 @@ mod unit_tests {
             ("test-state-manager".to_string(), String::new()),
             None,
         )
+    }
+
+    fn deterministic_actor_id(last_byte: u8) -> Uuid {
+        let mut bytes = [0_u8; 16];
+        bytes[15] = last_byte;
+        Uuid::from_bytes(bytes)
     }
 
     #[tokio::test]
@@ -966,6 +987,75 @@ mod unit_tests {
             .unwrap();
 
         assert_eq!(sm.model_update_dispatch_targets(), vec![expected_target]);
+    }
+
+    #[tokio::test]
+    async fn model_update_dispatch_targets_for_subset_returns_known_actor_ids_in_independent_mode()
+    {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let id1 = deterministic_actor_id(1);
+        let id2 = deterministic_actor_id(2);
+        let id3 = deterministic_actor_id(3);
+        let unknown_id = deterministic_actor_id(9);
+
+        for actor_id in [id1, id2, id3] {
+            sm.actor_handles
+                .insert(actor_id, Arc::new(tokio::spawn(async {})));
+        }
+
+        let subset = vec![id3, unknown_id, id1, id3];
+        assert_eq!(
+            sm.model_update_dispatch_targets_for_subset(Some(&subset)),
+            vec![id1, id3]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_update_dispatch_targets_for_subset_ignores_unknown_actor_ids() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let known_id = deterministic_actor_id(1);
+        let unknown_id = deterministic_actor_id(2);
+
+        sm.actor_handles
+            .insert(known_id, Arc::new(tokio::spawn(async {})));
+
+        let subset = vec![unknown_id];
+        assert!(sm
+            .model_update_dispatch_targets_for_subset(Some(&subset))
+            .is_empty());
+
+        let subset = vec![unknown_id, known_id];
+        assert_eq!(
+            sm.model_update_dispatch_targets_for_subset(Some(&subset)),
+            vec![known_id]
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tch-backend")]
+    async fn model_update_dispatch_targets_for_subset_deduplicates_selected_shared_devices() {
+        let (sm, _rx) = make_state_manager(shared_modes());
+        let cpu_small = deterministic_actor_id(1);
+        let cpu_large = deterministic_actor_id(2);
+        let cuda_small = deterministic_actor_id(3);
+        let cuda_large = deterministic_actor_id(4);
+
+        for (actor_id, device) in [
+            (cpu_small, DeviceType::Cpu),
+            (cpu_large, DeviceType::Cpu),
+            (cuda_small, DeviceType::Cuda(0)),
+            (cuda_large, DeviceType::Cuda(0)),
+        ] {
+            sm.actor_handles
+                .insert(actor_id, Arc::new(tokio::spawn(async {})));
+            sm.actor_devices.insert(actor_id, device);
+        }
+
+        let subset = vec![cuda_large, cpu_large, cpu_small];
+        assert_eq!(
+            sm.model_update_dispatch_targets_for_subset(Some(&subset)),
+            vec![cpu_small, cuda_large]
+        );
     }
 
     #[tokio::test]

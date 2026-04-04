@@ -817,11 +817,20 @@ impl<
         Ok(())
     }
 
-    pub async fn update_model(&self, model: ModelModule<B>) -> Result<(), ClientError> {
+    /// Update the model for all actors or for the specified actor IDs (if they exist).
+    ///
+    /// When `actor_ids` is `Some`, only the listed actors are considered for the update.
+    /// In `ModelMode::Shared`, the runtime still updates one representative actor per relevant
+    /// device so each shared model handle is refreshed only once.
+    pub async fn update_model(
+        &self,
+        model: ModelModule<B>,
+        actor_ids: Option<Vec<ActorUuid>>,
+    ) -> Result<(), ClientError> {
         if let Err(e) = validate_module::<B>(&model) {
             return Err(ClientError::ModelValidationFailed(e.to_string()));
         }
-        self.coordinator.update_model(model).await?;
+        self.coordinator.update_model(model, actor_ids).await?;
         Ok(())
     }
 

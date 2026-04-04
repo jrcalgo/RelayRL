@@ -212,7 +212,11 @@ pub trait ClientInterface<
         ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError>;
-    async fn update_model(&self, model: ModelModule<B>) -> Result<(), CoordinatorError>;
+    async fn update_model(
+        &self,
+        model: ModelModule<B>,
+        actor_ids: Option<Vec<ActorUuid>>,
+    ) -> Result<(), CoordinatorError>;
     async fn get_model_version(
         &self,
         ids: Vec<ActorUuid>,
@@ -327,6 +331,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn prepare_model_update_dispatch(
         &self,
+        actor_ids: Option<&[ActorUuid]>,
     ) -> Result<
         Option<(Sender<RoutedMessage>, Vec<ActorUuid>, Arc<RwLock<PathBuf>>)>,
         CoordinatorError,
@@ -339,7 +344,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         let shared_state = params.shared_state.read().await;
                         (
                             shared_state.global_dispatcher_tx.clone(),
-                            shared_state.model_update_dispatch_targets(),
+                            shared_state.model_update_dispatch_targets_for_subset(actor_ids),
                         )
                     };
 
@@ -1371,9 +1376,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn update_model(&self, model: ModelModule<B>) -> Result<(), CoordinatorError> {
+    async fn update_model(
+        &self,
+        model: ModelModule<B>,
+        actor_ids: Option<Vec<ActorUuid>>,
+    ) -> Result<(), CoordinatorError> {
         let Some((global_dispatcher_tx, target_actor_ids, local_model_path)) =
-            self.prepare_model_update_dispatch().await?
+            self.prepare_model_update_dispatch(actor_ids.as_deref()).await?
         else {
             return Ok(());
         };
@@ -1724,7 +1733,7 @@ mod unit_tests {
     #[tokio::test]
     async fn prepare_model_update_dispatch_no_runtime_returns_err() {
         let c = make_coordinator();
-        let result = c.prepare_model_update_dispatch().await;
+        let result = c.prepare_model_update_dispatch(None).await;
         assert!(result.is_err());
     }
 
@@ -1738,13 +1747,54 @@ mod unit_tests {
         let (coordinator, _shared_state, mut global_dispatcher_rx) =
             make_runtime_coordinator(client_modes).await;
 
-        let result = coordinator.prepare_model_update_dispatch().await;
+        let result = coordinator.prepare_model_update_dispatch(None).await;
 
         assert!(matches!(result, Ok(None)));
         assert!(matches!(
             global_dispatcher_rx.try_recv(),
             Err(TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn prepare_model_update_dispatch_subset_filters_requested_actor_ids() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        };
+        let (coordinator, shared_state, _global_dispatcher_rx) =
+            make_runtime_coordinator(client_modes).await;
+        let actor_ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        let unknown_actor_id = Uuid::new_v4();
+
+        {
+            let mut shared_state = shared_state.write().await;
+            let (tx_to_buffer, _buffer_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            for actor_id in &actor_ids {
+                shared_state
+                    .new_actor(
+                        *actor_id,
+                        Arc::from("router-a"),
+                        DeviceType::Cpu,
+                        None,
+                        tx_to_buffer.clone(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let requested_actor_ids = vec![actor_ids[2], unknown_actor_id, actor_ids[0], actor_ids[2]];
+        let (_global_dispatcher_tx, target_actor_ids, _local_model_path) = coordinator
+            .prepare_model_update_dispatch(Some(&requested_actor_ids))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut expected_target_actor_ids = vec![actor_ids[0], actor_ids[2]];
+        expected_target_actor_ids.sort_by_key(|actor_id| actor_id.to_string());
+
+        assert_eq!(target_actor_ids, expected_target_actor_ids);
     }
 
     #[tokio::test]
@@ -1811,7 +1861,7 @@ mod unit_tests {
         });
 
         let (global_dispatcher_tx, target_actor_ids, _local_model_path) = coordinator
-            .prepare_model_update_dispatch()
+            .prepare_model_update_dispatch(None)
             .await
             .unwrap()
             .unwrap();
