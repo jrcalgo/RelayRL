@@ -281,15 +281,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 self.current_traj.add_action(last_action);
 
                 let traj_clone = self.current_traj.clone();
-                let now = SystemTime::now();
-                let duration = now
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
+                let (duration_ms, duration_ns) = {
+                    let now: SystemTime = SystemTime::now();
+                    let duration = now
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
+                    (duration.as_millis(), duration.as_nanos())
+                };
                 let send_traj_msg = RoutedMessage {
                     actor_id: self.actor_id,
                     protocol: RoutingProtocol::SendTrajectory,
                     payload: RoutedPayload::SendTrajectory {
-                        timestamp: (duration.as_millis(), duration.as_nanos()),
+                        timestamp: (duration_ms, duration_ns),
                         trajectory: traj_clone,
                     },
                 };
@@ -668,18 +671,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if !self.current_traj.actions.is_empty() {
             let send_traj_msg = {
                 let traj_clone = self.current_traj.clone();
-                let now = SystemTime::now();
-                let duration_ms = now
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| ActorError::SystemError(format!("Clock skew: {}", e)))?;
-                let duration_ns = now
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| ActorError::SystemError(format!("Clock skew: {}", e)))?;
+                let (duration_ms, duration_ns) = {
+                    let now: SystemTime = SystemTime::now();
+                    let duration = now
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|e| ActorError::SystemError(format!("Clock skew: {}", e)))?;
+                    (duration.as_millis(), duration.as_nanos())
+                };
                 RoutedMessage {
                     actor_id: self.actor_id,
                     protocol: RoutingProtocol::SendTrajectory,
                     payload: RoutedPayload::SendTrajectory {
-                        timestamp: (duration_ms.as_millis(), duration_ns.as_nanos()),
+                        timestamp: (duration_ms, duration_ns),
                         trajectory: traj_clone,
                     },
                 }
@@ -715,13 +718,7 @@ mod unit_tests {
     use burn_ndarray::NdArrayDevice;
     use burn_tensor::Tensor;
 
-    #[cfg(feature = "tch-backend")]
-    use burn_tch::LibTorch;
-
     type NdArrayBackend = NdArray<f32>;
-
-    #[cfg(feature = "tch-backend")]
-    type TchBackend = LibTorch<f32>;
 
     const D_IN: usize = 4;
     const D_OUT: usize = 1;
@@ -734,11 +731,6 @@ mod unit_tests {
     }
 
     fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
-        Arc::new(RwLock::new(None))
-    }
-
-    #[cfg(feature = "tch-backend")]
-    fn empty_torch_model_handle() -> LocalModelHandle<TchBackend> {
         Arc::new(RwLock::new(None))
     }
 
@@ -759,43 +751,6 @@ mod unit_tests {
             actor_id,
             device,
             empty_onnx_model_handle(),
-            Arc::new(RwLock::new(PathBuf::new())),
-            Arc::new(RwLock::new(max_traj_length as u128)),
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            None,
-            rx_from_router,
-            tx_to_buffer,
-            disabled_data_mode(),
-            #[cfg(feature = "metrics")]
-            test_metrics(),
-        )
-        .await;
-
-        (actor, tx_to_actor, rx_from_buffer)
-    }
-
-    #[cfg(feature = "tch-backend")]
-    async fn create_tch_actor(
-        max_traj_length: u128,
-        device: DeviceType,
-    ) -> (
-        Actor<TchBackend, D_IN, D_OUT>,
-        mpsc::Sender<RoutedMessage>,
-        mpsc::Receiver<RoutedMessage>,
-    ) {
-        let actor_id = Uuid::new_v4();
-        let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-
-        let actor = Actor::<TchBackend, D_IN, D_OUT>::new(
-            Arc::from("test-actor-namespace"),
-            actor_id,
-            device,
-            empty_torch_model_handle(),
             Arc::new(RwLock::new(PathBuf::new())),
             Arc::new(RwLock::new(max_traj_length as u128)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
