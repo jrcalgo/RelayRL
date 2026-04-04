@@ -43,7 +43,8 @@ pub(crate) struct SharedZmqTrainingAddresses {
 
 /// Shared transport addresses for both NATS and ZMQ transports.
 ///
-/// I was going to store these in an enum but I realized I don't hate myself enough to do that. Would have to pattern match everywhere that uses this instead of just storing shared pointers to empty strings for unused fields, memory be damned.
+/// I was going to store these in an enum but I realized I don't hate myself enough to do that. 
+/// Would have to pattern match everywhere that uses this instead of just storing shared pointers to empty strings for unused fields, memory be damned.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SharedTransportAddresses {
@@ -69,10 +70,7 @@ pub(crate) fn construct_transport_addresses(
         match *transport_type {
             #[cfg(feature = "zmq-transport")]
             TransportType::ZMQ => Arc::<str>::from(
-                "tcp://".to_owned()
-                    + &network_params.host
-                    + ":"
-                    + &network_params.port.to_string(),
+                "tcp://".to_owned() + &network_params.host + ":" + &network_params.port.to_string(),
             ),
             #[cfg(feature = "nats-transport")]
             TransportType::NATS => Arc::<str>::from(
@@ -215,7 +213,7 @@ pub enum LifeCycleManagerError {
 pub(crate) struct LifeCycleManager {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     algorithm_args: Arc<AlgorithmArgs>,
-    max_traj_length: Arc<RwLock<u128>>,
+    max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     #[cfg(feature = "metrics")]
@@ -258,7 +256,7 @@ impl LifeCycleManager {
         let config_update_polling = config.client_config.config_update_polling_seconds;
 
         let transport_config = config.get_transport_config();
-        let max_traj_length = transport_config.max_traj_length;
+        let max_traj_length = transport_config.max_traj_length as usize;
 
         Self {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -308,7 +306,7 @@ impl LifeCycleManager {
         self.config_path.clone()
     }
 
-    pub fn get_max_traj_length(&self) -> Arc<RwLock<u128>> {
+    pub fn get_max_traj_length(&self) -> Arc<RwLock<usize>> {
         self.max_traj_length.clone()
     }
 
@@ -345,7 +343,7 @@ impl LifeCycleManager {
         max_traj_length: &u128,
     ) -> Result<(), LifeCycleManagerError> {
         let mut max_traj_length_guard = self.max_traj_length.write().await;
-        *max_traj_length_guard = *max_traj_length;
+        *max_traj_length_guard = *max_traj_length as usize;
         Ok(())
     }
 

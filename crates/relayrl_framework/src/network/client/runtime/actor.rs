@@ -71,7 +71,7 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
         device: DeviceType,
         model_handle: LocalModelHandle<B>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
-        shared_max_traj_length: Arc<RwLock<u128>>,
+        shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -104,7 +104,7 @@ pub(crate) struct Actor<
     reloadable_model: LocalModelHandle<B>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     #[allow(dead_code)]
-    shared_max_traj_length: Arc<RwLock<u128>>,
+    shared_max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -274,13 +274,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let start_time = Instant::now();
 
             let result = async {
-                let actor_id = self.actor_id;
-                let mut last_action =
-                    RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
-                last_action.update_reward(reward);
-                self.current_traj.add_action(last_action);
+                {
+                    let actor_id = self.actor_id;
+                    let mut last_action =
+                        RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
+                    last_action.update_reward(reward);
+                    self.current_traj.add_action(last_action);
+                }
 
-                let traj_clone = self.current_traj.clone();
+                let traj_to_send: RelayRLTrajectory = {
+                    let max_traj_length: usize = *self.shared_max_traj_length.read().await;
+                    std::mem::replace(&mut self.current_traj, RelayRLTrajectory::new(max_traj_length))
+                };
+
                 let (duration_ms, duration_ns) = {
                     let now: SystemTime = SystemTime::now();
                     let duration = now
@@ -288,12 +294,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
                     (duration.as_millis(), duration.as_nanos())
                 };
+
                 let send_traj_msg = RoutedMessage {
                     actor_id: self.actor_id,
                     protocol: RoutingProtocol::SendTrajectory,
                     payload: RoutedPayload::SendTrajectory {
                         timestamp: (duration_ms, duration_ns),
-                        trajectory: traj_clone,
+                        trajectory: traj_to_send,
                     },
                 };
 
@@ -339,7 +346,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         device: DeviceType,
         model_handle: LocalModelHandle<B>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
-        shared_max_traj_length: Arc<RwLock<u128>>,
+        shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -354,7 +361,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     where
         Self: Sized,
     {
-        let max_traj_length: u128 = *shared_max_traj_length.read().await;
+        let max_traj_length: usize = *shared_max_traj_length.read().await;
 
         let model_init_flag = model_handle.read().await.is_none();
         if model_init_flag {
@@ -376,7 +383,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses,
             model_device: device,
-            current_traj: RelayRLTrajectory::new(max_traj_length as usize),
+            current_traj: RelayRLTrajectory::new(max_traj_length),
             rx_from_router,
             shared_tx_to_buffer,
             shared_client_modes,
@@ -735,7 +742,7 @@ mod unit_tests {
     }
 
     async fn create_ndarray_actor(
-        max_traj_length: u128,
+        max_traj_length: usize,
         device: DeviceType,
     ) -> (
         Actor<NdArrayBackend, D_IN, D_OUT>,
@@ -752,7 +759,7 @@ mod unit_tests {
             device,
             empty_onnx_model_handle(),
             Arc::new(RwLock::new(PathBuf::new())),
-            Arc::new(RwLock::new(max_traj_length as u128)),
+            Arc::new(RwLock::new(max_traj_length)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
