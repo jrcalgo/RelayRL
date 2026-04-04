@@ -22,6 +22,8 @@ use crate::utilities::configuration::{Algorithm, NetworkParams};
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::list_ids;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use active_uuid_registry::interface::get_context_entries;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{
@@ -29,6 +31,7 @@ use relayrl_types::data::tensor::{
     IntBurnTensor, SupportedTensorBackend,
 };
 use relayrl_types::model::ModelModule;
+use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
@@ -67,6 +70,8 @@ pub enum ClientError {
     InvalidInferenceMode(String),
     #[error("Invalid trajectory file directory: {0}")]
     InvalidTrajectoryFileDirectory(String),
+    #[error("Model validation failed: {0}")]
+    ModelValidationFailed(String),
 }
 
 /// Output target for runtime statistics collection.
@@ -326,13 +331,13 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub actor_count: u32,
     pub router_scale: u32,
     pub default_device: DeviceType,
-    #[cfg(any(feature = "training-server", feature = "inference-server"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "training-server", feature = "inference-server"))))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "nats-transport", feature = "zmq-transport"))))]
     pub default_model: Option<ModelModule<B>>,
-    #[cfg(not(any(feature = "training-server", feature = "inference-server")))]
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(not(any(feature = "training-server", feature = "inference-server"))))
+        doc(cfg(not(any(feature = "nats-transport", feature = "zmq-transport"))))
     )]
     pub default_model: ModelModule<B>,
     pub config_path: Option<PathBuf>,
@@ -511,9 +516,9 @@ impl<
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
-            #[cfg(any(feature = "training-server", feature = "inference-server"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             default_model: self.default_model,
-            #[cfg(not(any(feature = "training-server", feature = "inference-server")))]
+            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
             default_model: self.default_model.unwrap(), // this is guaranteed to panic if not set; without transport available, the model must be set at build time
             config_path: self.config_path,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -827,6 +832,15 @@ impl<
         Ok(())
     }
 
+    pub async fn update_model(&self, model: ModelModule<B>) -> Result<(), ClientError> {
+        if let Err(e) = validate_module::<B>(&model) {
+            return Err(ClientError::ModelValidationFailed(e.to_string()));
+        }
+
+        self.coordinator.update_model(model).await?;
+        Ok(())
+    }
+
     /// Retrieves the model version for each actor ID listed (if instance IDs exist)
     ///
     /// Returns `(ActorID, ModelVersion)` pairs.
@@ -835,22 +849,6 @@ impl<
         actor_ids: Vec<Uuid>,
     ) -> Result<Vec<(Uuid, i64)>, ClientError> {
         Ok(self.coordinator.get_model_version(actor_ids).await?)
-    }
-
-    /// Collect runtime statistics.
-    ///
-    /// Current status: not implemented.
-    ///
-    /// # Errors
-    /// Will return an error once implemented if serialization or IO fails.
-    #[deprecated(note = "Not implemented")]
-    #[cfg(any(feature = "metrics", feature = "logging"))]
-    pub fn runtime_statistics(
-        &self,
-        _return_type: RuntimeStatisticsReturnType,
-    ) -> Result<RuntimeStatisticsReturnType, ClientError> {
-        // stand-in for actual implementation
-        Ok(RuntimeStatisticsReturnType::Hashmap(HashMap::new()))
     }
 
     /// Fetch the active client configuration.
@@ -968,7 +966,7 @@ impl<
                     &self.coordinator.client_modes.actor_training_data_mode,
                     &self.coordinator.client_modes.actor_inference_mode,
                 ) {
-                    /// sends all new actor ids to the server
+                    // sends all new actor ids to the server
                     let actor_entries = {
                         let client_namespace = self
                             .coordinator

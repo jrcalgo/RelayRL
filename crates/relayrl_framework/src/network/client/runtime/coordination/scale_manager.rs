@@ -3,7 +3,7 @@ use crate::network::HyperparameterArgs;
 use crate::network::client::agent::{AlgorithmArgs, ActorInferenceMode};
 use crate::network::client::agent::LocalTrajectoryFileParams;
 use crate::network::client::agent::{
-    ActorTrainingDataMode, ClientModes, uses_local_file_writing,
+    ActorTrainingDataMode, ClientModes, ModelMode, uses_local_file_writing,
 };
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -81,6 +81,8 @@ pub enum ScaleManagerError {
     SendFlagLastActionMessageError(String),
     #[error("Failed to send model version message: {0}")]
     SendModelVersionMessageError(String),
+    #[error("Failed to send model update message: {0}")]
+    SendModelUpdateMessageError(String),
     #[error("Failed to receive model version response: {0}")]
     ReceiveModelVersionResponseError(String),
     #[error("Failed to get config: {0}")]
@@ -399,6 +401,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let receiver = ClientTransportModelReceiver::new(
                     self.client_namespace.clone(),
                     global_dispatcher_tx,
+                    self.shared_state.clone(),
                     transport_addresses.clone(),
                     training_dispatcher.clone(),
                 );
@@ -961,7 +964,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn spawn_transport_receiver(
-        mut receiver: ClientTransportModelReceiver<B>,
+        mut receiver: ClientTransportModelReceiver<B, D_IN, D_OUT>,
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = receiver.spawn_loop().await {

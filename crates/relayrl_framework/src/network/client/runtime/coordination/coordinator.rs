@@ -1,7 +1,7 @@
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::{
-    ActorTrainingDataMode, ClientModes,
+    ActorInferenceMode, ActorTrainingDataMode, ClientModes,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{AlgorithmArgs, InferenceAddressesArgs, TrainingAddressesArgs};
@@ -29,11 +29,18 @@ use crate::network::client::runtime::data::transport_sink::{
 use crate::network::client::runtime::router::{
     InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::utilities::configuration::TransportConfigParams;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
 #[cfg(feature = "logging")]
 use crate::utilities::observability::logging::*;
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::*;
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use active_uuid_registry::{NamespaceString, ContextString};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use active_uuid_registry::interface::{get_namespace_entries, get_context_entries};
 
 use thiserror::Error;
 
@@ -49,6 +56,7 @@ use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher};
 use relayrl_types::model::ModelModule;
+use relayrl_types::model::utils::serialize_model_module;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
 
 
@@ -58,6 +66,7 @@ use std::time::Instant;
 
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
+use tokio::sync::mpsc::Sender;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
@@ -201,6 +210,7 @@ pub trait ClientInterface<
         ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError>;
+    async fn update_model(&self, model: ModelModule<B>) -> Result<(), CoordinatorError>;
     async fn get_model_version(
         &self,
         ids: Vec<ActorUuid>,
@@ -238,6 +248,113 @@ pub struct ClientCoordinator<
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ClientCoordinator<B, D_IN, D_OUT>
 {
+    async fn request_model_versions(
+        global_dispatcher_tx: Sender<RoutedMessage>,
+        ids: Vec<ActorUuid>,
+    ) -> Result<Vec<(Uuid, i64)>, CoordinatorError> {
+        let mut versions = Vec::with_capacity(ids.len());
+
+        for id in ids {
+            let (resp_tx, resp_rx) = oneshot::channel::<i64>();
+
+            let model_version_message = RoutedMessage {
+                actor_id: id,
+                protocol: RoutingProtocol::ModelVersion,
+                payload: RoutedPayload::ModelVersion { reply_to: resp_tx },
+            };
+
+            if let Err(e) = global_dispatcher_tx
+                .send(model_version_message)
+                .await
+                .map_err(|e| e.to_string())
+            {
+                return Err(CoordinatorError::ScaleManagerError(
+                    ScaleManagerError::SendModelVersionMessageError(e),
+                ));
+            }
+
+            match resp_rx.await.map_err(|e| e.to_string()) {
+                Ok(model_version) => versions.push((id, model_version)),
+                Err(e) => {
+                    return Err(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::ReceiveModelVersionResponseError(e),
+                    ));
+                }
+            }
+        }
+
+        Ok(versions)
+    }
+
+    async fn dispatch_model_updates(
+        global_dispatcher_tx: Sender<RoutedMessage>,
+        target_actor_ids: Vec<ActorUuid>,
+        model_bytes: Vec<u8>,
+    ) -> Result<(), CoordinatorError> {
+        let model_versions =
+            Self::request_model_versions(global_dispatcher_tx.clone(), target_actor_ids).await?;
+
+        for (actor_id, current_version) in model_versions {
+            let next_version = if current_version < 0 {
+                0
+            } else {
+                current_version + 1
+            };
+            let model_update_message = RoutedMessage {
+                actor_id,
+                protocol: RoutingProtocol::ModelUpdate,
+                payload: RoutedPayload::ModelUpdate {
+                    model_bytes: model_bytes.clone(),
+                    version: next_version,
+                },
+            };
+
+            if let Err(e) = global_dispatcher_tx
+                .send(model_update_message)
+                .await
+                .map_err(|e| e.to_string())
+            {
+                return Err(CoordinatorError::ScaleManagerError(
+                    ScaleManagerError::SendModelUpdateMessageError(e),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn prepare_model_update_dispatch(
+        &self,
+    ) -> Result<Option<(Sender<RoutedMessage>, Vec<ActorUuid>, Arc<RwLock<PathBuf>>)>, CoordinatorError>
+    {
+        match &self.runtime_params {
+            Some(params) => match &self.client_modes.actor_inference_mode {
+                ActorInferenceMode::Local(_) => {
+                    let local_model_path = params.lifecycle.get_local_model_path();
+                    let (global_dispatcher_tx, target_actor_ids) = {
+                        let shared_state = params.shared_state.read().await;
+                        (
+                            shared_state.global_dispatcher_tx.clone(),
+                            shared_state.model_update_dispatch_targets(),
+                        )
+                    };
+
+                    Ok(Some((
+                        global_dispatcher_tx,
+                        target_actor_ids,
+                        local_model_path,
+                    )))
+                }
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                ActorInferenceMode::Server(_) => {
+                    // TODO: Support inference-server model updates from the local client interface.
+                    Ok(None)
+                }
+            },
+            None => Err(CoordinatorError::NoRuntimeInstanceError),
+        }
+    }
+
     /// Transparent helper function used by the agent API for calling into the runtime to send client IDs to the server
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) async fn send_client_ids_to_server(
@@ -359,7 +476,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             },
         };
 
-        let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
+        let mut config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -371,7 +488,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         );
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        /// if args are set in client mode init config, set lifecycle manager server addresses while keeping unchanged config values
+        // if args are set in client mode init config, set lifecycle manager server addresses while keeping unchanged config values
         {
             let inference_address_args = if let ActorInferenceMode::Server(server_params) =
                 &shared_client_modes.actor_inference_mode
@@ -958,7 +1075,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn remove_actor(
         &mut self,
         id: ActorUuid,
-        _send_ids: bool,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
@@ -1240,50 +1357,50 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
+    async fn update_model(&self, model: ModelModule<B>) -> Result<(), CoordinatorError> {
+        let Some((global_dispatcher_tx, target_actor_ids, local_model_path)) =
+            self.prepare_model_update_dispatch().await?
+        else {
+            return Ok(());
+        };
+
+        if target_actor_ids.is_empty() {
+            return Ok(());
+        }
+
+        let serialization_dir = {
+            let model_path = local_model_path.read().await.clone();
+            model_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or_else(std::env::temp_dir)
+        };
+        std::fs::create_dir_all(&serialization_dir).map_err(|e| {
+            CoordinatorError::ConfigError(ClientConfigError::InvalidValue(format!(
+                "Failed to create model serialization directory '{}': {}",
+                serialization_dir.display(),
+                e
+            )))
+        })?;
+
+        let model_bytes = serialize_model_module(&model, serialization_dir);
+        Self::dispatch_model_updates(global_dispatcher_tx, target_actor_ids, model_bytes).await
+    }
+
     async fn get_model_version(
         &self,
         ids: Vec<ActorUuid>,
     ) -> Result<Vec<(Uuid, i64)>, CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                let mut versions = Vec::with_capacity(ids.len());
                 let global_dispatcher_tx = params
                     .shared_state
                     .read()
                     .await
                     .global_dispatcher_tx
                     .clone();
-
-                for id in ids {
-                    let (resp_tx, resp_rx) = oneshot::channel::<i64>();
-
-                    let model_version_message = RoutedMessage {
-                        actor_id: id,
-                        protocol: RoutingProtocol::ModelVersion,
-                        payload: RoutedPayload::ModelVersion { reply_to: resp_tx },
-                    };
-
-                    if let Err(e) = global_dispatcher_tx
-                        .send(model_version_message)
-                        .await
-                        .map_err(|e| e.to_string())
-                    {
-                        return Err(CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::SendModelVersionMessageError(e),
-                        ));
-                    }
-
-                    match resp_rx.await.map_err(|e| e.to_string()) {
-                        Ok(model_version) => versions.push((id, model_version)),
-                        Err(e) => {
-                            return Err(CoordinatorError::ScaleManagerError(
-                                ScaleManagerError::ReceiveModelVersionResponseError(e),
-                            ));
-                        }
-                    }
-                }
-
-                Ok(versions)
+                Self::request_model_versions(global_dispatcher_tx, ids).await
             }
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
@@ -1349,8 +1466,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let start_time = Instant::now();
 
                 let result = {
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                     {
-                        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                         params
                             .scaling
                             .scale_in(router_remove, true)
@@ -1358,8 +1475,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             .map_err(CoordinatorError::from)
                     }
 
+                    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                     {
-                        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
                         params
                             .scaling
                             .scale_in(router_remove)
@@ -1422,10 +1539,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use crate::network::client::agent::{
+        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+    };
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    use crate::network::client::agent::InferenceParams;
+    use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
+    use crate::utilities::configuration::ClientConfigLoader;
+    use active_uuid_registry::interface::{clear_namespace, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
+    use relayrl_types::data::tensor::DeviceType;
     use std::path::PathBuf;
-    
+    use tokio::sync::mpsc::{self, error::TryRecvError};
 
     type TestBackend = NdArray<f32>;
 
@@ -1435,6 +1561,106 @@ mod unit_tests {
             TransportType::default(),
             ClientModes::default(),
         )
+    }
+
+    fn make_lifecycle_manager() -> LifeCycleManager {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(tmp, "{{}}").expect("write temp config");
+        let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
+        let lifecycle = LifeCycleManager::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            AlgorithmArgs::default(),
+            &config,
+            tmp.path().to_path_buf(),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+        );
+        drop(tmp);
+        lifecycle
+    }
+
+    #[cfg(feature = "metrics")]
+    fn test_metrics() -> MetricsManager {
+        MetricsManager::new(
+            Arc::new(RwLock::new((
+                "test-coordinator".to_string(),
+                String::new(),
+            ))),
+            ("test-coordinator".to_string(), String::new()),
+            None,
+        )
+    }
+
+    async fn make_runtime_coordinator(
+        client_modes: ClientModes,
+    ) -> (
+        ClientCoordinator<TestBackend, 4, 1>,
+        Arc<RwLock<StateManager<TestBackend, 4, 1>>>,
+        tokio::sync::mpsc::Receiver<RoutedMessage>,
+    ) {
+        let client_namespace: Arc<str> = Arc::from(format!("test-coordinator-{}", Uuid::new_v4()));
+        clear_namespace(client_namespace.as_ref());
+        reserve_namespace(client_namespace.as_ref());
+
+        let lifecycle = make_lifecycle_manager();
+        *lifecycle.get_local_model_path().write().await = PathBuf::new();
+        let shared_client_modes = Arc::new(client_modes.clone());
+        let (state, global_dispatcher_rx) = StateManager::<TestBackend, 4, 1>::new(
+            client_namespace.clone(),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            shared_client_modes.clone(),
+            lifecycle.get_max_traj_length(),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            lifecycle.get_local_model_path(),
+            None,
+            #[cfg(feature = "metrics")]
+            test_metrics(),
+        );
+        let shared_state = Arc::new(RwLock::new(state));
+        let (dummy_tx, dummy_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let scaling = ScaleManager::new(
+            client_namespace.clone(),
+            shared_client_modes,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            lifecycle.get_algorithm_args(),
+            shared_state.clone(),
+            dummy_rx,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+            #[cfg(feature = "metrics")]
+            test_metrics(),
+            lifecycle.clone(),
+        )
+        .unwrap();
+        drop(dummy_tx);
+
+        let mut coordinator = ClientCoordinator::<TestBackend, 4, 1>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            client_modes,
+        );
+        coordinator.runtime_params = Some(CoordinatorParams {
+            client_namespace,
+            #[cfg(feature = "metrics")]
+            metrics: test_metrics(),
+            lifecycle,
+            shared_state: shared_state.clone(),
+            scaling,
+        });
+
+        (coordinator, shared_state, global_dispatcher_rx)
     }
 
     #[test]
@@ -1475,6 +1701,130 @@ mod unit_tests {
         let c = make_coordinator();
         let result = c.get_model_version(vec![]).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn prepare_model_update_dispatch_no_runtime_returns_err() {
+        let c = make_coordinator();
+        let result = c.prepare_model_update_dispatch().await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[tokio::test]
+    async fn prepare_model_update_dispatch_server_mode_returns_none() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Server(InferenceParams::default()),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        };
+        let (coordinator, _shared_state, mut global_dispatcher_rx) =
+            make_runtime_coordinator(client_modes).await;
+
+        let result = coordinator.prepare_model_update_dispatch().await;
+
+        assert!(matches!(result, Ok(None)));
+        assert!(matches!(
+            global_dispatcher_rx.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_model_updates_sends_expected_targets_and_versions() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        };
+        let (coordinator, shared_state, mut global_dispatcher_rx) =
+            make_runtime_coordinator(client_modes).await;
+        let actor_ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        let current_versions = vec![
+            (actor_ids[0], 0_i64),
+            (actor_ids[1], 4_i64),
+            (actor_ids[2], -1_i64),
+        ];
+
+        {
+            let mut shared_state = shared_state.write().await;
+            let (tx_to_buffer, _buffer_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            for actor_id in &actor_ids {
+                shared_state
+                    .new_actor(
+                        *actor_id,
+                        Arc::from("router-a"),
+                        DeviceType::Cpu,
+                        None,
+                        tx_to_buffer.clone(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let (captured_updates_tx, captured_updates_rx) =
+            oneshot::channel::<Vec<(Uuid, i64, usize)>>();
+        let expected_update_count = actor_ids.len();
+        tokio::spawn(async move {
+            let mut captured_updates = Vec::new();
+
+            while let Some(message) = global_dispatcher_rx.recv().await {
+                match message.payload {
+                    RoutedPayload::ModelVersion { reply_to } => {
+                        let current_version = current_versions
+                            .iter()
+                            .find(|(actor_id, _)| *actor_id == message.actor_id)
+                            .map(|(_, version)| *version)
+                            .unwrap();
+                        let _ = reply_to.send(current_version);
+                    }
+                    RoutedPayload::ModelUpdate {
+                        model_bytes,
+                        version,
+                    } => {
+                        captured_updates.push((message.actor_id, version, model_bytes.len()));
+                        if captured_updates.len() == expected_update_count {
+                            let _ = captured_updates_tx.send(captured_updates);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (global_dispatcher_tx, target_actor_ids, _local_model_path) = coordinator
+            .prepare_model_update_dispatch()
+            .await
+            .unwrap()
+            .unwrap();
+        ClientCoordinator::<TestBackend, 4, 1>::dispatch_model_updates(
+            global_dispatcher_tx,
+            target_actor_ids,
+            vec![1, 2, 3],
+        )
+        .await
+        .unwrap();
+        let mut captured_updates = captured_updates_rx.await.unwrap();
+        captured_updates.sort_by_key(|(actor_id, _, _)| actor_id.to_string());
+
+        let mut expected_updates = vec![
+            (actor_ids[0], 1_i64),
+            (actor_ids[1], 5_i64),
+            (actor_ids[2], 0_i64),
+        ];
+        expected_updates.sort_by_key(|(actor_id, _)| actor_id.to_string());
+
+        assert_eq!(captured_updates.len(), expected_updates.len());
+        for ((actor_id, version, model_bytes_len), (expected_actor_id, expected_version)) in
+            captured_updates.iter().zip(expected_updates.iter())
+        {
+            assert_eq!(actor_id, expected_actor_id);
+            assert_eq!(version, expected_version);
+            assert!(
+                *model_bytes_len > 0,
+                "serialized model bytes should not be empty"
+            );
+        }
     }
 
     #[tokio::test]

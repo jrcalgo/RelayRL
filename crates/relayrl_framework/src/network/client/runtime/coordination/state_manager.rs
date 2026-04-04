@@ -91,6 +91,7 @@ pub(crate) struct StateManager<
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
+    actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterNamespace>,
 }
 
@@ -132,6 +133,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 global_dispatcher_tx,
                 actor_inboxes: DashMap::new(),
                 actor_handles: DashMap::new(),
+                actor_devices: DashMap::new(),
                 actor_router_addresses: DashMap::new(),
             },
             global_dispatcher_rx,
@@ -147,11 +149,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// 4. None
     async fn load_reloadable_model(
         &self,
-        default_model: Option<ModelModule<B>>,
+        model_module: Option<ModelModule<B>>,
         device: DeviceType,
     ) -> Result<Option<HotReloadableModel<B>>, StateManagerError> {
         // Check fn param
-        if let Some(model) = default_model {
+        if let Some(model) = model_module {
             return Ok(Some(
                 HotReloadableModel::<B>::new_from_module(model, device)
                     .await
@@ -288,6 +290,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let (model_handle, model_handshake_flag) = self
             .get_or_init_model_handle(default_model, device.clone())
             .await?;
+        self.actor_devices.insert(actor_id, device.clone());
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let mut actor: Actor<B, D_IN, D_OUT> = Actor::<B, D_IN, D_OUT>::new(
@@ -395,6 +398,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) async fn clear_runtime_components(&mut self) -> Result<(), StateManagerError> {
         self.actor_handles.clear();
         self.actor_inboxes.clear();
+        self.actor_devices.clear();
         self.actor_router_addresses.clear();
         self.shared_local_models.clear();
 
@@ -407,6 +411,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         self.actor_inboxes.remove(&id);
+        self.actor_devices.remove(&id);
+        self.actor_router_addresses.remove(&id);
         remove_id(
             self.client_namespace.as_ref(),
             crate::network::ACTOR_CONTEXT,
@@ -455,6 +461,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_handles.remove(&current_id);
         self.actor_inboxes.insert(new_id, current_id_inbox);
         self.actor_inboxes.remove(&current_id);
+        if let Some((_, current_device)) = self.actor_devices.remove(&current_id) {
+            self.actor_devices.insert(new_id, current_device);
+        }
+        if let Some((_, router_namespace)) = self.actor_router_addresses.remove(&current_id) {
+            self.actor_router_addresses.insert(new_id, router_namespace);
+        }
 
         replace_id(
             self.client_namespace.as_ref(),
@@ -511,6 +523,64 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .collect()
     }
 
+    fn sorted_actor_ids_for_model_updates(&self) -> Vec<ActorUuid> {
+        let mut actor_ids = self.get_actor_id_list();
+        actor_ids.sort_by_key(|actor_id| actor_id.to_string());
+        actor_ids
+    }
+
+    fn canonical_model_update_target_from_sorted_actor_ids(
+        &self,
+        actor_id: ActorUuid,
+        sorted_actor_ids: &[ActorUuid],
+    ) -> ActorUuid {
+        match &self.shared_client_modes.actor_inference_mode {
+            ActorInferenceMode::Local(ModelMode::Shared) => {
+                let Some(actor_device) = self
+                    .actor_devices
+                    .get(&actor_id)
+                    .map(|device_entry| device_entry.value().clone())
+                else {
+                    return actor_id;
+                };
+
+                sorted_actor_ids
+                    .iter()
+                    .copied()
+                    .find(|candidate_actor_id| {
+                        self.actor_devices
+                            .get(candidate_actor_id)
+                            .map(|device_entry| device_entry.value() == &actor_device)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(actor_id)
+            }
+            _ => actor_id,
+        }
+    }
+
+    pub(crate) fn canonical_model_update_target(&self, actor_id: ActorUuid) -> ActorUuid {
+        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates();
+        self.canonical_model_update_target_from_sorted_actor_ids(actor_id, &sorted_actor_ids)
+    }
+
+    pub(crate) fn model_update_dispatch_targets(&self) -> Vec<ActorUuid> {
+        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates();
+        let mut dispatch_targets = Vec::new();
+
+        for actor_id in sorted_actor_ids.iter().copied() {
+            let canonical_target = self
+                .canonical_model_update_target_from_sorted_actor_ids(actor_id, &sorted_actor_ids);
+            if dispatch_targets.contains(&canonical_target) {
+                continue;
+            }
+
+            dispatch_targets.push(canonical_target);
+        }
+
+        dispatch_targets
+    }
+
     fn get_actor_handle(&self, id: Uuid) -> Option<Arc<JoinHandle<()>>> {
         self.actor_handles
             .get(&id)
@@ -528,6 +598,7 @@ mod unit_tests {
     use crate::network::client::agent::{
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
+    use active_uuid_registry::interface::{reserve_id_with, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
     use relayrl_types::data::tensor::DeviceType;
@@ -559,8 +630,9 @@ mod unit_tests {
         StateManager<TestBackend, D_IN, D_OUT>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
+        let namespace: Arc<str> = Arc::from(format!("test-sm-{}", Uuid::new_v4()));
         StateManager::<TestBackend, D_IN, D_OUT>::new(
-            Arc::from("test-sm"),
+            namespace,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -711,6 +783,137 @@ mod unit_tests {
         assert_eq!(list.len(), 3);
         for id in &ids {
             assert!(list.contains(id), "Actor {} not in list", id);
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_actor_clears_device_and_router_metadata() {
+        let (mut sm, _rx) = make_state_manager(disabled_modes());
+        reserve_namespace(sm.client_namespace.as_ref());
+        let actor_id = reserve_id_with(sm.client_namespace.as_ref(), crate::network::ACTOR_CONTEXT, 117, 100)
+            .unwrap();
+        let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+
+        sm.actor_handles
+            .insert(actor_id, Arc::new(tokio::spawn(async {})));
+        sm.actor_inboxes.insert(actor_id, tx_to_actor);
+        sm.actor_devices.insert(actor_id, DeviceType::Cpu);
+        sm.actor_router_addresses
+            .insert(actor_id, Arc::from("router-a"));
+
+        sm.remove_actor(actor_id).unwrap();
+
+        assert!(sm.actor_handles.get(&actor_id).is_none());
+        assert!(sm.actor_inboxes.get(&actor_id).is_none());
+        assert!(sm.actor_devices.get(&actor_id).is_none());
+        assert!(sm.actor_router_addresses.get(&actor_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn set_actor_id_moves_device_and_router_metadata() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        reserve_namespace(sm.client_namespace.as_ref());
+        let current_id =
+            reserve_id_with(sm.client_namespace.as_ref(), crate::network::ACTOR_CONTEXT, 117, 100)
+                .unwrap();
+        let new_id = Uuid::new_v4();
+        let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+
+        sm.actor_handles
+            .insert(current_id, Arc::new(tokio::spawn(async {})));
+        sm.actor_inboxes.insert(current_id, tx_to_actor);
+        sm.actor_devices.insert(current_id, DeviceType::Cpu);
+        sm.actor_router_addresses
+            .insert(current_id, Arc::from("router-a"));
+
+        sm.set_actor_id(current_id, new_id).unwrap();
+
+        assert!(sm.actor_handles.get(&current_id).is_none());
+        assert!(sm.actor_inboxes.get(&current_id).is_none());
+        assert!(sm.actor_devices.get(&current_id).is_none());
+        assert!(sm.actor_router_addresses.get(&current_id).is_none());
+        assert!(sm.actor_handles.get(&new_id).is_some());
+        assert!(sm.actor_inboxes.get(&new_id).is_some());
+        assert!(matches!(
+            sm.actor_devices.get(&new_id),
+            Some(device) if *device == DeviceType::Cpu
+        ));
+        assert!(matches!(
+            sm.actor_router_addresses.get(&new_id),
+            Some(namespace) if *namespace == Arc::<str>::from("router-a")
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_update_dispatch_targets_returns_all_actor_ids_in_independent_mode() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+        for id in &ids {
+            sm.actor_handles
+                .insert(*id, Arc::new(tokio::spawn(async {})));
+        }
+
+        let mut expected = ids.clone();
+        expected.sort_by_key(|actor_id| actor_id.to_string());
+
+        assert_eq!(sm.model_update_dispatch_targets(), expected);
+    }
+
+    #[tokio::test]
+    async fn model_update_dispatch_targets_deduplicates_shared_mode_by_device() {
+        let (sm, _rx) = make_state_manager(shared_modes());
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+        for id in &ids {
+            sm.actor_handles
+                .insert(*id, Arc::new(tokio::spawn(async {})));
+            sm.actor_devices.insert(*id, DeviceType::Cpu);
+        }
+
+        let expected_target = ids
+            .iter()
+            .min_by_key(|actor_id| actor_id.to_string())
+            .copied()
+            .unwrap();
+
+        assert_eq!(sm.model_update_dispatch_targets(), vec![expected_target]);
+    }
+
+    #[tokio::test]
+    async fn canonical_model_update_target_uses_shared_device_representative() {
+        let (sm, _rx) = make_state_manager(shared_modes());
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+        for id in &ids {
+            sm.actor_handles
+                .insert(*id, Arc::new(tokio::spawn(async {})));
+            sm.actor_devices.insert(*id, DeviceType::Cpu);
+        }
+
+        let expected_target = ids
+            .iter()
+            .min_by_key(|actor_id| actor_id.to_string())
+            .copied()
+            .unwrap();
+
+        for id in &ids {
+            assert_eq!(sm.canonical_model_update_target(*id), expected_target);
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_model_update_target_preserves_independent_actor_ids() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+        for id in &ids {
+            sm.actor_handles
+                .insert(*id, Arc::new(tokio::spawn(async {})));
+        }
+
+        for id in &ids {
+            assert_eq!(sm.canonical_model_update_target(*id), *id);
         }
     }
 
