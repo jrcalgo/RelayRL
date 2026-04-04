@@ -182,17 +182,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         // Try local_model_path
-        let local_model_path_str = self
-            .shared_local_model_path
-            .read()
-            .await
-            .to_str()
-            .unwrap_or("")
-            .to_string();
+        let local_model_path = self.shared_local_model_path.read().await;
 
-        if !local_model_path_str.is_empty() {
+        if !local_model_path.to_str().unwrap_or_default().is_empty() {
             return Ok(Some(
-                HotReloadableModel::<B>::new_from_path(local_model_path_str.clone(), device)
+                HotReloadableModel::<B>::new_from_path(local_model_path.as_path(), device)
                     .await
                     .map_err(|_| {
                         StateManagerError::FailedToCreateReloadableModelError(
