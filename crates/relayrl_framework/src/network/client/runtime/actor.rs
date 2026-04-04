@@ -89,7 +89,7 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError>;
     async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError>;
     async fn refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError>;
-    async fn handle_shutdown(&self, _msg: RoutedMessage) -> Result<(), ActorError>;
+    async fn handle_shutdown(&mut self, _msg: RoutedMessage) -> Result<(), ActorError>;
 }
 
 /// Responsible for performing inference with an in-memory model
@@ -674,10 +674,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
-    async fn handle_shutdown(&self, _msg: RoutedMessage) -> Result<(), ActorError> {
+    async fn handle_shutdown(&mut self, _msg: RoutedMessage) -> Result<(), ActorError> {
         if !self.current_traj.actions.is_empty() {
             let send_traj_msg = {
-                let traj_clone = self.current_traj.clone();
+                let traj_to_send: RelayRLTrajectory = {
+                    let max_traj_length: usize = *self.shared_max_traj_length.read().await;
+                    std::mem::replace(&mut self.current_traj, RelayRLTrajectory::new(max_traj_length))
+                };
+
                 let (duration_ms, duration_ns) = {
                     let now: SystemTime = SystemTime::now();
                     let duration = now
@@ -685,12 +689,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .map_err(|e| ActorError::SystemError(format!("Clock skew: {}", e)))?;
                     (duration.as_millis(), duration.as_nanos())
                 };
+
                 RoutedMessage {
                     actor_id: self.actor_id,
                     protocol: RoutingProtocol::SendTrajectory,
                     payload: RoutedPayload::SendTrajectory {
                         timestamp: (duration_ms, duration_ns),
-                        trajectory: traj_clone,
+                        trajectory: traj_to_send,
                     },
                 }
             };
