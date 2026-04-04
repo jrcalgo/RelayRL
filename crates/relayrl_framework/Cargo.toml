@@ -48,8 +48,8 @@ active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
 # General external crates used throughout framework
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
-rand = "0.9.2"
-log = { version = "0.4.28", features = ["kv"] }
+rand = { workspace = true }
+log = { workspace = true, features = ["kv"] }
 dashmap = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
