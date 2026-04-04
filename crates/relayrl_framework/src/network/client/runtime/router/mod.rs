@@ -1,5 +1,6 @@
 use crate::network::client::runtime::router::buffer::TrajectorySinkError;
 use crate::network::client::runtime::router::filter::FilterError;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::router::receiver::TransportReceiverError;
 
 use relayrl_types::data::action::RelayRLAction;
@@ -14,6 +15,7 @@ use tokio::sync::oneshot;
 
 pub(crate) mod buffer;
 pub(crate) mod filter;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) mod receiver;
 pub(crate) mod router_dispatcher;
 
@@ -23,6 +25,7 @@ pub enum RouterError {
     #[error(transparent)]
     FilterError(#[from] FilterError),
     #[error(transparent)]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     TransportReceiverError(#[from] TransportReceiverError),
     #[error(transparent)]
     TrajectorySinkError(#[from] TrajectorySinkError),

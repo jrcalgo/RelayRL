@@ -5,10 +5,7 @@
 
 use super::export;
 
-use opentelemetry::{
-    InstrumentationScope, KeyValue, global,
-    metrics::Meter,
-};
+use opentelemetry::{InstrumentationScope, KeyValue, global, metrics::Meter};
 use prometheus::{Counter as PrometheusCounter, Histogram as PrometheusHistogram, Registry};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;

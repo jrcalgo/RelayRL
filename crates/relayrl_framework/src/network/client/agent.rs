@@ -20,9 +20,9 @@ use crate::prelude::config::ClientConfigLoader;
 use crate::utilities::configuration::{Algorithm, NetworkParams};
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::list_ids;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use active_uuid_registry::interface::get_context_entries;
+use active_uuid_registry::interface::list_ids;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
@@ -140,37 +140,17 @@ pub enum TrainingAddressesArgs {
 }
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct InferenceParams {
     pub model_mode: ModelMode,
     pub inference_addresses: Option<InferenceAddressesArgs>,
 }
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-impl Default for InferenceParams {
-    fn default() -> Self {
-        Self {
-            model_mode: ModelMode::default(),
-            inference_addresses: None,
-        }
-    }
-}
-
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct TrainingParams {
     pub model_mode: ModelMode,
     pub training_addresses: Option<TrainingAddressesArgs>,
-}
-
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-impl Default for TrainingParams {
-    fn default() -> Self {
-        Self {
-            model_mode: ModelMode::default(),
-            training_addresses: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -332,7 +312,10 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub router_scale: u32,
     pub default_device: DeviceType,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "nats-transport", feature = "zmq-transport"))))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
     pub default_model: Option<ModelModule<B>>,
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     #[cfg_attr(
@@ -505,14 +488,14 @@ impl<
         // Initialize agent object
         let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.transport_type.unwrap_or(TransportType::default()),
+            self.transport_type.unwrap_or_default(),
             self.client_modes.unwrap_or_default(),
         );
 
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args: self.algorithm_args.unwrap_or(AlgorithmArgs::default()),
+            algorithm_args: self.algorithm_args.unwrap_or_default(),
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
@@ -648,6 +631,7 @@ impl<
     ///
     /// # Errors
     /// Returns an error if startup fails (configuration, runtime init, transport init, etc).
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -706,6 +690,7 @@ impl<
     ///
     /// # Errors
     /// Returns an error if restart coordination fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn restart(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -836,7 +821,6 @@ impl<
         if let Err(e) = validate_module::<B>(&model) {
             return Err(ClientError::ModelValidationFailed(e.to_string()));
         }
-
         self.coordinator.update_model(model).await?;
         Ok(())
     }
@@ -1012,7 +996,13 @@ impl<
         actor_id: ActorUuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator.remove_actor(actor_id, true).await?;
+            self.coordinator
+                .remove_actor(
+                    actor_id,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    true,
+                )
+                .await?;
             Ok(())
         })
     }
@@ -1032,7 +1022,13 @@ impl<
         } else {
             Box::pin(async move {
                 for actor_id in actor_ids {
-                    self.coordinator.remove_actor(actor_id, false).await?;
+                    self.coordinator
+                        .remove_actor(
+                            actor_id,
+                            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                            false,
+                        )
+                        .await?;
                 }
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

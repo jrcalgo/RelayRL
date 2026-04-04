@@ -159,8 +159,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
             loop {
                 let result = std::thread::scope(|s| {
                     let inference_thread =
-                        if let Some(inference_protocol) = self.inference_protocol.as_ref() {
-                            Some(s.spawn(|| {
+                        self.inference_protocol.as_ref().map(|inference_protocol| {
+                            s.spawn(|| {
                                 let _permit = inference_protocol
                                     .backpressure
                                     .acquire()
@@ -179,7 +179,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                 loop {
                                     let result =
                                 <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_client_ids(
-                                    &self,
+                                    self,
                                     &scaling_entry,
                                     &client_ids,
                                     inference_scaling_server_address,
@@ -214,15 +214,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                         }
                                     }
                                 }
-                            }))
-                        } else {
-                            None
-                        };
+                            })
+                        });
 
-                    let training_thread = if let Some(training_protocol) =
-                        self.training_protocol.as_ref()
-                    {
-                        Some(s.spawn(|| {
+                    let training_thread = self.training_protocol.as_ref().map(|training_protocol| s.spawn(|| {
                         let _permit = training_protocol.backpressure.acquire().map_err(TransportError::from)?;
 
                         if training_protocol.circuit_breaker.is_open() {
@@ -235,7 +230,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_client_ids(
-                                &self,
+                                self,
                                 &scaling_entry,
                                 &client_ids,
                                 training_scaling_server_address,
@@ -267,10 +262,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                 }
                             }
                         }
-                    }))
-                    } else {
-                        None
-                    };
+                    }));
 
                     let inference_result = inference_thread.map(|thread| {
                         thread
@@ -309,9 +301,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Scaling protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -334,10 +326,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
             let mut attempts = 0;
             loop {
                 let result = std::thread::scope(|s| {
-                    let inference_thread = if let Some(inference_protocol) =
-                        self.inference_protocol.as_ref()
-                    {
-                        Some(s.spawn(|| {
+                    let inference_thread = self.inference_protocol.as_ref().map(|inference_protocol| s.spawn(|| {
                         let _permit = inference_protocol.backpressure.acquire().map_err(TransportError::from)?;
 
                         if inference_protocol.circuit_breaker.is_open() {
@@ -350,7 +339,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_scaling_warning(
-                                &self,
+                                self,
                                 &scaling_entry,
                                 &operation,
                                 inference_scaling_server_address,
@@ -383,15 +372,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                 }
                             }
                         }
-                    }))
-                    } else {
-                        None
-                    };
+                    }));
 
-                    let training_thread = if let Some(training_protocol) =
-                        self.training_protocol.as_ref()
-                    {
-                        Some(s.spawn(|| {
+                    let training_thread = self.training_protocol.as_ref().map(|training_protocol| s.spawn(|| {
                         let _permit = training_protocol.backpressure.acquire().map_err(TransportError::from)?;
 
                         if training_protocol.circuit_breaker.is_open() {
@@ -404,7 +387,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_scaling_warning(
-                                &self,
+                                self,
                                 &scaling_entry,
                                 &operation,
                                 training_scaling_server_address,
@@ -437,10 +420,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                 }
                             }
                         }
-                    }))
-                    } else {
-                        None
-                    };
+                    }));
 
                     let inference_result = inference_thread.map(|thread| {
                         thread
@@ -479,9 +459,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Scaling protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -504,10 +484,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
             let mut attempts = 0;
             loop {
                 let result = std::thread::scope(|s| {
-                    let inference_thread = if let Some(inference_protocol) =
-                        self.inference_protocol.as_ref()
-                    {
-                        Some(s.spawn(|| {
+                    let inference_thread = self.inference_protocol.as_ref().map(|inference_protocol| s.spawn(|| {
                         let _permit = inference_protocol.backpressure.acquire().map_err(TransportError::from)?;
 
                         if inference_protocol.circuit_breaker.is_open() {
@@ -520,7 +497,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_scaling_complete(
-                                &self,
+                                self,
                                 &scaling_entry,
                                 &operation,
                                 inference_scaling_server_address,
@@ -553,15 +530,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                 }
                             }
                         }
-                    }))
-                    } else {
-                        None
-                    };
+                    }));
 
-                    let training_thread = if let Some(training_protocol) =
-                        self.training_protocol.as_ref()
-                    {
-                        Some(s.spawn(|| {
+                    let training_thread = self.training_protocol.as_ref().map(|training_protocol| s.spawn(|| {
                         let _permit = training_protocol.backpressure.acquire().map_err(TransportError::from)?;
 
                         if training_protocol.circuit_breaker.is_open() {
@@ -574,7 +545,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                         let mut attempts = 0;
                         loop {
                             let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_scaling_complete(
-                                &self,
+                                self,
                                 &scaling_entry,
                                 &operation,
                                 training_scaling_server_address,
@@ -607,10 +578,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                 }
                             }
                         }
-                    }))
-                    } else {
-                        None
-                    };
+                    }));
 
                     let inference_result = inference_thread.map(|thread| {
                         thread
@@ -649,9 +617,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Scaling protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -673,10 +641,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
             let mut attempts = 0;
             loop {
                 let result = std::thread::scope(|s| {
-                    let inference_thread = if let Some(inference_protocol) =
-                        self.inference_protocol.as_ref()
-                    {
-                        Some(s.spawn(|| {
+                    let inference_thread = self.inference_protocol.as_ref().map(|inference_protocol| s.spawn(|| {
                             let _permit = inference_protocol.backpressure.acquire().map_err(TransportError::from)?;
 
                             if inference_protocol.circuit_breaker.is_open() {
@@ -689,7 +654,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                             let mut attempts = 0;
                             loop {
                                 let result = <ZmqInterface<B> as ZmqInferenceExecution>::execute_send_shutdown_signal(
-                                    &self,
+                                    self,
                                     &scaling_entry,
                                     inference_scaling_server_address,
                                 );
@@ -721,62 +686,53 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                                     }
                                 }
                             }
-                        }))
-                    } else {
-                        None
-                    };
+                        }));
 
-                    let training_thread = if let Some(training_protocol) =
-                        self.training_protocol.as_ref()
-                    {
-                        Some(s.spawn(|| {
-                            let _permit = training_protocol.backpressure.acquire().map_err(TransportError::from)?;
+                    let training_thread = self.training_protocol.as_ref().map(|training_protocol| s.spawn(|| {
+                        let _permit = training_protocol.backpressure.acquire().map_err(TransportError::from)?;
 
-                            if training_protocol.circuit_breaker.is_open() {
-                                return Err(TransportError::CircuitOpen);
-                            }
+                        if training_protocol.circuit_breaker.is_open() {
+                            return Err(TransportError::CircuitOpen);
+                        }
 
-                            let training_scaling_server_address: &str =
-                                transport_addresses.zmq_training_addresses.training_scaling_server_address.as_ref();
+                        let training_scaling_server_address: &str =
+                            transport_addresses.zmq_training_addresses.training_scaling_server_address.as_ref();
 
-                            let mut attempts = 0;
-                            loop {
-                                let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_shutdown_signal(
-                                    &self,
-                                    &scaling_entry,
-                                    training_scaling_server_address,
-                                );
+                        let mut attempts = 0;
+                        loop {
+                            let result = <ZmqInterface<B> as ZmqTrainingExecution<B>>::execute_send_shutdown_signal(
+                                self,
+                                &scaling_entry,
+                                training_scaling_server_address,
+                            );
 
-                                match result {
-                                    Ok(_) => {
-                                        training_protocol.circuit_breaker.record_success();
-                                        return Ok(());
-                                    }
-                                    Err(_)
-                                        if attempts
-                                            < training_protocol.config.retry_policy.max_attempts =>
-                                    {
-                                        attempts += 1;
-                                        training_protocol.circuit_breaker.record_failure();
-                                        let delay = training_protocol
-                                            .config
-                                            .retry_policy
-                                            .delay_for_attempt(attempts);
-                                        sleep(delay);
-                                    }
-                                    Err(e) => {
-                                        training_protocol.circuit_breaker.record_failure();
-                                        return Err(TransportError::MaxRetriesExceeded {
-                                            cause: e.to_string(),
-                                            attempts,
-                                        });
-                                    }
+                            match result {
+                                Ok(_) => {
+                                    training_protocol.circuit_breaker.record_success();
+                                    return Ok(());
+                                }
+                                Err(_)
+                                    if attempts
+                                        < training_protocol.config.retry_policy.max_attempts =>
+                                {
+                                    attempts += 1;
+                                    training_protocol.circuit_breaker.record_failure();
+                                    let delay = training_protocol
+                                        .config
+                                        .retry_policy
+                                        .delay_for_attempt(attempts);
+                                    sleep(delay);
+                                }
+                                Err(e) => {
+                                    training_protocol.circuit_breaker.record_failure();
+                                    return Err(TransportError::MaxRetriesExceeded {
+                                        cause: e.to_string(),
+                                        attempts,
+                                    });
                                 }
                             }
-                        }))
-                    } else {
-                        None
-                    };
+                        }
+                    }));
 
                     let inference_result = inference_thread.map(|thread| {
                         thread
@@ -820,9 +776,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientScalingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Scaling protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 }
@@ -882,9 +838,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Inference protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -938,9 +894,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Inference protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -994,9 +950,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientInferenceTransportOps<B
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Inference protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 }
@@ -1160,9 +1116,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Training protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -1212,9 +1168,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Training protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -1268,9 +1224,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Training protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 
@@ -1319,9 +1275,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                 }
             }
         } else {
-            return Err(TransportError::InvalidState(
+            Err(TransportError::InvalidState(
                 "Training protocol not initialized".to_string(),
-            ));
+            ))
         }
     }
 

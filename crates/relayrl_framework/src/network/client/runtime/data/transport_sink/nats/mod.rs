@@ -22,8 +22,6 @@ use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 
 pub(super) mod inference_subjects {
-    pub(super) const INFERENCE_SERVER_SUBJECT: &str = "inference-server";
-
     pub(super) const INFERENCE_REQUEST_SUBJECT: &str = "inference-server.model.inference.request";
     pub(super) const FLAG_LAST_INFERENCE_SUBJECT: &str =
         "inference-server.model.inference.flag-last";
@@ -38,8 +36,6 @@ pub(super) mod inference_subjects {
 }
 
 pub(super) mod training_subjects {
-    pub(super) const TRAINING_SERVER_SUBJECT: &str = "training-server";
-
     pub(super) const TRAINING_MODEL_LISTENING_SUBJECT: &str = "training-server.model.listening";
     pub(super) const TRAINING_MODEL_HANDSHAKE_SUBJECT: &str = "training-server.model.handshake";
 

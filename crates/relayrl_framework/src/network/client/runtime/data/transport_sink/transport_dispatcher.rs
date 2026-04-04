@@ -117,13 +117,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
             ClientTransportInterface::Sync(_) => {
                 let transport = self.transport.clone();
                 tokio::task::spawn_blocking(move || match &*transport {
-                    ClientTransportInterface::Sync(sync_tr) => {
-                        sync_tr.listen_for_model(
-                            receiver_entry,
-                            model_update_tx,
-                            transport_addresses,
-                        )
-                    }
+                    ClientTransportInterface::Sync(sync_tr) => sync_tr.listen_for_model(
+                        receiver_entry,
+                        model_update_tx,
+                        transport_addresses,
+                    ),
                     #[cfg(feature = "nats-transport")]
                     ClientTransportInterface::Async(_) => unreachable!(),
                 })

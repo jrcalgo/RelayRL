@@ -1,10 +1,8 @@
 use crate::network::HyperparameterArgs;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::{AlgorithmArgs, ActorInferenceMode};
 use crate::network::client::agent::LocalTrajectoryFileParams;
-use crate::network::client::agent::{
-    ActorTrainingDataMode, ClientModes, ModelMode, uses_local_file_writing,
-};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::{ActorInferenceMode, AlgorithmArgs, ModelMode};
+use crate::network::client::agent::{ActorTrainingDataMode, ClientModes, uses_local_file_writing};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
@@ -32,8 +30,7 @@ use crate::utilities::configuration::Algorithm;
 use crate::utilities::observability::metrics::MetricsManager;
 
 use active_uuid_registry::interface::{
-    get_namespace_entries, remove_id, remove_namespace,
-    reserve_id_with, reserve_namespace,
+    get_namespace_entries, remove_id, remove_namespace, reserve_id_with, reserve_namespace,
 };
 use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
 use burn_tensor::backend::Backend;
@@ -90,6 +87,7 @@ pub enum ScaleManagerError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) enum ScalingOperation {
     ScaleOut,
     ScaleIn,
@@ -105,6 +103,7 @@ pub(crate) enum ProcessInitFlag<B: Backend + BackendMatcher<Backend = B>> {
 pub(crate) struct RouterRuntimeParams {
     pub(crate) filter_loop: JoinHandle<()>,
     pub(crate) trajectory_buffer_loop: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
     pub(crate) filter_tx: Sender<RoutedMessage>,
     pub(crate) trajectory_buffer_tx: Sender<RoutedMessage>,
 }
@@ -119,6 +118,7 @@ pub(crate) struct ScaleManager<
 > {
     client_namespace: Arc<str>,
     router_namespace_counter: u32,
+    #[allow(unused)]
     pub(crate) scaling_id: ScaleManagerUuid,
     shared_client_modes: Arc<ClientModes>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -147,6 +147,7 @@ pub(crate) struct ScaleManager<
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ScaleManager<B, D_IN, D_OUT>
 {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client_namespace: Arc<str>,
         shared_client_modes: Arc<ClientModes>,
@@ -395,9 +396,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         match (&self.training_dispatcher, &self.shared_transport_addresses) {
             (Some(training_dispatcher), Some(transport_addresses)) => {
-                let _ = reserve_id_with(self.client_namespace.as_ref(), crate::network::RECEIVER_CONTEXT, 1, 100).map_err(ScaleManagerError::from)?;
+                let _ = reserve_id_with(
+                    self.client_namespace.as_ref(),
+                    crate::network::RECEIVER_CONTEXT,
+                    1,
+                    100,
+                )
+                .map_err(ScaleManagerError::from)?;
 
-                let global_dispatcher_tx = self.shared_state.read().await.global_dispatcher_tx.clone();
+                let global_dispatcher_tx =
+                    self.shared_state.read().await.global_dispatcher_tx.clone();
                 let receiver = ClientTransportModelReceiver::new(
                     self.client_namespace.clone(),
                     global_dispatcher_tx,
@@ -410,7 +418,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     match lc.subscribe_shutdown() {
                         Ok(rx) => receiver.with_shutdown(rx),
                         Err(e) => {
-                            log::error!("[ScaleManager] Failed to subscribe transport receiver to shutdown: {}", e);
+                            log::error!(
+                                "[ScaleManager] Failed to subscribe transport receiver to shutdown: {}",
+                                e
+                            );
                             receiver
                         }
                     }
@@ -418,12 +429,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     receiver
                 };
 
-                log::info!("[ScaleManager] Spawning transport receiver loop for client namespace: {}", self.client_namespace);
+                log::info!(
+                    "[ScaleManager] Spawning transport receiver loop for client namespace: {}",
+                    self.client_namespace
+                );
                 let receiver_loop = Self::spawn_transport_receiver(receiver).await;
                 self.router_receiver_loop = Some(receiver_loop);
             }
             _ => {
-                log::debug!("[ScaleManager] Transport receiver loop not started; training dispatcher or server addresses not found");
+                log::debug!(
+                    "[ScaleManager] Transport receiver loop not started; training dispatcher or server addresses not found"
+                );
             }
         }
 
@@ -985,21 +1001,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-
-    #[test]
-    fn scale_out_equals_scale_out() {
-        assert_eq!(ScalingOperation::ScaleOut, ScalingOperation::ScaleOut);
-    }
-
-    #[test]
-    fn scale_in_equals_scale_in() {
-        assert_eq!(ScalingOperation::ScaleIn, ScalingOperation::ScaleIn);
-    }
-
-    #[test]
-    fn scale_out_not_equal_scale_in() {
-        assert_ne!(ScalingOperation::ScaleOut, ScalingOperation::ScaleIn);
-    }
 
     #[test]
     fn scaling_not_supported_error_display_contains_message() {

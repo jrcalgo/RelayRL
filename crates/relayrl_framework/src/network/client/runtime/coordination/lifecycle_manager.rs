@@ -266,7 +266,7 @@ impl LifeCycleManager {
             max_traj_length: Arc::new(RwLock::new(max_traj_length)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_addresses: Arc::new(RwLock::new(construct_transport_addresses(
-                &transport_config,
+                transport_config,
                 &transport_type,
             ))),
             #[cfg(feature = "metrics")]

@@ -5,5 +5,3 @@
 
 pub mod open_telemetry;
 pub mod prometheus;
-
-

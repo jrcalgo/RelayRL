@@ -21,7 +21,6 @@ use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
-
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
@@ -261,8 +260,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             reply_to.send(Arc::new(r4sa)).map_err(|e| {
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
-
-            return Ok(());
         } else {
             // local inference fallback (this should never happen, but just in case)
             return self.perform_local_inference(msg).await;
@@ -467,7 +464,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 );
 
                                 if let Err(e) =
-                                    model.save(&self.shared_local_model_path.read().await.clone())
+                                    model.save(self.shared_local_model_path.read().await.clone())
                                 {
                                     log::error!(
                                         "[Actor {:?}] Failed to save model: {:?}",

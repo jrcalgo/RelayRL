@@ -2,29 +2,50 @@ use relayrl_types::HyperparameterArgs;
 use std::collections::HashMap;
 
 /// **Client Constants**: Constants for client-side runtime coordination and actor management.
+#[cfg(feature = "client")]
 pub(super) const CLIENT_NAMESPACE_PREFIX: &str = "client";
+#[cfg(feature = "client")]
 pub(super) const ACTOR_CONTEXT: &str = "actor";
+#[cfg(feature = "client")]
 pub(super) const SCALE_MANAGER_CONTEXT: &str = "scaler";
-#[cfg(feature = "zmq-transport")]
+#[cfg(all(feature = "client", feature = "zmq-transport"))]
 pub(super) const ZMQ_CLIENT_CONTEXT: &str = "zmq-client";
-#[cfg(feature = "nats-transport")]
+#[cfg(all(feature = "client", feature = "nats-transport"))]
 pub(super) const NATS_CLIENT_CONTEXT: &str = "nats-client";
 
+#[cfg(feature = "client")]
 pub(super) const ROUTER_NAMESPACE_PREFIX: &str = "router";
+#[cfg(all(feature = "client", feature = "nats-transport"))]
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(super) const RECEIVER_CONTEXT: &str = "receiver";
+#[cfg(feature = "client")]
 pub(super) const BUFFER_CONTEXT: &str = "buffer";
 
 /// **Server Constants**: Constants for server-side runtime coordination and actor management.
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(all(
+    feature = "training-server",
+    any(feature = "nats-transport", feature = "zmq-transport")
+))]
 pub(super) const TRAINING_SERVER_NAMESPACE_PREFIX: &str = "training-server";
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(all(
+    feature = "inference-server",
+    any(feature = "nats-transport", feature = "zmq-transport")
+))]
 pub(super) const INFERENCE_SERVER_NAMESPACE_PREFIX: &str = "inference-server";
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(all(
+    any(feature = "training-server", feature = "inference-server"),
+    any(feature = "nats-transport", feature = "zmq-transport")
+))]
 pub(super) const WORKER_CONTEXT: &str = "worker";
-#[cfg(feature = "zmq-transport")]
+#[cfg(all(
+    any(feature = "training-server", feature = "inference-server"),
+    feature = "zmq-transport"
+))]
 pub(super) const ZMQ_SERVER_CONTEXT: &str = "zmq-server";
-#[cfg(feature = "nats-transport")]
+#[cfg(all(
+    any(feature = "training-server", feature = "inference-server"),
+    feature = "nats-transport"
+))]
 pub(super) const NATS_SERVER_CONTEXT: &str = "nats-server";
 
 /// **Client Modules**: Handles client-side runtime coordination and actor management.

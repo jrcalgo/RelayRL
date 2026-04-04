@@ -2,9 +2,9 @@ use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManagerError;
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
@@ -98,6 +98,7 @@ pub(crate) struct StateManager<
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     StateManager<B, D_IN, D_OUT>
 {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client_namespace: Arc<str>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -337,6 +338,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
+    #[allow(unused)]
     pub(crate) async fn restart_actor(
         &mut self,
         actor_id: ActorUuid,
@@ -497,6 +499,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ///
     /// Takes `&self` for the same reason as `distribute_actors`: `actor_router_addresses`
     /// is a `DashMap` and mutation is safe through a shared reference.
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn restore_actor_router_mappings(
         &self,
         mappings: Vec<(ActorUuid, RouterNamespace)>,
@@ -509,6 +512,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterNamespace)> {
         self.actor_router_addresses
             .iter()
@@ -559,6 +563,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn canonical_model_update_target(&self, actor_id: ActorUuid) -> ActorUuid {
         let sorted_actor_ids = self.sorted_actor_ids_for_model_updates();
         self.canonical_model_update_target_from_sorted_actor_ids(actor_id, &sorted_actor_ids)
@@ -721,6 +726,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     fn restore_replaces_all_mappings() {
         let (sm, _rx) = make_state_manager(disabled_modes());
         let old_id = Uuid::new_v4();
@@ -740,6 +746,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     fn restore_with_empty_clears_all() {
         let (sm, _rx) = make_state_manager(disabled_modes());
         sm.actor_router_addresses
@@ -749,6 +756,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     fn get_returns_all_inserted_mappings() {
         let (sm, _rx) = make_state_manager(disabled_modes());
         let id1 = Uuid::new_v4();
@@ -790,8 +798,13 @@ mod unit_tests {
     async fn remove_actor_clears_device_and_router_metadata() {
         let (mut sm, _rx) = make_state_manager(disabled_modes());
         reserve_namespace(sm.client_namespace.as_ref());
-        let actor_id = reserve_id_with(sm.client_namespace.as_ref(), crate::network::ACTOR_CONTEXT, 117, 100)
-            .unwrap();
+        let actor_id = reserve_id_with(
+            sm.client_namespace.as_ref(),
+            crate::network::ACTOR_CONTEXT,
+            117,
+            100,
+        )
+        .unwrap();
         let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
         sm.actor_handles
@@ -813,9 +826,13 @@ mod unit_tests {
     async fn set_actor_id_moves_device_and_router_metadata() {
         let (sm, _rx) = make_state_manager(disabled_modes());
         reserve_namespace(sm.client_namespace.as_ref());
-        let current_id =
-            reserve_id_with(sm.client_namespace.as_ref(), crate::network::ACTOR_CONTEXT, 117, 100)
-                .unwrap();
+        let current_id = reserve_id_with(
+            sm.client_namespace.as_ref(),
+            crate::network::ACTOR_CONTEXT,
+            117,
+            100,
+        )
+        .unwrap();
         let new_id = Uuid::new_v4();
         let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
@@ -881,6 +898,7 @@ mod unit_tests {
     }
 
     #[tokio::test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn canonical_model_update_target_uses_shared_device_representative() {
         let (sm, _rx) = make_state_manager(shared_modes());
         let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
@@ -903,6 +921,7 @@ mod unit_tests {
     }
 
     #[tokio::test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn canonical_model_update_target_preserves_independent_actor_ids() {
         let (sm, _rx) = make_state_manager(disabled_modes());
         let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();

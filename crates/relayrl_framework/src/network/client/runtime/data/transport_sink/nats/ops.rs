@@ -33,8 +33,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::{Stream, StreamExt};
@@ -1114,22 +1114,22 @@ impl NatsTrainingOps {
 
         let mut drain_errors: Vec<String> = Vec::new();
 
-        if let Some(existing_inference_client) = shutdown_clients.inference_client {
-            if let Err(drain_error) = existing_inference_client.drain().await {
-                drain_errors.push(format!(
-                    "Failed to drain inference NATS client for '{}': {}",
-                    shutdown_clients.client_namespace, drain_error
-                ));
-            }
+        if let Some(existing_inference_client) = shutdown_clients.inference_client
+            && let Err(drain_error) = existing_inference_client.drain().await
+        {
+            drain_errors.push(format!(
+                "Failed to drain inference NATS client for '{}': {}",
+                shutdown_clients.client_namespace, drain_error
+            ));
         }
 
-        if let Some(existing_training_client) = shutdown_clients.training_client {
-            if let Err(drain_error) = existing_training_client.drain().await {
-                drain_errors.push(format!(
-                    "Failed to drain training NATS client for '{}': {}",
-                    shutdown_clients.client_namespace, drain_error
-                ));
-            }
+        if let Some(existing_training_client) = shutdown_clients.training_client
+            && let Err(drain_error) = existing_training_client.drain().await
+        {
+            drain_errors.push(format!(
+                "Failed to drain training NATS client for '{}': {}",
+                shutdown_clients.client_namespace, drain_error
+            ));
         }
 
         match drain_errors.len() {
@@ -1189,9 +1189,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
                 ))
             })?;
 
-        let payload_stream = model_update_subscriber.map(|received_nats_message| {
-            received_nats_message.payload
-        });
+        let payload_stream =
+            model_update_subscriber.map(|received_nats_message| received_nats_message.payload);
 
         forward_model_update_payloads(payload_stream, model_update_tx, || async {
             listener_stop_flag.load(Ordering::SeqCst) || self.is_shutting_down().await
@@ -1220,12 +1219,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         let actor_entries_string = actor_entries
             .iter()
             .map(|(actor_namespace, actor_context, actor_id)| {
-                format!(
-                    "{}:{}:{}",
-                    actor_namespace.to_string(),
-                    actor_context.to_string(),
-                    actor_id.to_string()
-                )
+                format!("{}:{}:{}", actor_namespace, actor_context, actor_id)
             })
             .collect::<Vec<String>>()
             .join(",");
@@ -1646,7 +1640,11 @@ mod unit_tests {
 
     use tokio::sync::mpsc;
 
-    fn make_model_update_payload(actor_id_bytes: [u8; 16], version: i64, model_bytes: &[u8]) -> Bytes {
+    fn make_model_update_payload(
+        actor_id_bytes: [u8; 16],
+        version: i64,
+        model_bytes: &[u8],
+    ) -> Bytes {
         serialize_payload_to_nats_bytes(
             &ModelUpdateBroadcastMessage {
                 model_bytes: model_bytes.to_vec(),
@@ -1672,7 +1670,10 @@ mod unit_tests {
 
         let first_message = rx.recv().await.unwrap();
         assert_eq!(first_message.actor_id, Uuid::from_bytes([1; 16]));
-        assert!(matches!(first_message.protocol, RoutingProtocol::ModelUpdate));
+        assert!(matches!(
+            first_message.protocol,
+            RoutingProtocol::ModelUpdate
+        ));
         match first_message.payload {
             RoutedPayload::ModelUpdate {
                 model_bytes,
@@ -1761,17 +1762,21 @@ mod unit_tests {
         let receiver_id = Uuid::new_v4();
         let listener_handle = connection_manager.register_model_listener(&receiver_id);
 
-        assert!(connection_manager
-            .model_listener_shutdown_flags
-            .get(&receiver_id)
-            .is_some());
+        assert!(
+            connection_manager
+                .model_listener_shutdown_flags
+                .get(&receiver_id)
+                .is_some()
+        );
 
         drop(listener_handle);
 
-        assert!(connection_manager
-            .model_listener_shutdown_flags
-            .get(&receiver_id)
-            .is_none());
+        assert!(
+            connection_manager
+                .model_listener_shutdown_flags
+                .get(&receiver_id)
+                .is_none()
+        );
     }
 
     #[test]

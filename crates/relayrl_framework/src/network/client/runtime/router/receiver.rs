@@ -1,8 +1,6 @@
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::state_manager::{
-    ActorUuid, StateManager,
-};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::coordination::state_manager::{ActorUuid, StateManager};
 use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::TrainingDispatcher;
 use crate::network::client::runtime::router::{
@@ -12,8 +10,8 @@ use crate::network::client::runtime::router::{
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
-use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::UuidPoolError;
+use active_uuid_registry::interface::get_context_entries;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use thiserror::Error;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tokio::time::Duration;
 
 #[derive(Debug, Error)]
@@ -110,25 +108,39 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         .map_err(TransportReceiverError::from)?;
         let receiver_entry = entries
             .first()
-            .ok_or(TransportReceiverError::NoEntriesFound)?.clone();
+            .ok_or(TransportReceiverError::NoEntriesFound)?
+            .clone();
 
-        let (model_update_tx, mut model_update_rx) = tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (model_update_tx, mut model_update_rx) =
+            tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
         let training_dispatcher = self.training_dispatcher.clone();
         let transport_addresses = self.shared_transport_addresses.clone();
         let receiver_entry_for_task = receiver_entry.clone();
         let listener_handle = tokio::spawn(async move {
             loop {
-                match training_dispatcher.listen_for_model(receiver_entry_for_task.clone(), model_update_tx.clone(), transport_addresses.clone()).await {
+                match training_dispatcher
+                    .listen_for_model(
+                        receiver_entry_for_task.clone(),
+                        model_update_tx.clone(),
+                        transport_addresses.clone(),
+                    )
+                    .await
+                {
                     Ok(()) => {
-                        log::warn!("[ClientTransportModelReceiver] Model listener stopped gracefully");
+                        log::warn!(
+                            "[ClientTransportModelReceiver] Model listener stopped gracefully"
+                        );
                         break;
                     }
                     Err(e) => {
-                        log::error!("[ClientTransportModelReceiver] Failed to listen for model: {}", e);
+                        log::error!(
+                            "[ClientTransportModelReceiver] Failed to listen for model: {}",
+                            e
+                        );
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-                } 
+                }
             }
         });
         let mut last_forwarded_model_versions: HashMap<ActorUuid, i64> = HashMap::new();
@@ -251,10 +263,7 @@ mod unit_tests {
 
     #[cfg(feature = "metrics")]
     fn test_metrics() -> MetricsManager {
-        let metrics_args = (
-            "test-transport-receiver".to_string(),
-            String::new(),
-        );
+        let metrics_args = ("test-transport-receiver".to_string(), String::new());
         MetricsManager::new(
             Arc::new(RwLock::new(metrics_args.clone())),
             metrics_args,

@@ -115,16 +115,16 @@ impl CircuitBreaker {
                     .opened_at
                     .read()
                     .expect("CircuitBreaker opened_at lock poisoned")
+                    && opened_at.elapsed() >= self.open_duration
                 {
-                    if opened_at.elapsed() >= self.open_duration {
-                        // Transition to half-open
-                        *self
-                            .state
-                            .write()
-                            .expect("CircuitBreaker state lock poisoned") = CircuitState::HalfOpen;
-                        return false; // Allow the test request
-                    }
+                    // Transition to half-open
+                    *self
+                        .state
+                        .write()
+                        .expect("CircuitBreaker state lock poisoned") = CircuitState::HalfOpen;
+                    return false; // Allow the test request
                 }
+
                 true
             }
             CircuitState::HalfOpen => false, // Allow test request

@@ -4,10 +4,10 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
     SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::zmq::{
     ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
 };
-use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
 
@@ -16,8 +16,8 @@ use active_uuid_registry::interface::{remove_id, reserve_id_with};
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::data::trajectory::EncodedTrajectory;
-use relayrl_types::model::utils::validate_module;
 use relayrl_types::model::ModelModule;
+use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
@@ -26,10 +26,10 @@ use std::io::Write;
 
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc::Sender;
 use zmq::{Context, Socket};
@@ -37,6 +37,7 @@ use zmq::{Context, Socket};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ZmqPoolError {
     #[error(transparent)]
     SocketError(#[from] zmq::Error),
@@ -585,25 +586,26 @@ fn build_routed_model_update_message(
         log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
         return Ok(None);
     } else {
-        let actor_array: [u8; 16] = actor_id_bytes.as_slice().try_into().map_err(|conversion_error| {
-            TransportError::ListenForModelError(format!(
-                "Failed to convert actor ID bytes to fixed-size array: {}",
-                conversion_error
-            ))
-        })?;
+        let actor_array: [u8; 16] =
+            actor_id_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|conversion_error| {
+                    TransportError::ListenForModelError(format!(
+                        "Failed to convert actor ID bytes to fixed-size array: {}",
+                        conversion_error
+                    ))
+                })?;
         Uuid::from_bytes(actor_array)
     };
 
     let model_version_byte_array: [u8; 8] =
-        model_version_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| {
-                TransportError::ListenForModelError(format!(
-                    "Malformed model update response: invalid version byte length: expected 8, got {}",
-                    model_version_bytes.len()
-                ))
-            })?;
+        model_version_bytes.as_slice().try_into().map_err(|_| {
+            TransportError::ListenForModelError(format!(
+                "Malformed model update response: invalid version byte length: expected 8, got {}",
+                model_version_bytes.len()
+            ))
+        })?;
     let model_version = i64::from_be_bytes(model_version_byte_array);
 
     Ok(Some(RoutedMessage {
@@ -769,7 +771,7 @@ impl ZmqTrainingOps {
                     e
                 ))
             })?
-            .stop_model_listener(&receiver_id);
+            .stop_model_listener(receiver_id);
         Ok(())
     }
 
@@ -811,7 +813,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_dealer_socket", socket_id.clone())
+                remove_id("client", "zmq_dealer_socket", socket_id)
                     .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
@@ -832,8 +834,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_sub_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove_id("client", "zmq_sub_socket", socket_id).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -853,8 +854,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_push_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove_id("client", "zmq_push_socket", socket_id).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -874,7 +874,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_dealer_socket", socket_id.clone())
+                remove_id("client", "zmq_dealer_socket", socket_id)
                     .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
@@ -882,12 +882,8 @@ impl ZmqTrainingOps {
         }
 
         let (client_namspace, zmq_context, transport_id) = self.transport_entry.clone();
-        remove_id(
-            client_namspace.as_ref(),
-            zmq_context.as_ref(),
-            transport_id.clone(),
-        )
-        .map_err(TransportError::from)?;
+        remove_id(client_namspace.as_ref(), zmq_context.as_ref(), transport_id)
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
@@ -928,7 +924,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                     e
                 ))
             })?
-            .register_model_listener(&receiver_id);
+            .register_model_listener(receiver_id);
 
         let _ = self
             .zmq_pool
@@ -940,7 +936,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ))
             })?
             .update_cache(
-                &receiver_id,
+                receiver_id,
                 model_server_address,
                 CacheAddressType::ModelServer,
                 SocketPoolType::ModelSub,
@@ -962,7 +958,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .ok_or_else(|| {
                 TransportError::ListenForModelError("SUB socket pool not initialized".to_string())
             })?
-            .get(&receiver_id)
+            .get(receiver_id)
             .ok_or_else(|| {
                 TransportError::ListenForModelError(format!(
                     "SUB socket not found for receiver ID: {}",
@@ -986,10 +982,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             match socket
                 .try_lock()
                 .map_err(|e| {
-                    TransportError::ListenForModelError(format!(
-                        "Failed to lock sub socket: {}",
-                        e
-                    ))
+                    TransportError::ListenForModelError(format!("Failed to lock sub socket: {}", e))
                 })?
                 .recv_multipart(0)
             {
@@ -1030,7 +1023,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         };
 
         if let Ok(pool) = self.zmq_pool.read() {
-            pool.unregister_model_listener(&receiver_id);
+            pool.unregister_model_listener(receiver_id);
         }
 
         result
@@ -1566,28 +1559,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
                             log::info!("[ZmqClient] Server updated cache with client IDs");
-                            return Ok(());
+                            Ok(())
                         }
-                        ServerResponse::Failure => {
-                            return Err(TransportError::SendClientIdsToServerError(
-                                "Server failed to acknowledge client IDs".to_string(),
-                            ));
-                        }
+                        ServerResponse::Failure => Err(TransportError::SendClientIdsToServerError(
+                            "Server failed to acknowledge client IDs".to_string(),
+                        )),
                     },
-                    Err(e) => {
-                        return Err(TransportError::SendClientIdsToServerError(format!(
-                            "Failed to parse server response: {}",
-                            e
-                        )));
-                    }
+                    Err(e) => Err(TransportError::SendClientIdsToServerError(format!(
+                        "Failed to parse server response: {}",
+                        e
+                    ))),
                 }
             }
-            Err(e) => {
-                return Err(TransportError::SendClientIdsToServerError(format!(
-                    "Failed to receive client IDs from server: {}",
-                    e
-                )));
-            }
+            Err(e) => Err(TransportError::SendClientIdsToServerError(format!(
+                "Failed to receive client IDs from server: {}",
+                e
+            ))),
         }
     }
 
@@ -2077,29 +2064,25 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
                             log::info!("[ZmqClient] Server acknowledged shutdown signal");
-                            return Ok(());
+                            Ok(())
                         }
                         ServerResponse::Failure => {
                             log::error!("[ZmqClient] Server failed to acknowledge shutdown signal");
-                            return Err(TransportError::SendShutdownSignalError(
+                            Err(TransportError::SendShutdownSignalError(
                                 "Server failed to acknowledge shutdown signal".to_string(),
-                            ));
+                            ))
                         }
                     },
-                    Err(e) => {
-                        return Err(TransportError::SendShutdownSignalError(format!(
-                            "Failed to parse shutdown signal response: {}",
-                            e
-                        )));
-                    }
+                    Err(e) => Err(TransportError::SendShutdownSignalError(format!(
+                        "Failed to parse shutdown signal response: {}",
+                        e
+                    ))),
                 }
             }
-            Err(e) => {
-                return Err(TransportError::SendShutdownSignalError(format!(
-                    "Failed to receive shutdown signal from server: {}",
-                    e
-                )));
-            }
+            Err(e) => Err(TransportError::SendShutdownSignalError(format!(
+                "Failed to receive shutdown signal from server: {}",
+                e
+            ))),
         }
     }
 }
@@ -2130,7 +2113,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(routed_message.actor_id, Uuid::from_bytes([1; 16]));
-        assert!(matches!(routed_message.protocol, RoutingProtocol::ModelUpdate));
+        assert!(matches!(
+            routed_message.protocol,
+            RoutingProtocol::ModelUpdate
+        ));
         match routed_message.payload {
             RoutedPayload::ModelUpdate {
                 model_bytes,
@@ -2145,11 +2131,7 @@ mod tests {
 
     #[test]
     fn build_routed_model_update_message_rejects_missing_version_frame() {
-        let message_parts = vec![
-            b"model-update".to_vec(),
-            vec![10, 20],
-            vec![1; 16],
-        ];
+        let message_parts = vec![b"model-update".to_vec(), vec![10, 20], vec![1; 16]];
 
         let err = match build_routed_model_update_message(&message_parts) {
             Ok(_) => panic!("expected malformed message to return an error"),
@@ -2218,6 +2200,10 @@ mod tests {
         let _ = pool.register_model_listener(&receiver_id);
         pool.unregister_model_listener(&receiver_id);
 
-        assert!(pool.model_listener_shutdown_flags.get(&receiver_id).is_none());
+        assert!(
+            pool.model_listener_shutdown_flags
+                .get(&receiver_id)
+                .is_none()
+        );
     }
 }

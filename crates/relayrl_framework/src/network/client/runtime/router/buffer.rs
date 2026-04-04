@@ -1,4 +1,6 @@
 use super::{RoutedMessage, RoutedPayload, RouterError};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::ActorTrainingDataMode;
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
     LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing,
@@ -15,11 +17,15 @@ use crate::network::client::runtime::data::transport_sink::{
     TransportError, transport_dispatcher::TrainingDispatcher,
 };
 
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use relayrl_types::data::trajectory::EncodedTrajectory;
 use relayrl_types::data::trajectory::{RelayRLTrajectory, TrajectoryError};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::prelude::action::CodecConfig;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::registry_uuid::Uuid;
 
 use burn_tensor::backend::Backend;
@@ -376,8 +382,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         // Dispatch each job to enabled sinks
                         for job in jobs_to_process {
                             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                            if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode {
-                                if let (Some(dispatcher), Some(transport_addresses)) =
+                            if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode &&
+                                let (Some(dispatcher), Some(transport_addresses)) =
                                     (worker_training_dispatcher.clone(), worker_transport_addresses.clone())
                                 {
                                     let transport_job = job.clone();
@@ -402,7 +408,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                             }
                                         };
 
-                                        let addrs = transport_addrs.read().await;
                                         if let Err(e) = Self::send_trajectory(
                                             &transport_namespace,
                                             &transport_job.actor_id,
@@ -421,7 +426,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                         }
                                     });
                                 }
-                            }
+
 
                             if uses_local_file_writing(&worker_modes.actor_training_data_mode) &&
                                 let Some(ref traj_output) = worker_trajectory_file_output {
@@ -456,29 +461,28 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             let mut queue = worker_queue.lock().await;
             while let Some(job) = queue.pop() {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                if let Some(transport_addresses) = &worker_transport_addresses {
-                    if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+                if let Some(transport_addresses) = &worker_transport_addresses
+                    && let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
                         &worker_modes.actor_training_data_mode
-                    {
-                        let encoded = match job.traj_for_processing.encode(&worker_codec) {
-                            Ok(enc) => enc,
-                            Err(e) => {
-                                log::error!("[TrajectoryBuffer] Encode error: {:?}", e);
-                                return;
-                            }
-                        };
+                {
+                    let encoded = match job.traj_for_processing.encode(&worker_codec) {
+                        Ok(enc) => enc,
+                        Err(e) => {
+                            log::error!("[TrajectoryBuffer] Encode error: {:?}", e);
+                            return;
+                        }
+                    };
 
-                        let _ = Self::send_trajectory(
-                            &worker_namespace,
-                            &job.actor_id,
-                            &job.priority,
-                            &encoded,
-                            &worker_training_dispatcher,
-                            &transport_addresses,
-                            &worker_actor_last_processed,
-                        )
-                        .await;
-                    }
+                    let _ = Self::send_trajectory(
+                        &worker_namespace,
+                        &job.actor_id,
+                        &job.priority,
+                        &encoded,
+                        &worker_training_dispatcher,
+                        transport_addresses,
+                        &worker_actor_last_processed,
+                    )
+                    .await;
                 }
 
                 if uses_local_file_writing(&worker_modes.actor_training_data_mode)
@@ -635,7 +639,7 @@ mod unit_tests {
     use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
     use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
     use active_uuid_registry::registry_uuid::Uuid;
-    
+
     use relayrl_types::data::trajectory::RelayRLTrajectory;
     use std::collections::BinaryHeap;
     use std::sync::Arc;

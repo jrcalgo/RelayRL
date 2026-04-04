@@ -183,7 +183,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             interval.tick().await;
 
             // Batch operation: Lock once, process all actors, then release
-            let (retry_messages, expired_count) = {
+            let retry_results = {
                 let mut pending_map = pending_messages.lock().await;
 
                 let mut to_remove: Vec<ActorUuid> = Vec::new();
@@ -241,8 +241,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 // Release lock before async operations
                 drop(pending_map);
 
-                (retry_messages, to_remove.len() as u64)
+                #[cfg(feature = "metrics")]
+                {
+                    (retry_messages, to_remove.len() as u64)
+                }
+                #[cfg(not(feature = "metrics"))]
+                {
+                    retry_messages
+                }
             };
+
+            #[cfg(feature = "metrics")]
+            let (retry_messages, expired_count) = retry_results;
+            #[cfg(not(feature = "metrics"))]
+            let retry_messages = retry_results;
 
             #[cfg(feature = "metrics")]
             if expired_count > 0 {

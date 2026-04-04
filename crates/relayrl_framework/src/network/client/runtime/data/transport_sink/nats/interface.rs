@@ -231,7 +231,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -297,7 +297,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -416,7 +416,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -482,7 +482,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -600,7 +600,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -666,7 +666,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -783,7 +783,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -848,7 +848,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -957,7 +957,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                         .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1028,7 +1028,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                         .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1099,7 +1099,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                         .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1180,7 +1180,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                         .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1245,7 +1245,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                         .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1315,7 +1315,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                         .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }

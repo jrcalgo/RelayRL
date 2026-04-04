@@ -101,15 +101,15 @@ impl CircuitBreaker {
                     .opened_at
                     .read()
                     .expect("CircuitBreaker opened_at lock poisoned")
+                    && opened_at.elapsed() >= self.open_duration
                 {
-                    if opened_at.elapsed() >= self.open_duration {
-                        *self
-                            .state
-                            .write()
-                            .expect("CircuitBreaker state lock poisoned") = CircuitState::HalfOpen;
-                        return false;
-                    }
+                    *self
+                        .state
+                        .write()
+                        .expect("CircuitBreaker state lock poisoned") = CircuitState::HalfOpen;
+                    return false;
                 }
+
                 true
             }
             CircuitState::HalfOpen => false,

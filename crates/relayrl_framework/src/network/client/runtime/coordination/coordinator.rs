@@ -1,8 +1,6 @@
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes,
-};
+use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{AlgorithmArgs, InferenceAddressesArgs, TrainingAddressesArgs};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -38,17 +36,16 @@ use crate::utilities::observability::logging::*;
 use crate::utilities::observability::metrics::*;
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use active_uuid_registry::{NamespaceString, ContextString};
+use active_uuid_registry::interface::{get_context_entries, get_namespace_entries};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use active_uuid_registry::interface::{get_namespace_entries, get_context_entries};
+use active_uuid_registry::{ContextString, NamespaceString};
 
 use thiserror::Error;
 
 use burn_tensor::backend::Backend;
 
 use active_uuid_registry::interface::{
-    clear_namespace, remove_id, remove_namespace,
-    reserve_id_with, reserve_namespace,
+    clear_namespace, remove_id, remove_namespace, reserve_id_with, reserve_namespace,
 };
 use active_uuid_registry::{UuidPoolError, registry_uuid::Uuid};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -59,14 +56,14 @@ use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::serialize_model_module;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
 
-
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "metrics")]
 use std::time::Instant;
 
 use tokio::sync::RwLock;
-use tokio::sync::oneshot;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 
 pub(crate) const CHANNEL_THROUGHPUT: usize = 256_000;
 
@@ -148,6 +145,7 @@ pub trait ClientInterface<
     ) -> Self
     where
         Self: Sized;
+    #[allow(clippy::too_many_arguments)]
     async fn start(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -166,6 +164,7 @@ pub trait ClientInterface<
         >,
     ) -> Result<(), CoordinatorError>;
     async fn shutdown(&mut self) -> Result<(), CoordinatorError>;
+    #[allow(clippy::too_many_arguments)]
     async fn restart(
         &mut self,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -191,8 +190,11 @@ pub trait ClientInterface<
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         send_algorithm_init: bool,
     ) -> Result<Uuid, CoordinatorError>;
-    async fn remove_actor(&mut self, id: ActorUuid, send_ids: bool)
-    -> Result<(), CoordinatorError>;
+    async fn remove_actor(
+        &mut self,
+        id: ActorUuid,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
+    ) -> Result<(), CoordinatorError>;
     async fn set_actor_id(
         &mut self,
         current_id: ActorUuid,
@@ -325,8 +327,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn prepare_model_update_dispatch(
         &self,
-    ) -> Result<Option<(Sender<RoutedMessage>, Vec<ActorUuid>, Arc<RwLock<PathBuf>>)>, CoordinatorError>
-    {
+    ) -> Result<
+        Option<(Sender<RoutedMessage>, Vec<ActorUuid>, Arc<RwLock<PathBuf>>)>,
+        CoordinatorError,
+    > {
         match &self.runtime_params {
             Some(params) => match &self.client_modes.actor_inference_mode {
                 ActorInferenceMode::Local(_) => {
@@ -476,7 +480,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             },
         };
 
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let mut config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+        let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
         let lifecycle: LifeCycleManager = LifeCycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -642,7 +649,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
 
                 lifecycle
-                    .set_transport_addresses(&transport_params_for_packing, &self.transport_type)
+                    .set_transport_addresses(transport_params_for_packing, &self.transport_type)
                     .await?;
             }
         }
@@ -678,7 +685,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 shared_client_modes.clone(),
             )
             .await
-            .map_err(|e| CoordinatorError::TransportError(e))?;
+            .map_err(CoordinatorError::from)?;
 
             let shared_transport: Arc<ClientTransportInterface<B>> = Arc::new(transport);
 
@@ -872,9 +879,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 // shutdown transport client components (sockets, etc.)
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                match &params.scaling.scaling_dispatcher {
-                    Some(dispatcher) => dispatcher.shutdown_transport().await?,
-                    None => (),
+                if let Some(dispatcher) = &params.scaling.scaling_dispatcher {
+                    dispatcher.shutdown_transport().await?;
                 }
 
                 // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (router receivers, router senders, central filters)
@@ -1539,11 +1545,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    use crate::network::client::agent::InferenceParams;
     use crate::network::client::agent::{
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    use crate::network::client::agent::InferenceParams;
     use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
     use crate::utilities::configuration::ClientConfigLoader;
     use active_uuid_registry::interface::{clear_namespace, reserve_namespace};
@@ -1584,10 +1590,7 @@ mod unit_tests {
     #[cfg(feature = "metrics")]
     fn test_metrics() -> MetricsManager {
         MetricsManager::new(
-            Arc::new(RwLock::new((
-                "test-coordinator".to_string(),
-                String::new(),
-            ))),
+            Arc::new(RwLock::new(("test-coordinator".to_string(), String::new()))),
             ("test-coordinator".to_string(), String::new()),
             None,
         )
@@ -1678,7 +1681,13 @@ mod unit_tests {
     #[tokio::test]
     async fn remove_actor_no_runtime_returns_err() {
         let mut c = make_coordinator();
-        let result = c.remove_actor(Uuid::new_v4(), false).await;
+        let result = c
+            .remove_actor(
+                Uuid::new_v4(),
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                false,
+            )
+            .await;
         assert!(result.is_err());
     }
 
