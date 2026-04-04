@@ -361,7 +361,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                              worker_queue.is_empty() {
                                 break;
                             }
-                        
+
 
                         let mut jobs_to_process = Vec::with_capacity(BATCH_SIZE);
                         {
@@ -654,7 +654,7 @@ mod unit_tests {
     }
 
     fn test_namespace() -> RouterNamespace {
-        Arc::from("test-ns")
+        Arc::from("test-buffer-ns")
     }
 
     fn now_millis() -> u128 {

@@ -43,7 +43,7 @@ pub(crate) struct SharedZmqTrainingAddresses {
 
 /// Shared transport addresses for both NATS and ZMQ transports.
 ///
-/// I was going to store these in an enum but I realized I don't hate myself enough to do that. 
+/// I was going to store these in an enum but I realized I don't hate myself enough to do that.
 /// Would have to pattern match everywhere that uses this instead of just storing shared pointers to empty strings for unused fields, memory be damned.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]

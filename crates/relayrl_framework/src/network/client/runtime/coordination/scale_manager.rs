@@ -184,7 +184,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             shared_state.read().await.shared_router_state.clone(),
             #[cfg(feature = "metrics")]
             metrics,
-        ).await;
+        )
+        .await;
 
         let dispatcher: RouterDispatcher = match lifecycle.subscribe_shutdown() {
             Ok(rx) => dispatcher.with_shutdown(rx),

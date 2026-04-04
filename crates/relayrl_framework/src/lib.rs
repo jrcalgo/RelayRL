@@ -76,7 +76,6 @@
 //!
 //! ### Under Development
 //! - Network transport layer (ZMQ)
-//! - Database trajectory sinks (PostgreSQL/SQLite)
 //! - Server-side inference mode
 //! - Training server integration
 //!
@@ -96,7 +95,7 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Build agent with 4 concurrent actors
-//! let (agent, params) = AgentBuilder::<NdArray, 4, 2, Float, Float>::builder()
+//! let (mut agent, params) = AgentBuilder::<NdArray, 4, 2, Float, Float>::builder()
 //!     .actor_count(4)
 //!     .router_scale(2)
 //!     .default_device(DeviceType::Cpu)
@@ -114,7 +113,7 @@
 //! ).await?;
 //!
 //! // Request actions from actors
-//! let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+//! let observation = Tensor::<NdArray, 4, Float>::zeros([1, 4], &Default::default());
 //! let actions = agent.request_action(
 //!     vec![/* actor IDs */],
 //!     observation,

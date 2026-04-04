@@ -1000,7 +1000,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ));
                 }
 
-                let actor_count: usize = params.shared_state.read().await.shared_router_state.actor_inboxes.len();
+                let actor_count: usize = params
+                    .shared_state
+                    .read()
+                    .await
+                    .shared_router_state
+                    .actor_inboxes
+                    .len();
                 let router_namespace: RouterNamespace =
                     router_namespaces[actor_count % router_namespaces.len()].clone();
 
@@ -1648,6 +1654,7 @@ mod unit_tests {
             test_metrics(),
             lifecycle.clone(),
         )
+        .await
         .unwrap();
         drop(dummy_tx);
 

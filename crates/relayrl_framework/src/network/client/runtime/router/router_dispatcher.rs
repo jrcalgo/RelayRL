@@ -42,7 +42,7 @@ struct PendingMessage {
 /// - Race conditions between actor creation and router assignment
 ///
 /// Callers should ensure actors are assigned to routers before sending messages to them.
-pub(crate) struct RouterDispatcher{
+pub(crate) struct RouterDispatcher {
     global_dispatcher_rx: Receiver<RoutedMessage>,
     router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
     shared_router_state: Arc<SharedRouterState>,
@@ -484,52 +484,39 @@ mod unit_tests {
             shared_router_state.clone(),
             #[cfg(feature = "metrics")]
             test_metrics(),
-        ).await;
+        )
+        .await;
         (dispatcher, global_tx, router_channels, shared_router_state)
     }
 
     #[test]
     fn get_timeout_for_protocol_correct_values() {
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(
-                &RoutingProtocol::RequestInference
-            ),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::RequestInference),
             Duration::from_secs(10)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(
-                &RoutingProtocol::ModelVersion
-            ),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::ModelVersion),
             Duration::from_secs(15)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(
-                &RoutingProtocol::FlagLastInference
-            ),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::FlagLastInference),
             Duration::from_secs(20)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(
-                &RoutingProtocol::ModelHandshake
-            ),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::ModelHandshake),
             Duration::from_secs(30)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(
-                &RoutingProtocol::SendTrajectory
-            ),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::SendTrajectory),
             Duration::from_secs(30)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(
-                &RoutingProtocol::ModelUpdate
-            ),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::ModelUpdate),
             Duration::from_secs(60)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(
-                &RoutingProtocol::Shutdown
-            ),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Shutdown),
             Duration::from_secs(60)
         );
     }
@@ -641,7 +628,8 @@ mod unit_tests {
 
     #[tokio::test]
     async fn dispatcher_exits_on_broadcast_signal() {
-        let (dispatcher, _global_tx, _router_channels, _shared_router_state) = make_dispatcher().await;
+        let (dispatcher, _global_tx, _router_channels, _shared_router_state) =
+            make_dispatcher().await;
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
         let dispatcher = dispatcher.with_shutdown(shutdown_rx);
 
@@ -659,7 +647,8 @@ mod unit_tests {
 
     #[tokio::test]
     async fn dispatcher_exits_on_channel_close() {
-        let (dispatcher, global_tx, _router_channels, _shared_router_state) = make_dispatcher().await;
+        let (dispatcher, global_tx, _router_channels, _shared_router_state) =
+            make_dispatcher().await;
         let handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
 
         drop(global_tx); // closed channel → dispatcher sees None → exits

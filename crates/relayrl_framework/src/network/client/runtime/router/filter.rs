@@ -1,6 +1,8 @@
 use super::{RoutedMessage, RouterError, RoutingProtocol};
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-use crate::network::client::runtime::coordination::state_manager::{SharedRouterState, StateManager};
+use crate::network::client::runtime::coordination::state_manager::{
+    SharedRouterState, StateManager,
+};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
@@ -54,7 +56,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let mut shutdown: Option<broadcast::Receiver<()>> = self.shutdown.take();
         let mut rx: Receiver<RoutedMessage> = self.rx_from_receiver;
         let this_router_namespace: RouterNamespace = self.associated_router_namespace.clone();
-        let shared_router_state: Arc<SharedRouterState> = self.shared_agent_state.read().await.shared_router_state.clone();        
+        let shared_router_state: Arc<SharedRouterState> = self
+            .shared_agent_state
+            .read()
+            .await
+            .shared_router_state
+            .clone();
 
         loop {
             tokio::select! {
@@ -191,8 +198,12 @@ mod unit_tests {
         let (sm, _global_rx) = make_state_manager();
         let actor_id = Uuid::new_v4();
         let (actor_tx, actor_rx) = mpsc::channel::<RoutedMessage>(16);
-        sm.shared_router_state.actor_inboxes.insert(actor_id, actor_tx);
-        sm.shared_router_state.actor_router_addresses.insert(actor_id, namespace);
+        sm.shared_router_state
+            .actor_inboxes
+            .insert(actor_id, actor_tx);
+        sm.shared_router_state
+            .actor_router_addresses
+            .insert(actor_id, namespace);
         (Arc::new(RwLock::new(sm)), actor_id, actor_rx)
     }
 

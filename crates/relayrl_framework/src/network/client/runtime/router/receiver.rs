@@ -251,7 +251,7 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             modes,
-            Arc::new(RwLock::new(100u128)),
+            Arc::new(RwLock::new(100)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),

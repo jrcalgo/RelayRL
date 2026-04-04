@@ -272,7 +272,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        self.shared_router_state.actor_inboxes.insert(actor_id, tx_to_actor.clone());
+        self.shared_router_state
+            .actor_inboxes
+            .insert(actor_id, tx_to_actor.clone());
 
         let shared_local_model_path = self.shared_local_model_path.clone();
         let shared_max_traj_length = self.shared_max_traj_length.clone();
@@ -332,7 +334,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }));
 
         self.actor_handles.insert(actor_id, handle);
-        self.shared_router_state.actor_router_addresses
+        self.shared_router_state
+            .actor_router_addresses
             .insert(actor_id, router_namespace);
 
         Ok(())
@@ -461,13 +464,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         self.actor_handles.insert(new_id, current_id_handle);
         self.actor_handles.remove(&current_id);
-        self.shared_router_state.actor_inboxes.insert(new_id, current_id_inbox);
+        self.shared_router_state
+            .actor_inboxes
+            .insert(new_id, current_id_inbox);
         self.shared_router_state.actor_inboxes.remove(&current_id);
         if let Some((_, current_device)) = self.actor_devices.remove(&current_id) {
             self.actor_devices.insert(new_id, current_device);
         }
-        if let Some((_, router_namespace)) = self.shared_router_state.actor_router_addresses.remove(&current_id) {
-            self.shared_router_state.actor_router_addresses.insert(new_id, router_namespace);
+        if let Some((_, router_namespace)) = self
+            .shared_router_state
+            .actor_router_addresses
+            .remove(&current_id)
+        {
+            self.shared_router_state
+                .actor_router_addresses
+                .insert(new_id, router_namespace);
         }
 
         replace_id(
@@ -490,7 +501,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
             let router_namespace = router_namespaces[i % router_namespaces.len()].clone();
-            self.shared_router_state.actor_router_addresses
+            self.shared_router_state
+                .actor_router_addresses
                 .insert(*actor_id, router_namespace);
         }
     }
@@ -507,14 +519,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.shared_router_state.actor_router_addresses.clear();
 
         for (actor_id, router_namespace) in mappings {
-            self.shared_router_state.actor_router_addresses
+            self.shared_router_state
+                .actor_router_addresses
                 .insert(actor_id, router_namespace);
         }
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterNamespace)> {
-        self.shared_router_state.actor_router_addresses
+        self.shared_router_state
+            .actor_router_addresses
             .iter()
             .map(|entry| (*entry.key(), entry.value().clone()))
             .collect()
@@ -593,7 +607,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     fn get_actor_inbox(&self, id: Uuid) -> Option<Sender<RoutedMessage>> {
-        self.shared_router_state.actor_inboxes.get(&id).map(|tx| tx.value().clone())
+        self.shared_router_state
+            .actor_inboxes
+            .get(&id)
+            .map(|tx| tx.value().clone())
     }
 }
 
@@ -681,7 +698,11 @@ mod unit_tests {
 
         assert_eq!(sm.shared_router_state.actor_router_addresses.len(), 4);
         for id in &actor_ids {
-            let assigned = sm.shared_router_state.actor_router_addresses.get(id).unwrap();
+            let assigned = sm
+                .shared_router_state
+                .actor_router_addresses
+                .get(id)
+                .unwrap();
             assert!(
                 *assigned == ns1 || *assigned == ns2,
                 "Actor {} assigned to unexpected namespace",
@@ -697,12 +718,17 @@ mod unit_tests {
         let original_ns: RouterNamespace = Arc::from("original");
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state.actor_router_addresses
+        sm.shared_router_state
+            .actor_router_addresses
             .insert(actor_id, original_ns.clone());
 
         sm.distribute_actors(vec![]);
 
-        let assigned = sm.shared_router_state.actor_router_addresses.get(&actor_id).unwrap();
+        let assigned = sm
+            .shared_router_state
+            .actor_router_addresses
+            .get(&actor_id)
+            .unwrap();
         assert_eq!(*assigned, original_ns, "Namespace should not change");
     }
 
@@ -720,7 +746,11 @@ mod unit_tests {
         sm.distribute_actors(vec![ns.clone()]);
 
         for id in &actor_ids {
-            let assigned = sm.shared_router_state.actor_router_addresses.get(id).unwrap();
+            let assigned = sm
+                .shared_router_state
+                .actor_router_addresses
+                .get(id)
+                .unwrap();
             assert_eq!(*assigned, ns);
         }
     }
@@ -734,14 +764,22 @@ mod unit_tests {
         let old_ns: RouterNamespace = Arc::from("old");
         let new_ns: RouterNamespace = Arc::from("new");
 
-        sm.shared_router_state.actor_router_addresses.insert(old_id, old_ns);
+        sm.shared_router_state
+            .actor_router_addresses
+            .insert(old_id, old_ns);
         sm.restore_actor_router_mappings(vec![(new_id, new_ns.clone())]);
 
         assert!(
-            !sm.shared_router_state.actor_router_addresses.contains_key(&old_id),
+            !sm.shared_router_state
+                .actor_router_addresses
+                .contains_key(&old_id),
             "Old mapping should be cleared"
         );
-        let assigned = sm.shared_router_state.actor_router_addresses.get(&new_id).unwrap();
+        let assigned = sm
+            .shared_router_state
+            .actor_router_addresses
+            .get(&new_id)
+            .unwrap();
         assert_eq!(*assigned, new_ns);
     }
 
@@ -749,7 +787,8 @@ mod unit_tests {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     fn restore_with_empty_clears_all() {
         let (sm, _rx) = make_state_manager(disabled_modes());
-        sm.shared_router_state.actor_router_addresses
+        sm.shared_router_state
+            .actor_router_addresses
             .insert(Uuid::new_v4(), Arc::from("ns"));
         sm.restore_actor_router_mappings(vec![]);
         assert!(sm.shared_router_state.actor_router_addresses.is_empty());
@@ -766,9 +805,15 @@ mod unit_tests {
         let ns2: RouterNamespace = Arc::from("r2");
         let ns3: RouterNamespace = Arc::from("r3");
 
-        sm.shared_router_state.actor_router_addresses.insert(id1, ns1.clone());
-        sm.shared_router_state.actor_router_addresses.insert(id2, ns2.clone());
-        sm.shared_router_state.actor_router_addresses.insert(id3, ns3.clone());
+        sm.shared_router_state
+            .actor_router_addresses
+            .insert(id1, ns1.clone());
+        sm.shared_router_state
+            .actor_router_addresses
+            .insert(id2, ns2.clone());
+        sm.shared_router_state
+            .actor_router_addresses
+            .insert(id3, ns3.clone());
 
         let result = sm.get_actor_router_mappings();
         assert_eq!(result.len(), 3);
@@ -809,17 +854,30 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state.actor_inboxes.insert(actor_id, tx_to_actor);
+        sm.shared_router_state
+            .actor_inboxes
+            .insert(actor_id, tx_to_actor);
         sm.actor_devices.insert(actor_id, DeviceType::Cpu);
-        sm.shared_router_state.actor_router_addresses
+        sm.shared_router_state
+            .actor_router_addresses
             .insert(actor_id, Arc::from("router-a"));
 
         sm.remove_actor(actor_id).unwrap();
 
         assert!(sm.actor_handles.get(&actor_id).is_none());
-        assert!(sm.shared_router_state.actor_inboxes.get(&actor_id).is_none());
+        assert!(
+            sm.shared_router_state
+                .actor_inboxes
+                .get(&actor_id)
+                .is_none()
+        );
         assert!(sm.actor_devices.get(&actor_id).is_none());
-        assert!(sm.shared_router_state.actor_router_addresses.get(&actor_id).is_none());
+        assert!(
+            sm.shared_router_state
+                .actor_router_addresses
+                .get(&actor_id)
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -838,17 +896,30 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(current_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state.actor_inboxes.insert(current_id, tx_to_actor);
+        sm.shared_router_state
+            .actor_inboxes
+            .insert(current_id, tx_to_actor);
         sm.actor_devices.insert(current_id, DeviceType::Cpu);
-        sm.shared_router_state.actor_router_addresses
+        sm.shared_router_state
+            .actor_router_addresses
             .insert(current_id, Arc::from("router-a"));
 
         sm.set_actor_id(current_id, new_id).unwrap();
 
         assert!(sm.actor_handles.get(&current_id).is_none());
-        assert!(sm.shared_router_state.actor_inboxes.get(&current_id).is_none());
+        assert!(
+            sm.shared_router_state
+                .actor_inboxes
+                .get(&current_id)
+                .is_none()
+        );
         assert!(sm.actor_devices.get(&current_id).is_none());
-        assert!(sm.shared_router_state.actor_router_addresses.get(&current_id).is_none());
+        assert!(
+            sm.shared_router_state
+                .actor_router_addresses
+                .get(&current_id)
+                .is_none()
+        );
         assert!(sm.actor_handles.get(&new_id).is_some());
         assert!(sm.shared_router_state.actor_inboxes.get(&new_id).is_some());
         assert!(matches!(

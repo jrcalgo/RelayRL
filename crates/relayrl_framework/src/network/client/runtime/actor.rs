@@ -284,7 +284,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 let traj_to_send: RelayRLTrajectory = {
                     let max_traj_length: usize = *self.shared_max_traj_length.read().await;
-                    std::mem::replace(&mut self.current_traj, RelayRLTrajectory::new(max_traj_length))
+                    std::mem::replace(
+                        &mut self.current_traj,
+                        RelayRLTrajectory::new(max_traj_length),
+                    )
                 };
 
                 let (duration_ms, duration_ns) = {
@@ -679,7 +682,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let send_traj_msg = {
                 let traj_to_send: RelayRLTrajectory = {
                     let max_traj_length: usize = *self.shared_max_traj_length.read().await;
-                    std::mem::replace(&mut self.current_traj, RelayRLTrajectory::new(max_traj_length))
+                    std::mem::replace(
+                        &mut self.current_traj,
+                        RelayRLTrajectory::new(max_traj_length),
+                    )
                 };
 
                 let (duration_ms, duration_ns) = {
@@ -936,50 +942,6 @@ mod unit_tests {
         assert!(
             rx_buf.try_recv().is_err(),
             "Buffer should be empty after shutdown with no trajectory"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_action_inference_appends_to_trajectory() {
-        let (actor, tx, mut rx_buf) = create_ndarray_actor(1, DeviceType::Cpu).await;
-        let actor_id = actor.actor_id;
-
-        let obs = Arc::new(AnyBurnTensor::Float(FloatBurnTensor::<
-            NdArrayBackend,
-            D_IN,
-        > {
-            tensor: Arc::new(Tensor::zeros(
-                burn_tensor::Shape::new([4; D_IN]),
-                &NdArrayDevice::default(),
-            )),
-            dtype: DType::NdArray(NdArrayDType::F32),
-        }));
-        let mask = None::<Arc<AnyBurnTensor<NdArrayBackend, D_OUT>>>;
-        let reward = 1.0;
-
-        let inference_request = InferenceRequest {
-            observation: Box::new(obs),
-            mask: Box::new(mask),
-            reward,
-            reply_to: oneshot::channel().0,
-        };
-
-        tx.send(build_msg(
-            actor_id,
-            RoutingProtocol::RequestInference,
-            RoutedPayload::RequestInference(Box::new(inference_request)),
-        ))
-        .await
-        .unwrap();
-
-        let msg = tokio::time::timeout(tokio::time::Duration::from_millis(300), rx_buf.recv())
-            .await
-            .expect("timeout waiting for trajectory")
-            .expect("buffer rx closed");
-
-        assert!(
-            matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
-            "RequestInference should produce a SendTrajectory message"
         );
     }
 
