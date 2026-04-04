@@ -3,7 +3,7 @@ name = "relayrl_framework"
 version = "0.5.0-beta"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
-description = "A distributed, system-oriented multi-agent reinforcement learning framework."
+description = "A system-oriented multi-agent reinforcement learning framework."
 repository = "https://github.com/jrcalgo/relayrl"
 documentation = "https://docs.rs/crate/relayrl_framework"
 readme = "README.md"
@@ -60,6 +60,7 @@ serde_json = { workspace = true }
 bytemuck = { workspace = true }
 bincode = { workspace = true }
 bytes = "1.11.1"
+generic-array = { workspace = true }
 # TODO: Add Redis support for training data storagen & querying
 # redis = 0.32.7
 
