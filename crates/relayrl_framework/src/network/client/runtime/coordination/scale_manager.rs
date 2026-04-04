@@ -148,7 +148,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ScaleManager<B, D_IN, D_OUT>
 {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) async fn new(
         client_namespace: Arc<str>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -181,12 +181,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let dispatcher = RouterDispatcher::new(
             global_dispatcher_rx,
             router_filter_channels.clone(),
-            shared_state.clone(),
+            shared_state.read().await.shared_router_state.clone(),
             #[cfg(feature = "metrics")]
             metrics,
-        );
+        ).await;
 
-        let dispatcher: RouterDispatcher<B, D_IN, D_OUT> = match lifecycle.subscribe_shutdown() {
+        let dispatcher: RouterDispatcher = match lifecycle.subscribe_shutdown() {
             Ok(rx) => dispatcher.with_shutdown(rx),
             Err(e) => {
                 log::error!(

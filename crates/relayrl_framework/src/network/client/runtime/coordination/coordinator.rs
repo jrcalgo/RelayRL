@@ -788,6 +788,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     metrics.clone(),
                     lifecycle.clone(),
                 )
+                .await
                 .map_err(CoordinatorError::from)?
             };
 
@@ -999,7 +1000,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ));
                 }
 
-                let actor_count: usize = params.shared_state.read().await.actor_inboxes.len();
+                let actor_count: usize = params.shared_state.read().await.shared_router_state.actor_inboxes.len();
                 let router_namespace: RouterNamespace =
                     router_namespaces[actor_count % router_namespaces.len()].clone();
 
@@ -1242,6 +1243,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .shared_state
                         .read()
                         .await
+                        .shared_router_state
                         .actor_router_addresses
                         .contains_key(&id);
                     if !has_router {

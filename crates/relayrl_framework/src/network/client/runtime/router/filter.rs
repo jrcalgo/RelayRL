@@ -1,6 +1,6 @@
 use super::{RoutedMessage, RouterError, RoutingProtocol};
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-use crate::network::client::runtime::coordination::state_manager::StateManager;
+use crate::network::client::runtime::coordination::state_manager::{SharedRouterState, StateManager};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
@@ -54,7 +54,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let mut shutdown: Option<broadcast::Receiver<()>> = self.shutdown.take();
         let mut rx: Receiver<RoutedMessage> = self.rx_from_receiver;
         let this_router_namespace: RouterNamespace = self.associated_router_namespace.clone();
-        let shared_agent_state = self.shared_agent_state.clone();
+        let shared_router_state: Arc<SharedRouterState> = self.shared_agent_state.read().await.shared_router_state.clone();        
 
         loop {
             tokio::select! {
@@ -62,10 +62,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     match msg_opt {
                         Some(msg) => {
                             if let RoutingProtocol::Shutdown = msg.protocol {
-                                Self::route_message(msg, &this_router_namespace, &shared_agent_state).await?;
+                                Self::route_message(msg, &this_router_namespace, &shared_router_state).await?;
                                 break Ok(());
                             }
-                            Self::route_message(msg, &this_router_namespace, &shared_agent_state).await?;
+                            Self::route_message(msg, &this_router_namespace, &shared_router_state).await?;
                         }
                         None => break Ok(()),
                     }
@@ -85,14 +85,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn route_message(
         msg: RoutedMessage,
         router_namespace: &RouterNamespace,
-        shared_agent_state: &Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+        shared_router_state: &Arc<SharedRouterState>,
     ) -> Result<(), RouterError> {
         let actor_id: Uuid = msg.actor_id;
-        let shared_state = shared_agent_state.read().await;
 
-        match shared_state.actor_router_addresses.get(&actor_id) {
+        match shared_router_state.actor_router_addresses.get(&actor_id) {
             Some(assigned_router_namespace) if *assigned_router_namespace == *router_namespace => {
-                match shared_state.actor_inboxes.get(&actor_id) {
+                match shared_router_state.actor_inboxes.get(&actor_id) {
                     Some(tx) => {
                         if let Err(e) = tx.send(msg).await {
                             return Err(RouterError::FilterError(FilterError::RoutingError(
@@ -161,7 +160,7 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             disabled_modes(),
-            Arc::new(RwLock::new(100u128)),
+            Arc::new(RwLock::new(100)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -192,8 +191,8 @@ mod unit_tests {
         let (sm, _global_rx) = make_state_manager();
         let actor_id = Uuid::new_v4();
         let (actor_tx, actor_rx) = mpsc::channel::<RoutedMessage>(16);
-        sm.actor_inboxes.insert(actor_id, actor_tx);
-        sm.actor_router_addresses.insert(actor_id, namespace);
+        sm.shared_router_state.actor_inboxes.insert(actor_id, actor_tx);
+        sm.shared_router_state.actor_router_addresses.insert(actor_id, namespace);
         (Arc::new(RwLock::new(sm)), actor_id, actor_rx)
     }
 

@@ -1,21 +1,16 @@
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-use crate::network::client::runtime::coordination::state_manager::StateManager;
+use crate::network::client::runtime::coordination::state_manager::{ActorUuid, SharedRouterState};
 use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
 use thiserror::Error;
 
-use burn_tensor::backend::Backend;
-use relayrl_types::data::tensor::BackendMatcher;
-
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 #[derive(Debug, Error)]
@@ -47,33 +42,27 @@ struct PendingMessage {
 /// - Race conditions between actor creation and router assignment
 ///
 /// Callers should ensure actors are assigned to routers before sending messages to them.
-pub(crate) struct RouterDispatcher<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
+pub(crate) struct RouterDispatcher{
     global_dispatcher_rx: Receiver<RoutedMessage>,
     router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
-    shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+    shared_router_state: Arc<SharedRouterState>,
     shutdown: Option<broadcast::Receiver<()>>,
     pending_messages: Arc<DashMap<ActorUuid, PendingMessage>>,
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    RouterDispatcher<B, D_IN, D_OUT>
-{
-    pub(crate) fn new(
+impl RouterDispatcher {
+    pub(crate) async fn new(
         global_dispatcher_rx: Receiver<RoutedMessage>,
         router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
-        shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+        shared_router_state: Arc<SharedRouterState>,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) -> Self {
         Self {
             global_dispatcher_rx,
             router_channels,
-            shared_state,
+            shared_router_state,
             shutdown: None,
             pending_messages: Arc::new(DashMap::<ActorUuid, PendingMessage>::new()),
             #[cfg(feature = "metrics")]
@@ -99,14 +88,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         // Spawn background retry task;
         let pending_messages = self.pending_messages.clone();
         let router_channels = self.router_channels.clone();
-        let shared_state = self.shared_state.clone();
+        let shared_router_state = self.shared_router_state.clone();
         #[cfg(feature = "metrics")]
         let metrics = self.metrics.clone();
         let retry_handle = tokio::spawn(async move {
             Self::retry_pending_messages_loop(
                 pending_messages,
                 router_channels,
-                shared_state,
+                shared_router_state,
                 #[cfg(feature = "metrics")]
                 metrics,
             )
@@ -169,7 +158,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn retry_pending_messages_loop(
         pending_messages: Arc<DashMap<ActorUuid, PendingMessage>>,
         router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
-        shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+        shared_router_state: Arc<SharedRouterState>,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) {
         const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -183,7 +172,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             // Batch operation: Lock once, process all actors, then release
             let retry_results = {
-
                 let mut to_remove: Vec<ActorUuid> = Vec::new();
                 let mut to_retry: Vec<(ActorUuid, Instant, u32)> = Vec::new();
 
@@ -233,7 +221,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut retry_messages = Vec::new();
                 for (actor_id, first_attempt, retry_count) in &to_retry {
                     if let Some(pending_msg) = pending_messages.remove(actor_id) {
-                        retry_messages.push((*actor_id, pending_msg.1, *first_attempt, *retry_count));
+                        retry_messages.push((
+                            *actor_id,
+                            pending_msg.1,
+                            *first_attempt,
+                            *retry_count,
+                        ));
                     }
                 }
 
@@ -263,8 +256,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             for (actor_id, pending_msg, first_attempt, retry_count) in retry_messages {
                 // Check router assignment (async operation, no lock needed)
                 let router_namespace = {
-                    let state = shared_state.read().await;
-                    state
+                    shared_router_state
                         .actor_router_addresses
                         .get(&actor_id)
                         .map(|entry| entry.value().clone())
@@ -347,8 +339,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Look up which router this actor is assigned to
         let router_namespace = {
-            let state = self.shared_state.read().await;
-            state
+            self.shared_router_state
                 .actor_router_addresses
                 .get(&actor_id)
                 .map(|entry| entry.value().clone())
@@ -443,7 +434,7 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             disabled_modes(),
-            Arc::new(RwLock::new(100u128)),
+            Arc::new(RwLock::new(100)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -475,68 +466,68 @@ mod unit_tests {
 
     /// Build a RouterDispatcher with a pre-wired state manager and router channel map.
     /// Returns: (dispatcher, global_tx, router_channels, shared_state)
-    fn make_dispatcher() -> (
-        RouterDispatcher<TestBackend, D_IN, D_OUT>,
+    async fn make_dispatcher() -> (
+        RouterDispatcher,
         mpsc::Sender<RoutedMessage>,
         Arc<DashMap<RouterNamespace, mpsc::Sender<RoutedMessage>>>,
-        Arc<RwLock<StateManager<TestBackend, D_IN, D_OUT>>>,
+        Arc<SharedRouterState>,
     ) {
         let (sm, _state_global_rx) = make_state_manager();
-        let shared_state = Arc::new(RwLock::new(sm));
+        let shared_router_state = sm.shared_router_state.clone();
         let router_channels: Arc<DashMap<RouterNamespace, mpsc::Sender<RoutedMessage>>> =
             Arc::new(DashMap::new());
         // The dispatcher reads from its own channel (not the StateManager's global_rx)
         let (global_tx, global_rx) = mpsc::channel::<RoutedMessage>(32);
-        let dispatcher = RouterDispatcher::<TestBackend, D_IN, D_OUT>::new(
+        let dispatcher = RouterDispatcher::new(
             global_rx,
             router_channels.clone(),
-            shared_state.clone(),
+            shared_router_state.clone(),
             #[cfg(feature = "metrics")]
             test_metrics(),
-        );
-        (dispatcher, global_tx, router_channels, shared_state)
+        ).await;
+        (dispatcher, global_tx, router_channels, shared_router_state)
     }
 
     #[test]
     fn get_timeout_for_protocol_correct_values() {
         assert_eq!(
-            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+            RouterDispatcher::get_timeout_for_message_protocol(
                 &RoutingProtocol::RequestInference
             ),
             Duration::from_secs(10)
         );
         assert_eq!(
-            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+            RouterDispatcher::get_timeout_for_message_protocol(
                 &RoutingProtocol::ModelVersion
             ),
             Duration::from_secs(15)
         );
         assert_eq!(
-            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+            RouterDispatcher::get_timeout_for_message_protocol(
                 &RoutingProtocol::FlagLastInference
             ),
             Duration::from_secs(20)
         );
         assert_eq!(
-            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+            RouterDispatcher::get_timeout_for_message_protocol(
                 &RoutingProtocol::ModelHandshake
             ),
             Duration::from_secs(30)
         );
         assert_eq!(
-            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+            RouterDispatcher::get_timeout_for_message_protocol(
                 &RoutingProtocol::SendTrajectory
             ),
             Duration::from_secs(30)
         );
         assert_eq!(
-            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+            RouterDispatcher::get_timeout_for_message_protocol(
                 &RoutingProtocol::ModelUpdate
             ),
             Duration::from_secs(60)
         );
         assert_eq!(
-            RouterDispatcher::<TestBackend, D_IN, D_OUT>::get_timeout_for_message_protocol(
+            RouterDispatcher::get_timeout_for_message_protocol(
                 &RoutingProtocol::Shutdown
             ),
             Duration::from_secs(60)
@@ -545,15 +536,13 @@ mod unit_tests {
 
     #[tokio::test]
     async fn dispatches_to_assigned_router() {
-        let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
+        let (dispatcher, global_tx, router_channels, shared_router_state) = make_dispatcher().await;
 
         let actor_id = Uuid::new_v4();
         let ns: RouterNamespace = Arc::from("router-dispatch-test");
 
         // Register actor → namespace in state
-        shared_state
-            .write()
-            .await
+        shared_router_state
             .actor_router_addresses
             .insert(actor_id, ns.clone());
 
@@ -587,7 +576,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn queues_message_for_unassigned_actor() {
-        let (mut dispatcher, _tx, _router_channels, _shared_state) = make_dispatcher();
+        let (mut dispatcher, _tx, _router_channels, _shared_router_state) = make_dispatcher().await;
 
         let actor_id = Uuid::new_v4();
         // Actor has no router assignment → dispatch_message should queue it
@@ -608,7 +597,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn retries_deliver_message_after_assignment() {
-        let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
+        let (dispatcher, global_tx, router_channels, shared_router_state) = make_dispatcher().await;
 
         let actor_id = Uuid::new_v4();
         let ns: RouterNamespace = Arc::from("retry-ns");
@@ -634,9 +623,7 @@ mod unit_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
 
         // Now assign actor to a router
-        shared_state
-            .write()
-            .await
+        shared_router_state
             .actor_router_addresses
             .insert(actor_id, ns.clone());
         router_channels.insert(ns, router_tx);
@@ -654,7 +641,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn dispatcher_exits_on_broadcast_signal() {
-        let (dispatcher, _global_tx, _router_channels, _shared_state) = make_dispatcher();
+        let (dispatcher, _global_tx, _router_channels, _shared_router_state) = make_dispatcher().await;
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
         let dispatcher = dispatcher.with_shutdown(shutdown_rx);
 
@@ -672,7 +659,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn dispatcher_exits_on_channel_close() {
-        let (dispatcher, global_tx, _router_channels, _shared_state) = make_dispatcher();
+        let (dispatcher, global_tx, _router_channels, _shared_router_state) = make_dispatcher().await;
         let handle = tokio::spawn(async move { dispatcher.spawn_loop().await });
 
         drop(global_tx); // closed channel → dispatcher sees None → exits
@@ -687,13 +674,11 @@ mod unit_tests {
 
     #[tokio::test]
     async fn closed_router_channel_does_not_panic() {
-        let (dispatcher, global_tx, router_channels, shared_state) = make_dispatcher();
+        let (dispatcher, global_tx, router_channels, shared_router_state) = make_dispatcher().await;
         let actor_id = Uuid::new_v4();
         let ns: RouterNamespace = Arc::from("closed-router-ns");
 
-        shared_state
-            .write()
-            .await
+        shared_router_state
             .actor_router_addresses
             .insert(actor_id, ns.clone());
 

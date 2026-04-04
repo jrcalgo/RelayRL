@@ -68,6 +68,11 @@ pub enum StateManagerError {
 
 pub type ActorUuid = Uuid;
 
+pub(crate) struct SharedRouterState {
+    pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
+    pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterNamespace>,
+}
+
 /// In-memory actor state management and global channel transport
 pub(crate) struct StateManager<
     B: Backend + BackendMatcher<Backend = B>,
@@ -80,7 +85,7 @@ pub(crate) struct StateManager<
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
     shared_client_modes: Arc<ClientModes>,
-    shared_max_traj_length: Arc<RwLock<u128>>,
+    shared_max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -89,10 +94,9 @@ pub(crate) struct StateManager<
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
-    pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
+    pub(crate) shared_router_state: Arc<SharedRouterState>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
-    pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterNamespace>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -106,7 +110,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
         shared_client_modes: Arc<ClientModes>,
-        shared_max_traj_length: Arc<RwLock<u128>>,
+        shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -132,10 +136,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(feature = "metrics")]
                 metrics,
                 global_dispatcher_tx,
-                actor_inboxes: DashMap::new(),
+                shared_router_state: Arc::new(SharedRouterState {
+                    actor_inboxes: DashMap::new(),
+                    actor_router_addresses: DashMap::new(),
+                }),
                 actor_handles: DashMap::new(),
                 actor_devices: DashMap::new(),
-                actor_router_addresses: DashMap::new(),
             },
             global_dispatcher_rx,
         )
@@ -266,7 +272,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        self.actor_inboxes.insert(actor_id, tx_to_actor.clone());
+        self.shared_router_state.actor_inboxes.insert(actor_id, tx_to_actor.clone());
 
         let shared_local_model_path = self.shared_local_model_path.clone();
         let shared_max_traj_length = self.shared_max_traj_length.clone();
@@ -326,7 +332,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }));
 
         self.actor_handles.insert(actor_id, handle);
-        self.actor_router_addresses
+        self.shared_router_state.actor_router_addresses
             .insert(actor_id, router_namespace);
 
         Ok(())
@@ -355,7 +361,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) async fn shutdown_all_actors(&self) -> Result<(), StateManagerError> {
         // Send Shutdown message to every actor inbox; actors will flush and exit
-        for entry in self.actor_inboxes.iter() {
+        for entry in self.shared_router_state.actor_inboxes.iter() {
             let actor_id: ActorUuid = *entry.key();
             let tx: Sender<RoutedMessage> = entry.value().clone();
             let shutdown_msg = RoutedMessage {
@@ -393,9 +399,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) async fn clear_runtime_components(&mut self) -> Result<(), StateManagerError> {
         self.actor_handles.clear();
-        self.actor_inboxes.clear();
+        self.shared_router_state.actor_inboxes.clear();
         self.actor_devices.clear();
-        self.actor_router_addresses.clear();
+        self.shared_router_state.actor_router_addresses.clear();
         self.shared_local_models.clear();
 
         Ok(())
@@ -406,9 +412,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             handle.abort();
         }
 
-        self.actor_inboxes.remove(&id);
+        self.shared_router_state.actor_inboxes.remove(&id);
         self.actor_devices.remove(&id);
-        self.actor_router_addresses.remove(&id);
+        self.shared_router_state.actor_router_addresses.remove(&id);
         remove_id(
             self.client_namespace.as_ref(),
             crate::network::ACTOR_CONTEXT,
@@ -455,13 +461,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         self.actor_handles.insert(new_id, current_id_handle);
         self.actor_handles.remove(&current_id);
-        self.actor_inboxes.insert(new_id, current_id_inbox);
-        self.actor_inboxes.remove(&current_id);
+        self.shared_router_state.actor_inboxes.insert(new_id, current_id_inbox);
+        self.shared_router_state.actor_inboxes.remove(&current_id);
         if let Some((_, current_device)) = self.actor_devices.remove(&current_id) {
             self.actor_devices.insert(new_id, current_device);
         }
-        if let Some((_, router_namespace)) = self.actor_router_addresses.remove(&current_id) {
-            self.actor_router_addresses.insert(new_id, router_namespace);
+        if let Some((_, router_namespace)) = self.shared_router_state.actor_router_addresses.remove(&current_id) {
+            self.shared_router_state.actor_router_addresses.insert(new_id, router_namespace);
         }
 
         replace_id(
@@ -484,7 +490,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
             let router_namespace = router_namespaces[i % router_namespaces.len()].clone();
-            self.actor_router_addresses
+            self.shared_router_state.actor_router_addresses
                 .insert(*actor_id, router_namespace);
         }
     }
@@ -498,17 +504,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &self,
         mappings: Vec<(ActorUuid, RouterNamespace)>,
     ) {
-        self.actor_router_addresses.clear();
+        self.shared_router_state.actor_router_addresses.clear();
 
         for (actor_id, router_namespace) in mappings {
-            self.actor_router_addresses
+            self.shared_router_state.actor_router_addresses
                 .insert(actor_id, router_namespace);
         }
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterNamespace)> {
-        self.actor_router_addresses
+        self.shared_router_state.actor_router_addresses
             .iter()
             .map(|entry| (*entry.key(), entry.value().clone()))
             .collect()
@@ -587,7 +593,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     fn get_actor_inbox(&self, id: Uuid) -> Option<Sender<RoutedMessage>> {
-        self.actor_inboxes.get(&id).map(|tx| tx.value().clone())
+        self.shared_router_state.actor_inboxes.get(&id).map(|tx| tx.value().clone())
     }
 }
 
@@ -637,7 +643,7 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             modes,
-            Arc::new(RwLock::new(100u128)),
+            Arc::new(RwLock::new(100)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -673,9 +679,9 @@ mod unit_tests {
 
         sm.distribute_actors(vec![ns1.clone(), ns2.clone()]);
 
-        assert_eq!(sm.actor_router_addresses.len(), 4);
+        assert_eq!(sm.shared_router_state.actor_router_addresses.len(), 4);
         for id in &actor_ids {
-            let assigned = sm.actor_router_addresses.get(id).unwrap();
+            let assigned = sm.shared_router_state.actor_router_addresses.get(id).unwrap();
             assert!(
                 *assigned == ns1 || *assigned == ns2,
                 "Actor {} assigned to unexpected namespace",
@@ -691,12 +697,12 @@ mod unit_tests {
         let original_ns: RouterNamespace = Arc::from("original");
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
-        sm.actor_router_addresses
+        sm.shared_router_state.actor_router_addresses
             .insert(actor_id, original_ns.clone());
 
         sm.distribute_actors(vec![]);
 
-        let assigned = sm.actor_router_addresses.get(&actor_id).unwrap();
+        let assigned = sm.shared_router_state.actor_router_addresses.get(&actor_id).unwrap();
         assert_eq!(*assigned, original_ns, "Namespace should not change");
     }
 
@@ -714,7 +720,7 @@ mod unit_tests {
         sm.distribute_actors(vec![ns.clone()]);
 
         for id in &actor_ids {
-            let assigned = sm.actor_router_addresses.get(id).unwrap();
+            let assigned = sm.shared_router_state.actor_router_addresses.get(id).unwrap();
             assert_eq!(*assigned, ns);
         }
     }
@@ -728,14 +734,14 @@ mod unit_tests {
         let old_ns: RouterNamespace = Arc::from("old");
         let new_ns: RouterNamespace = Arc::from("new");
 
-        sm.actor_router_addresses.insert(old_id, old_ns);
+        sm.shared_router_state.actor_router_addresses.insert(old_id, old_ns);
         sm.restore_actor_router_mappings(vec![(new_id, new_ns.clone())]);
 
         assert!(
-            !sm.actor_router_addresses.contains_key(&old_id),
+            !sm.shared_router_state.actor_router_addresses.contains_key(&old_id),
             "Old mapping should be cleared"
         );
-        let assigned = sm.actor_router_addresses.get(&new_id).unwrap();
+        let assigned = sm.shared_router_state.actor_router_addresses.get(&new_id).unwrap();
         assert_eq!(*assigned, new_ns);
     }
 
@@ -743,10 +749,10 @@ mod unit_tests {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     fn restore_with_empty_clears_all() {
         let (sm, _rx) = make_state_manager(disabled_modes());
-        sm.actor_router_addresses
+        sm.shared_router_state.actor_router_addresses
             .insert(Uuid::new_v4(), Arc::from("ns"));
         sm.restore_actor_router_mappings(vec![]);
-        assert!(sm.actor_router_addresses.is_empty());
+        assert!(sm.shared_router_state.actor_router_addresses.is_empty());
     }
 
     #[test]
@@ -760,9 +766,9 @@ mod unit_tests {
         let ns2: RouterNamespace = Arc::from("r2");
         let ns3: RouterNamespace = Arc::from("r3");
 
-        sm.actor_router_addresses.insert(id1, ns1.clone());
-        sm.actor_router_addresses.insert(id2, ns2.clone());
-        sm.actor_router_addresses.insert(id3, ns3.clone());
+        sm.shared_router_state.actor_router_addresses.insert(id1, ns1.clone());
+        sm.shared_router_state.actor_router_addresses.insert(id2, ns2.clone());
+        sm.shared_router_state.actor_router_addresses.insert(id3, ns3.clone());
 
         let result = sm.get_actor_router_mappings();
         assert_eq!(result.len(), 3);
@@ -803,17 +809,17 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
-        sm.actor_inboxes.insert(actor_id, tx_to_actor);
+        sm.shared_router_state.actor_inboxes.insert(actor_id, tx_to_actor);
         sm.actor_devices.insert(actor_id, DeviceType::Cpu);
-        sm.actor_router_addresses
+        sm.shared_router_state.actor_router_addresses
             .insert(actor_id, Arc::from("router-a"));
 
         sm.remove_actor(actor_id).unwrap();
 
         assert!(sm.actor_handles.get(&actor_id).is_none());
-        assert!(sm.actor_inboxes.get(&actor_id).is_none());
+        assert!(sm.shared_router_state.actor_inboxes.get(&actor_id).is_none());
         assert!(sm.actor_devices.get(&actor_id).is_none());
-        assert!(sm.actor_router_addresses.get(&actor_id).is_none());
+        assert!(sm.shared_router_state.actor_router_addresses.get(&actor_id).is_none());
     }
 
     #[tokio::test]
@@ -832,25 +838,25 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(current_id, Arc::new(tokio::spawn(async {})));
-        sm.actor_inboxes.insert(current_id, tx_to_actor);
+        sm.shared_router_state.actor_inboxes.insert(current_id, tx_to_actor);
         sm.actor_devices.insert(current_id, DeviceType::Cpu);
-        sm.actor_router_addresses
+        sm.shared_router_state.actor_router_addresses
             .insert(current_id, Arc::from("router-a"));
 
         sm.set_actor_id(current_id, new_id).unwrap();
 
         assert!(sm.actor_handles.get(&current_id).is_none());
-        assert!(sm.actor_inboxes.get(&current_id).is_none());
+        assert!(sm.shared_router_state.actor_inboxes.get(&current_id).is_none());
         assert!(sm.actor_devices.get(&current_id).is_none());
-        assert!(sm.actor_router_addresses.get(&current_id).is_none());
+        assert!(sm.shared_router_state.actor_router_addresses.get(&current_id).is_none());
         assert!(sm.actor_handles.get(&new_id).is_some());
-        assert!(sm.actor_inboxes.get(&new_id).is_some());
+        assert!(sm.shared_router_state.actor_inboxes.get(&new_id).is_some());
         assert!(matches!(
             sm.actor_devices.get(&new_id),
             Some(device) if *device == DeviceType::Cpu
         ));
         assert!(matches!(
-            sm.actor_router_addresses.get(&new_id),
+            sm.shared_router_state.actor_router_addresses.get(&new_id),
             Some(namespace) if *namespace == Arc::<str>::from("router-a")
         ));
     }
