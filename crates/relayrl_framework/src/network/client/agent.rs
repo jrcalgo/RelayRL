@@ -72,6 +72,8 @@ pub enum ClientError {
     InvalidTrajectoryFileDirectory(String),
     #[error("Model validation failed: {0}")]
     ModelValidationFailed(String),
+    #[error("Update model is not supported: {0}")]
+    ModelUpdateNotSupported(String),
 }
 
 /// Output target for runtime statistics collection.
@@ -827,6 +829,14 @@ impl<
         model: ModelModule<B>,
         actor_ids: Option<Vec<ActorUuid>>,
     ) -> Result<(), ClientError> {
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = self.coordinator.client_modes.actor_training_data_mode {
+            log::warn!("Updating model locally is not supported in Online or Hybrid training data modes");
+            return Err(ClientError::ModelUpdateNotSupported(
+                "Updating model locally is not supported in Online or Hybrid training data modes".to_string(),
+            ));
+        }
+
         if let Err(e) = validate_module::<B>(&model) {
             return Err(ClientError::ModelValidationFailed(e.to_string()));
         }
