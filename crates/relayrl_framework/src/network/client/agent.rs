@@ -347,7 +347,7 @@ pub struct AgentBuilder<
     KindIn: TensorKind<B> + Send + Sync,
     KindOut: TensorKind<B> + Send + Sync,
 > {
-    pub client_modes: Option<ClientModes>,
+    pub client_modes: ClientModes,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub transport_type: Option<TransportType>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -377,7 +377,7 @@ impl<
     /// - Transport default to `ZMQ` when enabled by feature flags.
     pub fn builder() -> Self {
         Self {
-            client_modes: Some(ClientModes::default()),
+            client_modes: ClientModes::default(),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_type: Some(TransportType::default()),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -394,9 +394,7 @@ impl<
     }
 
     pub fn actor_inference_mode(mut self, actor_inference_mode: ActorInferenceMode) -> Self {
-        if let Some(ref mut modes) = self.client_modes {
-            modes.actor_inference_mode = actor_inference_mode;
-        }
+        self.client_modes.actor_inference_mode = actor_inference_mode;
         self
     }
 
@@ -404,9 +402,7 @@ impl<
         mut self,
         actor_training_data_mode: ActorTrainingDataMode,
     ) -> Self {
-        if let Some(ref mut modes) = self.client_modes {
-            modes.actor_training_data_mode = actor_training_data_mode;
-        }
+        self.client_modes.actor_training_data_mode = actor_training_data_mode;
         self
     }
 
@@ -491,7 +487,7 @@ impl<
         let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             self.transport_type.unwrap_or_default(),
-            self.client_modes.unwrap_or_default(),
+            self.client_modes,
         );
 
         // Tuple parameters
@@ -830,10 +826,15 @@ impl<
         actor_ids: Option<Vec<ActorUuid>>,
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = self.coordinator.client_modes.actor_training_data_mode {
-            log::warn!("Updating model locally is not supported in Online or Hybrid training data modes");
+        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+            self.coordinator.client_modes.actor_training_data_mode
+        {
+            log::warn!(
+                "Updating model locally is not supported in Online or Hybrid training data modes"
+            );
             return Err(ClientError::ModelUpdateNotSupported(
-                "Updating model locally is not supported in Online or Hybrid training data modes".to_string(),
+                "Updating model locally is not supported in Online or Hybrid training data modes"
+                    .to_string(),
             ));
         }
 
