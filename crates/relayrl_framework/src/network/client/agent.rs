@@ -47,7 +47,6 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Errors returned by the client API.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error(transparent)]
