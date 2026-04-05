@@ -47,6 +47,13 @@ pub fn init_opentelemetry_with_otlp(otlp_endpoint: &str) {
     );
 }
 
+/// Shut down the current global OpenTelemetry meter provider.
+#[cfg(feature = "opentelemetry")]
+pub fn shutdown_opentelemetry_meter_provider() {
+    global::set_meter_provider(SdkMeterProvider::default());
+    log::info!("Replaced OpenTelemetry meter provider with the default provider");
+}
+
 /// Track an RelayRL counter with OpenTelemetry
 ///
 /// # Arguments
