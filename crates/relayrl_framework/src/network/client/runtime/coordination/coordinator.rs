@@ -1106,14 +1106,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .remove_actor(id)
                     .map_err(CoordinatorError::from)?;
-                // remove the actor id from the namespace/context since we're removing the actor
-                remove_id(
-                    params.client_namespace.as_ref(),
-                    crate::network::ACTOR_CONTEXT,
-                    id,
-                )
-                .map_err(CoordinatorError::from)?;
-
+                
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if send_ids {
                     let actor_entries = get_context_entries(
