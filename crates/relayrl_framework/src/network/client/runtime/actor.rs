@@ -292,7 +292,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let (duration_ms, duration_ns) = {
                     let now: SystemTime = SystemTime::now();
                     let duration = now
-                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .duration_since(UNIX_EPOCH)
                         .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
                     (duration.as_millis(), duration.as_nanos())
                 };
