@@ -103,7 +103,6 @@ pub(crate) struct Actor<
     actor_id: ActorUuid,
     reloadable_model: LocalModelHandle<B>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
-    #[allow(dead_code)]
     shared_max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
