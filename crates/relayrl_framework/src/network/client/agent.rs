@@ -214,7 +214,13 @@ impl LocalTrajectoryFileParams {
 
 impl Default for LocalTrajectoryFileParams {
     fn default() -> Self {
-        Self::new(PathBuf::from("."), LocalTrajectoryFileType::Csv).unwrap() // this will never fail
+        Self::new(PathBuf::from("."), LocalTrajectoryFileType::Csv).unwrap_or_else(|_| {
+            log::error!("Failed to create default local trajectory file params, returning unverified default");
+            Self {
+                directory: PathBuf::from("."),
+                file_type: LocalTrajectoryFileType::Csv,
+            }
+        })
     }
 }
 
