@@ -400,8 +400,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         while let Some(msg) = self.rx_from_router.recv().await {
             match msg.protocol {
                 RoutingProtocol::ModelHandshake => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::initial_model_handshake(self, msg)
-                        .await?;
+                    self.initial_model_handshake(msg).await?;
                 }
                 RoutingProtocol::RequestInference => {
                     self.handle_inference_kind(msg).await?;
@@ -413,10 +412,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     self.get_model_version(msg).await?;
                 }
                 RoutingProtocol::ModelUpdate => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::refresh_model(self, msg).await?;
+                    self.refresh_model(msg).await?;
                 }
                 RoutingProtocol::Shutdown => {
-                    <Actor<B, D_IN, D_OUT> as ActorEntity<B>>::handle_shutdown(self, msg).await?;
+                    self.handle_shutdown(msg).await?;
                     break;
                 }
                 _ => {}
