@@ -1677,7 +1677,7 @@ pub struct NatsTransportAddresses {
 pub struct TransportConfigParams {
     pub nats_addresses: NatsTransportAddresses,
     pub zmq_addresses: ZmqTransportAddresses,
-    pub max_traj_length: u128,
+    pub max_traj_length: usize,
     pub local_model_module: LocalModelModuleParams,
 }
 
@@ -1736,7 +1736,7 @@ pub trait TransportConfigBuildParams {
     fn set_zmq_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_zmq_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_zmq_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self;
+    fn set_max_traj_length(&mut self, max_traj_length: usize) -> &mut Self;
     fn set_local_model_module(&mut self, directory_name: &str, model_name: &str) -> &mut Self;
     fn build(&self) -> TransportConfigParams;
     fn build_default() -> TransportConfigParams;
@@ -1751,7 +1751,7 @@ pub struct TransportConfigBuilder {
     zmq_trajectory_server_address: Option<NetworkParams>,
     zmq_inference_scaling_server_address: Option<NetworkParams>,
     zmq_training_scaling_server_address: Option<NetworkParams>,
-    max_traj_length: Option<u128>,
+    max_traj_length: Option<usize>,
     local_model_module: Option<LocalModelModuleParams>,
 }
 
@@ -1827,7 +1827,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         self
     }
 
-    fn set_max_traj_length(&mut self, max_traj_length: u128) -> &mut Self {
+    fn set_max_traj_length(&mut self, max_traj_length: usize) -> &mut Self {
         self.max_traj_length = Some(max_traj_length);
         self
     }
@@ -1910,7 +1910,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 },
             };
 
-        let max_traj_length: u128 = match &self.max_traj_length {
+        let max_traj_length: usize = match &self.max_traj_length {
             Some(length) => *length,
             None => 1000,
         };

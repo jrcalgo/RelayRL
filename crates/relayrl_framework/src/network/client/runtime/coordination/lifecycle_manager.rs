@@ -256,7 +256,7 @@ impl LifeCycleManager {
         let config_update_polling = config.client_config.config_update_polling_seconds;
 
         let transport_config = config.get_transport_config();
-        let max_traj_length = transport_config.max_traj_length as usize;
+        let max_traj_length = transport_config.max_traj_length;
 
         Self {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -340,10 +340,10 @@ impl LifeCycleManager {
 
     pub(crate) async fn set_max_traj_length(
         &self,
-        max_traj_length: &u128,
+        max_traj_length: &usize,
     ) -> Result<(), LifeCycleManagerError> {
         let mut max_traj_length_guard = self.max_traj_length.write().await;
-        *max_traj_length_guard = *max_traj_length as usize;
+        *max_traj_length_guard = *max_traj_length;
         Ok(())
     }
 
