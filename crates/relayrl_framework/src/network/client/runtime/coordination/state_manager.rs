@@ -383,7 +383,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ),
             );
 
-            while active_uuid_registry::interface::list_ids(self.client_namespace.as_ref(), crate::network::ACTOR_CONTEXT).contains(&actor_id) {
+            while active_uuid_registry::interface::list_ids(
+                self.client_namespace.as_ref(),
+                crate::network::ACTOR_CONTEXT,
+            )
+            .contains(&actor_id)
+            {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
 

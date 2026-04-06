@@ -428,14 +428,14 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    pub(crate) fn shutdown(&mut self){
+    pub(crate) fn shutdown(&mut self) {
         self.shutdown_notifier.notify_waiters();
         self.handle_shutdown_signal();
     }
 
     pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
         let mut config_update_polling_seconds =
-        *self.config_update_polling_seconds.read().await as u64;
+            *self.config_update_polling_seconds.read().await as u64;
 
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(
             config_update_polling_seconds,
@@ -475,14 +475,17 @@ impl LifeCycleManager {
         }
     }
 
-    pub(crate) fn handle_shutdown_signal(&self){
+    pub(crate) fn handle_shutdown_signal(&self) {
         if let Err(e) = self.shutdown_tx.send(()) {
-            log::error!("[LifeCycleManager] Failed to send shutdown signal. No active receivers: {}", e);
+            log::error!(
+                "[LifeCycleManager] Failed to send shutdown signal. No active receivers: {}",
+                e
+            );
         }
     }
 
     pub(crate) async fn handle_config_change(
-        &self, 
+        &self,
         path: PathBuf,
     ) -> Result<(), LifeCycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);

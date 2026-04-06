@@ -199,7 +199,10 @@ impl LocalTrajectoryFileParams {
         }
 
         if !directory.is_dir() {
-            return Err(ClientError::InvalidTrajectoryFileDirectory(format!("Path is not a directory, {}", directory.display().to_string())));
+            return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
+                "Path is not a directory, {}",
+                directory.display().to_string()
+            )));
         }
 
         Ok(Self {
