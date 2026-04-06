@@ -90,6 +90,9 @@ optional = true
 version = "0.4.1"
 optional = true
 
+[dev-dependencies]
+tch = { version = "=0.22.0", default-features = false, features = ["download-libtorch"] }
+
 # Essential for benchmarking
 [dev-dependencies.criterion]
 version = "0.5.1"
