@@ -3,9 +3,9 @@
 **Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
-**Version:** 0.5.0-alpha.3
+**Version:** 0.5.0-beta
 
-**Status:** Under active development, expect broken functionality and breaking changes!
+**Status:** Under active development, expect breaking changes.
 
 **Tested Platform Support:** macOS (Silicon), Linux (Ubuntu), Windows 10 (x86_64)
 
@@ -15,7 +15,9 @@ With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `rel
 
 Without transport being fully implemented yet, the client can write data to an `arrow` or `csv` file on your local device.
 
-As of now, the only way to perform inference is to provide your own `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
+As of now, the supported beta path is the local/default client runtime. Provide your own
+`TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface.
+Transport-backed and server-backed workflows remain experimental in `0.5.0-beta`.
 
 All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
 
@@ -29,9 +31,8 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 **Current Limitations:**
 
-- **Data Collection:** Only local Arrow file sink is available
-- **Transport Layer:** Network transport (ZMQ) is under active development
-- **Database Layer:** PostgreSQL/SQLite support is under active development
+- **Data Collection:** Only local Arrow or CSV file sinks are available
+- **Transport Layer:** Network transport (ZMQ/NATS) is implemented, however no complementary server is available at this time
 
 **Major Changes:**
 
@@ -39,18 +40,33 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 - **Rust-First Design Philosophy:** Complete removal of PyO3 and its Python code dependencies from framework; all core components written entirely in Rust.
 - **Backend Independence:** Replacement of direct `Tch` crate dependency with `Burn`, enabling generic Tensor interfacing with the framework (currently supports Burn's `Tch` and `NdArray` Tensor backends, as well as `TorchScript` and `ONNX` model inference).
 - **Improved Error Handling:** Near complete removal of panics and replacement with proper error handling (retries, branches, etc.) and upstream propagation.
-- **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building a strong `ZMQ` transport implementation.
+- **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building strong `ZMQ` and `NATS` transport implementations.
 - **Type System:** Moved to a separate crate (`relayrl_types`).
 - **RL Algorithms:** Moved to a separate crate (`relayrl_algorithms`), which remains unimplemented for now.
 - **Python Bindings:** Moved to a separate crate (`relayrl_python`), which remains unimplemented for now.
 
 ## Quick Start
 
+### 0.5.0-beta Scope
+
+Supported in `0.5.0-beta`:
+
+- local inference
+- actor lifecycle management
+- router scaling
+- local Arrow/CSV trajectory writing
+
+Experimental in `0.5.0-beta`:
+
+- `zmq-transport`
+- `nats-transport`
+- server-backed inference or training workflows
+- server-side crates and scaffolding
+
 ```rust
-// the following instructions assume that the `client` feature flag is the only one enabled;
-// parameters for start()/restart()/AgentBuilder will change if `transport_layer` or `database_layer` is enabled.
-use relayrl_framework::prelude::network::{RelayRLAgent, AgentBuilder, RelayRLAgentActors};
-use relayrl_framework::prelude::types::{ModelModule, DeviceType};
+use relayrl_framework::prelude::network::{AgentBuilder, RelayRLAgentActors};
+use relayrl_framework::prelude::types::model::ModelModule;
+use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
 use burn_ndarray::NdArray;
 use burn_tensor::{Tensor, Float};
 use std::path::PathBuf;
@@ -65,16 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let (mut agent, params) = AgentBuilder::<NdArray, OBS_RANK, ACT_RANK, Float, Float>::builder()
         .actor_count(4)
-        .default_model(ModelModule::<NdArray>::load_from_path(model_path))
+        .default_model(ModelModule::<NdArray>::load_from_path(model_path)?)
         .build().await?;
 
-    agent.start(
-        params.actor_count, 
-        params.router_scale, 
-        params.default_device, 
-        params.default_model, 
-        params.config_path
-    ).await?;
+    agent.start(params).await?;
 
     // 2. Interact (using Burn Tensors)
     let reward: f32 = 1.0;
@@ -117,11 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Roadmap
 
-- ### **v0.5.0:**
-  - Client `ZMQ` transport interface completion
-  - Client `NATS` transport interface completion
-  - Comprehensive Client testing and benchmarking on common RL environments
-  - Short Client stabilization period to enable focused server-side development
+- ### **v0.5.x:**
+  - Local/default client runtime beta polish
+  - Comprehensive client testing and benchmarking on common RL environments
+  - Transport-backed client workflows remain experimental during the beta period
 
 - ### **v0.6.0:**
   - Training Server implementation with support for Online/Offline training workflows
@@ -149,8 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - ### **Beyond this crate:**
   - `relayrl_algorithms` crate creation and publication for training workflows
-  - `relayrl_types` updates to minimize serialization overhead and to reduce tensor copy towards zero-copy (preferably)
-  - `relayrl_cli` for ease-of-use and language agnostic execution via a deployable gRPC pipeline for external CLI process interfacing
+  - `relayrl_types` updates to minimize serialization overhead and to reduce tensor copy towards zero-copy (as much as possible)
+  - `relayrl_cli` for ease-of-use, deployability, and language agnostic execution via a deployable gRPC pipeline for external CLI process interfacing
 
 ## Contributing
 

@@ -3,7 +3,6 @@ pub(super) mod ops;
 pub(super) mod policies;
 
 use crate::network::client::agent::ModelMode;
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::zmq::ops::ZmqPoolError;
@@ -16,14 +15,12 @@ use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Error, Clone)]
@@ -94,7 +91,7 @@ pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> 
     fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_send_algorithm_init_request(

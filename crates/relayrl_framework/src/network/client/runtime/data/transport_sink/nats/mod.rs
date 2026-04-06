@@ -14,41 +14,38 @@ use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 
 pub(super) mod inference_subjects {
-    pub(super) const INFERENCE_SERVER_SUBJECT: &str = "inference-server";
-
     pub(super) const INFERENCE_REQUEST_SUBJECT: &str = "inference-server.model.inference.request";
-    pub(super) const FLAG_LAST_INFERENCE_SUBJECT: &str = "inference-server.model.inference.flag-last";
+    pub(super) const FLAG_LAST_INFERENCE_SUBJECT: &str =
+        "inference-server.model.inference.flag-last";
 
     pub(super) const INFERENCE_MODEL_INIT_REQUEST_SUBJECT: &str = "inference-server.model.init";
 
-    pub(super) const INFERENCE_SCALING_CLIENT_IDS_SUBJECT: &str = "inference-server.scaling.client-ids";
+    pub(super) const INFERENCE_SCALING_CLIENT_IDS_SUBJECT: &str =
+        "inference-server.scaling.client-ids";
     pub(super) const INFERENCE_SCALING_WARNING_SUBJECT: &str = "inference-server.scaling.warning";
     pub(super) const INFERENCE_SCALING_COMPLETE_SUBJECT: &str = "inference-server.scaling.complete";
     pub(super) const INFERENCE_SCALING_SHUTDOWN_SUBJECT: &str = "inference-server.scaling.shutdown";
 }
 
 pub(super) mod training_subjects {
-    pub(super) const TRAINING_SERVER_SUBJECT: &str = "training-server";
-    
     pub(super) const TRAINING_MODEL_LISTENING_SUBJECT: &str = "training-server.model.listening";
     pub(super) const TRAINING_MODEL_HANDSHAKE_SUBJECT: &str = "training-server.model.handshake";
 
-    pub(super) const TRAINING_ALGORITHM_INIT_REQUEST_SUBJECT: &str = "training-server.algorithm.init";
+    pub(super) const TRAINING_ALGORITHM_INIT_REQUEST_SUBJECT: &str =
+        "training-server.algorithm.init";
 
     pub(super) const TRAINING_SEND_TRAJECTORY_SUBJECT: &str = "training-server.trajectory";
 
-    pub(super) const TRAINING_SCALING_CLIENT_IDS_SUBJECT: &str = "training-server.scaling.client-ids";
+    pub(super) const TRAINING_SCALING_CLIENT_IDS_SUBJECT: &str =
+        "training-server.scaling.client-ids";
     pub(super) const TRAINING_SCALING_WARNING_SUBJECT: &str = "training-server.scaling.warning";
     pub(super) const TRAINING_SCALING_COMPLETE_SUBJECT: &str = "training-server.scaling.complete";
     pub(super) const TRAINING_SCALING_SHUTDOWN_SUBJECT: &str = "training-server.scaling.shutdown";
@@ -111,7 +108,7 @@ pub(super) trait NatsTrainingExecution<B: Backend + BackendMatcher<Backend = B>>
     async fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         training_server_address: &str,
     ) -> Result<(), TransportError>;
     async fn execute_send_algorithm_init_request(

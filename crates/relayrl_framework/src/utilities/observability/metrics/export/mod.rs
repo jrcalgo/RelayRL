@@ -5,8 +5,3 @@
 
 pub mod open_telemetry;
 pub mod prometheus;
-
-// Re-export commonly used functions
-pub use prometheus::{create_prometheus_registry, get_metrics_as_string};
-
-pub use open_telemetry::init_opentelemetry_with_otlp;

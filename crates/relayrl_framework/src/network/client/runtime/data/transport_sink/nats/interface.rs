@@ -16,18 +16,18 @@ use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
 
+use async_trait::async_trait;
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
-use async_trait::async_trait;
 
+use super::super::combine_scaling_results;
 use super::ops::{NatsConnectionManager, NatsInferenceOps, NatsTrainingOps};
 use super::policies::{BackpressureController, CircuitBreaker, NatsPolicyConfig};
 use super::{NatsInferenceExecution, NatsTrainingExecution};
-use super::super::combine_scaling_results;
 
 use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
@@ -44,6 +44,12 @@ pub(crate) struct NatsInterface<B: Backend + BackendMatcher<Backend = B>> {
     training_protocol: Option<NatsProtocol>,
     scaling_protocol: Option<NatsProtocol>,
     _phantom: PhantomData<B>,
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>> NatsInterface<B> {
+    async fn is_shutting_down(&self) -> bool {
+        self.nats_training_ops.is_shutting_down().await
+    }
 }
 
 #[async_trait]
@@ -67,8 +73,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
             crate::network::NATS_CLIENT_CONTEXT.to_string(),
         );
 
-        let nats_connection_manager =
-            Arc::new(RwLock::new(NatsConnectionManager::new(client_namespace.clone())));
+        let nats_connection_manager = Arc::new(RwLock::new(NatsConnectionManager::new(
+            client_namespace.clone(),
+        )));
         let nats_inference_ops =
             NatsInferenceOps::new(transport_entry.clone(), nats_connection_manager.clone());
         let nats_training_ops =
@@ -136,7 +143,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
     }
 
     async fn shutdown(&self) -> Result<(), TransportError> {
-        unimplemented!("NatsInterface::shutdown")
+        self.nats_training_ops.shutdown().await
     }
 }
 
@@ -151,10 +158,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
         _replace_context: bool,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let scaling_protocol = self
-            .scaling_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let scaling_protocol = self.scaling_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Scaling protocol not initialized".into())
+        })?;
         let _permit = scaling_protocol
             .backpressure
             .acquire()
@@ -225,7 +231,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -291,7 +297,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -313,7 +319,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                     attempts += 1;
                     scaling_protocol.circuit_breaker.record_failure();
                     tokio::time::sleep(
-                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                        scaling_protocol
+                            .config
+                            .retry_policy
+                            .delay_for_attempt(attempts),
                     )
                     .await;
                 }
@@ -334,10 +343,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let scaling_protocol = self
-            .scaling_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let scaling_protocol = self.scaling_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Scaling protocol not initialized".into())
+        })?;
         let _permit = scaling_protocol
             .backpressure
             .acquire()
@@ -408,7 +416,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -474,7 +482,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -496,7 +504,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                     attempts += 1;
                     scaling_protocol.circuit_breaker.record_failure();
                     tokio::time::sleep(
-                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                        scaling_protocol
+                            .config
+                            .retry_policy
+                            .delay_for_attempt(attempts),
                     )
                     .await;
                 }
@@ -517,10 +528,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
         operation: ScalingOperation,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let scaling_protocol = self
-            .scaling_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let scaling_protocol = self.scaling_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Scaling protocol not initialized".into())
+        })?;
         let _permit = scaling_protocol
             .backpressure
             .acquire()
@@ -590,7 +600,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -656,7 +666,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -678,7 +688,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                     attempts += 1;
                     scaling_protocol.circuit_breaker.record_failure();
                     tokio::time::sleep(
-                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                        scaling_protocol
+                            .config
+                            .retry_policy
+                            .delay_for_attempt(attempts),
                     )
                     .await;
                 }
@@ -698,10 +711,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
         scaling_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let scaling_protocol = self
-            .scaling_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Scaling protocol not initialized".into()))?;
+        let scaling_protocol = self.scaling_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Scaling protocol not initialized".into())
+        })?;
         let _permit = scaling_protocol
             .backpressure
             .acquire()
@@ -771,7 +783,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -836,7 +848,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                                         .await;
                                     } else {
                                         return Some(Err(TransportError::MaxRetriesExceeded {
-                                            cause: format!("timeout: {}", timeout.to_string()),
+                                            cause: format!("timeout: {}", timeout),
                                             attempts,
                                         }));
                                     }
@@ -858,7 +870,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientScalingTransportOps<B>
                     attempts += 1;
                     scaling_protocol.circuit_breaker.record_failure();
                     tokio::time::sleep(
-                        scaling_protocol.config.retry_policy.delay_for_attempt(attempts),
+                        scaling_protocol
+                            .config
+                            .retry_policy
+                            .delay_for_attempt(attempts),
                     )
                     .await;
                 }
@@ -885,10 +900,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
         model_module: Option<ModelModule<B>>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let protocol = self
-            .inference_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Inference protocol not initialized".into()))?;
+        let protocol = self.inference_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Inference protocol not initialized".into())
+        })?;
         let _permit = protocol
             .backpressure
             .acquire()
@@ -898,7 +912,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
             return Err(TransportError::CircuitOpen);
         }
 
-        let nats_inference_server_address: &str = transport_addresses.nats_inference_address.as_ref();
+        let nats_inference_server_address: &str =
+            transport_addresses.nats_inference_address.as_ref();
         let mut attempts = 0u32;
 
         loop {
@@ -921,8 +936,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
                             cause: e.to_string(),
@@ -934,11 +951,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -953,10 +972,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
         obs_bytes: Vec<u8>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<RelayRLAction, TransportError> {
-        let protocol = self
-            .inference_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Inference protocol not initialized".into()))?;
+        let protocol = self.inference_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Inference protocol not initialized".into())
+        })?;
         let _permit = protocol
             .backpressure
             .acquire()
@@ -966,13 +984,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
             return Err(TransportError::CircuitOpen);
         }
 
-        let nats_inference_server_address: &str = transport_addresses.nats_inference_address.as_ref();
+        let nats_inference_server_address: &str =
+            transport_addresses.nats_inference_address.as_ref();
         let mut attempts = 0u32;
 
         loop {
             match tokio::time::timeout(
                 protocol.config.timeout,
-                self.execute_send_inference_request(&actor_entry, &obs_bytes, nats_inference_server_address),
+                self.execute_send_inference_request(
+                    &actor_entry,
+                    &obs_bytes,
+                    nats_inference_server_address,
+                ),
             )
             .await
             {
@@ -984,8 +1007,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
                             cause: e.to_string(),
@@ -997,11 +1022,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1016,10 +1043,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
         reward: f32,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let protocol = self
-            .inference_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Inference protocol not initialized".into()))?;
+        let protocol = self.inference_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Inference protocol not initialized".into())
+        })?;
         let _permit = protocol
             .backpressure
             .acquire()
@@ -1029,13 +1055,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
             return Err(TransportError::CircuitOpen);
         }
 
-        let nats_inference_server_address: &str = transport_addresses.nats_inference_address.as_ref();
+        let nats_inference_server_address: &str =
+            transport_addresses.nats_inference_address.as_ref();
         let mut attempts = 0u32;
 
         loop {
             match tokio::time::timeout(
                 protocol.config.timeout,
-                self.execute_send_flag_last_inference(&actor_entry, &reward, nats_inference_server_address),
+                self.execute_send_flag_last_inference(
+                    &actor_entry,
+                    &reward,
+                    nats_inference_server_address,
+                ),
             )
             .await
             {
@@ -1047,8 +1078,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
                             cause: e.to_string(),
@@ -1060,11 +1093,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientInferenceTransportOps<
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1087,10 +1122,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         hyperparams: HashMap<Algorithm, HyperparameterArgs>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let protocol = self
-            .training_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        let protocol = self.training_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Training protocol not initialized".into())
+        })?;
         let _permit = protocol
             .backpressure
             .acquire()
@@ -1125,8 +1159,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
                             cause: e.to_string(),
@@ -1138,11 +1174,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1156,10 +1194,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         actor_entry: (NamespaceString, ContextString, Uuid),
         transport_addresses: SharedTransportAddresses,
     ) -> Result<Option<ModelModule<B>>, TransportError> {
-        let protocol = self
-            .training_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        let protocol = self.training_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Training protocol not initialized".into())
+        })?;
         let _permit = protocol
             .backpressure
             .acquire()
@@ -1187,8 +1224,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
                             cause: e.to_string(),
@@ -1200,11 +1239,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1219,10 +1260,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         encoded_trajectory: EncodedTrajectory,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let protocol = self
-            .training_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        let protocol = self.training_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Training protocol not initialized".into())
+        })?;
         let _permit = protocol
             .backpressure
             .acquire()
@@ -1238,7 +1278,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         loop {
             match tokio::time::timeout(
                 protocol.config.timeout,
-                self.execute_send_trajectory(&buffer_entry, &encoded_trajectory, nats_training_server_address),
+                self.execute_send_trajectory(
+                    &buffer_entry,
+                    &encoded_trajectory,
+                    nats_training_server_address,
+                ),
             )
             .await
             {
@@ -1250,8 +1294,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
                             cause: e.to_string(),
@@ -1263,11 +1309,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
+                            cause: format!("timeout: {}", timeout),
                             attempts,
                         });
                     }
@@ -1279,37 +1327,52 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
     async fn listen_for_model(
         &self,
         receiver_entry: (NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_update_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
-        let protocol = self
-            .training_protocol
-            .as_ref()
-            .ok_or_else(|| TransportError::InvalidState("Training protocol not initialized".into()))?;
+        let protocol = self.training_protocol.as_ref().ok_or_else(|| {
+            TransportError::InvalidState("Training protocol not initialized".into())
+        })?;
         if protocol.circuit_breaker.is_open() {
             return Err(TransportError::CircuitOpen);
+        }
+        if self.is_shutting_down().await {
+            return Ok(());
         }
 
         let nats_training_server_address: &str = transport_addresses.nats_training_address.as_ref();
         let mut attempts = 0u32;
 
         loop {
-            match tokio::time::timeout(
-                protocol.config.timeout,
-                self.execute_listen_for_model(&receiver_entry, &global_dispatcher_tx, nats_training_server_address),
-            )
-            .await
+            if self.is_shutting_down().await {
+                return Ok(());
+            }
+
+            match self
+                .execute_listen_for_model(
+                    &receiver_entry,
+                    &model_update_tx,
+                    nats_training_server_address,
+                )
+                .await
             {
-                Ok(Ok(())) => {
+                Ok(()) => {
                     protocol.circuit_breaker.record_success();
                     return Ok(());
                 }
-                Ok(Err(e)) => {
+                Err(_) if self.is_shutting_down().await => {
+                    log::info!("[NatsInterface] Model listener stopped during shutdown");
+                    protocol.circuit_breaker.record_success();
+                    return Ok(());
+                }
+                Err(e) => {
                     protocol.circuit_breaker.record_failure();
                     if attempts < protocol.config.retry_policy.max_attempts {
                         attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
+                        tokio::time::sleep(
+                            protocol.config.retry_policy.delay_for_attempt(attempts),
+                        )
+                        .await;
                     } else {
                         return Err(TransportError::MaxRetriesExceeded {
                             cause: e.to_string(),
@@ -1317,25 +1380,19 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                         });
                     }
                 }
-                Err(timeout) => {
-                    protocol.circuit_breaker.record_failure();
-                    if attempts < protocol.config.retry_policy.max_attempts {
-                        attempts += 1;
-                        tokio::time::sleep(protocol.config.retry_policy.delay_for_attempt(attempts))
-                            .await;
-                    } else {
-                        return Err(TransportError::MaxRetriesExceeded {
-                            cause: format!("timeout: {}", timeout.to_string()),
-                            attempts,
-                        });
-                    }
-                }
             }
         }
     }
-}
 
-// ── NatsInferenceExecution delegation ────────────────────────────────────────
+    async fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        self.nats_training_ops
+            .stop_model_listener(&receiver_entry)
+            .await
+    }
+}
 
 impl<B: Backend + BackendMatcher<Backend = B>> NatsInferenceExecution for NatsInterface<B> {
     #[inline]
@@ -1453,20 +1510,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsInferenceExecution for NatsIn
     }
 }
 
-// ── NatsTrainingExecution delegation ─────────────────────────────────────────
-
 impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for NatsInterface<B> {
     #[inline]
     async fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_listen_for_model(
             &self.nats_training_ops,
             receiver_entry,
-            global_dispatcher_tx,
+            model_update_tx,
             nats_training_server_address,
         )
         .await

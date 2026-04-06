@@ -1,3 +1,8 @@
+//! NATS transport operations for the experimental client transport path.
+//!
+//! The local/default client runtime is the supported `0.5.0-beta` path. NATS-backed workflows in
+//! this module remain experimental.
+
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::data::transport_sink::{ScalingOperation, TransportError};
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
@@ -17,32 +22,35 @@ use super::training_subjects::{
 use super::{NatsInferenceExecution, NatsTrainingExecution};
 
 use relayrl_types::HyperparameterArgs;
+use relayrl_types::model::utils::validate_module;
 use relayrl_types::prelude::action::RelayRLAction;
 use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
-use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
+use bytes::Bytes;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use bytes::Bytes;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 
 // Every payload struct is serialized to `bytes::Bytes` via bincode v2 and sent
 // as the body of a NATS/JetStream message.
 mod payloads {
-    use serde::{Deserialize, Serialize};
+    use crate::utilities::configuration::Algorithm;
     use relayrl_types::HyperparameterArgs;
     use relayrl_types::prelude::trajectory::EncodedTrajectory;
-    use crate::utilities::configuration::Algorithm;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
     #[derive(Serialize, Deserialize)]
@@ -228,10 +236,9 @@ fn serialize_model_module_to_bundle<B: Backend + BackendMatcher<Backend = B>>(
             ))
         })?;
 
-    let raw_metadata_json_string =
-        String::from_utf8_lossy(&metadata_json_bytes).into_owned();
-    let metadata_value: serde_json::Value =
-        serde_json::from_str(&raw_metadata_json_string).map_err(|json_parse_error| {
+    let raw_metadata_json_string = String::from_utf8_lossy(&metadata_json_bytes).into_owned();
+    let metadata_value: serde_json::Value = serde_json::from_str(&raw_metadata_json_string)
+        .map_err(|json_parse_error| {
             TransportError::InvalidState(format!(
                 "Failed to parse metadata.json for model file name extraction: {}",
                 json_parse_error
@@ -275,17 +282,20 @@ fn deserialize_model_module_from_bundle<B: Backend + BackendMatcher<Backend = B>
         })?;
 
     let metadata_json_file_path = model_deserialization_temp_dir.path().join("metadata.json");
-    std::fs::write(&metadata_json_file_path, &model_files_bundle.metadata_json_bytes).map_err(
-        |metadata_write_error| {
-            TransportError::ModelHandshakeError(format!(
-                "Failed to write metadata.json to temporary directory: {}",
-                metadata_write_error
-            ))
-        },
-    )?;
+    std::fs::write(
+        &metadata_json_file_path,
+        &model_files_bundle.metadata_json_bytes,
+    )
+    .map_err(|metadata_write_error| {
+        TransportError::ModelHandshakeError(format!(
+            "Failed to write metadata.json to temporary directory: {}",
+            metadata_write_error
+        ))
+    })?;
 
-    let model_file_path =
-        model_deserialization_temp_dir.path().join(&model_files_bundle.model_file_name);
+    let model_file_path = model_deserialization_temp_dir
+        .path()
+        .join(&model_files_bundle.model_file_name);
     std::fs::write(&model_file_path, &model_files_bundle.model_file_bytes).map_err(
         |model_file_write_error| {
             TransportError::ModelHandshakeError(format!(
@@ -295,15 +305,15 @@ fn deserialize_model_module_from_bundle<B: Backend + BackendMatcher<Backend = B>
         },
     )?;
 
-    let loaded_model_module =
-        ModelModule::<B>::load_from_path(model_deserialization_temp_dir.path()).map_err(
-            |model_load_error| {
-                TransportError::ModelHandshakeError(format!(
-                    "Failed to load model module from temporary directory: {:?}",
-                    model_load_error
-                ))
-            },
-        )?;
+    let loaded_model_module = ModelModule::<B>::load_from_path(
+        model_deserialization_temp_dir.path(),
+    )
+    .map_err(|model_load_error| {
+        TransportError::ModelHandshakeError(format!(
+            "Failed to load model module from temporary directory: {:?}",
+            model_load_error
+        ))
+    })?;
 
     validate_module::<B>(&loaded_model_module).map_err(|model_validation_error| {
         TransportError::ModelHandshakeError(format!(
@@ -324,6 +334,112 @@ fn address_fingerprint(server_address: &str) -> u64 {
     address_hasher.finish()
 }
 
+fn build_routed_model_update_message(
+    model_update_payload_bytes: &[u8],
+) -> Result<RoutedMessage, TransportError> {
+    let deserialized_model_update_broadcast: ModelUpdateBroadcastMessage =
+        deserialize_nats_response_bytes(model_update_payload_bytes, "model update broadcast")?;
+
+    let model_bytes_vector = deserialized_model_update_broadcast.model_bytes;
+    let actor_id_bytes_vector = deserialized_model_update_broadcast.actor_id_bytes;
+    let model_version = deserialized_model_update_broadcast.model_version;
+
+    if model_bytes_vector.is_empty() {
+        return Err(TransportError::ListenForModelError(
+            "Received model update broadcast with empty model bytes".to_string(),
+        ));
+    }
+
+    if actor_id_bytes_vector.len() != 16 {
+        return Err(TransportError::ListenForModelError(format!(
+            "Received model update broadcast with invalid actor ID byte length: \
+             expected 16, got {}",
+            actor_id_bytes_vector.len()
+        )));
+    }
+
+    let actor_id_byte_array: [u8; 16] =
+        actor_id_bytes_vector
+            .as_slice()
+            .try_into()
+            .map_err(|conversion_error| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to convert actor ID bytes to fixed-size array: {}",
+                    conversion_error
+                ))
+            })?;
+
+    Ok(RoutedMessage {
+        actor_id: Uuid::from_bytes(actor_id_byte_array),
+        protocol: RoutingProtocol::ModelUpdate,
+        payload: RoutedPayload::ModelUpdate {
+            model_bytes: model_bytes_vector,
+            version: model_version,
+        },
+    })
+}
+
+async fn forward_model_update_payloads<S, F, Fut>(
+    mut payload_stream: S,
+    global_dispatcher_tx: &Sender<RoutedMessage>,
+    mut is_shutting_down: F,
+) -> Result<(), TransportError>
+where
+    S: Stream<Item = Bytes> + Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    while let Some(model_update_payload) = payload_stream.next().await {
+        let routed_model_update_message =
+            build_routed_model_update_message(model_update_payload.as_ref())?;
+
+        if let Err(send_error) = global_dispatcher_tx.send(routed_model_update_message).await {
+            if is_shutting_down().await {
+                return Ok(());
+            }
+
+            return Err(TransportError::ListenForModelError(format!(
+                "Failed to dispatch model update message to global dispatcher: {}",
+                send_error
+            )));
+        }
+    }
+
+    if is_shutting_down().await {
+        Ok(())
+    } else {
+        Err(TransportError::ListenForModelError(
+            "Model update subscriber closed unexpectedly".to_string(),
+        ))
+    }
+}
+
+struct NatsModelListenerHandle {
+    receiver_id: Uuid,
+    listener_shutdown: Arc<AtomicBool>,
+    model_listener_shutdown_flags: Arc<DashMap<Uuid, Arc<AtomicBool>>>,
+}
+
+impl NatsModelListenerHandle {
+    fn is_stopping(&self) -> bool {
+        self.listener_shutdown.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for NatsModelListenerHandle {
+    fn drop(&mut self) {
+        let should_remove = self
+            .model_listener_shutdown_flags
+            .get(&self.receiver_id)
+            .map(|entry| Arc::ptr_eq(entry.value(), &self.listener_shutdown))
+            .unwrap_or(false);
+
+        if should_remove {
+            self.model_listener_shutdown_flags.remove(&self.receiver_id);
+        }
+    }
+}
+
 pub(super) struct NatsConnectionManager {
     pub(super) client_namespace: Arc<str>,
     inference_client: Option<async_nats::Client>,
@@ -331,6 +447,14 @@ pub(super) struct NatsConnectionManager {
     training_client: Option<async_nats::Client>,
     training_jetstream_context: Option<async_nats::jetstream::Context>,
     training_address_fingerprint: Option<u64>,
+    model_listener_shutdown_flags: Arc<DashMap<Uuid, Arc<AtomicBool>>>,
+    shutting_down: bool,
+}
+
+struct NatsShutdownClients {
+    client_namespace: Arc<str>,
+    inference_client: Option<async_nats::Client>,
+    training_client: Option<async_nats::Client>,
 }
 
 impl NatsConnectionManager {
@@ -342,7 +466,54 @@ impl NatsConnectionManager {
             training_client: None,
             training_jetstream_context: None,
             training_address_fingerprint: None,
+            model_listener_shutdown_flags: Arc::new(DashMap::new()),
+            shutting_down: false,
         }
+    }
+
+    pub(super) fn is_shutting_down(&self) -> bool {
+        self.shutting_down
+    }
+
+    fn register_model_listener(&self, receiver_id: &Uuid) -> NatsModelListenerHandle {
+        let listener_shutdown = self
+            .model_listener_shutdown_flags
+            .entry(*receiver_id)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
+        listener_shutdown.store(false, Ordering::SeqCst);
+
+        NatsModelListenerHandle {
+            receiver_id: *receiver_id,
+            listener_shutdown,
+            model_listener_shutdown_flags: self.model_listener_shutdown_flags.clone(),
+        }
+    }
+
+    fn stop_model_listener(&self, receiver_id: &Uuid) {
+        if let Some(listener_shutdown) = self.model_listener_shutdown_flags.get(receiver_id) {
+            listener_shutdown.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn begin_shutdown(&mut self) -> Option<NatsShutdownClients> {
+        if self.shutting_down {
+            return None;
+        }
+
+        self.shutting_down = true;
+        for listener_shutdown in self.model_listener_shutdown_flags.iter() {
+            listener_shutdown.value().store(true, Ordering::SeqCst);
+        }
+        self.inference_address_fingerprint = None;
+        self.training_jetstream_context = None;
+        self.training_address_fingerprint = None;
+
+        Some(NatsShutdownClients {
+            client_namespace: self.client_namespace.clone(),
+            inference_client: self.inference_client.take(),
+            training_client: self.training_client.take(),
+        })
     }
 
     /// Returns a clone of the cached inference `Client`, reconnecting first if
@@ -351,6 +522,12 @@ impl NatsConnectionManager {
         &mut self,
         nats_inference_server_address: &str,
     ) -> Result<async_nats::Client, TransportError> {
+        if self.shutting_down {
+            return Err(TransportError::InvalidState(
+                "NATS transport is shutting down".to_string(),
+            ));
+        }
+
         let incoming_address_fingerprint = address_fingerprint(nats_inference_server_address);
 
         let address_has_changed = match self.inference_address_fingerprint {
@@ -374,15 +551,14 @@ impl NatsConnectionManager {
                     })?;
             }
 
-            let new_inference_client =
-                async_nats::connect(nats_inference_server_address)
-                    .await
-                    .map_err(|nats_connection_error| {
-                        TransportError::NatsClientError(format!(
-                            "Failed to connect inference NATS client to '{}': {}",
-                            nats_inference_server_address, nats_connection_error
-                        ))
-                    })?;
+            let new_inference_client = async_nats::connect(nats_inference_server_address)
+                .await
+                .map_err(|nats_connection_error| {
+                    TransportError::NatsClientError(format!(
+                        "Failed to connect inference NATS client to '{}': {}",
+                        nats_inference_server_address, nats_connection_error
+                    ))
+                })?;
 
             self.inference_client = Some(new_inference_client);
             self.inference_address_fingerprint = Some(incoming_address_fingerprint);
@@ -402,6 +578,12 @@ impl NatsConnectionManager {
         &mut self,
         nats_training_server_address: &str,
     ) -> Result<(async_nats::Client, async_nats::jetstream::Context), TransportError> {
+        if self.shutting_down {
+            return Err(TransportError::InvalidState(
+                "NATS transport is shutting down".to_string(),
+            ));
+        }
+
         let incoming_address_fingerprint = address_fingerprint(nats_training_server_address);
 
         let address_has_changed = match self.training_address_fingerprint {
@@ -426,15 +608,14 @@ impl NatsConnectionManager {
             }
             self.training_jetstream_context = None;
 
-            let new_training_client =
-                async_nats::connect(nats_training_server_address)
-                    .await
-                    .map_err(|nats_connection_error| {
-                        TransportError::NatsClientError(format!(
-                            "Failed to connect training NATS client to '{}': {}",
-                            nats_training_server_address, nats_connection_error
-                        ))
-                    })?;
+            let new_training_client = async_nats::connect(nats_training_server_address)
+                .await
+                .map_err(|nats_connection_error| {
+                    TransportError::NatsClientError(format!(
+                        "Failed to connect training NATS client to '{}': {}",
+                        nats_training_server_address, nats_connection_error
+                    ))
+                })?;
 
             let new_training_jetstream_context =
                 async_nats::jetstream::new(new_training_client.clone());
@@ -613,10 +794,8 @@ impl NatsInferenceExecution for NatsInferenceOps {
 
         let model_files_bundle_bytes: Vec<u8> = match model_module {
             Some(model_module_reference) => {
-                let model_files_bundle =
-                    serialize_model_module_to_bundle(model_module_reference)?;
-                serialize_payload_to_nats_bytes(&model_files_bundle, "model files bundle")?
-                    .to_vec()
+                let model_files_bundle = serialize_model_module_to_bundle(model_module_reference)?;
+                serialize_payload_to_nats_bytes(&model_files_bundle, "model files bundle")?.to_vec()
             }
             None => vec![],
         };
@@ -676,11 +855,13 @@ impl NatsInferenceExecution for NatsInferenceOps {
 
         let client_id_entries: Vec<ClientIdEntry> = client_ids
             .iter()
-            .map(|(client_namespace, client_context, client_id)| ClientIdEntry {
-                namespace: client_namespace.to_string(),
-                context: client_context.to_string(),
-                id: client_id.to_string(),
-            })
+            .map(
+                |(client_namespace, client_context, client_id)| ClientIdEntry {
+                    namespace: client_namespace.to_string(),
+                    context: client_context.to_string(),
+                    id: client_id.to_string(),
+                },
+            )
             .collect();
 
         let inference_client_ids_payload = ClientIdsPayload {
@@ -692,10 +873,8 @@ impl NatsInferenceExecution for NatsInferenceOps {
             client_id_entries,
         };
 
-        let serialized_inference_client_ids_payload = serialize_payload_to_nats_bytes(
-            &inference_client_ids_payload,
-            "inference client IDs",
-        )?;
+        let serialized_inference_client_ids_payload =
+            serialize_payload_to_nats_bytes(&inference_client_ids_payload, "inference client IDs")?;
 
         let nats_inference_client = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -911,13 +1090,70 @@ impl NatsTrainingOps {
             nats_connection_manager,
         }
     }
+
+    pub(super) async fn is_shutting_down(&self) -> bool {
+        self.nats_connection_manager.read().await.is_shutting_down()
+    }
+
+    pub(super) async fn stop_model_listener(
+        &self,
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        let (_, _, receiver_id) = receiver_entry;
+        self.nats_connection_manager
+            .read()
+            .await
+            .stop_model_listener(receiver_id);
+        Ok(())
+    }
+
+    pub(super) async fn shutdown(&self) -> Result<(), TransportError> {
+        let shutdown_clients = {
+            let mut nats_connection_manager = self.nats_connection_manager.write().await;
+            nats_connection_manager.begin_shutdown()
+        };
+
+        let Some(shutdown_clients) = shutdown_clients else {
+            return Ok(());
+        };
+
+        let mut drain_errors: Vec<String> = Vec::new();
+
+        if let Some(existing_inference_client) = shutdown_clients.inference_client
+            && let Err(drain_error) = existing_inference_client.drain().await
+        {
+            drain_errors.push(format!(
+                "Failed to drain inference NATS client for '{}': {}",
+                shutdown_clients.client_namespace, drain_error
+            ));
+        }
+
+        if let Some(existing_training_client) = shutdown_clients.training_client
+            && let Err(drain_error) = existing_training_client.drain().await
+        {
+            drain_errors.push(format!(
+                "Failed to drain training NATS client for '{}': {}",
+                shutdown_clients.client_namespace, drain_error
+            ));
+        }
+
+        match drain_errors.len() {
+            0 => Ok(()),
+            1 => Err(TransportError::InvalidState(drain_errors.remove(0))),
+            _ => {
+                let second = drain_errors.pop().unwrap_or_default();
+                let first = drain_errors.pop().unwrap_or_default();
+                Err(TransportError::MultipleErrors(first, second))
+            }
+        }
+    }
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for NatsTrainingOps {
     async fn execute_listen_for_model(
         &self,
-        _receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
+        model_update_tx: &Sender<RoutedMessage>,
         nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         if nats_training_server_address.is_empty() {
@@ -926,21 +1162,29 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             ));
         }
 
-        if global_dispatcher_tx.is_closed() {
+        if model_update_tx.is_closed() {
             return Err(TransportError::ListenForModelError(
-                "Global dispatcher channel is closed".to_string(),
+                "Model update transmitter channel is closed".to_string(),
             ));
         }
 
-        let nats_training_client = {
+        if self.is_shutting_down().await {
+            return Ok(());
+        }
+
+        let (_, _, receiver_id) = receiver_entry;
+
+        let (nats_training_client, listener_stop_flag, _listener_handle) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
+            let listener_handle = nats_connection_manager.register_model_listener(receiver_id);
+            let listener_stop_flag = listener_handle.listener_shutdown.clone();
             let (training_client, _training_jetstream_context) = nats_connection_manager
                 .get_training_client(nats_training_server_address)
                 .await?;
-            training_client
+            (training_client, listener_stop_flag, listener_handle)
         };
 
-        let mut model_update_subscriber = nats_training_client
+        let model_update_subscriber = nats_training_client
             .subscribe(TRAINING_MODEL_LISTENING_SUBJECT)
             .await
             .map_err(|subscribe_error| {
@@ -950,71 +1194,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
                 ))
             })?;
 
-        let received_nats_message = model_update_subscriber
-            .next()
-            .await
-            .ok_or_else(|| {
-                TransportError::ListenForModelError(
-                    "Model update subscriber closed without yielding a message".to_string(),
-                )
-            })?;
+        let payload_stream =
+            model_update_subscriber.map(|received_nats_message| received_nats_message.payload);
 
-        let deserialized_model_update_broadcast: ModelUpdateBroadcastMessage =
-            deserialize_nats_response_bytes(
-                &received_nats_message.payload,
-                "model update broadcast",
-            )?;
-
-        let model_bytes_vector = deserialized_model_update_broadcast.model_bytes;
-        let actor_id_bytes_vector = deserialized_model_update_broadcast.actor_id_bytes;
-        let model_version = deserialized_model_update_broadcast.model_version;
-
-        if model_bytes_vector.is_empty() {
-            return Err(TransportError::ListenForModelError(
-                "Received model update broadcast with empty model bytes".to_string(),
-            ));
-        }
-
-        if actor_id_bytes_vector.len() != 16 {
-            return Err(TransportError::ListenForModelError(format!(
-                "Received model update broadcast with invalid actor ID byte length: \
-                 expected 16, got {}",
-                actor_id_bytes_vector.len()
-            )));
-        }
-
-        let actor_id_byte_array: [u8; 16] = actor_id_bytes_vector
-            .as_slice()
-            .try_into()
-            .map_err(|conversion_error| {
-                TransportError::ListenForModelError(format!(
-                    "Failed to convert actor ID bytes to fixed-size array: {}",
-                    conversion_error
-                ))
-            })?;
-
-        let actor_uuid = Uuid::from_bytes(actor_id_byte_array);
-
-        let routed_model_update_message = RoutedMessage {
-            actor_id: actor_uuid,
-            protocol: RoutingProtocol::ModelUpdate,
-            payload: RoutedPayload::ModelUpdate {
-                model_bytes: model_bytes_vector,
-                version: model_version,
-            },
-        };
-
-        global_dispatcher_tx
-            .send(routed_model_update_message)
-            .await
-            .map_err(|send_error| {
-                TransportError::ListenForModelError(format!(
-                    "Failed to dispatch model update message to global dispatcher: {}",
-                    send_error
-                ))
-            })?;
-
-        Ok(())
+        forward_model_update_payloads(payload_stream, model_update_tx, || async {
+            listener_stop_flag.load(Ordering::SeqCst) || self.is_shutting_down().await
+        })
+        .await
     }
 
     async fn execute_send_algorithm_init_request(
@@ -1038,12 +1224,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         let actor_entries_string = actor_entries
             .iter()
             .map(|(actor_namespace, actor_context, actor_id)| {
-                format!(
-                    "{}:{}:{}",
-                    actor_namespace.to_string(),
-                    actor_context.to_string(),
-                    actor_id.to_string()
-                )
+                format!("{}:{}:{}", actor_namespace, actor_context, actor_id)
             })
             .collect::<Vec<String>>()
             .join(",");
@@ -1147,7 +1328,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
                 "model handshake response",
             )?;
 
-        if deserialized_handshake_response.model_files_bundle_bytes.is_empty() {
+        if deserialized_handshake_response
+            .model_files_bundle_bytes
+            .is_empty()
+        {
             return Ok(None);
         }
 
@@ -1185,10 +1369,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             encoded_trajectory: encoded_trajectory.clone(),
         };
 
-        let serialized_trajectory_publish_payload = serialize_payload_to_nats_bytes(
-            &trajectory_publish_payload,
-            "trajectory publish",
-        )?;
+        let serialized_trajectory_publish_payload =
+            serialize_payload_to_nats_bytes(&trajectory_publish_payload, "trajectory publish")?;
 
         let (_nats_training_client, nats_training_jetstream_context) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -1237,11 +1419,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
 
         let client_id_entries: Vec<ClientIdEntry> = client_ids
             .iter()
-            .map(|(client_namespace, client_context, client_id)| ClientIdEntry {
-                namespace: client_namespace.to_string(),
-                context: client_context.to_string(),
-                id: client_id.to_string(),
-            })
+            .map(
+                |(client_namespace, client_context, client_id)| ClientIdEntry {
+                    namespace: client_namespace.to_string(),
+                    context: client_context.to_string(),
+                    id: client_id.to_string(),
+                },
+            )
             .collect();
 
         let training_client_ids_payload = ClientIdsPayload {
@@ -1253,10 +1437,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             client_id_entries,
         };
 
-        let serialized_training_client_ids_payload = serialize_payload_to_nats_bytes(
-            &training_client_ids_payload,
-            "training client IDs",
-        )?;
+        let serialized_training_client_ids_payload =
+            serialize_payload_to_nats_bytes(&training_client_ids_payload, "training client IDs")?;
 
         let (nats_training_client, _training_jetstream_context) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -1430,10 +1612,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             scaling_id: scaling_id.to_string(),
         };
 
-        let serialized_training_shutdown_payload = serialize_payload_to_nats_bytes(
-            &training_shutdown_payload,
-            "training shutdown",
-        )?;
+        let serialized_training_shutdown_payload =
+            serialize_payload_to_nats_bytes(&training_shutdown_payload, "training shutdown")?;
 
         let (nats_training_client, _training_jetstream_context) = {
             let mut nats_connection_manager = self.nats_connection_manager.write().await;
@@ -1456,5 +1636,164 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    use tokio::sync::mpsc;
+
+    fn make_model_update_payload(
+        actor_id_bytes: [u8; 16],
+        version: i64,
+        model_bytes: &[u8],
+    ) -> Bytes {
+        serialize_payload_to_nats_bytes(
+            &ModelUpdateBroadcastMessage {
+                model_bytes: model_bytes.to_vec(),
+                actor_id_bytes: actor_id_bytes.to_vec(),
+                model_version: version,
+            },
+            "model update broadcast",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn forward_model_update_payloads_dispatches_multiple_updates() {
+        let (tx, mut rx) = mpsc::channel::<RoutedMessage>(4);
+        let payload_stream = tokio_stream::iter(vec![
+            make_model_update_payload([1; 16], 3, &[10, 20]),
+            make_model_update_payload([2; 16], 4, &[30, 40]),
+        ]);
+
+        forward_model_update_payloads(payload_stream, &tx, || std::future::ready(true))
+            .await
+            .unwrap();
+
+        let first_message = rx.recv().await.unwrap();
+        assert_eq!(first_message.actor_id, Uuid::from_bytes([1; 16]));
+        assert!(matches!(
+            first_message.protocol,
+            RoutingProtocol::ModelUpdate
+        ));
+        match first_message.payload {
+            RoutedPayload::ModelUpdate {
+                model_bytes,
+                version,
+            } => {
+                assert_eq!(model_bytes, vec![10, 20]);
+                assert_eq!(version, 3);
+            }
+            _ => panic!("expected model update payload"),
+        }
+
+        let second_message = rx.recv().await.unwrap();
+        assert_eq!(second_message.actor_id, Uuid::from_bytes([2; 16]));
+        match second_message.payload {
+            RoutedPayload::ModelUpdate {
+                model_bytes,
+                version,
+            } => {
+                assert_eq!(model_bytes, vec![30, 40]);
+                assert_eq!(version, 4);
+            }
+            _ => panic!("expected model update payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_model_update_payloads_returns_ok_when_shutdown_closes_stream() {
+        let (tx, _rx) = mpsc::channel::<RoutedMessage>(1);
+        let payload_stream = tokio_stream::iter(Vec::<Bytes>::new());
+
+        let result =
+            forward_model_update_payloads(payload_stream, &tx, || std::future::ready(true)).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn forward_model_update_payloads_errors_when_stream_closes_unexpectedly() {
+        let (tx, _rx) = mpsc::channel::<RoutedMessage>(1);
+        let payload_stream = tokio_stream::iter(Vec::<Bytes>::new());
+
+        let result =
+            forward_model_update_payloads(payload_stream, &tx, || std::future::ready(false)).await;
+
+        assert!(matches!(
+            result,
+            Err(TransportError::ListenForModelError(message))
+                if message.contains("closed unexpectedly")
+        ));
+    }
+
+    #[tokio::test]
+    async fn connection_manager_shutdown_marks_state_and_blocks_reconnects() {
+        let mut connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        assert!(!connection_manager.is_shutting_down());
+
+        let shutdown_clients = connection_manager.begin_shutdown();
+
+        assert!(shutdown_clients.is_some());
+        assert!(connection_manager.is_shutting_down());
+        assert!(matches!(
+            connection_manager
+                .get_training_client("nats://127.0.0.1:4222")
+                .await,
+            Err(TransportError::InvalidState(message))
+                if message.contains("shutting down")
+        ));
+    }
+
+    #[test]
+    fn register_and_stop_model_listener_updates_flag() {
+        let connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_handle = connection_manager.register_model_listener(&receiver_id);
+
+        assert!(!listener_handle.is_stopping());
+
+        connection_manager.stop_model_listener(&receiver_id);
+
+        assert!(listener_handle.is_stopping());
+    }
+
+    #[test]
+    fn listener_handle_drop_unregisters_listener_flag() {
+        let connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_handle = connection_manager.register_model_listener(&receiver_id);
+
+        assert!(
+            connection_manager
+                .model_listener_shutdown_flags
+                .get(&receiver_id)
+                .is_some()
+        );
+
+        drop(listener_handle);
+
+        assert!(
+            connection_manager
+                .model_listener_shutdown_flags
+                .get(&receiver_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn begin_shutdown_marks_registered_listeners_stopping() {
+        let mut connection_manager = NatsConnectionManager::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_handle = connection_manager.register_model_listener(&receiver_id);
+
+        let shutdown_clients = connection_manager.begin_shutdown();
+
+        assert!(shutdown_clients.is_some());
+        assert!(connection_manager.is_shutting_down());
+        assert!(listener_handle.is_stopping());
     }
 }

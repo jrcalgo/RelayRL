@@ -1,15 +1,21 @@
+//! Transport dispatch abstractions for experimental client networking paths.
+//!
+//! These components sit behind `zmq-transport` and `nats-transport`. They remain experimental in
+//! `0.5.0-beta`; the local/default client runtime is the supported beta path.
+
 use crate::network::TransportType;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
-use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
 #[cfg(feature = "nats-transport")]
 use crate::network::client::runtime::data::transport_sink::nats::interface::NatsInterface;
 #[cfg(feature = "zmq-transport")]
+use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
+#[cfg(feature = "zmq-transport")]
 use crate::network::client::runtime::data::transport_sink::zmq::interface::ZmqInterface;
-use crate::network::client::runtime::router::{InferenceRequest, RoutedMessage};
+use crate::network::client::runtime::router::RoutedMessage;
 use crate::prelude::network::ClientModes;
-use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
+use crate::utilities::configuration::Algorithm;
 
 use relayrl_types::HyperparameterArgs;
 use relayrl_types::data::action::RelayRLAction;
@@ -17,14 +23,13 @@ use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::data::trajectory::EncodedTrajectory;
 use relayrl_types::model::ModelModule;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
+use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
 
 use async_trait::async_trait;
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 
 #[cfg(feature = "nats-transport")]
@@ -83,11 +88,15 @@ fn combine_scaling_results(
     result2: Option<Result<(), TransportError>>,
 ) -> Result<(), TransportError> {
     match (result1, result2) {
-        (Some(Err(e)), Some(Err(e2))) => Err(TransportError::MultipleErrors(e.to_string(), e2.to_string())),
+        (Some(Err(e)), Some(Err(e2))) => Err(TransportError::MultipleErrors(
+            e.to_string(),
+            e2.to_string(),
+        )),
         (Some(Err(e)), None) => Err(e),
         (None, Some(Err(e))) => Err(e),
         (None, None) => Err(TransportError::InvalidState(
-            "Inference and Training servers not initialized, and yet we have a scaling operation. This should never happen. What are you doing? How did you get here?".to_string(),
+            "Received a scaling operation before either transport server was initialized"
+                .to_string(),
         )),
         _ => Ok(()),
     }
@@ -205,8 +214,12 @@ pub(crate) trait AsyncClientTrainingTransportOps<B: Backend + BackendMatcher<Bac
     async fn listen_for_model(
         &self,
         receiver_entry: (NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_update_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
+    ) -> Result<(), TransportError>;
+    async fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
     ) -> Result<(), TransportError>;
 }
 
@@ -237,8 +250,12 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
     fn listen_for_model(
         &self,
         receiver_entry: (NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_update_tx: Sender<RoutedMessage>,
         transport_addresses: SharedTransportAddresses,
+    ) -> Result<(), TransportError>;
+    fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
     ) -> Result<(), TransportError>;
 }
 
@@ -318,7 +335,7 @@ pub(crate) async fn client_transport_factory<B: Backend + BackendMatcher<Backend
         TransportType::NATS => Ok(ClientTransportInterface::<B>::Async(Box::new(
             NatsInterface::<B>::new(client_namespace, shared_client_modes)
                 .await
-                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?
+                .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
         ))),
     }
 }

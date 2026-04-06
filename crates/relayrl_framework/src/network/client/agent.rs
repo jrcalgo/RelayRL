@@ -5,7 +5,11 @@
 //! - `AgentBuilder`: ergonomic construction of an agent instance plus its startup parameters.
 //! - Mode/config enums that describe inference and trajectory recording behavior.
 //!
-//! Transport and database layers are optional feature flags gating additional functionality.
+//! Beta scope in `0.5.0-beta`:
+//! - Supported: the local/default client path, including local inference, actor lifecycle
+//!   management, router scaling, and local trajectory writing.
+//! - Experimental: transport-backed and server-backed workflows enabled by
+//!   `zmq-transport` or `nats-transport`.
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::HyperparameterArgs;
@@ -20,7 +24,9 @@ use crate::prelude::config::ClientConfigLoader;
 use crate::utilities::configuration::{Algorithm, NetworkParams};
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{get_context_entries, list_ids};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use active_uuid_registry::interface::get_context_entries;
+use active_uuid_registry::interface::list_ids;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
@@ -28,9 +34,8 @@ use relayrl_types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, SupportedTensorBackend,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use relayrl_types::data::tensor::{NdArrayDType, TchDType};
 use relayrl_types::model::ModelModule;
+use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
@@ -44,10 +49,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::task::JoinHandle;
 
 /// Errors returned by the client API.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error(transparent)]
@@ -70,6 +73,10 @@ pub enum ClientError {
     InvalidInferenceMode(String),
     #[error("Invalid trajectory file directory: {0}")]
     InvalidTrajectoryFileDirectory(String),
+    #[error("Model validation failed: {0}")]
+    ModelValidationFailed(String),
+    #[error("Update model is not supported: {0}")]
+    ModelUpdateNotSupported(String),
 }
 
 /// Output target for runtime statistics collection.
@@ -103,6 +110,7 @@ impl Default for AlgorithmArgs {
     }
 }
 
+/// Experimental ZMQ endpoints for server-backed inference workflows.
 #[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZmqInferenceAddressesArgs {
@@ -110,6 +118,7 @@ pub struct ZmqInferenceAddressesArgs {
     pub inference_scaling_server_address: Option<NetworkParams>,
 }
 
+/// Experimental ZMQ endpoints for server-backed training workflows.
 #[cfg(feature = "zmq-transport")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZmqTrainingAddressesArgs {
@@ -119,6 +128,7 @@ pub struct ZmqTrainingAddressesArgs {
     pub training_scaling_server_address: Option<NetworkParams>,
 }
 
+/// Experimental transport address configuration for server-backed inference.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum InferenceAddressesArgs {
@@ -128,6 +138,7 @@ pub enum InferenceAddressesArgs {
     NATS(Option<NetworkParams>),
 }
 
+/// Experimental transport address configuration for server-backed training.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrainingAddressesArgs {
@@ -137,38 +148,20 @@ pub enum TrainingAddressesArgs {
     NATS(Option<NetworkParams>),
 }
 
+/// Experimental configuration for server-backed inference.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct InferenceParams {
     pub model_mode: ModelMode,
     pub inference_addresses: Option<InferenceAddressesArgs>,
 }
 
+/// Experimental configuration for server-backed training.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-impl Default for InferenceParams {
-    fn default() -> Self {
-        Self {
-            model_mode: ModelMode::default(),
-            inference_addresses: None,
-        }
-    }
-}
-
-#[cfg(feature = "zmq-transport")]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct TrainingParams {
     pub model_mode: ModelMode,
     pub training_addresses: Option<TrainingAddressesArgs>,
-}
-
-#[cfg(feature = "zmq-transport")]
-impl Default for TrainingParams {
-    fn default() -> Self {
-        Self {
-            model_mode: ModelMode::default(),
-            training_addresses: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,16 +182,9 @@ impl LocalTrajectoryFileParams {
         directory: PathBuf,
         file_type: LocalTrajectoryFileType,
     ) -> Result<Self, ClientError> {
-        if directory.to_str().as_slice().is_empty() {
+        if directory.as_os_str().is_empty() {
             return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
                 "Path '{}' is empty",
-                directory.display()
-            )));
-        }
-
-        if directory.extension().is_some() {
-            return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
-                "Path '{}' appears to be a file, not a directory",
                 directory.display()
             )));
         }
@@ -206,8 +192,9 @@ impl LocalTrajectoryFileParams {
         {
             const TOTAL_ATTEMPTS: i32 = 2;
             let mut attempts: i32 = 1;
+            // Ensure the output directory exists before returning the validated parameters.
             while !directory.exists() {
-                // loop until directory exists (since create_dir_all can fail) or we've tried too many times
+                // Retry once in case the first `create_dir_all` attempt fails transiently.
                 match std::fs::create_dir_all(&directory) {
                     Ok(_) => break,
                     Err(_) if attempts < TOTAL_ATTEMPTS => {
@@ -221,6 +208,13 @@ impl LocalTrajectoryFileParams {
             }
         }
 
+        if !directory.is_dir() {
+            return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
+                "Path is not a directory, {}",
+                directory.display().to_string()
+            )));
+        }
+
         Ok(Self {
             directory,
             file_type,
@@ -230,33 +224,40 @@ impl LocalTrajectoryFileParams {
 
 impl Default for LocalTrajectoryFileParams {
     fn default() -> Self {
-        Self::new(PathBuf::from("."), LocalTrajectoryFileType::Csv).unwrap() // this will never fail
+        Self::new(PathBuf::from("."), LocalTrajectoryFileType::Csv).unwrap_or_else(|_| {
+            log::error!(
+                "Failed to validate the default local trajectory directory, falling back to the current directory"
+            );
+            Self {
+                directory: PathBuf::from("."),
+                file_type: LocalTrajectoryFileType::Csv,
+            }
+        })
     }
 }
 
-/// TODO: Add architecture support for independent/shared model inference/training requests to server(s).
+/// Shared-model semantics are fully supported for local inference in `0.5.0-beta`.
+///
+/// Server-backed uses of `ModelMode` are still experimental.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub enum ModelMode {
-    /// Each actor has an independent server-side model
+    /// Each actor has an independent model handle.
+    #[default]
     Independent,
-    /// All actors share the same server-side model.
+    /// Actors on the same device share a model handle.
     Shared,
 }
 
-impl Default for ModelMode {
-    fn default() -> Self {
-        Self::Independent
-    }
-}
-
-/// Inference mode used by local runtime actors.
+/// Inference mode used by runtime actors.
+///
+/// The local path is the beta-supported path in `0.5.0-beta`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorInferenceMode {
     /// Inference occurs locally in the local runtime actor.
     Local(ModelMode),
-    /// Inference occurs on external inference server(s).
+    /// Experimental: inference occurs on external inference server(s).
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
@@ -271,20 +272,22 @@ impl Default for ActorInferenceMode {
     }
 }
 
-/// Training mode used by runtime actors for training data collection and processing
+/// Training mode used by runtime actors for training data collection and processing.
+///
+/// Offline local trajectory writing is part of the beta-supported local/default path.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorTrainingDataMode {
-    /// Training data is sent to the server for processing
+    /// Experimental: training data is sent to the server for processing.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
     Online(TrainingParams),
-    /// Training data is recorded to local file
+    /// Training data is recorded to a local file.
     Offline(Option<LocalTrajectoryFileParams>),
-    /// Training data is sent to the server for processing and recorded to local file
+    /// Experimental: training data is sent to the server and also recorded locally.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
@@ -306,30 +309,26 @@ impl Default for ActorTrainingDataMode {
 
 pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode) -> bool {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _));
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _)
+    );
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     return matches!(training_data_mode, ActorTrainingDataMode::Offline(_));
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct ClientModes {
     pub actor_inference_mode: ActorInferenceMode,
     pub actor_training_data_mode: ActorTrainingDataMode,
 }
 
-impl Default for ClientModes {
-    fn default() -> Self {
-        Self {
-            actor_inference_mode: ActorInferenceMode::default(),
-            actor_training_data_mode: ActorTrainingDataMode::default(),
-        }
-    }
-}
-
 /// Parameters used to start a [`RelayRLAgent`].
 ///
-/// Typically constructed via [`AgentBuilder::build`].
+/// Typically constructed via [`AgentBuilder::build`] and then passed to
+/// [`RelayRLAgent::start`] or [`RelayRLAgent::restart`].
+#[derive(Clone)]
 pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
@@ -340,13 +339,16 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub actor_count: u32,
     pub router_scale: u32,
     pub default_device: DeviceType,
-    #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "tch-model", feature = "onnx-model"))))]
-    pub default_model: Option<ModelModule<B>>,
-    #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(not(any(feature = "tch-model", feature = "onnx-model"))))
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
+    pub default_model: Option<ModelModule<B>>,
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(any(feature = "nats-transport", feature = "zmq-transport"))))
     )]
     pub default_model: ModelModule<B>,
     pub config_path: Option<PathBuf>,
@@ -360,9 +362,59 @@ impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for AgentStartPar
     }
 }
 
+impl<B: Backend + BackendMatcher<Backend = B>> AgentStartParameters<B> {
+    fn infer_dtypes(&self) -> (Option<DType>, Option<DType>) {
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        {
+            if let Some(model_module) = &self.default_model {
+                return (
+                    Some(model_module.metadata.input_dtype.clone()),
+                    Some(model_module.metadata.output_dtype.clone()),
+                );
+            }
+
+            (None, None)
+        }
+
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+        {
+            (
+                Some(self.default_model.metadata.input_dtype.clone()),
+                Some(self.default_model.metadata.output_dtype.clone()),
+            )
+        }
+    }
+}
+
 /// Builder for creating a [`RelayRLAgent`] and its startup parameters.
 ///
 /// This builder is `#[must_use]`: setters return an updated value.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use relayrl_framework::prelude::network::{AgentBuilder, RelayRLAgentActors};
+/// use relayrl_framework::prelude::types::model::ModelModule;
+/// use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
+/// use burn_ndarray::NdArray;
+/// use burn_tensor::Float;
+/// use std::path::PathBuf;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+/// let (mut agent, params) = AgentBuilder::<NdArray, 1, 1, Float, Float>::builder()
+///     .default_device(DeviceType::Cpu)
+///     .default_model(default_model)
+///     .config_path(PathBuf::from("client_config.json"))
+///     .build()
+///     .await?;
+///
+/// agent.start(params).await?;
+/// let _actor_ids = agent.get_actor_ids()?;
+/// agent.shutdown().await?;
+/// # Ok(())
+/// # }
+/// ```
 #[must_use]
 pub struct AgentBuilder<
     B: Backend + BackendMatcher<Backend = B>,
@@ -371,7 +423,7 @@ pub struct AgentBuilder<
     KindIn: TensorKind<B> + Send + Sync,
     KindOut: TensorKind<B> + Send + Sync,
 > {
-    pub client_modes: Option<ClientModes>,
+    pub client_modes: ClientModes,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub transport_type: Option<TransportType>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -399,10 +451,9 @@ impl<
     /// Notes:
     /// - Modes default to local inference.
     /// - Transport default to `ZMQ` when enabled by feature flags.
-    #[must_use]
     pub fn builder() -> Self {
         Self {
-            client_modes: Some(ClientModes::default()),
+            client_modes: ClientModes::default(),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_type: Some(TransportType::default()),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -418,57 +469,45 @@ impl<
         }
     }
 
-    #[must_use]
     pub fn actor_inference_mode(mut self, actor_inference_mode: ActorInferenceMode) -> Self {
-        if let Some(ref mut modes) = self.client_modes {
-            modes.actor_inference_mode = actor_inference_mode;
-        }
+        self.client_modes.actor_inference_mode = actor_inference_mode;
         self
     }
 
-    #[must_use]
     pub fn actor_training_data_mode(
         mut self,
         actor_training_data_mode: ActorTrainingDataMode,
     ) -> Self {
-        if let Some(ref mut modes) = self.client_modes {
-            modes.actor_training_data_mode = actor_training_data_mode;
-        }
+        self.client_modes.actor_training_data_mode = actor_training_data_mode;
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn transport_type(mut self, transport_type: TransportType) -> Self {
         self.transport_type = Some(transport_type);
         self
     }
 
-    #[must_use]
     pub fn actor_count(mut self, count: u32) -> Self {
         self.actor_count = Some(count);
         self
     }
 
-    #[must_use]
     pub fn router_scale(mut self, count: u32) -> Self {
         self.router_scale = Some(count);
         self
     }
 
-    #[must_use]
     pub fn default_device(mut self, device: DeviceType) -> Self {
         self.default_device = Some(device);
         self
     }
 
-    #[must_use]
     pub fn default_model(mut self, model: ModelModule<B>) -> Self {
         self.default_model = Some(model);
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn algorithm(mut self, algorithm: Algorithm) -> Self {
         let hyperparams = match self.algorithm_args {
@@ -482,7 +521,6 @@ impl<
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn hyperparams(mut self, hyperparams: HyperparameterArgs) -> Self {
         let algorithm = match self.algorithm_args {
@@ -497,13 +535,11 @@ impl<
         self
     }
 
-    #[must_use]
     pub fn config_path(mut self, path: PathBuf) -> Self {
-        self.config_path = Some(path.into());
+        self.config_path = Some(path);
         self
     }
 
-    #[must_use]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn codec(mut self, codec: CodecConfig) -> Self {
         self.codec = Some(codec);
@@ -526,21 +562,23 @@ impl<
         // Initialize agent object
         let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.transport_type.unwrap_or(TransportType::ZMQ),
-            self.client_modes.unwrap_or(ClientModes::default()),
+            self.transport_type.unwrap_or_default(),
+            self.client_modes,
         );
 
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args: self.algorithm_args.unwrap_or(AlgorithmArgs::default()),
+            algorithm_args: self.algorithm_args.unwrap_or_default(),
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
-            #[cfg(any(feature = "tch-model", feature = "onnx-model"))]
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             default_model: self.default_model,
-            #[cfg(not(any(feature = "tch-model", feature = "onnx-model")))]
-            default_model: self.default_model.unwrap(), // this is guaranteed to panic if not set; without transport available, the model must be set at build time
+            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+            default_model: self.default_model.expect(
+                "AgentBuilder::build requires `default_model` for the local/default runtime",
+            ),
             config_path: self.config_path,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec: self.codec.unwrap_or_default(),
@@ -591,6 +629,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D: usize> ToAnyBurnTensor<B
 ///
 /// `RelayRLAgent` is a thin facade over the runtime coordinator, providing a stable public API
 /// for starting, scaling, and interacting with runtime actors.
+///
+/// In `0.5.0-beta`, the supported path is the local/default client runtime.
+/// Transport-backed and server-backed flows remain experimental.
 pub struct RelayRLAgent<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
@@ -656,54 +697,24 @@ impl<
     /// This spawns the coordinator runtime components and (by default) creates `actor_count`
     /// runtime actors.
     ///
-    /// # Parameters
-    /// - `algorithm_args`: Algorithm selection + optional hyperparameters.
-    /// - `actor_count`: Number of runtime actors to spawn initially.
-    /// - `router_scale`: Number of routing workers used to dispatch messages to actors.
-    /// - `default_device`: Default device for tensor ops per actor.
-    /// - `default_model`:
-    ///   - `Some`: each actor starts with this model.
-    ///   - `None`: the runtime may perform a server handshake to obtain a model (if enabled),
-    ///     otherwise startup can fail.
-    /// - `config_path`: Optional path to a client configuration file.
-    ///
     /// # Errors
     /// Returns an error if startup fails (configuration, runtime init, transport init, etc).
-    pub async fn start(
-        &mut self,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: AlgorithmArgs,
-        actor_count: u32,
-        router_scale: u32,
-        default_device: DeviceType,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
-            ModelModule<B>,
-        >,
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        default_model: ModelModule<B>,
-        config_path: Option<PathBuf>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
-            CodecConfig,
-        >,
-    ) -> Result<(), ClientError> {
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let (input_dtype, output_dtype) = if let Some(ref model_module) = default_model {
-            (
-                Some(model_module.metadata.input_dtype.clone()),
-                Some(model_module.metadata.output_dtype.clone()),
-            )
-        } else {
-            (None, None)
-        };
-
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        let (input_dtype, output_dtype) = (
-            Some(default_model.metadata.input_dtype.clone()),
-            Some(default_model.metadata.output_dtype.clone()),
-        );
-
+    pub async fn start(&mut self, params: AgentStartParameters<B>) -> Result<(), ClientError> {
+        let (input_dtype, output_dtype) = params.infer_dtypes();
         self.input_dtype = input_dtype;
         self.output_dtype = output_dtype;
+
+        let AgentStartParameters {
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            algorithm_args,
+            actor_count,
+            router_scale,
+            default_device,
+            default_model,
+            config_path,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            codec,
+        } = params;
 
         self.coordinator
             .start(
@@ -727,23 +738,23 @@ impl<
     ///
     /// # Errors
     /// Returns an error if restart coordination fails.
-    pub async fn restart(
-        &mut self,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: AlgorithmArgs,
-        actor_count: u32,
-        router_scale: u32,
-        default_device: DeviceType,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
-            ModelModule<B>,
-        >,
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        default_model: ModelModule<B>,
-        config_path: Option<PathBuf>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
-            CodecConfig,
-        >,
-    ) -> Result<(), ClientError> {
+    pub async fn restart(&mut self, params: AgentStartParameters<B>) -> Result<(), ClientError> {
+        let (input_dtype, output_dtype) = params.infer_dtypes();
+        self.input_dtype = input_dtype;
+        self.output_dtype = output_dtype;
+
+        let AgentStartParameters {
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            algorithm_args,
+            actor_count,
+            router_scale,
+            default_device,
+            default_model,
+            config_path,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            codec,
+        } = params;
+
         self.coordinator
             .restart(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -853,6 +864,36 @@ impl<
         Ok(())
     }
 
+    /// Update the model for all actors or for the specified actor IDs (if they exist).
+    ///
+    /// When `actor_ids` is `Some`, only the listed actors are considered for the update.
+    /// In `ModelMode::Shared`, the runtime still updates one representative actor per relevant
+    /// device so each shared model handle is refreshed only once.
+    pub async fn update_model(
+        &self,
+        model: ModelModule<B>,
+        actor_ids: Option<Vec<ActorUuid>>,
+    ) -> Result<(), ClientError> {
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+            self.coordinator.client_modes.actor_training_data_mode
+        {
+            log::warn!(
+                "Updating model locally is not supported in Online or Hybrid training data modes"
+            );
+            return Err(ClientError::ModelUpdateNotSupported(
+                "Updating model locally is not supported in Online or Hybrid training data modes"
+                    .to_string(),
+            ));
+        }
+
+        if let Err(e) = validate_module::<B>(&model) {
+            return Err(ClientError::ModelValidationFailed(e.to_string()));
+        }
+        self.coordinator.update_model(model, actor_ids).await?;
+        Ok(())
+    }
+
     /// Retrieves the model version for each actor ID listed (if instance IDs exist)
     ///
     /// Returns `(ActorID, ModelVersion)` pairs.
@@ -861,22 +902,6 @@ impl<
         actor_ids: Vec<Uuid>,
     ) -> Result<Vec<(Uuid, i64)>, ClientError> {
         Ok(self.coordinator.get_model_version(actor_ids).await?)
-    }
-
-    /// Collect runtime statistics.
-    ///
-    /// Current status: not implemented.
-    ///
-    /// # Errors
-    /// Will return an error once implemented if serialization or IO fails.
-    #[deprecated(note = "Not implemented")]
-    #[cfg(any(feature = "metrics", feature = "logging"))]
-    pub fn runtime_statistics(
-        &self,
-        return_type: RuntimeStatisticsReturnType,
-    ) -> Result<RuntimeStatisticsReturnType, ClientError> {
-        // stand-in for actual implementation
-        Ok(RuntimeStatisticsReturnType::Hashmap(HashMap::new()))
     }
 
     /// Fetch the active client configuration.
@@ -962,13 +987,13 @@ impl<
         default_model: Option<ModelModule<B>>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         if count == 0 {
-            return Box::pin(async move {
+            Box::pin(async move {
                 Err(ClientError::NoopActorCount(
                     "Noop actor count: `count` set to zero".to_string(),
                 ))
-            });
+            })
         } else if count == 1 {
-            return self.new_actor(device, default_model);
+            self.new_actor(device, default_model)
         } else {
             Box::pin(async move {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -994,7 +1019,7 @@ impl<
                     &self.coordinator.client_modes.actor_training_data_mode,
                     &self.coordinator.client_modes.actor_inference_mode,
                 ) {
-                    /// sends all new actor ids to the server
+                    // sends all new actor ids to the server
                     let actor_entries = {
                         let client_namespace = self
                             .coordinator
@@ -1024,10 +1049,7 @@ impl<
                         &self.coordinator.client_modes.actor_inference_mode
                     {
                         self.coordinator
-                            .send_inference_model_init_request(
-                                actor_entries,
-                                default_model.clone(),
-                            )
+                            .send_inference_model_init_request(actor_entries, default_model.clone())
                             .await?;
                     }
                 }
@@ -1043,7 +1065,13 @@ impl<
         actor_id: ActorUuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         Box::pin(async move {
-            self.coordinator.remove_actor(actor_id, true).await?;
+            self.coordinator
+                .remove_actor(
+                    actor_id,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    true,
+                )
+                .await?;
             Ok(())
         })
     }
@@ -1053,17 +1081,23 @@ impl<
         actor_ids: Vec<ActorUuid>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>> {
         if actor_ids.is_empty() {
-            return Box::pin(async move {
+            Box::pin(async move {
                 Err(ClientError::NoopActorCount(
                     "Noop actor count: `actor_ids` is empty in `remove_actors()`".to_string(),
                 ))
-            });
+            })
         } else if actor_ids.len() == 1 {
-            return self.remove_actor(actor_ids[0]);
+            self.remove_actor(actor_ids[0])
         } else {
             Box::pin(async move {
                 for actor_id in actor_ids {
-                    self.coordinator.remove_actor(actor_id, false).await?;
+                    self.coordinator
+                        .remove_actor(
+                            actor_id,
+                            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                            false,
+                        )
+                        .await?;
                 }
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -1128,4 +1162,222 @@ impl<
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use burn_ndarray::{NdArray, NdArrayDevice};
+    use burn_tensor::{Bool, Float, Int, Tensor, TensorData};
+    use relayrl_types::data::tensor::{DeviceType, NdArrayDType};
+    use relayrl_types::model::{ModelFileType, ModelMetadata};
+    use tch::{CModule, Device as TchDevice, Kind, Tensor as TchTensor};
+    use tempfile::tempdir;
+
+    type TestBackend = NdArray<f32>;
+
+    fn load_test_model_module() -> (tempfile::TempDir, ModelModule<TestBackend>) {
+        let model_dir = tempdir().expect("tempdir should be created");
+        let model_path = model_dir.path().join("test.pt");
+        let metadata = ModelMetadata {
+            model_file: "test.pt".to_string(),
+            model_type: ModelFileType::Pt,
+            input_dtype: DType::NdArray(NdArrayDType::F32),
+            output_dtype: DType::NdArray(NdArrayDType::F32),
+            input_shape: vec![2],
+            output_shape: vec![2],
+            default_device: Some(DeviceType::Cpu),
+        };
+
+        let trace_inputs = [TchTensor::zeros([2], (Kind::Float, TchDevice::Cpu))];
+        let mut trace_closure =
+            |inputs: &[TchTensor]| -> Vec<TchTensor> { vec![inputs[0].shallow_clone()] };
+        let traced_module = CModule::create_by_tracing(
+            "relayrl_test_module",
+            "forward",
+            &trace_inputs,
+            &mut trace_closure,
+        )
+        .expect("TorchScript smoke module should be traceable");
+        traced_module
+            .save(&model_path)
+            .expect("TorchScript smoke module should be written");
+
+        metadata
+            .save_to_dir(model_dir.path())
+            .expect("model metadata should be written");
+
+        let model_module = ModelModule::<TestBackend>::load_from_path(model_dir.path())
+            .expect("test TorchScript payload should load through the public model API");
+
+        (model_dir, model_module)
+    }
+
+    #[test]
+    fn offline_returns_true() {
+        assert!(uses_local_file_writing(&ActorTrainingDataMode::Offline(
+            None
+        )));
+    }
+
+    #[test]
+    fn disabled_returns_false() {
+        assert!(!uses_local_file_writing(&ActorTrainingDataMode::Disabled));
+    }
+
+    #[test]
+    fn model_mode_default_is_independent() {
+        assert_eq!(ModelMode::default(), ModelMode::Independent);
+    }
+
+    #[test]
+    fn actor_inference_mode_default_is_local_independent() {
+        assert_eq!(
+            ActorInferenceMode::default(),
+            ActorInferenceMode::Local(ModelMode::Independent),
+        );
+    }
+
+    #[test]
+    fn client_modes_default_uses_component_defaults() {
+        let modes = ClientModes::default();
+        assert_eq!(modes.actor_inference_mode, ActorInferenceMode::default());
+    }
+
+    #[test]
+    fn actor_count_setter_sets_field() {
+        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().actor_count(5);
+        assert_eq!(b.actor_count, Some(5));
+    }
+
+    #[test]
+    fn router_scale_setter_sets_field() {
+        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().router_scale(2);
+        assert_eq!(b.router_scale, Some(2));
+    }
+
+    #[test]
+    fn actor_count_does_not_change_router_scale() {
+        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().actor_count(3);
+        assert!(b.router_scale.is_none());
+    }
+
+    #[test]
+    fn local_trajectory_file_params_new_creates_directory() {
+        let tmp = tempdir().expect("tempdir should be created");
+        let output_dir = tmp.path().join("nested").join("trajectories");
+
+        let params =
+            LocalTrajectoryFileParams::new(output_dir.clone(), LocalTrajectoryFileType::Arrow)
+                .expect("trajectory params should create the output directory");
+
+        assert_eq!(params.directory, output_dir);
+        assert_eq!(params.file_type, LocalTrajectoryFileType::Arrow);
+        assert!(params.directory.is_dir());
+    }
+
+    #[tokio::test]
+    async fn build_returns_start_parameters_for_local_runtime() {
+        let config_dir = tempdir().expect("tempdir should be created");
+        let config_path = config_dir.path().join("client_config.json");
+        let (_model_dir, default_model) = load_test_model_module();
+
+        let (_agent, params) = AgentBuilder::<TestBackend, 1, 1, Float, Float>::builder()
+            .default_model(default_model.clone())
+            .config_path(config_path.clone())
+            .build()
+            .await
+            .expect("builder should succeed with a local default model");
+
+        assert_eq!(params.actor_count, 1);
+        assert_eq!(params.router_scale, 1);
+        assert_eq!(params.default_device, DeviceType::Cpu);
+        assert_eq!(params.config_path, Some(config_path));
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        assert_eq!(
+            params
+                .default_model
+                .as_ref()
+                .expect("builder should preserve the provided default model")
+                .metadata
+                .input_dtype,
+            default_model.metadata.input_dtype
+        );
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+        assert_eq!(
+            params.default_model.metadata.output_dtype,
+            default_model.metadata.output_dtype
+        );
+        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+        assert_eq!(
+            params.default_model.metadata.input_dtype,
+            default_model.metadata.input_dtype
+        );
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        assert_eq!(
+            params
+                .default_model
+                .as_ref()
+                .expect("builder should preserve the provided default model")
+                .metadata
+                .output_dtype,
+            default_model.metadata.output_dtype
+        );
+    }
+
+    #[tokio::test]
+    async fn scale_throughput_zero_returns_noop_error() {
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            ClientModes::default(),
+        );
+        let result = agent.scale_throughput(0).await;
+        assert!(matches!(result, Err(ClientError::NoopRouterScale(_))));
+    }
+
+    #[tokio::test]
+    async fn new_actors_zero_returns_noop_error() {
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            ClientModes::default(),
+        );
+        let result = agent.new_actors(0, DeviceType::Cpu, None).await;
+        assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
+    }
+
+    #[tokio::test]
+    async fn remove_actors_empty_vec_returns_noop_error() {
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            TransportType::default(),
+            ClientModes::default(),
+        );
+        let result = agent.remove_actors(vec![]).await;
+        assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
+    }
+
+    #[test]
+    fn float_tensor_converts_to_any_burn_tensor_float() {
+        let device = NdArrayDevice::default();
+        let t: Tensor<TestBackend, 1, Float> = Tensor::zeros([1], &device);
+        let result = t.to_any_burn_tensor(DType::NdArray(NdArrayDType::F32));
+        assert!(matches!(result, AnyBurnTensor::Float(_)));
+    }
+
+    #[test]
+    fn int_tensor_converts_to_any_burn_tensor_int() {
+        let device = NdArrayDevice::default();
+        let data = TensorData::new(vec![0_i64], [1]);
+        let t: Tensor<TestBackend, 1, Int> = Tensor::from_data(data, &device);
+        let result = t.to_any_burn_tensor(DType::NdArray(NdArrayDType::I32));
+        assert!(matches!(result, AnyBurnTensor::Int(_)));
+    }
+
+    #[test]
+    fn bool_tensor_converts_to_any_burn_tensor_bool() {
+        let device = NdArrayDevice::default();
+        let float_t: Tensor<TestBackend, 1, Float> = Tensor::zeros([1], &device);
+        let bool_t: Tensor<TestBackend, 1, Bool> = float_t.greater_elem(-1.0_f32);
+        let result = bool_t.to_any_burn_tensor(DType::NdArray(NdArrayDType::Bool));
+        assert!(matches!(result, AnyBurnTensor::Bool(_)));
+    }
+}

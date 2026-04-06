@@ -12,7 +12,7 @@ use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::EncodedTrajectory;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::collections::HashMap;
@@ -107,21 +107,46 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
     pub(crate) async fn listen_for_model(
         &self,
         receiver_entry: (NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: Sender<RoutedMessage>,
+        model_update_tx: Sender<RoutedMessage>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     ) -> Result<(), TransportError> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
             #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.listen_for_model(receiver_entry, global_dispatcher_tx, transport_addresses)
+            ClientTransportInterface::Sync(_) => {
+                let transport = self.transport.clone();
+                tokio::task::spawn_blocking(move || match &*transport {
+                    ClientTransportInterface::Sync(sync_tr) => sync_tr.listen_for_model(
+                        receiver_entry,
+                        model_update_tx,
+                        transport_addresses,
+                    ),
+                    #[cfg(feature = "nats-transport")]
+                    ClientTransportInterface::Async(_) => unreachable!(),
+                })
+                .await
+                .map_err(|join_error| TransportError::JoinError(join_error.to_string()))?
             }
             #[cfg(feature = "nats-transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
-                    .listen_for_model(receiver_entry, global_dispatcher_tx, transport_addresses)
+                    .listen_for_model(receiver_entry, model_update_tx, transport_addresses)
                     .await
+            }
+        }
+    }
+
+    pub(crate) async fn stop_model_listener(
+        &self,
+        receiver_entry: (NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        match &*self.transport {
+            #[cfg(feature = "zmq-transport")]
+            ClientTransportInterface::Sync(sync_tr) => sync_tr.stop_model_listener(receiver_entry),
+            #[cfg(feature = "nats-transport")]
+            ClientTransportInterface::Async(async_tr) => {
+                async_tr.stop_model_listener(receiver_entry).await
             }
         }
     }
@@ -332,4 +357,47 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+    use crate::network::client::agent::ModelMode;
+    use crate::utilities::configuration::Algorithm;
+    use burn_ndarray::NdArray;
+    use std::collections::HashMap;
+
+    type TestBackend = NdArray<f32>;
+
+    #[test]
+    fn training_init_request_holds_model_mode_and_algorithm() {
+        let req = ProcessInitRequest::<TestBackend>::TrainingAlgorithmInit(
+            ModelMode::Independent,
+            Algorithm::PPO,
+            HashMap::new(),
+        );
+        assert!(matches!(
+            req,
+            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Independent, Algorithm::PPO, _)
+        ));
+    }
+
+    #[test]
+    fn inference_init_request_with_none_model() {
+        let req = ProcessInitRequest::<TestBackend>::InferenceModelInit(ModelMode::Shared, None);
+        assert!(matches!(
+            req,
+            ProcessInitRequest::InferenceModelInit(ModelMode::Shared, None)
+        ));
+    }
+
+    #[test]
+    fn training_init_request_shared_mode() {
+        let req = ProcessInitRequest::<TestBackend>::TrainingAlgorithmInit(
+            ModelMode::Shared,
+            Algorithm::REINFORCE,
+            HashMap::new(),
+        );
+        assert!(matches!(
+            req,
+            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Shared, Algorithm::REINFORCE, _)
+        ));
+    }
+}

@@ -51,6 +51,8 @@ arrow-schema = "57.3.0"
 arrow-array = "57.3.0"
 csv = "1.4.0"
 
+generic-array = "0.14.9"
+
 [profile.dev]
 opt-level = 0
 debug = true

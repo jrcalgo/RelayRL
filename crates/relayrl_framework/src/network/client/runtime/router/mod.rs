@@ -1,5 +1,6 @@
 use crate::network::client::runtime::router::buffer::TrajectorySinkError;
 use crate::network::client::runtime::router::filter::FilterError;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::router::receiver::TransportReceiverError;
 
 use relayrl_types::data::action::RelayRLAction;
@@ -14,13 +15,17 @@ use tokio::sync::oneshot;
 
 pub(crate) mod buffer;
 pub(crate) mod filter;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) mod receiver;
+pub(crate) mod router_dispatcher;
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum RouterError {
     #[error(transparent)]
     FilterError(#[from] FilterError),
     #[error(transparent)]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     TransportReceiverError(#[from] TransportReceiverError),
     #[error(transparent)]
     TrajectorySinkError(#[from] TrajectorySinkError),
@@ -64,11 +69,11 @@ pub(crate) enum RoutedPayload {
 
 /// observation and mask are Arc<AnyBurnTensor<B, D_IN>> and Arc<Option<AnyBurnTensor<B, D_OUT>>> respectively
 ///
-/// Using Box<dyn Any + Send> to avoid adding generic parameters to this struct.
+/// Using Box<dyn Any + Send + Sync> to avoid adding generic parameters to this struct.
 /// This is (probably) safe because InferenceRequest is only sent to the actor from the coordinator layer, both of which are unavailable to the user.
 pub(crate) struct InferenceRequest {
-    pub(crate) observation: Box<dyn Any + Send>,
-    pub(crate) mask: Box<dyn Any + Send>,
+    pub(crate) observation: Box<dyn Any + Send + Sync>,
+    pub(crate) mask: Box<dyn Any + Send + Sync>,
     pub(crate) reward: f32,
     pub(crate) reply_to: oneshot::Sender<Arc<RelayRLAction>>,
 }

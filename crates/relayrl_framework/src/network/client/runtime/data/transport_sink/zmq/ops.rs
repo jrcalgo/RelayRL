@@ -1,48 +1,48 @@
+//! ZMQ transport operations for the experimental client transport path.
+//!
+//! The local/default client runtime is the supported `0.5.0-beta` path. ZMQ-backed workflows in
+//! this module remain experimental.
+
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    SharedZmqInferenceAddresses, SharedZmqTrainingAddresses, SharedTransportAddresses,
+    SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::zmq::{
     ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
 };
-use crate::network::client::runtime::data::transport_sink::{
-    SyncClientInferenceTransportOps, SyncClientTrainingTransportOps, TransportError, TransportUuid,
-};
-use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
-};
-use crate::utilities::configuration::{Algorithm, ClientConfigLoader};
+use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+use crate::utilities::configuration::Algorithm;
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{add_id, remove_id, reserve_id_with};
+use active_uuid_registry::interface::{remove_id, reserve_id_with};
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
-use relayrl_types::data::trajectory::{EncodedTrajectory, RelayRLTrajectory};
+use relayrl_types::data::trajectory::EncodedTrajectory;
+use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::validate_module;
-use relayrl_types::model::{HotReloadableModel, ModelModule};
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid};
+use active_uuid_registry::{ContextString, NamespaceString, registry_uuid::Uuid};
 
 use burn_tensor::backend::Backend;
 use std::io::Write;
-use zmq::SocketType::PAIR;
 
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc::Sender;
-use tokio::task;
-use zmq::{Context, Socket, SocketType};
+use zmq::{Context, Socket};
 
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ZmqPoolError {
     #[error(transparent)]
     SocketError(#[from] zmq::Error),
@@ -78,6 +78,8 @@ pub(super) struct ZmqPool {
     pub(super) zmq_socket_context: Context,
     cached_addresses: Option<DashMap<Uuid, Arc<RwLock<SharedTransportAddresses>>>>,
     cached_sockets: Arc<ZmqSocketPool>,
+    model_listener_shutdown_flags: DashMap<Uuid, Arc<AtomicBool>>,
+    transport_shutting_down: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,6 +114,8 @@ impl ZmqPool {
                 traj_push_socket: None,
                 scaling_dealer_socket: None,
             }),
+            model_listener_shutdown_flags: DashMap::new(),
+            transport_shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -186,10 +190,42 @@ impl ZmqPool {
         socket.set_identity(identity.as_bytes())?;
 
         socket.set_subscribe(b"")?;
+        socket.set_rcvtimeo(1000)?;
 
         socket.connect(address)?;
 
         Ok(socket)
+    }
+
+    fn register_model_listener(&self, receiver_id: &Uuid) -> Arc<AtomicBool> {
+        let listener_shutdown = self
+            .model_listener_shutdown_flags
+            .entry(*receiver_id)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
+        listener_shutdown.store(false, Ordering::SeqCst);
+        listener_shutdown
+    }
+
+    fn stop_model_listener(&self, receiver_id: &Uuid) {
+        if let Some(listener_shutdown) = self.model_listener_shutdown_flags.get(receiver_id) {
+            listener_shutdown.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn unregister_model_listener(&self, receiver_id: &Uuid) {
+        self.model_listener_shutdown_flags.remove(receiver_id);
+    }
+
+    fn begin_shutdown(&self) {
+        self.transport_shutting_down.store(true, Ordering::SeqCst);
+        for listener_shutdown in self.model_listener_shutdown_flags.iter() {
+            listener_shutdown.value().store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.transport_shutting_down.load(Ordering::SeqCst)
     }
 
     #[inline(always)]
@@ -227,7 +263,11 @@ impl ZmqPool {
                             != new_address
                     }
                     CacheAddressType::ModelServer => {
-                        addr_guard.zmq_training_addresses.model_server_address.as_ref() != new_address
+                        addr_guard
+                            .zmq_training_addresses
+                            .model_server_address
+                            .as_ref()
+                            != new_address
                     }
                     CacheAddressType::TrajectoryServer => {
                         addr_guard
@@ -529,6 +569,60 @@ fn validate_entry(
     Ok(entry)
 }
 
+fn build_routed_model_update_message(
+    message_parts: &[Vec<u8>],
+) -> Result<Option<RoutedMessage>, TransportError> {
+    if message_parts.len() < 4 {
+        return Err(TransportError::ListenForModelError(
+            "Malformed model update response".to_string(),
+        ));
+    }
+
+    let model_bytes = message_parts[1].clone();
+    let actor_id_bytes = message_parts[2].clone();
+    let model_version_bytes = &message_parts[3];
+
+    if model_bytes.is_empty() {
+        log::warn!("[ZmqClient] Model bytes are empty");
+        return Ok(None);
+    }
+
+    let actor_id = if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
+        log::warn!("[ZmqClient] Actor ID bytes are empty or invalid");
+        return Ok(None);
+    } else {
+        let actor_array: [u8; 16] =
+            actor_id_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|conversion_error| {
+                    TransportError::ListenForModelError(format!(
+                        "Failed to convert actor ID bytes to fixed-size array: {}",
+                        conversion_error
+                    ))
+                })?;
+        Uuid::from_bytes(actor_array)
+    };
+
+    let model_version_byte_array: [u8; 8] =
+        model_version_bytes.as_slice().try_into().map_err(|_| {
+            TransportError::ListenForModelError(format!(
+                "Malformed model update response: invalid version byte length: expected 8, got {}",
+                model_version_bytes.len()
+            ))
+        })?;
+    let model_version = i64::from_be_bytes(model_version_byte_array);
+
+    Ok(Some(RoutedMessage {
+        actor_id,
+        protocol: RoutingProtocol::ModelUpdate,
+        payload: RoutedPayload::ModelUpdate {
+            model_bytes,
+            version: model_version,
+        },
+    }))
+}
+
 #[repr(i64)]
 enum ServerResponse {
     Success = 0,
@@ -562,71 +656,93 @@ impl ZmqInferenceOps {
     }
 
     pub(super) fn shutdown(&self) -> Result<(), TransportError> {
-        unimplemented!();
+        if let Some(sockets) = &self
+            .zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::InvalidState(format!(
+                    "Failed to read ZMQ pool during inference shutdown: {}",
+                    e
+                ))
+            })?
+            .cached_sockets
+            .inference_dealer_socket
+        {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                remove_id("client", "zmq_dealer_socket", socket_id)
+                    .map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        Ok(())
     }
 }
 
-/// these will be implemented in a future update (0.7.0)
+/// Experimental client-side ZMQ inference operations. These request paths are not implemented as
+/// part of the `0.5.0-beta` support promise.
 impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_inference_request(
         &self,
-        actor_entry: &(NamespaceString, ContextString, Uuid),
-        action_request: &[u8],
-        inference_server_address: &str,
+        _actor_entry: &(NamespaceString, ContextString, Uuid),
+        _action_request: &[u8],
+        _inference_server_address: &str,
     ) -> Result<RelayRLAction, TransportError> {
         unimplemented!();
     }
 
     fn execute_send_flag_last_inference(
         &self,
-        actor_entry: &(NamespaceString, ContextString, Uuid),
-        reward: &f32,
-        inference_server_address: &str,
+        _actor_entry: &(NamespaceString, ContextString, Uuid),
+        _reward: &f32,
+        _inference_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_client_ids(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        client_ids: &[(NamespaceString, ContextString, Uuid)],
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _client_ids: &[(NamespaceString, ContextString, Uuid)],
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_inference_model_init_request<B: Backend + BackendMatcher<Backend = B>>(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        model_mode: &ModelMode,
-        model_module: &Option<ModelModule<B>>,
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _model_mode: &ModelMode,
+        _model_module: &Option<ModelModule<B>>,
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_scaling_warning(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        operation: &ScalingOperation,
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _operation: &ScalingOperation,
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_scaling_complete(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        operation: &ScalingOperation,
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _operation: &ScalingOperation,
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
 
     fn execute_send_shutdown_signal(
         &self,
-        scaling_entry: &(NamespaceString, ContextString, Uuid),
-        inference_scaling_server_address: &str,
+        _scaling_entry: &(NamespaceString, ContextString, Uuid),
+        _inference_scaling_server_address: &str,
     ) -> Result<(), TransportError> {
         unimplemented!();
     }
@@ -648,7 +764,47 @@ impl ZmqTrainingOps {
         }
     }
 
+    pub(super) fn stop_model_listener(
+        &self,
+        receiver_entry: &(NamespaceString, ContextString, Uuid),
+    ) -> Result<(), TransportError> {
+        let (_, _, receiver_id) = validate_entry(receiver_entry)?;
+        self.zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during listener shutdown: {}",
+                    e
+                ))
+            })?
+            .stop_model_listener(receiver_id);
+        Ok(())
+    }
+
+    pub(super) fn is_shutting_down(&self) -> Result<bool, TransportError> {
+        Ok(self
+            .zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during shutdown check: {}",
+                    e
+                ))
+            })?
+            .is_shutting_down())
+    }
+
     pub(super) fn shutdown(&self) -> Result<(), TransportError> {
+        self.zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::SendTrajError(format!(
+                    "Failed to read ZMQ pool during shutdown: {}",
+                    e
+                ))
+            })?
+            .begin_shutdown();
+
         if let Some(sockets) = &self
             .zmq_pool
             .read()
@@ -663,7 +819,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_dealer_socket", socket_id.clone())
+                remove_id("client", "zmq_dealer_socket", socket_id)
                     .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
@@ -684,8 +840,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_sub_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove_id("client", "zmq_sub_socket", socket_id).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -705,8 +860,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_push_socket", socket_id.clone())
-                    .map_err(TransportError::from)?;
+                remove_id("client", "zmq_push_socket", socket_id).map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
@@ -726,7 +880,7 @@ impl ZmqTrainingOps {
         {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_dealer_socket", socket_id.clone())
+                remove_id("client", "zmq_dealer_socket", socket_id)
                     .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
@@ -734,12 +888,8 @@ impl ZmqTrainingOps {
         }
 
         let (client_namspace, zmq_context, transport_id) = self.transport_entry.clone();
-        remove_id(
-            client_namspace.as_ref(),
-            zmq_context.as_ref(),
-            transport_id.clone(),
-        )
-        .map_err(TransportError::from)?;
+        remove_id(client_namspace.as_ref(), zmq_context.as_ref(), transport_id)
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
@@ -749,11 +899,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
     fn execute_listen_for_model(
         &self,
         receiver_entry: &(NamespaceString, ContextString, Uuid),
-        global_dispatcher_tx: &Sender<RoutedMessage>,
+        model_update_tx: &Sender<RoutedMessage>,
         model_server_address: &str,
     ) -> Result<(), TransportError> {
         let validated_entry = validate_entry(receiver_entry)?;
-        let (client_namespace, router_context, receiver_id) = validated_entry.clone();
+        let (_, _, receiver_id) = validated_entry;
 
         if model_server_address.is_empty() {
             return Err(TransportError::ListenForModelError(
@@ -761,11 +911,26 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ));
         }
 
-        if global_dispatcher_tx.is_closed() {
+        if model_update_tx.is_closed() {
             return Err(TransportError::ListenForModelError(
-                "Global dispatcher is closed".to_string(),
+                "Model update transmitter is closed".to_string(),
             ));
         }
+
+        if self.is_shutting_down()? {
+            return Ok(());
+        }
+
+        let listener_shutdown = self
+            .zmq_pool
+            .read()
+            .map_err(|e| {
+                TransportError::ListenForModelError(format!(
+                    "Failed to read ZMQ pool during listener registration: {}",
+                    e
+                ))
+            })?
+            .register_model_listener(receiver_id);
 
         let _ = self
             .zmq_pool
@@ -777,7 +942,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ))
             })?
             .update_cache(
-                &receiver_id,
+                receiver_id,
                 model_server_address,
                 CacheAddressType::ModelServer,
                 SocketPoolType::ModelSub,
@@ -799,7 +964,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .ok_or_else(|| {
                 TransportError::ListenForModelError("SUB socket pool not initialized".to_string())
             })?
-            .get(&receiver_id)
+            .get(receiver_id)
             .ok_or_else(|| {
                 TransportError::ListenForModelError(format!(
                     "SUB socket not found for receiver ID: {}",
@@ -809,72 +974,65 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .clone();
 
         let model_server_address = model_server_address.to_string();
-        let global_dispatcher_tx = global_dispatcher_tx.clone();
+        let model_update_tx = model_update_tx.clone();
+        log::info!(
+            "[ZmqClient] Listening for model updates at {}",
+            model_server_address
+        );
 
-        task::spawn_blocking(move || {
-            println!(
-                "[ZmqClient] Listening for model updates at {}",
-                model_server_address
-            );
+        let result = loop {
+            if listener_shutdown.load(Ordering::SeqCst) || self.is_shutting_down()? {
+                break Ok(());
+            }
 
-            loop {
-                match socket
-                    .try_lock()
-                    .map_err(|e| {
-                        TransportError::ListenForModelError(format!(
-                            "Failed to lock sub socket: {}",
-                            e
-                        ))
-                    })?
-                    .recv_multipart(0)
-                {
-                    Ok(message_parts) => {
-                        if message_parts.len() < 3 {
-                            eprintln!("[ZmqClient] Malformed model update response");
-                            return Err(TransportError::ListenForModelError(
-                                "Malformed model update response".to_string(),
-                            ));
+            match socket
+                .try_lock()
+                .map_err(|e| {
+                    TransportError::ListenForModelError(format!("Failed to lock sub socket: {}", e))
+                })?
+                .recv_multipart(0)
+            {
+                Ok(message_parts) => {
+                    let msg = match build_routed_model_update_message(&message_parts) {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            log::error!("[ZmqClient] {}", e);
+                            break Err(e);
+                        }
+                    };
+
+                    if let Err(send_error) = model_update_tx.blocking_send(msg) {
+                        if listener_shutdown.load(Ordering::SeqCst) || self.is_shutting_down()? {
+                            break Ok(());
                         }
 
-                        let model_bytes = message_parts[1].clone();
-                        let actor_id_bytes = message_parts[2].clone();
-
-                        if model_bytes.is_empty() {
-                            eprintln!("[ZmqClient] Model bytes are empty");
-                            continue;  // drops the message
-                        }
-
-                        let actor_id = {
-                            if actor_id_bytes.is_empty() || actor_id_bytes.len() != 16 {
-                                eprintln!("[ZmqClient] Actor ID bytes are empty or invalid");
-                                continue;  // drops the message
-                            } else {
-                                let actor_array = actor_id_bytes.as_array::<16>().cloned().unwrap(); // safe because we know the length is 16
-                                Uuid::from_bytes(actor_array)
-                            }
-                        };
-
-                        let msg = RoutedMessage {
-                            actor_id,
-                            protocol: RoutingProtocol::ModelUpdate,
-                            payload: RoutedPayload::ModelUpdate {
-                                model_bytes,
-                                version: 0,
-                            },
-                        };
-                        let _ = global_dispatcher_tx.blocking_send(msg);
-                    }
-                    Err(e) => {
-                        eprintln!("[ZmqClient] SUB socket recv error: {}", e);
-                        return Err::<(), TransportError>(TransportError::ListenForModelError(
-                            format!("SUB socket recv error: {}", e),
-                        ));
+                        break Err(TransportError::ListenForModelError(format!(
+                            "Failed to dispatch model update message to model update transmitter: {}",
+                            send_error
+                        )));
                     }
                 }
+                Err(zmq::Error::EAGAIN) => {
+                    if listener_shutdown.load(Ordering::SeqCst) || self.is_shutting_down()? {
+                        break Ok(());
+                    }
+                }
+                Err(e) => {
+                    log::error!("[ZmqClient] SUB socket recv error: {}", e);
+                    break Err(TransportError::ListenForModelError(format!(
+                        "SUB socket recv error: {}",
+                        e
+                    )));
+                }
             }
-        });
+        };
 
-        Ok(())
+        if let Ok(pool) = self.zmq_pool.read() {
+            pool.unregister_model_listener(receiver_id);
+        }
+
+        result
     }
 
     fn execute_send_algorithm_init_request(
@@ -886,7 +1044,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
-        // TODO: Reqeust that the server initializes a shared algorithm OR individual algorithms per actor (must be the same algorithm for now)
+        // Experimental transport path: shared vs independent server-side algorithm
+        // initialization is not finalized in `0.5.0-beta`.
         let validated_entry = validate_entry(scaling_entry)?;
         let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
@@ -920,7 +1079,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         let scaling_entry_string =
             format!("{}:{}:{}", client_namespace, manager_context, scaling_id);
 
-        let actor_entries_string = actor_entries.iter().map(|entry| format!("{}:{}:{}", client_namespace, entry.1, entry.2)).collect::<Vec<String>>().join(",");
+        let actor_entries_string = actor_entries
+            .iter()
+            .map(|entry| format!("{}:{}:{}", client_namespace, entry.1, entry.2))
+            .collect::<Vec<String>>()
+            .join(",");
 
         let algorithm_name_string = algorithm.as_str().to_string();
         let hyperparams_string = serde_json::to_string(&hyperparams).map_err(|e| {
@@ -984,7 +1147,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 0,
             ) {
             Ok(_) => {
-                println!("[ZmqClient] Sent algorithm init request");
+                log::info!("[ZmqClient] Sent algorithm init request");
             }
             Err(e) => {
                 return Err(TransportError::SendAlgorithmInitRequestError(format!(
@@ -1028,7 +1191,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        println!("[ZmqClient] Starting initial model handshake...");
+        log::info!("[ZmqClient] Starting initial model handshake...");
 
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
         let transport_entry_string =
@@ -1081,9 +1244,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ],
                 0,
             ) {
-            Ok(_) => println!("[ZmqClient] Sent GET_MODEL request"),
+            Ok(_) => log::info!("[ZmqClient] Sent GET_MODEL request"),
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send GET_MODEL: {}", e);
+                log::error!("[ZmqClient] Failed to send GET_MODEL: {}", e);
                 return Err(TransportError::ModelHandshakeError(format!(
                     "Failed to send GET_MODEL: {}",
                     e
@@ -1100,14 +1263,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         {
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
-                    eprintln!("[ZmqClient] Malformed handshake response");
+                    log::error!("[ZmqClient] Malformed handshake response");
                     return Err(TransportError::ModelHandshakeError(
                         "Malformed handshake response".to_string(),
                     ));
                 }
 
                 let model_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Received initial model ({} bytes)",
                     model_bytes.len()
                 );
@@ -1116,7 +1279,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match NamedTempFile::new() {
                     Ok(mut temp_file) => {
                         if let Err(e) = temp_file.write_all(model_bytes) {
-                            eprintln!("[ZmqClient] Failed to write model to temp file: {}", e);
+                            log::error!("[ZmqClient] Failed to write model to temp file: {}", e);
                             return Err(TransportError::ModelHandshakeError(format!(
                                 "Failed to write model to temp file: {}",
                                 e
@@ -1126,17 +1289,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                         match ModelModule::<B>::load_from_path(temp_file.path()) {
                             Ok(model) => {
                                 if let Err(e) = validate_module::<B>(&model) {
-                                    eprintln!("[ZmqClient] Failed to validate model: {:?}", e);
+                                    log::error!("[ZmqClient] Failed to validate model: {:?}", e);
                                     return Err(TransportError::ModelHandshakeError(format!(
                                         "Failed to validate model: {:?}",
                                         e
                                     )));
                                 }
-                                println!("[ZmqClient] Model loaded and validated successfully");
+                                log::info!("[ZmqClient] Model loaded and validated successfully");
                                 Ok(Some(model))
                             }
                             Err(e) => {
-                                eprintln!("[ZmqClient] Failed to load model: {:?}", e);
+                                log::error!("[ZmqClient] Failed to load model: {:?}", e);
                                 Err(TransportError::ModelHandshakeError(format!(
                                     "Failed to load model: {:?}",
                                     e
@@ -1145,7 +1308,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                         }
                     }
                     Err(e) => {
-                        eprintln!("[ZmqClient] Failed to create temp file: {}", e);
+                        log::error!("[ZmqClient] Failed to create temp file: {}", e);
                         Err(TransportError::ModelHandshakeError(format!(
                             "Failed to create temp file: {}",
                             e
@@ -1154,7 +1317,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to receive model: {}", e);
+                log::error!("[ZmqClient] Failed to receive model: {}", e);
                 Err(TransportError::ModelHandshakeError(format!(
                     "Failed to receive model: {}",
                     e
@@ -1200,7 +1363,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             TransportError::SendTrajError(format!("Failed to serialize trajectory: {}", e))
         })?;
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending trajectory ({} bytes, {} actions)",
             serialized_traj.len(),
             encoded_trajectory.num_actions
@@ -1230,7 +1393,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .traj_push_socket
             .as_ref()
             .ok_or_else(|| {
-                TransportError::SendTrajError("Trajectory push socket pool not initialized".to_string())
+                TransportError::SendTrajError(
+                    "Trajectory push socket pool not initialized".to_string(),
+                )
             })?
             .get(&buffer_id)
             .ok_or_else(|| {
@@ -1247,19 +1412,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .try_lock()
             .map_err(|e| {
                 TransportError::SendTrajError(format!("Failed to lock push socket: {}", e))
-            })?.send_multipart([
-                &empty_frame,
-                transport_entry_frame,
-                buffer_entry_frame,
-                serialized_traj_frame,
-            ], 0)
-        {
+            })?
+            .send_multipart(
+                [
+                    &empty_frame,
+                    transport_entry_frame,
+                    buffer_entry_frame,
+                    serialized_traj_frame,
+                ],
+                0,
+            ) {
             Ok(_) => {
-                println!("[ZmqClient] Trajectory sent successfully");
+                log::info!("[ZmqClient] Trajectory sent successfully");
                 Ok(())
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send trajectory: {}", e);
+                log::error!("[ZmqClient] Failed to send trajectory: {}", e);
                 Err(TransportError::SendTrajError(format!(
                     "Failed to send trajectory: {}",
                     e
@@ -1300,7 +1468,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        // TODO: Send client IDs to server for caching, validation, and routing
+        // Experimental transport path: client IDs are not yet forwarded for server-side caching,
+        // validation, or routing.
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
         let transport_entry_string =
             format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
@@ -1366,7 +1535,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ],
                 0,
             ) {
-            Ok(_) => println!("[ZmqClient] Sent client IDs to server"),
+            Ok(_) => log::info!("[ZmqClient] Sent client IDs to server"),
             Err(e) => {
                 return Err(TransportError::SendClientIdsToServerError(format!(
                     "Failed to send client IDs to server: {}",
@@ -1397,29 +1566,23 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(&message_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server updated cache with client IDs");
-                            return Ok(());
+                            log::info!("[ZmqClient] Server updated cache with client IDs");
+                            Ok(())
                         }
-                        ServerResponse::Failure => {
-                            return Err(TransportError::SendClientIdsToServerError(
-                                "Server failed to acknowledge client IDs".to_string(),
-                            ));
-                        }
+                        ServerResponse::Failure => Err(TransportError::SendClientIdsToServerError(
+                            "Server failed to acknowledge client IDs".to_string(),
+                        )),
                     },
-                    Err(e) => {
-                        return Err(TransportError::SendClientIdsToServerError(format!(
-                            "Failed to parse server response: {}",
-                            e
-                        )));
-                    }
+                    Err(e) => Err(TransportError::SendClientIdsToServerError(format!(
+                        "Failed to parse server response: {}",
+                        e
+                    ))),
                 }
             }
-            Err(e) => {
-                return Err(TransportError::SendClientIdsToServerError(format!(
-                    "Failed to receive client IDs from server: {}",
-                    e
-                )));
-            }
+            Err(e) => Err(TransportError::SendClientIdsToServerError(format!(
+                "Failed to receive client IDs from server: {}",
+                e
+            ))),
         }
     }
 
@@ -1443,12 +1606,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ScalingOperation::ScaleIn => "scale_in",
         };
 
-        println!(
+        log::info!(
             "[ZmqClient] Scaling warning notification send for {}",
             operation_type
         );
 
-        // TODO: In a full implementation, this would send a ZMQ message to the training server
+        // Experimental transport path: this currently records the scaling event locally without
+        // sending a training-server message.
         let _ = self
             .zmq_pool
             .read()
@@ -1466,7 +1630,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending scaling warning to {}",
             training_scaling_server_address
         );
@@ -1528,10 +1692,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 0,
             ) {
             Ok(_) => {
-                println!("[ZmqClient] Scaling warning sent successfully");
+                log::info!("[ZmqClient] Scaling warning sent successfully");
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send scaling warning: {}", e);
+                log::error!("[ZmqClient] Failed to send scaling warning: {}", e);
                 return Err(TransportError::SendScalingWarningError(format!(
                     "Failed to send scaling warning: {}",
                     e
@@ -1551,14 +1715,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         {
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
-                    eprintln!("[ZmqClient] Malformed scaling warning response");
+                    log::error!("[ZmqClient] Malformed scaling warning response");
                     return Err(TransportError::SendScalingWarningError(
                         "Malformed scaling warning response".to_string(),
                     ));
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Scaling warning response: {}",
                     String::from_utf8_lossy(response_bytes)
                 );
@@ -1566,17 +1730,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server acknowledged scaling warning");
+                            log::info!("[ZmqClient] Server acknowledged scaling warning");
                         }
                         ServerResponse::Failure => {
-                            println!("[ZmqClient] Server failed to acknowledge scaling warning");
+                            log::error!("[ZmqClient] Server failed to acknowledge scaling warning");
                             return Err(TransportError::SendScalingWarningError(
                                 "Server failed to acknowledge scaling warning".to_string(),
                             ));
                         }
                     },
                     Err(e) => {
-                        eprintln!(
+                        log::error!(
                             "[ZmqClient] Failed to parse scaling warning response: {}",
                             e
                         );
@@ -1588,7 +1752,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
             }
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "[ZmqClient] Failed to receive scaling warning response: {}",
                     e
                 );
@@ -1622,7 +1786,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ScalingOperation::ScaleIn => "scale_in",
         };
 
-        println!(
+        log::info!(
             "[ZmqClient] Scaling complete notification send for {}",
             operation_type
         );
@@ -1644,7 +1808,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending scaling complete to {}",
             training_scaling_server_address
         );
@@ -1705,10 +1869,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 0,
             ) {
             Ok(_) => {
-                println!("[ZmqClient] Scaling complete sent successfully");
+                log::info!("[ZmqClient] Scaling complete sent successfully");
             }
             Err(e) => {
-                eprintln!("[ZmqClient] Failed to send scaling complete: {}", e);
+                log::error!("[ZmqClient] Failed to send scaling complete: {}", e);
                 return Err(TransportError::SendScalingCompleteError(format!(
                     "Failed to send scaling complete: {}",
                     e
@@ -1728,14 +1892,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         {
             Ok(message_parts) => {
                 if message_parts.len() < 2 {
-                    eprintln!("[ZmqClient] Malformed scaling complete response");
+                    log::error!("[ZmqClient] Malformed scaling complete response");
                     return Err(TransportError::SendScalingCompleteError(
                         "Malformed scaling complete response".to_string(),
                     ));
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Scaling complete response: {}",
                     String::from_utf8_lossy(response_bytes)
                 );
@@ -1743,17 +1907,19 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server acknowledged scaling complete");
+                            log::info!("[ZmqClient] Server acknowledged scaling complete");
                         }
                         ServerResponse::Failure => {
-                            println!("[ZmqClient] Server failed to acknowledge scaling complete");
+                            log::error!(
+                                "[ZmqClient] Server failed to acknowledge scaling complete"
+                            );
                             return Err(TransportError::SendScalingCompleteError(
                                 "Server failed to acknowledge scaling complete".to_string(),
                             ));
                         }
                     },
                     Err(e) => {
-                        eprintln!(
+                        log::error!(
                             "[ZmqClient] Failed to parse scaling complete response: {}",
                             e
                         );
@@ -1765,7 +1931,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
             }
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "[ZmqClient] Failed to receive scaling complete response: {}",
                     e
                 );
@@ -1793,7 +1959,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             ));
         }
 
-        println!(
+        log::info!(
             "[ZmqClient] Sending shutdown signal to {}",
             training_scaling_server_address
         );
@@ -1871,7 +2037,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 ],
                 0,
             ) {
-            Ok(_) => println!("[ZmqClient] Sent shutdown signal to server"),
+            Ok(_) => log::info!("[ZmqClient] Sent shutdown signal to server"),
             Err(e) => {
                 return Err(TransportError::SendShutdownSignalError(format!(
                     "Failed to send shutdown signal to server: {}",
@@ -1898,7 +2064,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 }
 
                 let response_bytes: &Vec<u8> = &message_parts[1];
-                println!(
+                log::info!(
                     "[ZmqClient] Shutdown signal response: {}",
                     String::from_utf8_lossy(response_bytes)
                 );
@@ -1906,33 +2072,147 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                 match String::from_utf8_lossy(response_bytes).parse::<i64>() {
                     Ok(value) => match ServerResponse::from_i64(value) {
                         ServerResponse::Success => {
-                            println!("[ZmqClient] Server acknowledged shutdown signal");
-                            return Ok(());
+                            log::info!("[ZmqClient] Server acknowledged shutdown signal");
+                            Ok(())
                         }
                         ServerResponse::Failure => {
-                            println!("[ZmqClient] Server failed to acknowledge shutdown signal");
-                            return Err(TransportError::SendShutdownSignalError(
+                            log::error!("[ZmqClient] Server failed to acknowledge shutdown signal");
+                            Err(TransportError::SendShutdownSignalError(
                                 "Server failed to acknowledge shutdown signal".to_string(),
-                            ));
+                            ))
                         }
                     },
-                    Err(e) => {
-                        return Err(TransportError::SendShutdownSignalError(format!(
-                            "Failed to parse shutdown signal response: {}",
-                            e
-                        )));
-                    }
+                    Err(e) => Err(TransportError::SendShutdownSignalError(format!(
+                        "Failed to parse shutdown signal response: {}",
+                        e
+                    ))),
                 }
             }
-            Err(e) => {
-                return Err(TransportError::SendShutdownSignalError(format!(
-                    "Failed to receive shutdown signal from server: {}",
-                    e
-                )));
-            }
+            Err(e) => Err(TransportError::SendShutdownSignalError(format!(
+                "Failed to receive shutdown signal from server: {}",
+                e
+            ))),
         }
     }
 }
 
-#[cfg(tests)]
-mod tests {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_model_update_message_parts(
+        actor_id_bytes: [u8; 16],
+        version: i64,
+        model_bytes: &[u8],
+    ) -> Vec<Vec<u8>> {
+        vec![
+            b"model-update".to_vec(),
+            model_bytes.to_vec(),
+            actor_id_bytes.to_vec(),
+            version.to_be_bytes().to_vec(),
+        ]
+    }
+
+    #[test]
+    fn build_routed_model_update_message_parses_versioned_frames() {
+        let message_parts = make_model_update_message_parts([1; 16], 7, &[10, 20]);
+
+        let routed_message = build_routed_model_update_message(&message_parts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(routed_message.actor_id, Uuid::from_bytes([1; 16]));
+        assert!(matches!(
+            routed_message.protocol,
+            RoutingProtocol::ModelUpdate
+        ));
+        match routed_message.payload {
+            RoutedPayload::ModelUpdate {
+                model_bytes,
+                version,
+            } => {
+                assert_eq!(model_bytes, vec![10, 20]);
+                assert_eq!(version, 7);
+            }
+            _ => panic!("expected model update payload"),
+        }
+    }
+
+    #[test]
+    fn build_routed_model_update_message_rejects_missing_version_frame() {
+        let message_parts = vec![b"model-update".to_vec(), vec![10, 20], vec![1; 16]];
+
+        let err = match build_routed_model_update_message(&message_parts) {
+            Ok(_) => panic!("expected malformed message to return an error"),
+            Err(err) => err,
+        };
+
+        match err {
+            TransportError::ListenForModelError(message) => {
+                assert_eq!(message, "Malformed model update response");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn build_routed_model_update_message_rejects_invalid_version_frame_length() {
+        let mut message_parts = make_model_update_message_parts([1; 16], 7, &[10, 20]);
+        message_parts[3] = vec![1, 2, 3, 4];
+
+        let err = match build_routed_model_update_message(&message_parts) {
+            Ok(_) => panic!("expected malformed version frame to return an error"),
+            Err(err) => err,
+        };
+
+        match err {
+            TransportError::ListenForModelError(message) => {
+                assert_eq!(
+                    message,
+                    "Malformed model update response: invalid version byte length: expected 8, got 4"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn register_and_stop_model_listener_updates_flag() {
+        let pool = ZmqPool::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+
+        let listener_shutdown = pool.register_model_listener(&receiver_id);
+        assert!(!listener_shutdown.load(Ordering::SeqCst));
+
+        pool.stop_model_listener(&receiver_id);
+
+        assert!(listener_shutdown.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn begin_shutdown_marks_transport_and_active_listeners() {
+        let pool = ZmqPool::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+        let listener_shutdown = pool.register_model_listener(&receiver_id);
+
+        pool.begin_shutdown();
+
+        assert!(pool.is_shutting_down());
+        assert!(listener_shutdown.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn unregister_model_listener_removes_flag_entry() {
+        let pool = ZmqPool::new(Arc::from("test-client"));
+        let receiver_id = Uuid::new_v4();
+
+        let _ = pool.register_model_listener(&receiver_id);
+        pool.unregister_model_listener(&receiver_id);
+
+        assert!(
+            pool.model_listener_shutdown_flags
+                .get(&receiver_id)
+                .is_none()
+        );
+    }
+}

@@ -1,5 +1,5 @@
 {
-    "model_file": "client_model.pt",
+    "model_file": "server_model.pt",
     "model_type": "pt",
     "input_dtype": { "NdArray": "F32" },
     "output_dtype": { "NdArray": "F32" },

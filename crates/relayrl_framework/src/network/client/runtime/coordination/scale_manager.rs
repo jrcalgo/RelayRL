@@ -1,15 +1,18 @@
+//! Runtime scaling and router management.
+//!
+//! This module owns scalable router workers and the supporting runtime components that feed actor
+//! inboxes and trajectory sinks.
+
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::AlgorithmArgs;
-use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode, uses_local_file_writing
-};
+use crate::network::client::agent::{ActorInferenceMode, AlgorithmArgs, ModelMode};
+use crate::network::client::agent::{ActorTrainingDataMode, ClientModes, uses_local_file_writing};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    LifeCycleManager, LifeCycleManagerError,
+    LifecycleManager, LifecycleManagerError,
 };
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -23,27 +26,29 @@ use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, Tra
 use crate::network::client::runtime::router::receiver::{
     ClientTransportModelReceiver, TransportReceiverError,
 };
+use crate::network::client::runtime::router::router_dispatcher::RouterDispatcher;
 use crate::network::client::runtime::router::{
     RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
 };
-use crate::network::client::runtime::router_dispatcher::RouterDispatcher;
 use crate::utilities::configuration::Algorithm;
-use crate::utilities::configuration::HyperparameterConfig;
+#[cfg(feature = "metrics")]
+use crate::utilities::observability::metrics::MetricsManager;
 
-use active_uuid_registry::{NamespaceString, ContextString, registry_uuid::Uuid, UuidPoolError};
 use active_uuid_registry::interface::{
-    add_id, get_context_entries, get_namespace_entries, remove_id, remove_namespace,
-    reserve_id_with, reserve_namespace,
+    get_namespace_entries, remove_id, remove_namespace, reserve_id_with, reserve_namespace,
 };
+use active_uuid_registry::{ContextString, NamespaceString, UuidPoolError, registry_uuid::Uuid};
 use burn_tensor::backend::Backend;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::tensor::BackendMatcher;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::model::ModelModule;
 
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Receiver;
@@ -51,6 +56,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum ScaleManagerError {
     #[error(transparent)]
     UuidPoolError(#[from] UuidPoolError),
@@ -60,7 +66,7 @@ pub enum ScaleManagerError {
     #[error("Scaling operation not supported: {0}")]
     ScalingOperationNotSupportedError(String),
     #[error("Failed to subscribe to shutdown: {0}")]
-    SubscribeShutdownError(#[source] LifeCycleManagerError),
+    SubscribeShutdownError(#[source] LifecycleManagerError),
     #[error("Failed to spawn central filter: {0}")]
     SpawnCentralFilterError(String),
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -78,6 +84,8 @@ pub enum ScaleManagerError {
     SendFlagLastActionMessageError(String),
     #[error("Failed to send model version message: {0}")]
     SendModelVersionMessageError(String),
+    #[error("Failed to send model update message: {0}")]
+    SendModelUpdateMessageError(String),
     #[error("Failed to receive model version response: {0}")]
     ReceiveModelVersionResponseError(String),
     #[error("Failed to get config: {0}")]
@@ -85,22 +93,23 @@ pub enum ScaleManagerError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) enum ScalingOperation {
     ScaleOut,
     ScaleIn,
 }
 
 #[derive(Clone)]
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) enum ProcessInitFlag<B: Backend + BackendMatcher<Backend = B>> {
     TrainingAlgorithmInit,
     InferenceModelInit(Option<ModelModule<B>>),
 }
 
 pub(crate) struct RouterRuntimeParams {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) receiver_loop: Option<JoinHandle<()>>,
     pub(crate) filter_loop: JoinHandle<()>,
     pub(crate) trajectory_buffer_loop: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
     pub(crate) filter_tx: Sender<RoutedMessage>,
     pub(crate) trajectory_buffer_tx: Sender<RoutedMessage>,
 }
@@ -115,6 +124,7 @@ pub(crate) struct ScaleManager<
 > {
     client_namespace: Arc<str>,
     router_namespace_counter: u32,
+    #[allow(unused)]
     pub(crate) scaling_id: ScaleManagerUuid,
     shared_client_modes: Arc<ClientModes>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -129,19 +139,24 @@ pub(crate) struct ScaleManager<
     pub(crate) scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub(crate) router_receiver_loop: Option<JoinHandle<()>>,
     pub(crate) router_dispatcher: Option<JoinHandle<()>>,
     pub(crate) router_filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
     pub(crate) runtime_params: Option<DashMap<RouterNamespace, RouterRuntimeParams>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     codec: CodecConfig,
     cached_hyperparameters: HashMap<Algorithm, HyperparameterArgs>,
-    lifecycle: Option<LifeCycleManager>,
+    lifecycle: Option<LifecycleManager>,
 }
+
+// ===== Scale manager construction and teardown =====
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ScaleManager<B, D_IN, D_OUT>
 {
-    pub(crate) fn new(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new(
         client_namespace: Arc<str>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -157,7 +172,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
         >,
-        lifecycle: LifeCycleManager,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
+        lifecycle: LifecycleManager,
     ) -> Result<Self, ScaleManagerError> {
         let scaling_id: ScaleManagerUuid = reserve_id_with(
             client_namespace.as_ref(),
@@ -173,13 +189,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let dispatcher = RouterDispatcher::new(
             global_dispatcher_rx,
             router_filter_channels.clone(),
-            shared_state.clone(),
-        );
+            shared_state.read().await.shared_router_state.clone(),
+            #[cfg(feature = "metrics")]
+            metrics,
+        )
+        .await;
 
-        let dispatcher: RouterDispatcher<B, D_IN, D_OUT> = match lifecycle.subscribe_shutdown() {
+        let dispatcher: RouterDispatcher = match lifecycle.subscribe_shutdown() {
             Ok(rx) => dispatcher.with_shutdown(rx),
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "[ScaleManager] Failed to subscribe dispatcher to shutdown: {}",
                     e
                 );
@@ -189,7 +208,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let router_dispatcher: Option<JoinHandle<()>> = Some(tokio::spawn(async move {
             if let Err(e) = dispatcher.spawn_loop().await {
-                eprintln!("[ScaleManager] RouterDispatcher error: {}", e);
+                log::error!("[ScaleManager] RouterDispatcher error: {}", e);
             }
         }));
 
@@ -211,6 +230,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             training_dispatcher,
             router_dispatcher,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            router_receiver_loop: None,
             router_filter_channels,
             runtime_params: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -237,7 +258,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
             self.scale_in(router_count).await?;
         }
-        self.router_dispatcher.take().map(|handle| handle.abort());
+        if let Some(handle) = self.router_dispatcher.take() {
+            handle.abort()
+        };
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        if let Some(handle) = self.router_receiver_loop.take() {
+            handle.abort()
+        };
         self.router_filter_channels.clear();
         let _ = self.runtime_params.take();
         let _ = self.lifecycle.take();
@@ -276,9 +303,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn send_shutdown_signal_to_server(
-        &mut self,
-    ) -> Result<(), ScaleManagerError> {
+    pub(crate) async fn send_shutdown_signal_to_server(&mut self) -> Result<(), ScaleManagerError> {
         if let (Some(scaling_dispatcher), Some(transport_addresses)) =
             (&self.scaling_dispatcher, &self.shared_transport_addresses)
         {
@@ -318,7 +343,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ProcessInitFlag::TrainingAlgorithmInit => {
                     let algorithm_args = self.shared_algorithm_args.algorithm.clone();
 
-                    let hyperparamter_args =
+                    let hyperparameter_args =
                         if let Some(param_args) = &self.shared_algorithm_args.hyperparams {
                             self.cached_hyperparameters
                                 .insert(algorithm_args.clone(), param_args.clone());
@@ -335,13 +360,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         match self.shared_client_modes.actor_training_data_mode.clone() {
                             ActorTrainingDataMode::Online(params) => params.model_mode,
                             ActorTrainingDataMode::Hybrid(params, _) => params.model_mode,
-                            _ => ModelMode::Independent, // realistically, this should never happen due to client mode gating
+                            _ => ModelMode::Independent,
                         };
 
                     ProcessInitRequest::TrainingAlgorithmInit(
                         algorithm_model_mode,
                         algorithm_args,
-                        hyperparamter_args,
+                        hyperparameter_args,
                     )
                 }
                 ProcessInitFlag::InferenceModelInit(default_model) => {
@@ -371,12 +396,74 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    async fn start_transport_receiver(&mut self) -> Result<(), ScaleManagerError> {
+        if self.router_receiver_loop.is_some() {
+            log::debug!("[ScaleManager] Transport receiver loop already started");
+            return Ok(());
+        }
+
+        match (&self.training_dispatcher, &self.shared_transport_addresses) {
+            (Some(training_dispatcher), Some(transport_addresses)) => {
+                let _ = reserve_id_with(
+                    self.client_namespace.as_ref(),
+                    crate::network::RECEIVER_CONTEXT,
+                    1,
+                    100,
+                )
+                .map_err(ScaleManagerError::from)?;
+
+                let global_dispatcher_tx =
+                    self.shared_state.read().await.global_dispatcher_tx.clone();
+                let receiver = ClientTransportModelReceiver::new(
+                    self.client_namespace.clone(),
+                    global_dispatcher_tx,
+                    self.shared_state.clone(),
+                    transport_addresses.clone(),
+                    training_dispatcher.clone(),
+                );
+
+                let receiver = if let Some(lc) = &self.lifecycle {
+                    match lc.subscribe_shutdown() {
+                        Ok(rx) => receiver.with_shutdown(rx),
+                        Err(e) => {
+                            log::error!(
+                                "[ScaleManager] Failed to subscribe transport receiver to shutdown: {}",
+                                e
+                            );
+                            receiver
+                        }
+                    }
+                } else {
+                    receiver
+                };
+
+                log::info!(
+                    "[ScaleManager] Spawning transport receiver loop for client namespace: {}",
+                    self.client_namespace
+                );
+                let receiver_loop = Self::spawn_transport_receiver(receiver).await;
+                self.router_receiver_loop = Some(receiver_loop);
+            }
+            _ => {
+                log::debug!(
+                    "[ScaleManager] Transport receiver loop not started; training dispatcher or server addresses not found"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) async fn scale_out(
         &mut self,
         router_add: u32,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
     ) -> Result<(), ScaleManagerError> {
         let router_add = router_add as usize;
+
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        self.start_transport_receiver().await?;
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let Some(transport_addresses) = self.get_transport_addresses()? {
@@ -419,40 +506,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let (trajectory_buffer_tx, trajectory_buffer_rx) =
                 tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let receiver = match (&self.training_dispatcher, &self.shared_transport_addresses) {
-                (Some(training_dispatcher), Some(transport_addresses)) => {
-                    let _ = reserve_id_with(
-                        router_namespace.as_ref(),
-                        crate::network::RECEIVER_CONTEXT,
-                        1,
-                        100,
-                    )
-                    .map_err(ScaleManagerError::from)?;
-
-                    let global_dispatcher_tx =
-                        self.shared_state.read().await.global_dispatcher_tx.clone();
-                    let receiver_init = ClientTransportModelReceiver::new(
-                        router_namespace.clone(),
-                        global_dispatcher_tx,
-                        transport_addresses.clone(),
-                        training_dispatcher.clone(),
-                    );
-
-                    if let Some(lc) = &self.lifecycle {
-                        Some(
-                            receiver_init.with_shutdown(
-                                lc.subscribe_shutdown()
-                                    .map_err(ScaleManagerError::SubscribeShutdownError)?,
-                            ),
-                        )
-                    } else {
-                        Some(receiver_init)
-                    }
-                }
-                _ => None,
-            };
-
             let filter = {
                 let shared_filter_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
                     self.shared_state.clone();
@@ -472,6 +525,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
             };
 
+            let mut buffer_actor_count: Option<Arc<AtomicUsize>> = None;
             let buffer: Option<ClientTrajectoryBuffer<B>> = {
                 if self.shared_client_modes.actor_training_data_mode
                     != ActorTrainingDataMode::Disabled
@@ -514,44 +568,38 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         );
                     };
 
+                    let shared_max_traj_length = self
+                        .lifecycle
+                        .as_ref()
+                        .map(|lc| lc.get_max_traj_length())
+                        .unwrap_or_else(|| Arc::new(RwLock::new(1000)));
+                    let shared_actor_count =
+                        self.shared_state.read().await.shared_actor_count.clone();
+                    buffer_init.with_semaphore_capacity(shared_max_traj_length, shared_actor_count);
+
                     Some(buffer_init)
                 } else {
                     None
                 }
             };
 
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let receiver_loop: Option<JoinHandle<()>> = if let Some(rcv) = receiver {
-                Some(Self::spawn_transport_receiver(rcv).await)
-            } else {
-                None
-            };
             let filter_loop: JoinHandle<()> = Self::spawn_central_filter(filter).await;
-            let trajectory_buffer_loop: Option<JoinHandle<()>> = if let Some(buf) = buffer {
-                Some(Self::spawn_trajectory_buffer(buf))
-            } else {
-                None
-            };
+            let trajectory_buffer_loop: Option<JoinHandle<()>> =
+                buffer.map(Self::spawn_trajectory_buffer);
 
             let runtime_params = RouterRuntimeParams {
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                receiver_loop,
                 filter_loop,
                 trajectory_buffer_loop,
                 filter_tx: filter_tx.clone(),
                 trajectory_buffer_tx,
             };
 
-            if let Some(ref params) = self.runtime_params {
-                if let Some(old_params) = params.insert(router_namespace.clone(), runtime_params) {
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    if let Some(h) = old_params.receiver_loop {
-                        h.abort();
-                    }
-                    old_params.filter_loop.abort();
-                    if let Some(h) = old_params.trajectory_buffer_loop {
-                        h.abort();
-                    }
+            if let Some(ref params) = self.runtime_params
+                && let Some(old_params) = params.insert(router_namespace.clone(), runtime_params)
+            {
+                old_params.filter_loop.abort();
+                if let Some(h) = old_params.trajectory_buffer_loop {
+                    h.abort();
                 }
             }
 
@@ -567,12 +615,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .unwrap_or(0);
 
         if current_router_count != initial_router_count + router_add {
-            eprintln!(
+            log::error!(
                 "Router creation failed: expected {} routers, but have {}",
                 initial_router_count + router_add,
                 current_router_count
             );
-            eprintln!("Rolling back newly created routers...");
+            log::warn!("Rolling back newly created routers...");
             self.rollback_routers(&new_router_namespaces).await;
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -615,7 +663,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 .send_scaling_complete(ScalingOperation::ScaleOut, transport_addresses)
                 .await
             {
-                eprintln!(
+                log::warn!(
                     "Rolling back: removing newly created routers and restoring actor mappings..."
                 );
 
@@ -629,7 +677,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 self.rollback_routers(&new_router_namespaces).await;
 
-                eprintln!(
+                log::error!(
                     "[ScaleManager] Failed to send scaling confirmation via transport: {}.\n\
                     Server was not notified of scaling completion.\n\
                     Rollback complete. System restored to pre-scaling router state.",
@@ -646,9 +694,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
         }
 
-        println!(
+        log::info!(
             "Scale up successful: {} new router(s) added, total routers: {}",
-            router_add, current_router_count
+            router_add,
+            current_router_count
         );
 
         Ok(())
@@ -671,7 +720,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         if self.runtime_params.is_none() {
-            println!("No routers to scale down.");
+            log::warn!("No routers to scale down.");
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             {
                 if let Some(transport_addresses) = transport_addresses_opt {
@@ -699,9 +748,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .len();
 
         if initial_router_count < router_remove {
-            eprintln!(
+            log::error!(
                 "Cannot remove {} routers: only {} routers exist",
-                router_remove, initial_router_count
+                router_remove,
+                initial_router_count
             );
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             if let Some(transport_addresses) = transport_addresses_opt {
@@ -742,7 +792,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         };
 
         if current_router_count != initial_router_count - router_remove {
-            eprintln!(
+            log::error!(
                 "Router removal verification failed: expected {} routers, but have {}",
                 initial_router_count - router_remove,
                 current_router_count
@@ -806,7 +856,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let state = self.shared_state.write().await;
                     state.restore_actor_router_mappings(old_actor_mappings);
                 }
-                eprintln!(
+                log::error!(
                     "[ScaleManager] Failed to send scaling confirmation via transport: {}.\n\
                     Full rollback complete. All routers restored.",
                     e
@@ -822,11 +872,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Phase 4: Server confirmed — safe to perform destructive teardown.
         for (router_namespace, router_params) in &removed_routers {
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            if let Some(receiver_loop) = &router_params.receiver_loop {
-                receiver_loop.abort();
-            }
-
             router_params.filter_loop.abort();
 
             if let Some(trajectory_buffer_loop) = &router_params.trajectory_buffer_loop {
@@ -837,21 +882,22 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 get_namespace_entries(router_namespace.as_ref())?;
 
             for (_, context, id) in namespace_entries.iter() {
-                remove_id(router_namespace, context, *id);
+                let _ = remove_id(router_namespace, context, *id);
             }
 
             remove_namespace(router_namespace.as_ref());
             self.router_filter_channels.remove(router_namespace);
 
-            println!(
+            log::info!(
                 "Router namespace {} removed from registry.",
                 router_namespace
             );
         }
 
-        println!(
+        log::info!(
             "Scale down successful: {} router(s) removed, total routers: {}",
-            router_remove, current_router_count
+            router_remove,
+            current_router_count
         );
         Ok(())
     }
@@ -860,11 +906,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         if let Some(ref params) = self.runtime_params {
             for router_namespace in router_namespaces {
                 if let Some((_, router_params)) = params.remove(router_namespace) {
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    if let Some(receiver_loop) = &router_params.receiver_loop {
-                        receiver_loop.abort();
-                    }
-
                     router_params.filter_loop.abort();
 
                     if let Some(trajectory_buffer_loop) = &router_params.trajectory_buffer_loop {
@@ -874,7 +915,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     remove_namespace(router_namespace.as_ref());
                     self.router_filter_channels.remove(router_namespace);
 
-                    eprintln!("Rolled back router with namespace tag {}", router_namespace);
+                    log::warn!("Rolled back router with namespace tag {}", router_namespace);
                 }
             }
         }
@@ -951,18 +992,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn spawn_central_filter(filter: ClientCentralFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = filter.spawn_loop().await {
-                eprintln!("[ScaleManager] Central filter error: {}", e);
+                log::error!("[ScaleManager] Central filter error: {}", e);
             }
         })
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn spawn_transport_receiver(
-        mut receiver: ClientTransportModelReceiver<B>,
+        mut receiver: ClientTransportModelReceiver<B, D_IN, D_OUT>,
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = receiver.spawn_loop().await {
-                eprintln!("[ScaleManager] Transport receiver error: {}", e);
+                log::error!("[ScaleManager] Transport receiver error: {}", e);
             }
         })
     }
@@ -970,11 +1011,27 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     fn spawn_trajectory_buffer(mut buffer: ClientTrajectoryBuffer<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = buffer.spawn_loop() {
-                eprintln!("[ScaleManager] Trajectory buffer error: {}", e);
+                log::error!("[ScaleManager] Trajectory buffer error: {}", e);
             }
         })
     }
 }
 
 #[cfg(test)]
-mod tests {}
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn scaling_not_supported_error_display_contains_message() {
+        let err = ScaleManagerError::ScalingOperationNotSupportedError("test message".into());
+        let display = format!("{}", err);
+        assert!(display.contains("test message"));
+    }
+
+    #[test]
+    fn get_router_runtime_params_error_display_contains_message() {
+        let err = ScaleManagerError::GetRouterRuntimeParamsError("x".into());
+        let display = format!("{}", err);
+        assert!(display.contains("x"));
+    }
+}
