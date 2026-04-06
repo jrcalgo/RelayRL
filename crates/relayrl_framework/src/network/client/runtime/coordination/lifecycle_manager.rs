@@ -409,13 +409,12 @@ impl LifeCycleManager {
     }
 
     pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
+        let config_update_polling_seconds =
+        *self.config_update_polling_seconds.read().await as u64;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            config_update_polling_seconds,
+        ));
         loop {
-            let config_update_polling_seconds =
-                *self.config_update_polling_seconds.read().await as u64;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                config_update_polling_seconds,
-            ));
-
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     self.handle_shutdown_signal();
