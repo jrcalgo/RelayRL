@@ -335,7 +335,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ProcessInitFlag::TrainingAlgorithmInit => {
                     let algorithm_args = self.shared_algorithm_args.algorithm.clone();
 
-                    let hyperparamter_args =
+                    let hyperparameter_args =
                         if let Some(param_args) = &self.shared_algorithm_args.hyperparams {
                             self.cached_hyperparameters
                                 .insert(algorithm_args.clone(), param_args.clone());
@@ -358,7 +358,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ProcessInitRequest::TrainingAlgorithmInit(
                         algorithm_model_mode,
                         algorithm_args,
-                        hyperparamter_args,
+                        hyperparameter_args,
                     )
                 }
                 ProcessInitFlag::InferenceModelInit(default_model) => {
