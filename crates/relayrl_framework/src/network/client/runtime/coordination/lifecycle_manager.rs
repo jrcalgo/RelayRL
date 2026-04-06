@@ -174,9 +174,34 @@ pub(crate) fn construct_metrics_otlp_endpoint(
 
 pub(crate) fn construct_local_model_path(local_model_module: &LocalModelModuleParams) -> PathBuf {
     let cwd: PathBuf = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    cwd.join(&local_model_module.directory)
-        .join(&local_model_module.model_name)
-        .join(format!(".{}", &local_model_module.format))
+
+    let directory = if !local_model_module.directory.is_empty() {
+        local_model_module.directory.clone()
+    } else {
+        log::warn!("Local model directory is empty, using default: model_module");
+        "model_module".to_string()
+    };
+
+    let model_name = if !local_model_module.model_name.is_empty() {
+        local_model_module.model_name.clone()
+    } else {
+        log::warn!("Local model name is empty, using default: client_model");
+        "client_model".to_string()
+    };
+
+    let mut module_format = local_model_module.format.clone();
+    if !module_format.is_empty() {
+        while module_format.starts_with('.') {
+            module_format = module_format[1..].to_string();
+        }
+    } else {
+        log::warn!("Local model format is empty, using default: pt");
+        module_format = "pt".to_string();
+    }
+
+    cwd.join(&directory)
+        .join(&model_name)
+        .join(format!(".{}", &module_format))
 }
 
 pub(crate) fn construct_trajectory_file_output(
