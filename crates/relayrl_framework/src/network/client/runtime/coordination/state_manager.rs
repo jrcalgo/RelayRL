@@ -383,18 +383,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ),
             );
 
+            while active_uuid_registry::interface::list_ids(self.client_namespace.as_ref(), crate::network::ACTOR_CONTEXT).contains(&actor_id) {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+
             if let Ok(handle) = handle {
                 handle.abort();
             } else {
                 continue;
             }
-
-            remove_id(
-                self.client_namespace.as_ref(),
-                crate::network::ACTOR_CONTEXT,
-                actor_id,
-            )
-            .map_err(StateManagerError::from)?;
         }
 
         Ok(())
@@ -541,7 +538,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .collect()
     }
 
-    fn sorted_actor_ids_for_model_updates(&self, actor_ids: Option<&[ActorUuid]>) -> Vec<ActorUuid> {
+    fn sorted_actor_ids_for_model_updates(
+        &self,
+        actor_ids: Option<&[ActorUuid]>,
+    ) -> Vec<ActorUuid> {
         let mut actor_ids = match actor_ids {
             Some(ids) => ids
                 .iter()
@@ -1020,9 +1020,10 @@ mod unit_tests {
             .insert(known_id, Arc::new(tokio::spawn(async {})));
 
         let subset = vec![unknown_id];
-        assert!(sm
-            .model_update_dispatch_targets_for_subset(Some(&subset))
-            .is_empty());
+        assert!(
+            sm.model_update_dispatch_targets_for_subset(Some(&subset))
+                .is_empty()
+        );
 
         let subset = vec![unknown_id, known_id];
         assert_eq!(

@@ -58,6 +58,8 @@ pub enum ActorError {
     TypeConversionError(String),
     #[error("System error: {0}")]
     SystemError(String),
+    #[error(transparent)]
+    UuidPoolError(#[from] active_uuid_registry::UuidPoolError),
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
@@ -706,6 +708,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             let _ = self.shared_tx_to_buffer.send(send_traj_msg).await;
         }
+
+        active_uuid_registry::interface::remove_id(
+            self.client_namespace.as_ref(),
+            crate::network::ACTOR_CONTEXT,
+            self.actor_id,
+        )
+        .map_err(ActorError::from)?;
 
         Ok(())
     }
