@@ -24,10 +24,10 @@ use relayrl_types::model::{HotReloadableModel, ModelModule};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
+use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use burn_tensor::backend::Backend;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -393,7 +393,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             )
             .contains(&actor_id)
             {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    tokio::time::sleep(std::time::Duration::from_secs(1)),
+                )
+                .await
+                .map_err(|_| {
+                    StateManagerError::ShutdownAllActorsError(format!(
+                        "[StateManager] Shutdown all actors timeout: {}",
+                        actor_id
+                    ))
+                })?;
             }
 
             if let Ok(handle) = handle {
@@ -431,7 +441,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             id,
         )
         .map_err(StateManagerError::from)?;
-    
+
         Ok(())
     }
 
