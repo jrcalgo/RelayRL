@@ -449,16 +449,16 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    #[cfg(all(
-        any(feature = "nats-transport", feature = "zmq-transport"),
-        not(feature = "metrics")
-    ))]
     pub(crate) async fn handle_config_change(
-        &self,
+        &self, 
         path: PathBuf,
     ) -> Result<(), LifeCycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);
 
+        #[cfg(all(
+            any(feature = "nats-transport", feature = "zmq-transport"),
+            not(feature = "metrics")
+        ))]
         tokio::try_join!(
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
@@ -470,19 +470,10 @@ impl LifeCycleManager {
             LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
         })?;
 
-        Ok(())
-    }
-
-    #[cfg(all(
-        any(feature = "nats-transport", feature = "zmq-transport"),
-        feature = "metrics"
-    ))]
-    pub(crate) async fn handle_config_change(
-        &self,
-        path: PathBuf,
-    ) -> Result<(), LifeCycleManagerError> {
-        let new_config = ClientConfigLoader::load_config(&path);
-
+        #[cfg(all(
+            any(feature = "nats-transport", feature = "zmq-transport"),
+            feature = "metrics"
+        ))]
         tokio::try_join!(
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
@@ -498,19 +489,10 @@ impl LifeCycleManager {
             LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
         })?;
 
-        Ok(())
-    }
-
-    #[cfg(all(
-        not(any(feature = "nats-transport", feature = "zmq-transport")),
-        not(feature = "metrics")
-    ))]
-    pub(crate) async fn handle_config_change(
-        &self,
-        path: PathBuf,
-    ) -> Result<(), LifeCycleManagerError> {
-        let new_config = ClientConfigLoader::load_config(&path);
-
+        #[cfg(all(
+            not(any(feature = "nats-transport", feature = "zmq-transport")),
+            not(feature = "metrics")
+        ))]
         tokio::try_join!(
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
@@ -520,19 +502,10 @@ impl LifeCycleManager {
             LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
         })?;
 
-        Ok(())
-    }
-
-    #[cfg(all(
-        not(any(feature = "nats-transport", feature = "zmq-transport")),
-        feature = "metrics"
-    ))]
-    pub(crate) async fn handle_config_change(
-        &self,
-        path: PathBuf,
-    ) -> Result<(), LifeCycleManagerError> {
-        let new_config = ClientConfigLoader::load_config(&path);
-
+        #[cfg(all(
+            not(any(feature = "nats-transport", feature = "zmq-transport")),
+            feature = "metrics"
+        ))]
         tokio::try_join!(
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
