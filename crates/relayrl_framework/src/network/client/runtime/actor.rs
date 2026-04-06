@@ -838,6 +838,7 @@ mod unit_tests {
     async fn spawn_loop_exits_on_shutdown_message() {
         let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
+        active_uuid_registry::interface::add_id("test-actor-namespace", crate::network::ACTOR_CONTEXT, actor_id).unwrap();
         let handle = tokio::spawn(async move { actor.spawn_loop().await });
 
         tx.send(build_msg(
@@ -984,6 +985,7 @@ mod unit_tests {
         for _ in 0..3 {
             let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
             let actor_id = actor.actor_id;
+            active_uuid_registry::interface::add_id("test-actor-namespace", crate::network::ACTOR_CONTEXT, actor_id).unwrap();
             let h = tokio::spawn(async move { actor.spawn_loop().await });
             // Immediately shut each actor down
             tx.send(build_msg(
