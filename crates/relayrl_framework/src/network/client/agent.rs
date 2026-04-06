@@ -172,16 +172,9 @@ impl LocalTrajectoryFileParams {
         directory: PathBuf,
         file_type: LocalTrajectoryFileType,
     ) -> Result<Self, ClientError> {
-        if directory.to_str().as_slice().is_empty() {
+        if directory.as_os_str().is_empty() {
             return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
                 "Path '{}' is empty",
-                directory.display()
-            )));
-        }
-
-        if directory.extension().is_some() {
-            return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
-                "Path '{}' appears to be a file, not a directory",
                 directory.display()
             )));
         }
@@ -189,6 +182,7 @@ impl LocalTrajectoryFileParams {
         {
             const TOTAL_ATTEMPTS: i32 = 2;
             let mut attempts: i32 = 1;
+            // odd loop but we want to ensure the directory exists before we return :)
             while !directory.exists() {
                 // loop until directory exists (since create_dir_all can fail) or we've tried too many times
                 match std::fs::create_dir_all(&directory) {
@@ -202,6 +196,10 @@ impl LocalTrajectoryFileParams {
                     }
                 }
             }
+        }
+
+        if !directory.is_dir() {
+            return Err(ClientError::InvalidTrajectoryFileDirectory(format!("Path is not a directory, {}", directory.display().to_string())));
         }
 
         Ok(Self {
