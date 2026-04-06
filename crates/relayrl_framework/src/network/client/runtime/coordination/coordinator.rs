@@ -45,7 +45,7 @@ use thiserror::Error;
 use burn_tensor::backend::Backend;
 
 use active_uuid_registry::interface::{
-    clear_namespace, remove_id, remove_namespace, reserve_id_with, reserve_namespace,
+    clear_namespace, remove_namespace, reserve_id_with, reserve_namespace,
 };
 use active_uuid_registry::{UuidPoolError, registry_uuid::Uuid};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -891,9 +891,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (router receivers, router senders, central filters)
                 // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes)
-                if let Err(e) = params.lifecycle.shutdown() {
-                    return Err(CoordinatorError::LifeCycleManagerError(e));
-                }
+                params.lifecycle.shutdown();
 
                 // joins router dispatcher and scales down all routers, pretty redundant but just in case
                 params.scaling.clear_runtime_components().await?;
@@ -1106,7 +1104,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .remove_actor(id)
                     .map_err(CoordinatorError::from)?;
-                
+
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if send_ids {
                     let actor_entries = get_context_entries(
@@ -1374,8 +1372,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         model: ModelModule<B>,
         actor_ids: Option<Vec<ActorUuid>>,
     ) -> Result<(), CoordinatorError> {
-        let Some((global_dispatcher_tx, target_actor_ids, local_model_path)) =
-            self.prepare_model_update_dispatch(actor_ids.as_deref()).await?
+        let Some((global_dispatcher_tx, target_actor_ids, local_model_path)) = self
+            .prepare_model_update_dispatch(actor_ids.as_deref())
+            .await?
         else {
             return Ok(());
         };

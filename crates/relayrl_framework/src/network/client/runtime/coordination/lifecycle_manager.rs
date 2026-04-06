@@ -403,9 +403,9 @@ impl LifeCycleManager {
         Ok(())
     }
 
-    pub(crate) fn shutdown(&mut self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) fn shutdown(&mut self){
         self.shutdown_notifier.notify_waiters();
-        self.handle_shutdown_signal()
+        self.handle_shutdown_signal();
     }
 
     pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
@@ -418,11 +418,11 @@ impl LifeCycleManager {
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
-                    self.handle_shutdown_signal()?;
+                    self.handle_shutdown_signal();
                     break Ok(());
                 }
                 _ = self.shutdown_notifier.notified() => {
-                    self.handle_shutdown_signal()?;
+                    self.handle_shutdown_signal();
                     break Ok(());
                 }
                 _ = interval.tick() => {
@@ -440,13 +440,10 @@ impl LifeCycleManager {
         }
     }
 
-    pub(crate) fn handle_shutdown_signal(&self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) fn handle_shutdown_signal(&self){
         if let Err(e) = self.shutdown_tx.send(()) {
-            return Err(LifeCycleManagerError::SendShutdownSignalError(
-                format!("Failed to send shutdown signal. No active receivers: {}", e).to_string(),
-            ));
+            log::error!("[LifeCycleManager] Failed to send shutdown signal. No active receivers: {}", e);
         }
-        Ok(())
     }
 
     pub(crate) async fn handle_config_change(
