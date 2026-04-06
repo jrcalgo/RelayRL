@@ -596,6 +596,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.canonical_model_update_target_from_sorted_actor_ids(actor_id, &sorted_actor_ids)
     }
 
+    #[cfg(test)]
     pub(crate) fn model_update_dispatch_targets(&self) -> Vec<ActorUuid> {
         self.model_update_dispatch_targets_for_subset(None)
     }
