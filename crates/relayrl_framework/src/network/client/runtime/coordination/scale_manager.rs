@@ -43,6 +43,7 @@ use relayrl_types::model::ModelModule;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Receiver;
@@ -106,6 +107,7 @@ pub(crate) struct RouterRuntimeParams {
     #[allow(dead_code)]
     pub(crate) filter_tx: Sender<RoutedMessage>,
     pub(crate) trajectory_buffer_tx: Sender<RoutedMessage>,
+    pub(crate) trajectory_buffer_actor_count: Option<Arc<AtomicUsize>>,
 }
 
 pub type RouterNamespace = Arc<str>;
@@ -517,6 +519,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
             };
 
+            let mut buffer_actor_count: Option<Arc<AtomicUsize>> = None;
             let buffer: Option<ClientTrajectoryBuffer<B>> = {
                 if self.shared_client_modes.actor_training_data_mode
                     != ActorTrainingDataMode::Disabled
@@ -559,6 +562,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         );
                     };
 
+                    let shared_max_traj_length = self
+                        .lifecycle
+                        .as_ref()
+                        .map(|lc| lc.get_max_traj_length())
+                        .unwrap_or_else(|| Arc::new(RwLock::new(1000)));
+                    let actor_count = self
+                        .shared_state
+                        .read()
+                        .await
+                        .get_actor_id_list()
+                        .len()
+                        .max(1);
+                    let shared_actor_count = Arc::new(AtomicUsize::new(actor_count));
+                    buffer_actor_count = Some(shared_actor_count.clone());
+                    buffer_init
+                        .with_semaphore_capacity(shared_max_traj_length, shared_actor_count);
+
                     Some(buffer_init)
                 } else {
                     None
@@ -574,6 +594,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 trajectory_buffer_loop,
                 filter_tx: filter_tx.clone(),
                 trajectory_buffer_tx,
+                trajectory_buffer_actor_count: buffer_actor_count,
             };
 
             if let Some(ref params) = self.runtime_params

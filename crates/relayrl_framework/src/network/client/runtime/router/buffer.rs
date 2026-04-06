@@ -34,11 +34,11 @@ use std::collections::BinaryHeap;
 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 
 type PriorityRank = i64;
 
@@ -47,6 +47,7 @@ pub(crate) struct SinkQueueEntry {
     priority: PriorityRank, // lower = sooner, higher = later
     actor_id: ActorUuid,
     traj_for_processing: Arc<RelayRLTrajectory>,
+    permit: Option<Arc<OwnedSemaphorePermit>>,
 }
 
 impl Eq for SinkQueueEntry {}
@@ -103,6 +104,11 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
         shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     ) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
+    fn with_semaphore_capacity(
+        &mut self,
+        shared_max_traj_length: Arc<RwLock<usize>>,
+        shared_actor_count: Arc<AtomicUsize>,
+    ) -> &mut Self;
     fn spawn_loop(&mut self) -> Result<(), RouterError>;
     fn _compute_priority(
         actor_id: &ActorUuid,
@@ -126,6 +132,11 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
         shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     ) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
+    fn with_semaphore_capacity(
+        &mut self,
+        shared_max_traj_length: Arc<RwLock<usize>>,
+        shared_actor_count: Arc<AtomicUsize>,
+    ) -> &mut Self;
     fn spawn_loop(&mut self) -> Result<(), RouterError>;
     fn _compute_priority(
         actor_id: &ActorUuid,
@@ -170,6 +181,8 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
     shutdown: Option<broadcast::Receiver<()>>,
+    shared_max_traj_length: Option<Arc<RwLock<usize>>>,
+    shared_actor_count: Option<Arc<AtomicUsize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     codec: CodecConfig,
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
@@ -202,6 +215,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             shared_transport_addresses: None,
             shared_trajectory_file_output: None,
             shutdown: None,
+            shared_max_traj_length: None,
+            shared_actor_count: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec,
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
@@ -233,6 +248,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         self
     }
 
+    fn with_semaphore_capacity(
+        &mut self,
+        shared_max_traj_length: Arc<RwLock<usize>>,
+        shared_actor_count: Arc<AtomicUsize>,
+    ) -> &mut Self {
+        self.shared_max_traj_length = Some(shared_max_traj_length);
+        self.shared_actor_count = Some(shared_actor_count);
+        self
+    }
+
     fn spawn_loop(&mut self) -> Result<(), RouterError> {
         self.active.store(true, Ordering::SeqCst);
 
@@ -244,6 +269,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let (traj_queue_tx, mut traj_queue_rx) =
             tokio::sync::mpsc::unbounded_channel::<SinkQueueEntry>();
+
+        let (rx_semaphore, initial_semaphore_cap) =
+            match (&self.shared_max_traj_length, &self.shared_actor_count) {
+                (Some(mtl), Some(ac)) => {
+                    let cap = mtl
+                        .try_read()
+                        .map(|g| *g)
+                        .unwrap_or(1000)
+                        .saturating_mul(ac.load(Ordering::Relaxed).max(1));
+                    (Some(Arc::new(Semaphore::new(cap.max(1)))), cap)
+                }
+                _ => (None, 0),
+            };
+        let recv_max_traj_length = self.shared_max_traj_length.clone();
+        let recv_actor_count = self.shared_actor_count.clone();
 
         let actor_last_processed = self.actor_last_processed.clone();
         let shared_client_modes = self.shared_client_modes.clone();
@@ -268,6 +308,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let receiver_actor_last_processed = actor_last_processed.clone();
         let _receiver_handle = tokio::spawn(async move {
+            let mut current_semaphore_cap = initial_semaphore_cap;
             loop {
                 tokio::select! {
                     biased;
@@ -287,6 +328,23 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             Some(msg) => {
                                 // Only process SendTrajectory payloads
                                 if let RoutedPayload::SendTrajectory { timestamp, trajectory } = msg.payload {
+                                    let permit = if let (Some(sem), Some(mtl), Some(ac)) =
+                                        (&rx_semaphore, &recv_max_traj_length, &recv_actor_count)
+                                    {
+                                        let new_cap = (*mtl.read().await)
+                                            .saturating_mul(ac.load(Ordering::Relaxed).max(1));
+                                        if new_cap > current_semaphore_cap {
+                                            sem.add_permits(new_cap - current_semaphore_cap);
+                                            current_semaphore_cap = new_cap;
+                                        }
+                                        match sem.clone().acquire_owned().await {
+                                            Ok(p) => Some(Arc::new(p)),
+                                            Err(_) => break,
+                                        }
+                                    } else {
+                                        None
+                                    };
+
                                     let priority = Self::_compute_priority(
                                         &msg.actor_id,
                                         &receiver_actor_last_processed,
@@ -297,6 +355,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                         priority,
                                         actor_id: msg.actor_id,
                                         traj_for_processing: Arc::new(trajectory),
+                                        permit,
                                     };
 
                                     if traj_queue_tx.send(entry).is_err() {
@@ -686,6 +745,7 @@ mod unit_tests {
             priority,
             actor_id: Uuid::new_v4(),
             traj_for_processing: Arc::new(RelayRLTrajectory::new(1)),
+            permit: None,
         }
     }
 
@@ -710,11 +770,13 @@ mod unit_tests {
             priority: 10,
             actor_id: id,
             traj_for_processing: Arc::new(RelayRLTrajectory::new(1)),
+            permit: None,
         };
         let b = SinkQueueEntry {
             priority: 10,
             actor_id: id,
             traj_for_processing: Arc::new(RelayRLTrajectory::new(1)),
+            permit: None,
         };
         assert_eq!(a, b);
     }
