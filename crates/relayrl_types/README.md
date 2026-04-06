@@ -5,7 +5,6 @@ Core data types and encoding/decoding utilities for the RelayRL framework.
 
 [![Changelog](https://img.shields.io/badge/Changelog-0.5.4-blue.svg)](CHANGELOG.md)
 
-
 ## Features
 
 - **`RelayRLAction`**: Serializable action container (obs, act, mask, reward, data, done) with UUID agent tracking

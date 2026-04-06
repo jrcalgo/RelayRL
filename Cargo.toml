@@ -5,6 +5,7 @@ members = [
     "crates/relayrl_cli",
     "crates/relayrl_types",
     "crates/relayrl_algorithms",
+    "crates/relayrl_env_trait",
 ]
 resolver = "2"
 
