@@ -2,13 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.0-beta] - 2026-04-01
+## [0.5.0-beta] - 2026-04-06
 
 ### Added
+- **Local model update API** - `RelayRLAgent::update_model(model, actor_ids: Option<Vec<ActorUuid>>)` added for refreshing all actors or targeted actors; validates `ModelModule` metadata before dispatch and rejects local updates when `ActorTrainingDataMode` is `Online` or `Hybrid`
+- **Observability configuration** - `ClientConfigParams` and generated client config JSON now include `metrics_meter_name` and `metrics_otlp_endpoint`; metrics initialization is bound to live config state and Prometheus/OTLP exporter plumbing is threaded through the client runtime
+- **Algorithm and environment prelude re-exports** - Framework prelude now exposes `relayrl_algorithms` and `relayrl_env_trait` via `prelude::algorithms`, `prelude::templates::algorithms`, and `prelude::templates::environment`
+- **Expanded client test coverage** - Added `tests/local_client_smoke.rs` for a TorchScript-backed build/start/request/shutdown path and broadened unit coverage across agent, configuration, file sink, metrics, router, and lifecycle modules
+- **Transport model-listener stop hooks** - `stop_model_listener()` added across sync/async transport traits, dispatcher paths, and ZMQ/NATS implementations to support explicit listener shutdown during runtime teardown
 
 ### Changed
+- **Beta support contract** - `README.md`, crate docs, and client module docs now define `0.5.0-beta` as the local/default client runtime release; `zmq-transport`, `nats-transport`, and server-backed workflows are documented as experimental
+- **Feature defaults and docs.rs surface** - Default features changed to `["client", "tch-backend", "metrics", "logging"]`; docs.rs feature coverage expanded, and transports now opt in separately instead of being enabled by default
+- **Dependency and feature wiring** - `relayrl_algorithms`, `relayrl_env_trait`, and `generic-array` added; `relayrl_types/codec-full` moved behind `zmq-transport` / `nats-transport`; `tokio-stream` made optional under `nats-transport`; `async-nats` bumped to 0.47.0; `opentelemetry-otlp` bumped to 0.31.1 with `grpc-tonic`; dev dependencies now use `tch`, `burn-ndarray`, and `burn-tch` while `gym` was removed
+- **Agent startup and transport params** - `RelayRLAgent::start()` / `restart()` now consume `AgentStartParameters<B>`; `AgentBuilder` stores `ClientModes` directly instead of `Option<ClientModes>`; `InferenceParams` / `TrainingParams` now derive `Default`, and `TrainingParams` is available whenever either transport feature is enabled
+- **Runtime coordination and routing** - Coordinator, lifecycle, state, scale, actor, buffer, receiver, filter, and router dispatcher paths were reworked for shared router state, receiver-to-router dispatch, actor-count/max-traj-length-driven semaphore backpressure, tighter model-version routing, and the move of `router_dispatcher` into `runtime/router/`
+- **Experimental transport behavior** - ZMQ and NATS model-listener behavior was aligned around persistent listening, explicit shutdown, and model-version propagation; transport dispatch now coordinates model update routing and cleanup more consistently across both backends
+- **Observability runtime plumbing** - Metrics manager state is now rebound from config and threaded through coordinator, actor, scale, state, dispatcher, retry, and exporter paths; logging was simplified around a smaller `log4rs`-based module and broad `println!`/`eprintln!` usage was replaced with `log` macros
+- **Docs, examples, and assets** - Quick-start examples now use the beta import paths and `agent.start(params)` pattern; the example server model metadata and artifact were renamed from `client_model.pt` to `server_model.pt`
+
+### Removed
+- **Legacy network presets** - Removed `full-zmq-network`, `zmq-training-network`, `zmq-inference-network`, `full-nats-network`, `nats-training-network`, `nats-inference-network`, and the old `*-training-server` / `*-inference-server` feature flags from `Cargo.toml`
+- **In-crate templates and tokio utility module** - The old framework `templates` module was dropped in favor of external prelude re-exports from `relayrl_env_trait` / `relayrl_algorithms`, and `utilities::tokio` was removed from the crate
+- **Legacy logging helpers and runtime statistics stub** - Deleted the old logging builder/filter/sink submodules and removed the placeholder `RelayRLAgent::runtime_statistics()` API
 
 ### Fixed
+- **Configuration schema and defaults** - Corrected `hyperparameter_args` naming, renamed default transport JSON keys to `*_address`, changed the default local trajectory output type to valid `Csv`, added default metrics fields, and corrected the default training server model name to `training_server_model`
+- **Local trajectory directory handling** - `LocalTrajectoryFileParams::new()` now retries directory creation, verifies that the resolved path is actually a directory, and `Default` no longer assumes validation cannot fail
+- **Config hot-reload behavior** - Lifecycle polling now rebuilds its interval only when `config_update_polling_seconds` changes, uses a unified `handle_config_change()` path, and keeps shared `max_traj_length` state synchronized as configuration updates are applied
+- **Shutdown and listener cleanup** - Actor shutdown now surfaces timeout failures more cleanly, and transport/model listeners can be stopped explicitly during receiver shutdown instead of depending on best-effort teardown
+- **Metrics exporter rebinding and gated builds** - Prometheus collector reuse, OTLP provider rebinding, docs.rs compilation, and transport-specific feature-gated builds were tightened across metrics and transport codepaths
+
+### Breaking
+- Default features changed from `["client", "zmq-transport", "nats-transport"]` to `["client", "tch-backend", "metrics", "logging"]`; consumers must now opt into `zmq-transport` or `nats-transport` explicitly
+- Feature flags renamed/removed: legacy network presets and `zmq-training-server` / `zmq-inference-server` / `nats-training-server` / `nats-inference-server` were removed in favor of explicit transport flags plus `training-server` / `inference-server`
+- `RelayRLAgent::start()` / `restart()` now take `AgentStartParameters<B>` instead of the previous positional argument lists
+- `AgentBuilder::client_modes` is no longer `Option<ClientModes>`
+- Prelude imports moved from flat `prelude::{tensor,action,trajectory,model,templates}` exports to `prelude::types::*`, `prelude::algorithms`, and `prelude::templates::{algorithms,environment}`; the in-crate `templates` module is gone
+- `RuntimeStatisticsReturnType` is now gated behind `metrics` or `logging`, and the placeholder `runtime_statistics()` API was removed
+- `ClientError` is no longer `#[non_exhaustive]`, and new variants were added for model validation and local model update support
+- `TransportConfigParams::max_traj_length` and related builder setters now use `usize` instead of `u128`
+- Generated/default config JSON changed shape: transport keys now use `*_address` names, metrics fields were added, `trajectory_file_output.file_type` defaults to `Csv`, and the example server model filename changed to `server_model.pt`
 
 ## [0.5.0-alpha.3] - 2026-03-13
 
