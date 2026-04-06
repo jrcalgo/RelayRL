@@ -1,3 +1,8 @@
+//! Trajectory buffering and sink dispatch for router workers.
+//!
+//! This module handles local file output for the beta-supported local/default runtime and can also
+//! fan out trajectories to experimental transport-backed training sinks.
+
 use super::{RoutedMessage, RoutedPayload, RouterError};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::ActorTrainingDataMode;
@@ -187,6 +192,8 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     _phantom: PhantomData<B>,
 }
+
+// ===== Buffer construction and runtime loop =====
 
 impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     for ClientTrajectoryBuffer<B>

@@ -1,10 +1,16 @@
+//! Client runtime coordinator.
+//!
+//! This module owns top-level orchestration for the client runtime: configuration loading,
+//! lifecycle management, actor state, router scaling, and the public request path exposed through
+//! `RelayRLAgent`.
+
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{AlgorithmArgs, InferenceAddressesArgs, TrainingAddressesArgs};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    LifeCycleManager, LifeCycleManagerError,
+    LifecycleManager, LifecycleManagerError,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::scale_manager::ProcessInitFlag;
@@ -117,7 +123,7 @@ pub enum CoordinatorError {
     #[error(transparent)]
     StateManagerError(#[from] StateManagerError),
     #[error(transparent)]
-    LifeCycleManagerError(#[from] LifeCycleManagerError),
+    LifecycleManagerError(#[from] LifecycleManagerError),
     #[cfg(feature = "logging")]
     #[error(transparent)]
     LoggingError(#[from] LoggingError),
@@ -227,6 +233,8 @@ pub trait ClientInterface<
     async fn set_config_path(&self, config_path: PathBuf) -> Result<(), CoordinatorError>;
 }
 
+// ===== Coordinator state =====
+
 pub struct CoordinatorParams<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
@@ -235,7 +243,7 @@ pub struct CoordinatorParams<
     pub(crate) client_namespace: Arc<str>,
     #[cfg(feature = "metrics")]
     pub(crate) metrics: MetricsManager,
-    pub(crate) lifecycle: LifeCycleManager,
+    pub(crate) lifecycle: LifecycleManager,
     pub(crate) shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     pub(crate) scaling: ScaleManager<B, D_IN, D_OUT>,
 }
@@ -250,6 +258,8 @@ pub struct ClientCoordinator<
     pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
 }
+
+// ===== Internal helpers =====
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ClientCoordinator<B, D_IN, D_OUT>
@@ -356,7 +366,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorInferenceMode::Server(_) => {
-                    // TODO: Support inference-server model updates from the local client interface.
+                    // Experimental: local-client-triggered model updates are not implemented for
+                    // server inference in `0.5.0-beta`.
                     Ok(None)
                 }
             },
@@ -427,6 +438,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 }
 
+// ===== Client interface implementation =====
+
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
 {
@@ -490,7 +503,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
 
-        let lifecycle: LifeCycleManager = LifeCycleManager::new(
+        let lifecycle: LifecycleManager = LifecycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             algorithm_args.to_owned(),
             &config_loader,
@@ -893,7 +906,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes)
                 params.lifecycle.shutdown();
 
-                // joins router dispatcher and scales down all routers, pretty redundant but just in case
+                // Ensure all scalable router tasks are drained before state teardown completes.
                 params.scaling.clear_runtime_components().await?;
 
                 // drain the UUID pool to ensure all UUIDs are removed from the pool for the client namespace
@@ -1559,7 +1572,7 @@ mod unit_tests {
     use crate::network::client::agent::{
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManager;
+    use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManager;
     use crate::utilities::configuration::ClientConfigLoader;
     use active_uuid_registry::interface::{clear_namespace, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
@@ -1578,13 +1591,13 @@ mod unit_tests {
         )
     }
 
-    fn make_lifecycle_manager() -> LifeCycleManager {
+    fn make_lifecycle_manager() -> LifecycleManager {
         use std::io::Write;
 
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(tmp, "{{}}").expect("write temp config");
         let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
-        let lifecycle = LifeCycleManager::new(
+        let lifecycle = LifecycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             AlgorithmArgs::default(),
             &config,

@@ -1,3 +1,9 @@
+//! Lifecycle coordination for the client runtime.
+//!
+//! This module owns config watching, shared runtime settings, and shutdown fan-out for the
+//! client runtime. The local/default path is the supported `0.5.0-beta` path; transport-backed
+//! settings exposed here remain experimental.
+
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -43,8 +49,8 @@ pub(crate) struct SharedZmqTrainingAddresses {
 
 /// Shared transport addresses for both NATS and ZMQ transports.
 ///
-/// I was going to store these in an enum but I realized I don't hate myself enough to do that.
-/// Would have to pattern match everywhere that uses this instead of just storing shared pointers to empty strings for unused fields, memory be damned.
+/// This keeps the active transport addresses together in one shared structure so runtime
+/// components can clone a single handle regardless of feature configuration.
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SharedTransportAddresses {
@@ -217,7 +223,7 @@ pub(crate) fn construct_trajectory_file_output(
 
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
-pub enum LifeCycleManagerError {
+pub enum LifecycleManagerError {
     #[error("File metadata error: {0}")]
     FileMetadataError(String),
     #[error("System time error: {0}")]
@@ -234,7 +240,7 @@ pub enum LifeCycleManagerError {
 ///
 /// Spins up and tears down futures cleanly
 #[derive(Debug, Clone)]
-pub(crate) struct LifeCycleManager {
+pub(crate) struct LifecycleManager {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     algorithm_args: Arc<AlgorithmArgs>,
     max_traj_length: Arc<RwLock<usize>>,
@@ -255,7 +261,7 @@ pub(crate) struct LifeCycleManager {
     shutdown_notifier: Arc<Notify>,
 }
 
-impl LifeCycleManager {
+impl LifecycleManager {
     pub(crate) fn new(
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         algorithm_args: AlgorithmArgs,
@@ -271,7 +277,7 @@ impl LifeCycleManager {
             .and_then(|m| m.modified())
             .unwrap_or_else(|e| {
                 log::error!(
-                    "[LifeCycleManager] Failed to read config metadata: {}, using current time",
+                    "[LifecycleManager] Failed to read config metadata: {}, using current time",
                     e
                 );
                 SystemTime::now()
@@ -318,10 +324,10 @@ impl LifeCycleManager {
 
     // Listen for shutdown signals and config changes
     pub(crate) fn spawn_loop(&self) {
-        let self_clone: LifeCycleManager = self.clone();
+        let self_clone: LifecycleManager = self.clone();
         tokio::spawn(async move {
             if let Err(e) = self_clone.watch().await {
-                log::error!("[LifeCycleManager] Failed to spawn loop: {}", e);
+                log::error!("[LifecycleManager] Failed to spawn loop: {}", e);
             }
         });
     }
@@ -365,7 +371,7 @@ impl LifeCycleManager {
     pub(crate) async fn set_max_traj_length(
         &self,
         max_traj_length: &usize,
-    ) -> Result<(), LifeCycleManagerError> {
+    ) -> Result<(), LifecycleManagerError> {
         let mut max_traj_length_guard = self.max_traj_length.write().await;
         *max_traj_length_guard = *max_traj_length;
         Ok(())
@@ -377,7 +383,7 @@ impl LifeCycleManager {
         transport_params: &TransportConfigParams,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         transport_type: &TransportType,
-    ) -> Result<(), LifeCycleManagerError> {
+    ) -> Result<(), LifecycleManagerError> {
         let mut transport_addresses_guard = self.transport_addresses.write().await;
         *transport_addresses_guard =
             construct_transport_addresses(transport_params, transport_type);
@@ -389,7 +395,7 @@ impl LifeCycleManager {
         &self,
         metrics_meter_name: &str,
         metrics_otlp_endpoint: &OtlpEndpointParams,
-    ) -> Result<(), LifeCycleManagerError> {
+    ) -> Result<(), LifecycleManagerError> {
         let mut metrics_args_guard = self.metrics_args.write().await;
         *metrics_args_guard = (
             metrics_meter_name.to_string(),
@@ -402,7 +408,7 @@ impl LifeCycleManager {
     pub(crate) async fn set_init_hyperparameters(
         &self,
         init_hyperaparameters: &HyperparameterConfig,
-    ) -> Result<(), LifeCycleManagerError> {
+    ) -> Result<(), LifecycleManagerError> {
         let mut init_hyperparameters_guard = self.init_hyperparameters.write().await;
         *init_hyperparameters_guard =
             init_hyperaparameters.to_args(Some(&self.algorithm_args.algorithm));
@@ -412,7 +418,7 @@ impl LifeCycleManager {
     pub(crate) async fn set_local_model_path(
         &self,
         local_model_module: &LocalModelModuleParams,
-    ) -> Result<(), LifeCycleManagerError> {
+    ) -> Result<(), LifecycleManagerError> {
         let mut local_model_path_guard = self.local_model_path.write().await;
         *local_model_path_guard = construct_local_model_path(local_model_module);
         Ok(())
@@ -421,7 +427,7 @@ impl LifeCycleManager {
     pub(crate) async fn set_trajectory_file_path(
         &self,
         trajectory_file_output: &LocalTrajectoryFileParams,
-    ) -> Result<(), LifeCycleManagerError> {
+    ) -> Result<(), LifecycleManagerError> {
         let mut trajectory_file_output_guard = self.trajectory_file_output.write().await;
         *trajectory_file_output_guard = construct_trajectory_file_output(trajectory_file_output);
         Ok(())
@@ -432,7 +438,7 @@ impl LifeCycleManager {
         self.handle_shutdown_signal();
     }
 
-    pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
+    pub(crate) async fn watch(&self) -> Result<(), LifecycleManagerError> {
         let mut config_update_polling_seconds =
             *self.config_update_polling_seconds.read().await as u64;
 
@@ -454,7 +460,7 @@ impl LifeCycleManager {
                         let Ok(modified) = metadata.modified() {
                             let mut last_modified = self.last_modified.write().await;
                             if modified > *last_modified {
-                                log::info!("[LifeCycleManager] Config file changed, reloading...");
+                                log::info!("[LifecycleManager] Config file changed, reloading...");
                                 *last_modified = modified;
 
                                 #[allow(irrefutable_let_patterns)]
@@ -477,7 +483,7 @@ impl LifeCycleManager {
     pub(crate) fn handle_shutdown_signal(&self) {
         if let Err(e) = self.shutdown_tx.send(()) {
             log::error!(
-                "[LifeCycleManager] Failed to send shutdown signal. No active receivers: {}",
+                "[LifecycleManager] Failed to send shutdown signal. No active receivers: {}",
                 e
             );
         }
@@ -486,7 +492,7 @@ impl LifeCycleManager {
     pub(crate) async fn handle_config_change(
         &self,
         path: PathBuf,
-    ) -> Result<(), LifeCycleManagerError> {
+    ) -> Result<(), LifecycleManagerError> {
         let new_config = ClientConfigLoader::load_config(&path);
 
         #[cfg(all(
@@ -501,7 +507,7 @@ impl LifeCycleManager {
             self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),
         )
         .map_err(|e| {
-            LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
+            LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
         })?;
 
         #[cfg(all(
@@ -520,7 +526,7 @@ impl LifeCycleManager {
             ),
         )
         .map_err(|e| {
-            LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
+            LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
         })?;
 
         #[cfg(all(
@@ -533,7 +539,7 @@ impl LifeCycleManager {
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
         )
         .map_err(|e| {
-            LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
+            LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
         })?;
 
         #[cfg(all(
@@ -550,7 +556,7 @@ impl LifeCycleManager {
             ),
         )
         .map_err(|e| {
-            LifeCycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
+            LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
         })?;
 
         Ok(())
@@ -558,7 +564,7 @@ impl LifeCycleManager {
 
     pub(crate) fn subscribe_shutdown(
         &self,
-    ) -> Result<broadcast::Receiver<()>, LifeCycleManagerError> {
+    ) -> Result<broadcast::Receiver<()>, LifecycleManagerError> {
         Ok(self.shutdown_tx.subscribe())
     }
 }
@@ -640,7 +646,7 @@ mod unit_tests {
 
     #[test]
     fn subscribe_shutdown_receives_signal_after_handle_shutdown() {
-        // Test the broadcast mechanism used by LifeCycleManager in isolation.
+        // Test the broadcast mechanism used by LifecycleManager in isolation.
         // This mirrors what subscribe_shutdown() + handle_shutdown_signal() do.
         let (tx, mut rx) = tokio::sync::broadcast::channel::<()>(10);
         // Simulate subscribe_shutdown: the subscriber gets a clone of rx
@@ -665,12 +671,12 @@ mod unit_tests {
         );
     }
 
-    fn make_lifecycle_manager() -> LifeCycleManager {
+    fn make_lifecycle_manager() -> LifecycleManager {
         use std::io::Write;
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(tmp, "{{}}").expect("write temp config");
         let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
-        let lm = LifeCycleManager::new(
+        let lm = LifecycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             AlgorithmArgs::default(),
             &config,
@@ -678,7 +684,7 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
         );
-        // keep tempfile alive until LifeCycleManager is constructed
+        // Keep the temp file alive until LifecycleManager has loaded the config.
         drop(tmp);
         lm
     }

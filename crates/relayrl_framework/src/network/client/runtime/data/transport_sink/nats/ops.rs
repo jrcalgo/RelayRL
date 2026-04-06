@@ -1,3 +1,8 @@
+//! NATS transport operations for the experimental client transport path.
+//!
+//! The local/default client runtime is the supported `0.5.0-beta` path. NATS-backed workflows in
+//! this module remain experimental.
+
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::data::transport_sink::{ScalingOperation, TransportError};
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};

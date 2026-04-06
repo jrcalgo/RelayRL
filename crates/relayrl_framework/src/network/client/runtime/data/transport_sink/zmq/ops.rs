@@ -1,3 +1,8 @@
+//! ZMQ transport operations for the experimental client transport path.
+//!
+//! The local/default client runtime is the supported `0.5.0-beta` path. ZMQ-backed workflows in
+//! this module remain experimental.
+
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -676,7 +681,8 @@ impl ZmqInferenceOps {
     }
 }
 
-/// these will be implemented in a future update (0.7.0)
+/// Experimental client-side ZMQ inference operations. These request paths are not implemented as
+/// part of the `0.5.0-beta` support promise.
 impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_inference_request(
         &self,
@@ -1038,7 +1044,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
-        // TODO: Reqeust that the server initializes a shared algorithm OR individual algorithms per actor (must be the same algorithm for now)
+        // Experimental transport path: shared vs independent server-side algorithm
+        // initialization is not finalized in `0.5.0-beta`.
         let validated_entry = validate_entry(scaling_entry)?;
         let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
@@ -1461,7 +1468,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             )
             .map_err(ZmqClientError::from)?;
 
-        // TODO: Send client IDs to server for caching, validation, and routing
+        // Experimental transport path: client IDs are not yet forwarded for server-side caching,
+        // validation, or routing.
         let (_, zmq_context, transport_id) = self.transport_entry.clone();
         let transport_entry_string =
             format!("{}:{}:{}", client_namespace, zmq_context, transport_id);
@@ -1603,7 +1611,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             operation_type
         );
 
-        // TODO: In a full implementation, this would send a ZMQ message to the training server
+        // Experimental transport path: this currently records the scaling event locally without
+        // sending a training-server message.
         let _ = self
             .zmq_pool
             .read()

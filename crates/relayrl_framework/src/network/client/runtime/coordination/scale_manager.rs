@@ -1,3 +1,8 @@
+//! Runtime scaling and router management.
+//!
+//! This module owns scalable router workers and the supporting runtime components that feed actor
+//! inboxes and trajectory sinks.
+
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -7,7 +12,7 @@ use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHP
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
-    LifeCycleManager, LifeCycleManagerError,
+    LifecycleManager, LifecycleManagerError,
 };
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -61,7 +66,7 @@ pub enum ScaleManagerError {
     #[error("Scaling operation not supported: {0}")]
     ScalingOperationNotSupportedError(String),
     #[error("Failed to subscribe to shutdown: {0}")]
-    SubscribeShutdownError(#[source] LifeCycleManagerError),
+    SubscribeShutdownError(#[source] LifecycleManagerError),
     #[error("Failed to spawn central filter: {0}")]
     SpawnCentralFilterError(String),
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -142,8 +147,10 @@ pub(crate) struct ScaleManager<
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     codec: CodecConfig,
     cached_hyperparameters: HashMap<Algorithm, HyperparameterArgs>,
-    lifecycle: Option<LifeCycleManager>,
+    lifecycle: Option<LifecycleManager>,
 }
+
+// ===== Scale manager construction and teardown =====
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ScaleManager<B, D_IN, D_OUT>
@@ -166,7 +173,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             CodecConfig,
         >,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
-        lifecycle: LifeCycleManager,
+        lifecycle: LifecycleManager,
     ) -> Result<Self, ScaleManagerError> {
         let scaling_id: ScaleManagerUuid = reserve_id_with(
             client_namespace.as_ref(),
@@ -353,7 +360,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         match self.shared_client_modes.actor_training_data_mode.clone() {
                             ActorTrainingDataMode::Online(params) => params.model_mode,
                             ActorTrainingDataMode::Hybrid(params, _) => params.model_mode,
-                            _ => ModelMode::Independent, // realistically, this should never happen due to client mode gating
+                            _ => ModelMode::Independent,
                         };
 
                     ProcessInitRequest::TrainingAlgorithmInit(

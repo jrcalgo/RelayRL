@@ -1,3 +1,8 @@
+//! Transport dispatch abstractions for experimental client networking paths.
+//!
+//! These components sit behind `zmq-transport` and `nats-transport`. They remain experimental in
+//! `0.5.0-beta`; the local/default client runtime is the supported beta path.
+
 use crate::network::TransportType;
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
@@ -83,11 +88,15 @@ fn combine_scaling_results(
     result2: Option<Result<(), TransportError>>,
 ) -> Result<(), TransportError> {
     match (result1, result2) {
-        (Some(Err(e)), Some(Err(e2))) => Err(TransportError::MultipleErrors(e.to_string(), e2.to_string())),
+        (Some(Err(e)), Some(Err(e2))) => Err(TransportError::MultipleErrors(
+            e.to_string(),
+            e2.to_string(),
+        )),
         (Some(Err(e)), None) => Err(e),
         (None, Some(Err(e))) => Err(e),
         (None, None) => Err(TransportError::InvalidState(
-            "Inference and Training servers not initialized, and yet we have a scaling operation. This should never happen. What are you doing? How did you get here?".to_string(),
+            "Received a scaling operation before either transport server was initialized"
+                .to_string(),
         )),
         _ => Ok(()),
     }

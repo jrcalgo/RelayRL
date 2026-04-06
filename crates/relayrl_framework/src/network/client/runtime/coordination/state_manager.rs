@@ -1,8 +1,13 @@
+//! Actor state storage and model-handle coordination.
+//!
+//! This module tracks actor task handles, inboxes, router assignments, and local model handles for
+//! the client runtime.
+
 use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{Actor, ActorEntity};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-use crate::network::client::runtime::coordination::lifecycle_manager::LifeCycleManagerError;
+use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
@@ -47,7 +52,7 @@ pub enum StateManagerError {
     #[error("Actor already taken: {0}")]
     ActorAlreadyTakenError(String),
     #[error("Subscribe shutdown failed: {0}")]
-    SubscribeShutdownError(#[from] LifeCycleManagerError),
+    SubscribeShutdownError(#[from] LifecycleManagerError),
     #[error("Failed to receive shutdown signal: {0}")]
     ReceiveShutdownSignalError(String),
     #[error("Shutdown all actors failed: {0}")]
@@ -99,6 +104,8 @@ pub(crate) struct StateManager<
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) shared_actor_count: Arc<AtomicUsize>,
 }
+
+// ===== Construction and actor lifecycle =====
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     StateManager<B, D_IN, D_OUT>

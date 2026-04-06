@@ -1,3 +1,8 @@
+//! Runtime actor implementation.
+//!
+//! Actors own local inference state, trajectory assembly, and the message-handling loop for the
+//! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
+
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
@@ -229,6 +234,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Server inference: serialize observation (and optionally mask) and send to server.
     /// Note: if obs/mask live on GPU, you will pay a device->host copy during serialization.
+    ///
+    /// This path is still experimental in `0.5.0-beta`.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn request_server_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         // Both the inference_kind and inference_dispatcher initializations are based on
@@ -246,7 +253,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let (obs, _mask, _reward, reply_to) = Self::extract_inference_request(msg)?;
 
             let obs_bytes: Vec<u8> = Vec::new();
-            let _ = obs; // suppress unused warning that is going to have to be fixed in the future when we add support for server inference.
+            let _ = obs; // Experimental server inference serialization is not implemented yet.
 
             let actor_entry = (
                 self.client_namespace.to_string(),
@@ -262,7 +269,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
         } else {
-            // local inference fallback (this should never happen, but just in case)
+            // Fall back to local inference if a server dispatcher is not available.
             return self.perform_local_inference(msg).await;
         }
 
@@ -428,7 +435,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelHandshake = msg.payload {
-            // Fast path: model already loaded (this should never happen)
+            // Fast path: skip the handshake when a model is already available locally.
             {
                 let model_guard = self.reloadable_model.read().await;
                 if model_guard.is_some() {
