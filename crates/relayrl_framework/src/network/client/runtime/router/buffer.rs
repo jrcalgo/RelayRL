@@ -167,7 +167,6 @@ pub(crate) trait LocalFileTrajectorySinkTrait<B: Backend + BackendMatcher<Backen
 }
 
 pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     associated_router_namespace: RouterNamespace,
     active: AtomicBool,
     rx_from_actor: Option<Receiver<RoutedMessage>>,
@@ -193,16 +192,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     for ClientTrajectoryBuffer<B>
 {
     fn new(
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         associated_router_namespace: RouterNamespace,
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        _associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: CodecConfig,
     ) -> Self {
         Self {
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             associated_router_namespace,
             active: AtomicBool::new(false),
             rx_from_actor: Some(rx_from_actor),
@@ -270,7 +265,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let (traj_queue_tx, mut traj_queue_rx) =
             tokio::sync::mpsc::unbounded_channel::<SinkQueueEntry>();
 
-        let (rx_semaphore, initial_semaphore_cap) =
+        let (mut rx_semaphore, initial_semaphore_capacity) =
             match (&self.shared_max_traj_length, &self.shared_actor_count) {
                 (Some(mtl), Some(ac)) => {
                     let cap = mtl
@@ -308,7 +303,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let receiver_actor_last_processed = actor_last_processed.clone();
         let _receiver_handle = tokio::spawn(async move {
-            let mut current_semaphore_cap = initial_semaphore_cap;
+            let mut current_semaphore_capacity = initial_semaphore_capacity;
             loop {
                 tokio::select! {
                     biased;
@@ -328,21 +323,23 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             Some(msg) => {
                                 // Only process SendTrajectory payloads
                                 if let RoutedPayload::SendTrajectory { timestamp, trajectory } = msg.payload {
-                                    let permit = if let (Some(sem), Some(mtl), Some(ac)) =
-                                        (&rx_semaphore, &recv_max_traj_length, &recv_actor_count)
-                                    {
-                                        let new_cap = (*mtl.read().await)
-                                            .saturating_mul(ac.load(Ordering::Relaxed).max(1));
-                                        if new_cap > current_semaphore_cap {
-                                            sem.add_permits(new_cap - current_semaphore_cap);
-                                            current_semaphore_cap = new_cap;
+                                    let permit = match (&mut rx_semaphore, &recv_max_traj_length, &recv_actor_count) {
+                                        (Some(semaphore), Some(traj_length), Some(actor_count)) => {
+                                            let new_capacity = (*traj_length.read().await)
+                                                .saturating_mul(actor_count.load(Ordering::Relaxed).max(1));
+                                            if new_capacity > current_semaphore_capacity {
+                                                semaphore.add_permits(new_capacity - current_semaphore_capacity);
+                                                current_semaphore_capacity = new_capacity;
+                                            } else if new_capacity < current_semaphore_capacity {
+                                                *semaphore = Arc::new(Semaphore::new(new_capacity.max(1)));
+                                                current_semaphore_capacity = new_capacity;
+                                            }
+                                            match semaphore.clone().acquire_owned().await {
+                                                Ok(p) => Some(Arc::new(p)),
+                                                Err(_) => break,
+                                            }
                                         }
-                                        match sem.clone().acquire_owned().await {
-                                            Ok(p) => Some(Arc::new(p)),
-                                            Err(_) => break,
-                                        }
-                                    } else {
-                                        None
+                                        _ => None,
                                     };
 
                                     let priority = Self::_compute_priority(
