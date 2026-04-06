@@ -199,7 +199,8 @@ pub(crate) fn construct_local_model_path(local_model_module: &LocalModelModulePa
         module_format = "pt".to_string();
     }
 
-    cwd.join(&directory).join(format!("{}.{}", &model_name, &module_format))
+    cwd.join(&directory)
+        .join(format!("{}.{}", &model_name, &module_format))
 }
 
 pub(crate) fn construct_trajectory_file_output(

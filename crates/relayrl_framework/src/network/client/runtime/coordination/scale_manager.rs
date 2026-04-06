@@ -566,9 +566,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .as_ref()
                         .map(|lc| lc.get_max_traj_length())
                         .unwrap_or_else(|| Arc::new(RwLock::new(1000)));
-                    let shared_actor_count = self.shared_state.read().await.shared_actor_count.clone();
-                    buffer_init
-                        .with_semaphore_capacity(shared_max_traj_length, shared_actor_count);
+                    let shared_actor_count =
+                        self.shared_state.read().await.shared_actor_count.clone();
+                    buffer_init.with_semaphore_capacity(shared_max_traj_length, shared_actor_count);
 
                     Some(buffer_init)
                 } else {
