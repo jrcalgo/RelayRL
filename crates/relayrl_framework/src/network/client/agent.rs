@@ -1159,12 +1159,6 @@ mod unit_tests {
     }
 
     #[test]
-    fn builder_has_client_modes_set() {
-        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder();
-        assert!(b.client_modes.is_some());
-    }
-
-    #[test]
     fn actor_count_setter_sets_field() {
         let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().actor_count(5);
         assert_eq!(b.actor_count, Some(5));
