@@ -107,7 +107,6 @@ pub(crate) struct RouterRuntimeParams {
     #[allow(dead_code)]
     pub(crate) filter_tx: Sender<RoutedMessage>,
     pub(crate) trajectory_buffer_tx: Sender<RoutedMessage>,
-    pub(crate) trajectory_buffer_actor_count: Option<Arc<AtomicUsize>>,
 }
 
 pub type RouterNamespace = Arc<str>;
@@ -567,15 +566,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .as_ref()
                         .map(|lc| lc.get_max_traj_length())
                         .unwrap_or_else(|| Arc::new(RwLock::new(1000)));
-                    let actor_count = self
-                        .shared_state
-                        .read()
-                        .await
-                        .get_actor_id_list()
-                        .len()
-                        .max(1);
-                    let shared_actor_count = Arc::new(AtomicUsize::new(actor_count));
-                    buffer_actor_count = Some(shared_actor_count.clone());
+                    let shared_actor_count = self.shared_state.read().await.shared_actor_count.clone();
                     buffer_init
                         .with_semaphore_capacity(shared_max_traj_length, shared_actor_count);
 
@@ -594,7 +585,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 trajectory_buffer_loop,
                 filter_tx: filter_tx.clone(),
                 trajectory_buffer_tx,
-                trajectory_buffer_actor_count: buffer_actor_count,
             };
 
             if let Some(ref params) = self.runtime_params

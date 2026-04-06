@@ -26,7 +26,7 @@ use active_uuid_registry::registry_uuid::Uuid;
 
 use dashmap::DashMap;
 use std::sync::Arc;
-
+use std::sync::atomic::{AtomicUsize, Ordering};
 use burn_tensor::backend::Backend;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
@@ -97,6 +97,7 @@ pub(crate) struct StateManager<
     pub(crate) shared_router_state: Arc<SharedRouterState>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
+    pub(crate) shared_actor_count: Arc<AtomicUsize>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -142,6 +143,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }),
                 actor_handles: DashMap::new(),
                 actor_devices: DashMap::new(),
+                shared_actor_count: Arc::new(AtomicUsize::new(0)),
             },
             global_dispatcher_rx,
         )
@@ -338,6 +340,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .actor_router_addresses
             .insert(actor_id, router_namespace);
 
+        self.shared_actor_count.fetch_add(1, Ordering::Relaxed);
+
         Ok(())
     }
 
@@ -420,12 +424,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.shared_router_state.actor_inboxes.remove(&id);
         self.actor_devices.remove(&id);
         self.shared_router_state.actor_router_addresses.remove(&id);
+        self.shared_actor_count.fetch_sub(1, Ordering::Relaxed);
         remove_id(
             self.client_namespace.as_ref(),
             crate::network::ACTOR_CONTEXT,
             id,
         )
         .map_err(StateManagerError::from)?;
+    
         Ok(())
     }
 
