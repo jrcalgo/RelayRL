@@ -30,7 +30,7 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 
 | Crate | Version | Description |
 |-------|---------|-------------|
-| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-beta` | Core library with client runtime, server scaffolding, and utilities |
+| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-beta` | Core library with the local/default client runtime plus experimental server/transport scaffolding |
 | [`relayrl_types`](crates/relayrl_types/) | `0.5.4` | Data types, tensor containers, inference models, and codec pipeline (compression, encryption, integrity) |
 | [`relayrl_algorithms`](crates/relayrl_algorithms/) | `0.1.0` | Deep RL algorithms (PPO, REINFORCE, etc.) |
 | [`relayrl_env_trait`](crates/relayrl_env_trait/) | `1.0.0` | Stable trait impl. for integrating environment logic |
@@ -63,27 +63,23 @@ relayrl_framework = "0.5.0-beta"
 ### Basic Usage
 
 ```rust
-use relayrl_framework::prelude::network::{RelayRLAgent, AgentBuilder};
-use relayrl_framework::prelude::types::{ModelModule, DeviceType};
+use relayrl_framework::prelude::network::{AgentBuilder, RelayRLAgentActors};
+use relayrl_framework::prelude::types::model::ModelModule;
+use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
 use burn_ndarray::NdArray;
 use burn_tensor::{Tensor, Float};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build agent with 4 concurrent actors
+    let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
     let (mut agent, params) = AgentBuilder::<NdArray, 2, 2, Float, Float>::builder()
         .actor_count(4)
-        .default_model(ModelModule::<NdArray>::load_from_path("model.pt".into()))
+        .default_model(default_model)
         .build().await?;
 
     // Start the agent runtime
-    agent.start(
-        params.actor_count, 
-        params.router_scale, 
-        params.default_device, 
-        params.default_model, 
-        params.config_path
-    ).await?;
+    agent.start(params).await?;
 
     // Request actions from actors
     let obs = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
@@ -96,12 +92,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### 0.5.0-beta Scope
+
+The supported beta path is the local/default client runtime:
+
+- local inference
+- actor lifecycle management
+- router scaling
+- local trajectory writing
+
+The following surfaces remain experimental in `0.5.0-beta`, even when the feature flags are available:
+
+- `zmq-transport`
+- `nats-transport`
+- server-backed inference or training workflows
+- server crates and scaffolding
+
 For more usage details, see the [Framework README](crates/relayrl_framework/README.md) and the [Client Guide](CLIENT_GUIDE.md).
 
 ## Framework Roadmap
 
 ### Near Term
-- **v0.5.0** — Client ZMQ transport, Client NATS transport, comprehensive testing
+- **v0.5.x** — Local/default client runtime beta polish, comprehensive testing, transport-backed flows remain experimental
 - **v0.6.0** — Training Server for Online client workflows, algorithm integration
 
 ### Medium Term

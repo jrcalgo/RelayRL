@@ -5,7 +5,7 @@
 ---
 **Version:** 0.5.0-beta
 
-**Status:** Under active development, expect broken functionality and breaking changes!
+**Status:** Under active development, expect breaking changes.
 
 **Tested Platform Support:** macOS (Silicon), Linux (Ubuntu), Windows 10 (x86_64)
 
@@ -15,7 +15,9 @@ With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `rel
 
 Without transport being fully implemented yet, the client can write data to an `arrow` or `csv` file on your local device.
 
-As of now, the only way to perform inference is to provide your own `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface. Upon implementation of the training server and algorithms, the client will be able to acquire a `ModelModule` from the training server's algorithm runtime just like in v0.4.5.
+As of now, the supported beta path is the local/default client runtime. Provide your own
+`TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface.
+Transport-backed and server-backed workflows remain experimental in `0.5.0-beta`.
 
 All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
 
@@ -45,11 +47,26 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 ## Quick Start
 
+### 0.5.0-beta Scope
+
+Supported in `0.5.0-beta`:
+
+- local inference
+- actor lifecycle management
+- router scaling
+- local Arrow/CSV trajectory writing
+
+Experimental in `0.5.0-beta`:
+
+- `zmq-transport`
+- `nats-transport`
+- server-backed inference or training workflows
+- server-side crates and scaffolding
+
 ```rust
-// the following instructions assume that the `client` feature flag is the only one enabled;
-// parameters for start()/restart()/AgentBuilder will change if `transport_layer` or `database_layer` is enabled.
-use relayrl_framework::prelude::network::{RelayRLAgent, AgentBuilder, RelayRLAgentActors};
-use relayrl_framework::prelude::types::{ModelModule, DeviceType};
+use relayrl_framework::prelude::network::{AgentBuilder, RelayRLAgentActors};
+use relayrl_framework::prelude::types::model::ModelModule;
+use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
 use burn_ndarray::NdArray;
 use burn_tensor::{Tensor, Float};
 use std::path::PathBuf;
@@ -64,16 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let (mut agent, params) = AgentBuilder::<NdArray, OBS_RANK, ACT_RANK, Float, Float>::builder()
         .actor_count(4)
-        .default_model(ModelModule::<NdArray>::load_from_path(model_path))
+        .default_model(ModelModule::<NdArray>::load_from_path(model_path)?)
         .build().await?;
 
-    agent.start(
-        params.actor_count, 
-        params.router_scale, 
-        params.default_device, 
-        params.default_model, 
-        params.config_path
-    ).await?;
+    agent.start(params).await?;
 
     // 2. Interact (using Burn Tensors)
     let reward: f32 = 1.0;
@@ -116,11 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Roadmap
 
-- ### **v0.5.0:**
-  - Client `ZMQ` transport interface completion
-  - Client `NATS` transport interface completion
-  - Comprehensive Client testing and benchmarking on common RL environments
-  - Short Client stabilization period to enable focused server-side development
+- ### **v0.5.x:**
+  - Local/default client runtime beta polish
+  - Comprehensive client testing and benchmarking on common RL environments
+  - Transport-backed client workflows remain experimental during the beta period
 
 - ### **v0.6.0:**
   - Training Server implementation with support for Online/Offline training workflows

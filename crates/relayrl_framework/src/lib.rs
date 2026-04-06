@@ -3,8 +3,10 @@
 
 //! # RelayRL Framework
 //!
-//! **Version:** 0.5.0-alpha  
+//! **Version:** 0.5.0-beta
 //! **Status:** Under active development, expect breaking changes
+//! **Beta Scope:** The supported beta path is the local/default client runtime. Transport-backed
+//! and server-backed workflows are still experimental.
 //!
 //! RelayRL is a high-performance, multi-actor native reinforcement learning framework designed for
 //! concurrent actor execution and efficient trajectory collection. This crate currently provides the core
@@ -21,10 +23,10 @@
 //!                         │
 //! ┌─────────────────────────────────────────────────┐
 //! │  Runtime Coordination Layer                     │
-//! │  - ClientCoordinator                            │
+//! │  - ClientCoordinator (orchestrator)                            │
 //! │  - ScaleManager (router scaling)                │
 //! │  - StateManager (actor state)                   │
-//! │  - LifecycleManager (shutdown coordination)     │
+//! │  - LifecycleManager (config, shutdown)          │
 //! └─────────────────────────────────────────────────┘
 //!                         │
 //! ┌─────────────────────────────────────────────────┐
@@ -43,9 +45,8 @@
 //! ┌─────────────────────────────────────────────────┐
 //! │  Data Collection Layer                          │
 //! │  - TrajectoryBuffer (priority scheduling)       │
-//! │  - Arrow File Sink (available)                  │
-//! │  - Transport Sink (under development)           │
-//! │  - Database Sink (under development)            │
+//! │  - File Sink (Arrow/CSV)                        │
+//! │  - Transport Sink (ZMQ/NATS, experimental)      │
 //! └─────────────────────────────────────────────────┘
 //! ```
 //!
@@ -57,30 +58,25 @@
 //!     - `actor`: Individual actor implementations with local inference
 //!     - `coordination`: Lifecycle, scaling, metrics, and state management
 //!     - `router`: Message routing between actors and data sinks
-//!     - `data`: Transport and database layers (under development)
-//!
-//! - **[`network::server`]**: Training and inference server implementations (optional features)
-//!
-//! - **[`templates`]**: Environment trait definitions for training and testing
+//!     - `data`: Transport layers (ZMQ/NATS) and file sinks (Arrow/CSV)
 //!
 //! - **[`utilities`]**: Configuration loading, logging, metrics, and system utilities
 //!
 //! ## Current Status
 //!
 //! ### Available
-//! - Multi-actor client runtime with concurrent execution
-//! - Local Arrow file sink for trajectory data
+//! - Local/default multi-actor client runtime with concurrent execution
+//! - Local Arrow/CSV file sink for trajectory data
 //! - Builder pattern API for ergonomic agent construction
 //! - Router-based message dispatching with scaling support
 //! - Actor lifecycle management (create, remove, scale)
 //!
 //! ### Under Development
-//! - Network transport layer (ZMQ)
-//! - Server-side inference mode
+//! - Transport-backed client workflows (`zmq-transport`, `nats-transport`)
+//! - Inference server integration
 //! - Training server integration
 //!
 //! ### Not In This Crate
-//! - **Python Bindings**: See `relayrl_python` crate
 //! - **Algorithms**: See `relayrl_algorithms` crate
 //! - **Type Definitions**: See `relayrl_types` crate
 //!
@@ -88,34 +84,32 @@
 //!
 //! ```rust,no_run
 //! use relayrl_framework::prelude::network::*;
-//! use relayrl_types::data::tensor::DeviceType;
+//! use relayrl_framework::prelude::types::model::ModelModule;
+//! use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
 //! use burn_ndarray::NdArray;
 //! use burn_tensor::{Tensor, Float};
 //! use std::path::PathBuf;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Build agent with 4 concurrent actors
-//! let (mut agent, params) = AgentBuilder::<NdArray, 4, 2, Float, Float>::builder()
+//! let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+//! let (mut agent, params) = AgentBuilder::<NdArray, 2, 2, Float, Float>::builder()
 //!     .actor_count(4)
 //!     .router_scale(2)
 //!     .default_device(DeviceType::Cpu)
+//!     .default_model(default_model)
 //!     .config_path(PathBuf::from("client_config.json"))
 //!     .build()
 //!     .await?;
 //!
 //! // Start runtime
-//! agent.start(
-//!     params.actor_count,
-//!     params.router_scale,
-//!     params.default_device,
-//!     params.default_model,
-//!     params.config_path,
-//! ).await?;
+//! agent.start(params).await?;
 //!
 //! // Request actions from actors
-//! let observation = Tensor::<NdArray, 4, Float>::zeros([1, 4], &Default::default());
-//! let actions = agent.request_action(
-//!     vec![/* actor IDs */],
+//! let ids = agent.get_actor_ids()?;
+//! let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+//! let _actions = agent.request_action(
+//!     ids,
 //!     observation,
 //!     None,
 //!     0.0
@@ -130,9 +124,11 @@
 //! ## Feature Flags
 //!
 //! - `client` (default): Core client runtime
-//! - `network`: Full network stack (client + servers)
-//! - `transport_layer`: Network transport (ZMQ)
-//! - `database_layer`: Database support (PostgreSQL, SQLite)
+//! - `tch-backend`: Tch backend support
+//! - `inference-server`: Inference server support (under development)
+//! - `training-server`: Training server support (under development)
+//! - `zmq-transport`: Experimental network transport (ZMQ)
+//! - `nats-transport`: Experimental network transport (NATS)
 //! - `logging`: Log4rs logging
 //! - `metrics`: Prometheus/OpenTelemetry metrics
 //! - `profile`: Flamegraph and tokio-console profiling
@@ -144,17 +140,23 @@
 /// ## Client Runtime
 ///
 /// The [`client`](network::client) module contains the complete rewrite (v0.5.0) of the
-/// multi-actor client runtime, including:
+/// multi-actor client runtime.
+///
+/// In `0.5.0-beta`, the supported path is the local/default client runtime, including:
 /// - Public [`agent`](network::client::agent) API for agent construction and control
 /// - Internal runtime coordination (scaling, lifecycle, state management)
 /// - Router-based message dispatching
 /// - Actor execution with local inference
-/// - Data collection via Arrow file sink (transport/database under development)
+/// - Data collection via Arrow/CSV file sinks
+///
+/// Transport-backed workflows remain experimental even when the corresponding feature flags are
+/// enabled.
 ///
 /// ## Server Components (Optional)
 ///
 /// The [`server`](network::server) module provides training and inference server implementations,
-/// available via feature flags (`training_server`, `inference_server`).
+/// available via feature flags (`training_server`, `inference_server`). These are still
+/// experimental and not part of the `0.5.0-beta` support promise.
 pub mod network;
 
 /// Configuration, logging, metrics, and system utilities.
