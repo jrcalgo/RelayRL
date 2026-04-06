@@ -411,7 +411,6 @@ impl LifeCycleManager {
     pub(crate) async fn watch(&self) -> Result<(), LifeCycleManagerError> {
         let mut config_update_polling_seconds =
         *self.config_update_polling_seconds.read().await as u64;
-        let mut old_polling_seconds = config_update_polling_seconds;
 
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(
             config_update_polling_seconds,
@@ -434,13 +433,14 @@ impl LifeCycleManager {
                                 log::info!("[LifeCycleManager] Config file changed, reloading...");
                                 *last_modified = modified;
 
-                                config_update_polling_seconds = *self.config_update_polling_seconds.read().await as u64;
-                                if config_update_polling_seconds != old_polling_seconds {
-                                    interval = tokio::time::interval(std::time::Duration::from_secs(
-                                        config_update_polling_seconds,
-                                    ));
-                                    old_polling_seconds = config_update_polling_seconds;
-                                }
+                                #[allow(irrefutable_let_patterns)]
+                                if let new_polling_seconds = *self.config_update_polling_seconds.read().await as u64
+                                    && new_polling_seconds != config_update_polling_seconds {
+                                        interval = tokio::time::interval(std::time::Duration::from_secs(
+                                            new_polling_seconds,
+                                        ));
+                                        config_update_polling_seconds = new_polling_seconds;
+                                    }
 
                                 self.handle_config_change(self.config_path.as_ref().clone()).await?;
                             }
