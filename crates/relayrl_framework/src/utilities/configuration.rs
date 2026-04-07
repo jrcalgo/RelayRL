@@ -279,7 +279,7 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_JSON: &str = r#"{
             "model_name": "client_model",
             "format": "pt"
         },
-        "max_traj_length": 100000000
+        "max_traj_length": 1000
     }
 }"#;
 
@@ -392,7 +392,7 @@ pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_JSON: &str = r#"{
             "model_name": "training_server_model",
             "format": "pt"
         },
-        "max_traj_length": 100000000
+        "max_traj_length": 1000
     }
 }"#;
 
@@ -446,7 +446,7 @@ pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_JSON: &str = r#"{
                 "model_name": "inference_server_model",
                 "format": "pt"
             },
-            "max_traj_length": 100000000
+            "max_traj_length": 1000
         }
     }
 }"#;
@@ -1988,7 +1988,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                     },
                 },
             },
-            max_traj_length: 100000000,
+            max_traj_length: 1000,
             local_model_module: LocalModelModuleParams {
                 directory: "model_module".to_string(),
                 format: "pt".to_string(),
@@ -2122,7 +2122,7 @@ mod unit_tests {
             "model_name": "client_model",
             "format": "pt"
         },
-        "max_traj_length": 100000000
+        "max_traj_length": 1000
     }
 }"#;
 
@@ -2235,7 +2235,7 @@ mod unit_tests {
             "model_name": "some_server_model",
             "format": "pt"
         },
-        "max_traj_length": 100000000
+        "max_traj_length": 1000
     }
 }"#;
 
@@ -2519,7 +2519,7 @@ mod unit_tests {
         let transport = loader.get_transport_config();
         assert_eq!(transport.get_nats_inference_server_address().port, "50050");
         assert_eq!(transport.get_zmq_trajectory_server_address().port, "7776");
-        assert_eq!(transport.max_traj_length, 100000000);
+        assert_eq!(transport.max_traj_length, 1000);
     }
 
     #[test]
@@ -2614,7 +2614,7 @@ mod unit_tests {
                 .port,
             "7776"
         );
-        assert_eq!(loader.get_transport_config().max_traj_length, 100000000);
+        assert_eq!(loader.get_transport_config().max_traj_length, 1000);
         assert_eq!(
             loader.get_transport_config().local_model_module.directory,
             "model_module"

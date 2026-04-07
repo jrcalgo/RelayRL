@@ -47,7 +47,7 @@
                 "model_name": "client_model",
                 "format": "pt"
             },
-            "max_traj_length": 100000000
+            "max_traj_length": 1000
         }
     }
 }
