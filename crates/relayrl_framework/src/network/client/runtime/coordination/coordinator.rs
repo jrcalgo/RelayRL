@@ -1217,8 +1217,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(feature = "metrics")]
                 let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
-
                 // Extract router runtime params with clear error messages
                 let _router_runtime_params: &dashmap::DashMap<
                     RouterNamespace,
@@ -1246,25 +1244,24 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 };
 
                 // Get the global dispatcher sender
-                let global_dispatcher_tx = params
-                    .shared_state
-                    .read()
-                    .await
-                    .global_dispatcher_tx
-                    .clone();
+                let (global_dispatcher_tx, valid_ids) = {
+                    let shared_state = params.shared_state.read().await;
+                    let global_dispatcher_tx = shared_state.global_dispatcher_tx.clone();
+                    let valid_ids = ids
+                        .into_iter()
+                        .filter(|id| {
+                            shared_state
+                                .shared_router_state
+                                .actor_router_addresses
+                                .contains_key(id)
+                        })
+                        .collect::<Vec<_>>();
+                    (global_dispatcher_tx, valid_ids)
+                };
 
-                for id in ids {
-                    let has_router = params
-                        .shared_state
-                        .read()
-                        .await
-                        .shared_router_state
-                        .actor_router_addresses
-                        .contains_key(&id);
-                    if !has_router {
-                        continue;
-                    }
+                let mut pending = Vec::with_capacity(valid_ids.len());
 
+                for id in valid_ids {
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
 
                     let action_request_message = RoutedMessage {
@@ -1288,6 +1285,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         ));
                     }
 
+                    pending.push((id, resp_rx));
+                }
+
+                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
+
+                for (id, resp_rx) in pending {
                     match resp_rx.await.map_err(|e| e.to_string()) {
                         Ok(action) => actions.push((id, action)),
                         Err(e) => {
