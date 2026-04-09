@@ -530,7 +530,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ActorTrainingDataMode::Hybrid(server_params, _) => {
                     server_params.training_addresses.clone()
                 }
-                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::Offline(_) => None,
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineFiles(_) => None,
             };
 
             if inference_address_args.is_some() || training_address_args.is_some() {
@@ -675,7 +675,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         {
             // if args are set in client mode init config, set lifecycle manager trajectory file path
             let local_trajectory_file_params = match &shared_client_modes.actor_training_data_mode {
-                ActorTrainingDataMode::Offline(Some(params)) => Some(params),
+                ActorTrainingDataMode::OfflineFiles(Some(params)) => Some(params),
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorTrainingDataMode::Hybrid(_, Some(params)) => Some(params),
                 _ => None,
@@ -721,7 +721,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 };
 
             let training_dispatcher = match shared_client_modes.actor_training_data_mode {
-                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::Offline(_) => None,
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineFiles(_) => None,
                 _ => {
                     scaling_dispatcher = Some(Arc::new(ScalingDispatcher::<B>::new(
                         shared_transport.clone(),
@@ -1261,11 +1261,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 let mut pending = Vec::with_capacity(valid_ids.len());
 
-                for id in valid_ids {
+                for id in &valid_ids {
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
 
                     let action_request_message = RoutedMessage {
-                        actor_id: id,
+                        actor_id: id.clone(),
                         protocol: RoutingProtocol::RequestInference,
                         payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
                             observation: Box::new(observation.clone()),
@@ -1285,10 +1285,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         ));
                     }
 
-                    pending.push((id, resp_rx));
+                    pending.push((*id, resp_rx));
                 }
 
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
+                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(valid_ids.len());
 
                 for (id, resp_rx) in pending {
                     match resp_rx.await.map_err(|e| e.to_string()) {
