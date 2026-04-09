@@ -61,7 +61,8 @@
         },
         "trajectory_file_output": {
             "directory": "experiment_data",
-            "file_type": "json"
+            "_comment": "use `Csv` or `Arrow`",
+            "file_type": "Csv"
         }
     },
     "transport_config": {
