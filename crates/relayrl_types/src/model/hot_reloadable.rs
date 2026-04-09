@@ -3,39 +3,25 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use arc_swap::ArcSwap;
 use burn_tensor::backend::Backend;
 
 use crate::data::action::RelayRLAction;
-use crate::data::tensor::{
-    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData,
-};
-use crate::data::tensor::{DType};
+use crate::data::tensor::DType;
+use crate::data::tensor::{AnyBurnTensor, BackendMatcher, ConversionBurnTensor, TensorData};
 use crate::model::utils::validate_module;
 use crate::model::{ModelError, ModelModule};
 
 /// Wrapper that lets us swap the underlying model at runtime and run inference
 /// in an async-safe way.
 pub struct HotReloadableModel<B: Backend + BackendMatcher<Backend = B>> {
-    inner: RwLock<Arc<ModelModule<B>>>,
-    version: Arc<AtomicI64>,
+    inner: ArcSwap<ModelModule<B>>,
+    version: AtomicI64,
     default_device: DeviceType,
     input_dim: usize,
     output_dim: usize,
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>> Clone for HotReloadableModel<B> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: RwLock::new(self.inner.blocking_read().clone()),
-            version: self.version.clone(),
-            default_device: self.default_device.clone(),
-            input_dim: self.input_dim,
-            output_dim: self.output_dim,
-        }
-    }
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
@@ -45,13 +31,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
     ) -> Result<Self, ModelError> {
         let module: ModelModule<B> = ModelModule::<B>::load_from_path(path.as_ref().to_path_buf())?;
         validate_module::<B>(&module)?;
+        let input_dim = module.metadata.input_shape.len();
+        let output_dim = module.metadata.output_shape.len();
 
         Ok(Self {
-            inner: RwLock::new(Arc::new(module.to_owned())),
-            version: Arc::new(AtomicI64::new(0)),
+            inner: ArcSwap::new(Arc::new(module)),
+            version: AtomicI64::new(0),
             default_device: device,
-            input_dim: module.metadata.input_shape.len(),
-            output_dim: module.metadata.output_shape.len(),
+            input_dim,
+            output_dim,
         })
     }
 
@@ -60,13 +48,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         device: DeviceType,
     ) -> Result<Self, ModelError> {
         validate_module::<B>(&module)?;
+        let input_dim = module.metadata.input_shape.len();
+        let output_dim = module.metadata.output_shape.len();
 
         Ok(Self {
-            inner: RwLock::new(Arc::new(module.to_owned())),
-            version: Arc::new(AtomicI64::new(0)),
+            inner: ArcSwap::new(Arc::new(module)),
+            version: AtomicI64::new(0),
             default_device: device,
-            input_dim: module.metadata.input_shape.len(),
-            output_dim: module.metadata.output_shape.len(),
+            input_dim,
+            output_dim,
         })
     }
 
@@ -86,13 +76,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         &self.output_dim
     }
 
+    pub fn current_module(&self) -> Arc<ModelModule<B>> {
+        self.inner.load_full()
+    }
+
     /// Atomically swap the model from disk and bump version.
     pub async fn reload_from_path(&self, path: PathBuf, version: i64) -> Result<i64, ModelError> {
         let new_module = Arc::new(ModelModule::<B>::load_from_path(path)?);
-        {
-            let mut guard = self.inner.write().await;
-            *guard = new_module;
-        }
+        self.inner.store(new_module);
         self.version.store(version, Ordering::SeqCst);
         Ok(version)
     }
@@ -102,10 +93,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         module: ModelModule<B>,
         version: i64,
     ) -> Result<i64, ModelError> {
-        {
-            let mut guard = self.inner.write().await;
-            *guard = Arc::new(module);
-        }
+        self.inner.store(Arc::new(module));
         self.version.store(version, Ordering::SeqCst);
         Ok(version)
     }
@@ -118,7 +106,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         reward: f32,
         actor_id: Uuid,
     ) -> Result<RelayRLAction, ModelError> {
-        let model_module = self.inner.blocking_read();
+        let model_module = self.current_module();
         let (act_td, mask_td, aux) = model_module.step(observation.clone(), mask);
 
         // Build RelayRLAction by converting tensors → TensorData
@@ -182,7 +170,9 @@ mod unit_tests {
     use burn_ndarray::NdArray;
     use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
 
+    use crate::data::tensor::NdArrayDType;
     use crate::model::{InferenceModel, Model, ModelFileType, ModelMetadata, ModelModule};
+    use crate::prelude::tensor::relayrl::FloatBurnTensor;
 
     fn stub_module(output_shape: Vec<usize>) -> ModelModule<NdArray> {
         ModelModule {

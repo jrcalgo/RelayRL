@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_types"
-version = "0.5.4"
+version = "0.5.5"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
@@ -58,6 +58,7 @@ ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"], default-features 
 tokio = { workspace = true, features = ["full"], optional = true }
 tempfile = { workspace = true, optional = true }
 ndarray = { version = "0.17.2", optional = true }
+arc-swap = "1.9.1"
 
 [dependencies.blake3]
 version = "1.8.3"

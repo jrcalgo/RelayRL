@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-
-use burn_tensor::{backend::Backend};
+use burn_tensor::backend::Backend;
 use ort::tensor::IntoTensorElementType;
 use serde::{Deserialize, Serialize};
 
@@ -19,20 +18,20 @@ use thiserror::Error;
 
 use crate::data::action::RelayRLData;
 use crate::data::tensor::{
-    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, DType, DeviceType,
-    SupportedTensorBackend, TensorData,
+    AnyBurnTensor, BackendMatcher, ConversionBurnTensor, DType, DeviceType, SupportedTensorBackend,
+    TensorData,
 };
 use half::f16;
 
 #[cfg(feature = "tch-backend")]
 use half::bf16;
 
-#[cfg(feature = "tch-model")]
-use tch::{CModule, Tensor as TchTensor, no_grad};
-#[cfg(feature = "tch-backend")]
-use crate::data::tensor::TchDType;
 #[cfg(feature = "ndarray-backend")]
 use crate::data::tensor::NdArrayDType;
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
+#[cfg(feature = "tch-model")]
+use tch::{CModule, Tensor as TchTensor, no_grad};
 
 #[cfg(feature = "onnx-model")]
 use ort::{
@@ -830,8 +829,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         };
 
         // Step 3
-        let act_tensor: TchTensor = no_grad(|| module.forward_ts(&[&obs_tensor]))
-            .expect("Failed to run forward pass");
+        let act_tensor: TchTensor =
+            no_grad(|| module.forward_ts(&[&obs_tensor])).expect("Failed to run forward pass");
 
         // Step 4
         let flattened_act: TchTensor = act_tensor.flatten(0, -1);
@@ -1312,14 +1311,20 @@ mod unit_tests {
     use super::*;
     use std::marker::PhantomData;
 
+    use crate::prelude::tensor::relayrl::FloatBurnTensor;
     use burn_tensor::TensorData as BurnTensorData;
-    use crate::model::FloatBurnTensor;
 
     use uuid::Uuid;
 
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     use burn_ndarray::NdArray;
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     use burn_tensor::{Float, Tensor};
 
     fn temp_dir_path(label: &str) -> PathBuf {
@@ -1391,7 +1396,10 @@ mod unit_tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     fn stub_module(output_shape: Vec<usize>) -> ModelModule<NdArray> {
         ModelModule {
             model: Model {
@@ -1412,7 +1420,10 @@ mod unit_tests {
         }
     }
 
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArray, 1>> {
         let device = NdArray::get_device(&DeviceType::Cpu).unwrap();
         let tensor = Tensor::<NdArray, 1, Float>::from_data(
@@ -1427,7 +1438,10 @@ mod unit_tests {
     }
 
     #[test]
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     fn model_module_save_writes_metadata_and_model_bytes() {
         let dir = temp_dir_path("module-save");
         let module = stub_module(vec![2]);
@@ -1441,26 +1455,41 @@ mod unit_tests {
     }
 
     #[test]
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     fn resolve_device_returns_cpu_for_ndarray_models() {
         let module = stub_module(vec![2]);
-        assert!(matches!(module.resolve_device(), burn_tensor::Device::<NdArray>::Cpu));
+        assert!(matches!(
+            module.resolve_device(),
+            burn_tensor::Device::<NdArray>::Cpu
+        ));
     }
 
     #[test]
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     fn zeros_action_matches_output_shape_dtype_and_backend() {
         let module = stub_module(vec![2]);
         let zero_action = module.zeros_action::<1>().unwrap();
 
         assert_eq!(zero_action.shape, vec![2]);
         assert_eq!(zero_action.dtype, DType::NdArray(NdArrayDType::F32));
-        assert_eq!(zero_action.supported_backend, SupportedTensorBackend::NdArray);
+        assert_eq!(
+            zero_action.supported_backend,
+            SupportedTensorBackend::NdArray
+        );
         assert_eq!(zero_action.data, vec![0; 8]);
     }
 
     #[test]
-    #[cfg(all(feature = "ndarray-backend", any(feature = "tch-model", feature = "onnx-model")))]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
     fn step_falls_back_to_zero_actions_when_inference_is_unavailable() {
         let module = stub_module(vec![2]);
         let observation = float_any_tensor(&[1.0, 2.0]);
