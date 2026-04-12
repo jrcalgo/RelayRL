@@ -786,7 +786,6 @@ mod unit_tests {
             actor_id,
             device,
             model_handle,
-            local_inference_worker,
             Arc::new(RwLock::new(PathBuf::new())),
             Arc::new(RwLock::new(max_traj_length)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
