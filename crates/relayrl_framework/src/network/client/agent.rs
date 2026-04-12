@@ -301,14 +301,14 @@ pub enum ActorTrainingDataMode {
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    HybridFiles(TrainingParams, Option<LocalTrajectoryFileParams>),
+    OnlineFiles(TrainingParams, Option<LocalTrajectoryFileParams>),
     /// Experimental: training data is sent to the server and also recorded in memory.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    HybridMemory(TrainingParams),
+    OnlineMemory(TrainingParams),
     /// Training data collection and processing is disabled
     Disabled,
 }
@@ -326,7 +326,7 @@ pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     return matches!(
         training_data_mode,
-        ActorTrainingDataMode::OfflineFiles(_) | ActorTrainingDataMode::HybridFiles(_, _)
+        ActorTrainingDataMode::OfflineFiles(_) | ActorTrainingDataMode::OnlineFiles(_, _)
     );
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     return matches!(training_data_mode, ActorTrainingDataMode::OfflineFiles(_));
@@ -894,7 +894,9 @@ impl<
         actor_ids: Option<Vec<ActorUuid>>,
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_) =
+        if let ActorTrainingDataMode::Online(_)
+        | ActorTrainingDataMode::OnlineFiles(_, _)
+        | ActorTrainingDataMode::OnlineMemory(_) =
             self.coordinator.client_modes.actor_training_data_mode
         {
             log::warn!(
@@ -1032,7 +1034,9 @@ impl<
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
-                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_),
+                    ActorTrainingDataMode::Online(_)
+                    | ActorTrainingDataMode::OnlineFiles(_, _)
+                    | ActorTrainingDataMode::OnlineMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,
@@ -1056,7 +1060,9 @@ impl<
                         .send_client_ids_to_server(actor_entries.clone(), true)
                         .await?;
 
-                    if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_) =
+                    if let ActorTrainingDataMode::Online(_)
+                    | ActorTrainingDataMode::OnlineFiles(_, _)
+                    | ActorTrainingDataMode::OnlineMemory(_) =
                         &self.coordinator.client_modes.actor_training_data_mode
                     {
                         self.coordinator
@@ -1121,7 +1127,9 @@ impl<
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
-                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_),
+                    ActorTrainingDataMode::Online(_)
+                    | ActorTrainingDataMode::OnlineFiles(_, _)
+                    | ActorTrainingDataMode::OnlineMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,

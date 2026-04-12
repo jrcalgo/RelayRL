@@ -363,7 +363,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         target_actor_ids,
                         local_model_path,
                     )))
-                },
+                }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorInferenceMode::ServerOverflow(_, _) => {
                     // Experimental: local-client-triggered model updates are not implemented for
@@ -371,7 +371,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     Ok(None)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorInferenceMode::Server(_)  => {
+                ActorInferenceMode::Server(_) => {
                     // Experimental: local-client-triggered model updates are not implemented for
                     // server inference in `0.5.0-beta`.
                     Ok(None)
@@ -521,16 +521,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         // if args are set in client mode init config, set lifecycle manager server addresses while keeping unchanged config values
         {
-            let inference_address_args = if let ActorInferenceMode::Server(server_params) | ActorInferenceMode::ServerOverflow(_, server_params) =
-                &shared_client_modes.actor_inference_mode
-            {
-                server_params.inference_addresses.clone()
-            } else {
-                None
-            };
+            let inference_address_args =
+                if let ActorInferenceMode::Server(server_params)
+                | ActorInferenceMode::ServerOverflow(_, server_params) =
+                    &shared_client_modes.actor_inference_mode
+                {
+                    server_params.inference_addresses.clone()
+                } else {
+                    None
+                };
 
             let training_address_args = match &shared_client_modes.actor_training_data_mode {
-                ActorTrainingDataMode::Online(server_params) | ActorTrainingDataMode::HybridFiles(server_params, _) | ActorTrainingDataMode::HybridMemory(server_params) => {
+                ActorTrainingDataMode::Online(server_params)
+                | ActorTrainingDataMode::OnlineFiles(server_params, _)
+                | ActorTrainingDataMode::OnlineMemory(server_params) => {
                     server_params.training_addresses.clone()
                 }
                 ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineFiles(_) => None,
@@ -746,11 +750,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let shared_max_traj_length = lifecycle.get_max_traj_length();
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let shared_transport_addresses = if let ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) =
+            let shared_transport_addresses = if let ActorInferenceMode::Server(_)
+            | ActorInferenceMode::ServerOverflow(_, _) =
                 shared_client_modes.actor_inference_mode
             {
                 Some(lifecycle.get_transport_addresses())
-            } else if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_) =
+            } else if let ActorTrainingDataMode::Online(_)
+            | ActorTrainingDataMode::OnlineFiles(_, _)
+            | ActorTrainingDataMode::OnlineMemory(_) =
                 shared_client_modes.actor_training_data_mode
             {
                 Some(lifecycle.get_transport_addresses())
@@ -1291,7 +1298,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     pending.push((*id, resp_rx));
                 }
 
-                let mut join_set = tokio::task::JoinSet::<Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>>::new();
+                let mut join_set = tokio::task::JoinSet::<
+                    Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>,
+                >::new();
 
                 for (id, rx) in pending {
                     join_set.spawn(async move {

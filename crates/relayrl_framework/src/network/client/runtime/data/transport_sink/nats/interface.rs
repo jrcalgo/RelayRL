@@ -117,7 +117,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
         ) {
             (
                 ActorInferenceMode::Local(_),
-                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::Offline(_),
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineFiles(_),
             ) => None,
             _ => {
                 let config = NatsPolicyConfig::for_scaling();

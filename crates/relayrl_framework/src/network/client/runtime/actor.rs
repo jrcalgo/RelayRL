@@ -50,82 +50,6 @@ use thiserror::Error;
 ///   to every other actor that shares it.
 pub(crate) type LocalModelHandle<B> = Arc<ArcSwapOption<HotReloadableModel<B>>>;
 
-struct InferenceJob<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-{
-    observation: Arc<AnyBurnTensor<B, D_IN>>,
-    mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
-    reward: f32,
-    actor_id: ActorUuid,
-    response: oneshot::Sender<Result<RelayRLAction, ModelError>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct InferenceWorkerHandle<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
-    tx: Sender<InferenceJob<B, D_IN, D_OUT>>,
-}
-
-impl<
-    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
-    const D_IN: usize,
-    const D_OUT: usize,
-> InferenceWorkerHandle<B, D_IN, D_OUT>
-{
-    pub(crate) fn new(model_handle: LocalModelHandle<B>) -> Self {
-        let (tx, rx) =
-            tokio::sync::mpsc::channel::<InferenceJob<B, D_IN, D_OUT>>(CHANNEL_THROUGHPUT);
-
-        thread::spawn(move || {
-            let mut rx = rx;
-            while let Some(job) = rx.blocking_recv() {
-                let result = match model_handle.load_full() {
-                    Some(model) => model.forward::<D_IN, D_OUT>(
-                        job.observation,
-                        job.mask,
-                        job.reward,
-                        job.actor_id,
-                    ),
-                    None => Err(ModelError::IoError(
-                        "Model not loaded/available for actor inference".to_string(),
-                    )),
-                };
-                let _ = job.response.send(result);
-            }
-        });
-
-        Self { tx }
-    }
-
-    async fn infer(
-        &self,
-        observation: Arc<AnyBurnTensor<B, D_IN>>,
-        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
-        reward: f32,
-        actor_id: ActorUuid,
-    ) -> Result<RelayRLAction, ActorError> {
-        let (response_tx, response_rx) = oneshot::channel();
-
-        self.tx
-            .send(InferenceJob {
-                observation,
-                mask,
-                reward,
-                actor_id,
-                response: response_tx,
-            })
-            .await
-            .map_err(|_| ActorError::SystemError("inference worker closed".to_string()))?;
-
-        response_rx
-            .await
-            .map_err(|_| ActorError::SystemError("inference worker response dropped".to_string()))?
-            .map_err(ActorError::from)
-    }
-}
-
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
 pub enum ActorError {
@@ -273,13 +197,13 @@ impl<
         let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
 
         let result = async {
-            let r4sa = self
+            let rlrla = self
                 .local_inference_worker
                 .infer(obs, mask, reward, self.actor_id)
                 .await?;
 
-            self.current_traj.add_action(r4sa.clone());
-            reply_to.send(Arc::new(r4sa)).map_err(|e| {
+            self.current_traj.add_action(rlrla.clone());
+            reply_to.send(Arc::new(rlrla)).map_err(|e| {
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
 
