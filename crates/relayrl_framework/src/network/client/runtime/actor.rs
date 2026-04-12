@@ -779,7 +779,6 @@ mod unit_tests {
         let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let model_handle = empty_onnx_model_handle();
-        let local_inference_worker = InferenceWorkerHandle::new(model_handle.clone());
 
         let actor = Actor::<NdArrayBackend, D_IN, D_OUT>::new(
             Arc::from("test-actor-namespace"),
