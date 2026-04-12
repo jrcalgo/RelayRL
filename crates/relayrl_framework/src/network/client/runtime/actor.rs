@@ -85,7 +85,6 @@ pub trait ActorEntity<
         actor_id: ActorUuid,
         device: DeviceType,
         model_handle: LocalModelHandle<B>,
-        local_inference_worker: InferenceWorkerHandle<B, D_IN, D_OUT>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -118,7 +117,6 @@ pub(crate) struct Actor<
     client_namespace: Arc<str>,
     actor_id: ActorUuid,
     reloadable_model: LocalModelHandle<B>,
-    local_inference_worker: InferenceWorkerHandle<B, D_IN, D_OUT>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     shared_max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -195,15 +193,28 @@ impl<
         let start_time = Instant::now();
 
         let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
+        let actor_id = self.actor_id;
 
         let result = async {
-            let rlrla = self
-                .local_inference_worker
-                .infer(obs, mask, reward, self.actor_id)
-                .await?;
+            // Both the outer ArcSwapOption load and HotReloadableModel::forward() are
+            // lock-free, so inference never blocks on model reloads.
+            let rla = {
+                let guard = self.reloadable_model.load();
+                let reloadable_model = match &*guard {
+                    Some(m) => m,
+                    None => {
+                        return Err(ActorError::SystemError(
+                            "Model not loaded/available for actor inference".to_string(),
+                        ));
+                    }
+                };
+                reloadable_model
+                    .forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
+                    .map_err(ActorError::from)?
+            };
 
-            self.current_traj.add_action(rlrla.clone());
-            reply_to.send(Arc::new(rlrla)).map_err(|e| {
+            self.current_traj.add_action(rla.clone());
+            reply_to.send(Arc::new(rla)).map_err(|e| {
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
 
@@ -260,12 +271,12 @@ impl<
                 crate::network::ACTOR_CONTEXT.to_string(),
                 self.actor_id,
             );
-            let r4sa = inference_dispatcher
+            let rla = inference_dispatcher
                 .send_inference_request(actor_entry, obs_bytes, shared_transport_addresses)
                 .await?;
 
-            self.current_traj.add_action(r4sa.clone());
-            reply_to.send(Arc::new(r4sa)).map_err(|e| {
+            self.current_traj.add_action(rla.clone());
+            reply_to.send(Arc::new(rla)).map_err(|e| {
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
         } else {
@@ -359,7 +370,6 @@ impl<
         actor_id: ActorUuid,
         device: DeviceType,
         model_handle: LocalModelHandle<B>,
-        local_inference_worker: InferenceWorkerHandle<B, D_IN, D_OUT>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -389,7 +399,6 @@ impl<
             client_namespace,
             actor_id,
             reloadable_model: model_handle,
-            local_inference_worker,
             shared_local_model_path,
             shared_max_traj_length,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
