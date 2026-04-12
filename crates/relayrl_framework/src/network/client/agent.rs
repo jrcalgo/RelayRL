@@ -264,6 +264,13 @@ pub enum ActorInferenceMode {
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
     Server(InferenceParams),
+    /// Experimental: inference occurs locally for one actor, remote inference for others.
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
+    ServerOverflow(ModelMode, InferenceParams),
 }
 
 impl Default for ActorInferenceMode {
@@ -295,6 +302,12 @@ pub enum ActorTrainingDataMode {
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
     HybridFiles(TrainingParams, Option<LocalTrajectoryFileParams>),
+    /// Experimental: training data is sent to the server and also recorded in memory.
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
     HybridMemory(TrainingParams),
     /// Training data collection and processing is disabled
     Disabled,
