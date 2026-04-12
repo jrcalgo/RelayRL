@@ -363,9 +363,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         target_actor_ids,
                         local_model_path,
                     )))
+                },
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                ActorInferenceMode::ServerOverflow(_, _) => {
+                    // Experimental: local-client-triggered model updates are not implemented for
+                    // server overflow inference in `0.5.0-beta`.
+                    Ok(None)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorInferenceMode::Server(_) => {
+                ActorInferenceMode::Server(_)  => {
                     // Experimental: local-client-triggered model updates are not implemented for
                     // server inference in `0.5.0-beta`.
                     Ok(None)
@@ -515,7 +521,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         // if args are set in client mode init config, set lifecycle manager server addresses while keeping unchanged config values
         {
-            let inference_address_args = if let ActorInferenceMode::Server(server_params) =
+            let inference_address_args = if let ActorInferenceMode::Server(server_params) | ActorInferenceMode::ServerOverflow(_, server_params) =
                 &shared_client_modes.actor_inference_mode
             {
                 server_params.inference_addresses.clone()
@@ -524,10 +530,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             };
 
             let training_address_args = match &shared_client_modes.actor_training_data_mode {
-                ActorTrainingDataMode::Online(server_params) => {
-                    server_params.training_addresses.clone()
-                }
-                ActorTrainingDataMode::Hybrid(server_params, _) => {
+                ActorTrainingDataMode::Online(server_params) | ActorTrainingDataMode::HybridFiles(server_params, _) | ActorTrainingDataMode::HybridMemory(server_params) => {
                     server_params.training_addresses.clone()
                 }
                 ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineFiles(_) => None,
@@ -709,7 +712,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             let (inference_dispatcher, mut scaling_dispatcher) =
                 match shared_client_modes.actor_inference_mode {
-                    ActorInferenceMode::Server(_) => (
+                    ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => (
                         Some(Arc::new(InferenceDispatcher::<B>::new(
                             shared_transport.clone(),
                         ))),
@@ -743,11 +746,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let shared_max_traj_length = lifecycle.get_max_traj_length();
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let shared_transport_addresses = if let ActorInferenceMode::Server(_) =
+            let shared_transport_addresses = if let ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) =
                 shared_client_modes.actor_inference_mode
             {
                 Some(lifecycle.get_transport_addresses())
-            } else if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+            } else if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_) =
                 shared_client_modes.actor_training_data_mode
             {
                 Some(lifecycle.get_transport_addresses())
@@ -1288,17 +1291,28 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     pending.push((*id, resp_rx));
                 }
 
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(valid_ids.len());
+                let mut join_set = tokio::task::JoinSet::<Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>>::new();
 
-                for (id, resp_rx) in pending {
-                    match resp_rx.await.map_err(|e| e.to_string()) {
-                        Ok(action) => actions.push((id, action)),
-                        Err(e) => {
-                            return Err(CoordinatorError::ScaleManagerError(
-                                ScaleManagerError::ReceiveActionResponseError(e),
-                            ));
-                        }
-                    }
+                for (id, rx) in pending {
+                    join_set.spawn(async move {
+                        let action = rx.await.map_err(|e| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::ReceiveActionResponseError(e.to_string()),
+                            )
+                        })?;
+                        Ok::<(Uuid, Arc<RelayRLAction>), CoordinatorError>((id, action))
+                    });
+                }
+
+                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
+                    Vec::with_capacity(valid_ids.len());
+                while let Some(join_result) = join_set.join_next().await {
+                    let pair = join_result.map_err(|e| {
+                        CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::ReceiveActionResponseError(e.to_string()),
+                        )
+                    })??;
+                    actions.push(pair);
                 }
 
                 #[cfg(feature = "metrics")]
