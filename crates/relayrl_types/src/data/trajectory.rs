@@ -4,6 +4,7 @@
 //! Supports batching, compression, and network transmission optimizations.
 
 use crate::data::action::{ActionError, RelayRLAction};
+#[cfg(any(feature = "metadata", feature = "compression", feature = "encryption"))]
 use bincode::config;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,7 +19,7 @@ use crate::data::utilities::compress::CompressedData;
 #[cfg(feature = "encryption")]
 use crate::data::utilities::encrypt::EncryptedData;
 #[cfg(feature = "integrity")]
-use crate::data::utilities::integrity::{compute_checksum, Checksum};
+use crate::data::utilities::integrity::{Checksum, compute_checksum};
 #[cfg(feature = "metadata")]
 use crate::data::utilities::metadata::TensorMetadata;
 
@@ -315,7 +316,9 @@ impl RelayRLTrajectory {
         let mut data = encoded.data.clone();
 
         #[cfg(feature = "integrity")]
-        if config.verify_integrity && let Some(checksum) = encoded.checksum {
+        if config.verify_integrity
+            && let Some(checksum) = encoded.checksum
+        {
             let computed = compute_checksum(&data);
             if computed != checksum {
                 return Err(TrajectoryError::IntegrityError(

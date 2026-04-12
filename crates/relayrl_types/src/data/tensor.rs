@@ -97,7 +97,7 @@ impl BackendMatcher for NdArray {
     fn get_supported_backend() -> SupportedTensorBackend {
         SupportedTensorBackend::NdArray
     }
-        
+
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
         match device {
             DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),
@@ -969,7 +969,10 @@ mod unit_tests {
     #[test]
     fn ndarray_backend_matcher_reports_backend_and_cpu_device() {
         assert!(NdArray::matches_backend(&SupportedTensorBackend::NdArray));
-        assert_eq!(NdArray::get_supported_backend(), SupportedTensorBackend::NdArray);
+        assert_eq!(
+            NdArray::get_supported_backend(),
+            SupportedTensorBackend::NdArray
+        );
         assert!(matches!(NdArray::get_device(&DeviceType::Cpu), Ok(_)));
     }
 
@@ -1032,7 +1035,9 @@ mod unit_tests {
             .to_float_tensor::<NdArray, 1>(&DeviceType::Cpu)
             .expect_err("integer tensors cannot be converted to float tensors");
 
-        assert!(matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert")));
+        assert!(
+            matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert"))
+        );
     }
 
     #[test]
@@ -1043,7 +1048,9 @@ mod unit_tests {
             .to_bool_tensor::<NdArray, 1>(&DeviceType::Cpu)
             .expect_err("float tensors cannot be converted to bool tensors");
 
-        assert!(matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert")));
+        assert!(
+            matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert"))
+        );
     }
 
     #[test]
@@ -1070,7 +1077,10 @@ mod unit_tests {
         let tensor_data = any_tensor.into_f32_data().unwrap();
 
         assert_eq!(tensor_data.shape, vec![2]);
-        assert_eq!(tensor_data.supported_backend, SupportedTensorBackend::NdArray);
+        assert_eq!(
+            tensor_data.supported_backend,
+            SupportedTensorBackend::NdArray
+        );
         assert_eq!(tensor_data.data, f32_bytes(&[3.0, 6.0]));
     }
 

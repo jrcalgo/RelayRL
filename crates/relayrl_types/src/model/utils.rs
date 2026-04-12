@@ -3,15 +3,15 @@ use std::convert::TryInto;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(feature = "tch-backend")]
-use crate::data::tensor::TchDType;
 #[cfg(feature = "ndarray-backend")]
 use crate::data::tensor::NdArrayDType;
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
 
 use crate::data::action::RelayRLData;
 use crate::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-    IntBurnTensor
+    IntBurnTensor,
 };
 use burn_tensor::{Shape, backend::Backend};
 
@@ -267,11 +267,10 @@ pub fn serialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
 
     ModelModule::<B>::save(model, &temp_path).expect("Failed to save model");
 
-    let meta_bytes = std::fs::read(temp_path.join("metadata.json"))
-        .expect("Failed to read metadata.json");
+    let meta_bytes =
+        std::fs::read(temp_path.join("metadata.json")).expect("Failed to read metadata.json");
     let model_path = temp_path.join(&model.metadata.model_file);
-    let model_bytes = std::fs::read(&model_path)
-        .expect("Failed to read model file");
+    let model_bytes = std::fs::read(&model_path).expect("Failed to read model file");
 
     // Bundle: [4LE: meta_len][meta_bytes][model_bytes]
     let meta_len = meta_bytes.len() as u32;
@@ -323,8 +322,7 @@ pub fn deserialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
 
     std::fs::write(temp_path.join("metadata.json"), meta_bytes)
         .expect("Failed to write metadata.json");
-    std::fs::write(temp_path.join(model_file), model_bytes)
-        .expect("Failed to write model file");
+    std::fs::write(temp_path.join(model_file), model_bytes).expect("Failed to write model file");
 
     // Keep temp_dir alive until load_from_path completes.
     let result = ModelModule::<B>::load_from_path(temp_path)

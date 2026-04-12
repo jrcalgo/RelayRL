@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[cfg(any(feature = "metadata", feature = "compression", feature = "encryption"))]
 use bincode::config;
 use uuid::Uuid;
 
@@ -18,17 +19,17 @@ use crate::data::utilities::compress::{CompressedData, CompressionScheme};
 #[cfg(feature = "encryption")]
 use crate::data::utilities::encrypt::{EncryptedData, EncryptionKey};
 #[cfg(feature = "integrity")]
-use crate::data::utilities::integrity::{compute_checksum, Checksum};
+use crate::data::utilities::integrity::{Checksum, compute_checksum};
 #[cfg(feature = "metadata")]
 use crate::data::utilities::metadata::TensorMetadata;
 
-#[cfg(feature = "tch-backend")]
-use crate::data::tensor::TchDType;
 #[cfg(feature = "ndarray-backend")]
 use crate::data::tensor::NdArrayDType;
+#[cfg(feature = "tch-backend")]
+use crate::data::tensor::TchDType;
 
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
-use super::tensor::{BackendMatcher, DeviceType, SupportedTensorBackend };
+use super::tensor::{BackendMatcher, DeviceType, SupportedTensorBackend};
 
 use super::tensor::{DType, TensorData, TensorError};
 
@@ -137,9 +138,11 @@ impl RelayRLAction {
                     TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => tensor_data
                         .to_float_tensor::<B, 1>(device)
                         .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
-                    TchDType::U8 | TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 => tensor_data
-                        .to_int_tensor::<B, 1>(device)
-                        .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
+                    TchDType::U8 | TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 => {
+                        tensor_data
+                            .to_int_tensor::<B, 1>(device)
+                            .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>)
+                    }
                     TchDType::Bool => tensor_data
                         .to_bool_tensor::<B, 1>(device)
                         .map(|tensor| Box::new(tensor) as Box<dyn std::any::Any>),
@@ -400,7 +403,9 @@ impl RelayRLAction {
         let mut data = encoded.data.clone();
 
         #[cfg(feature = "integrity")]
-        if config.verify_integrity && let Some(checksum) = encoded.checksum {
+        if config.verify_integrity
+            && let Some(checksum) = encoded.checksum
+        {
             let computed = compute_checksum(&data);
             if computed != checksum {
                 return Err(ActionError::IntegrityError("Checksum mismatch".to_string()));
@@ -509,7 +514,10 @@ mod unit_tests {
         TensorData::new(
             vec![values.len()],
             DType::NdArray(NdArrayDType::F32),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             SupportedTensorBackend::NdArray,
         )
     }
@@ -526,7 +534,10 @@ mod unit_tests {
     fn rich_action() -> RelayRLAction {
         let mut aux = HashMap::new();
         aux.insert("score".to_string(), RelayRLData::F32(7.5));
-        aux.insert("label".to_string(), RelayRLData::String("policy".to_string()));
+        aux.insert(
+            "label".to_string(),
+            RelayRLData::String("policy".to_string()),
+        );
 
         RelayRLAction::new(
             Some(f32_tensor(&[1.0, 2.0])),
@@ -580,7 +591,11 @@ mod unit_tests {
 
         assert!(action.get_obs_tensor::<NdArray>(&DeviceType::Cpu).is_some());
         assert!(action.get_act_tensor::<NdArray>(&DeviceType::Cpu).is_some());
-        assert!(action.get_mask_tensor::<NdArray>(&DeviceType::Cpu).is_some());
+        assert!(
+            action
+                .get_mask_tensor::<NdArray>(&DeviceType::Cpu)
+                .is_some()
+        );
     }
 
     #[test]
@@ -599,7 +614,9 @@ mod unit_tests {
         let err = RelayRLAction::to_tensor::<NdArray>(&tensor, &DeviceType::Cpu)
             .expect_err("tensor conversion should reject the missing backend");
 
-        assert!(matches!(err, TensorError::BackendError(message) if message.contains("Backend mismatch")));
+        assert!(
+            matches!(err, TensorError::BackendError(message) if message.contains("Backend mismatch"))
+        );
     }
 
     #[test]
@@ -631,9 +648,18 @@ mod unit_tests {
         assert_eq!(decoded.get_rew(), action.get_rew());
         assert_eq!(decoded.get_done(), action.get_done());
         assert_eq!(decoded.get_agent_id(), action.get_agent_id());
-        assert_eq!(decoded.get_obs().unwrap().data, action.get_obs().unwrap().data);
-        assert_eq!(decoded.get_act().unwrap().data, action.get_act().unwrap().data);
-        assert_eq!(decoded.get_mask().unwrap().data, action.get_mask().unwrap().data);
+        assert_eq!(
+            decoded.get_obs().unwrap().data,
+            action.get_obs().unwrap().data
+        );
+        assert_eq!(
+            decoded.get_act().unwrap().data,
+            action.get_act().unwrap().data
+        );
+        assert_eq!(
+            decoded.get_mask().unwrap().data,
+            action.get_mask().unwrap().data
+        );
         assert!(matches!(
             decoded.get_data().unwrap().get("score"),
             Some(RelayRLData::F32(value)) if (*value - 7.5).abs() < f32::EPSILON
@@ -658,7 +684,9 @@ mod unit_tests {
         let err = RelayRLAction::decode(&encoded, &config)
             .expect_err("tampering should invalidate the checksum");
 
-        assert!(matches!(err, ActionError::IntegrityError(message) if message.contains("Checksum mismatch")));
+        assert!(
+            matches!(err, ActionError::IntegrityError(message) if message.contains("Checksum mismatch"))
+        );
     }
 
     #[test]
@@ -692,7 +720,10 @@ mod unit_tests {
 
         let decoded = RelayRLAction::decode_chunked(&chunks, &config).unwrap();
         assert_eq!(decoded.get_rew(), action.get_rew());
-        assert_eq!(decoded.get_obs().unwrap().data, action.get_obs().unwrap().data);
+        assert_eq!(
+            decoded.get_obs().unwrap().data,
+            action.get_obs().unwrap().data
+        );
     }
 
     #[test]

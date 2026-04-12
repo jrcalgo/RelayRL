@@ -1,12 +1,12 @@
-pub mod csv;
 pub mod arrow;
+pub mod csv;
 
 use crate::data::action::RelayRLAction;
-use crate::data::tensor::{DType, TensorData};
 #[cfg(feature = "ndarray-backend")]
 use crate::data::tensor::NdArrayDType;
 #[cfg(feature = "tch-backend")]
 use crate::data::tensor::TchDType;
+use crate::data::tensor::{DType, TensorData};
 use crate::data::trajectory::RelayRLTrajectory;
 
 pub(super) struct TensorDataFrame {
@@ -24,8 +24,11 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
     match &tensor.dtype {
         #[cfg(feature = "ndarray-backend")]
         DType::NdArray(NdArrayDType::F32) => {
-            let floats: Vec<f32> = tensor.data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
+            let floats: Vec<f32> = tensor
+                .data
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
             TensorDataFrame {
                 dtype_str,
                 shape,
@@ -36,8 +39,11 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
         }
         #[cfg(feature = "ndarray-backend")]
         DType::NdArray(NdArrayDType::F64) => {
-            let floats: Vec<f64> = tensor.data.chunks_exact(8).map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
-            .collect();
+            let floats: Vec<f64> = tensor
+                .data
+                .chunks_exact(8)
+                .map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+                .collect();
             TensorDataFrame {
                 dtype_str,
                 shape,
@@ -48,8 +54,11 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
         }
         #[cfg(feature = "tch-backend")]
         DType::Tch(TchDType::F32) => {
-            let floats: Vec<f32> = tensor.data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
+            let floats: Vec<f32> = tensor
+                .data
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
             TensorDataFrame {
                 dtype_str,
                 shape,
@@ -60,8 +69,11 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
         }
         #[cfg(feature = "tch-backend")]
         DType::Tch(TchDType::F64) => {
-            let floats: Vec<f64> = tensor.data.chunks_exact(8).map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
-            .collect();
+            let floats: Vec<f64> = tensor
+                .data
+                .chunks_exact(8)
+                .map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+                .collect();
             TensorDataFrame {
                 dtype_str,
                 shape,
@@ -81,9 +93,10 @@ pub(super) fn tensor_to_data_frame(tensor: &TensorData) -> TensorDataFrame {
 }
 
 pub(super) fn get_backend_str(trajectory: &RelayRLTrajectory) -> String {
-    trajectory.actions.iter().find_map(|a: &RelayRLAction| {
-        a.get_obs().map(|t| format!("{:?}", t.supported_backend))
-    })
+    trajectory
+        .actions
+        .iter()
+        .find_map(|a: &RelayRLAction| a.get_obs().map(|t| format!("{:?}", t.supported_backend)))
         .unwrap_or_else(|| "None".to_string())
 }
 
@@ -95,7 +108,10 @@ mod unit_tests {
         TensorData::new(
             vec![values.len()],
             DType::NdArray(NdArrayDType::F32),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             crate::data::tensor::SupportedTensorBackend::NdArray,
         )
     }
@@ -104,7 +120,10 @@ mod unit_tests {
         TensorData::new(
             vec![values.len()],
             DType::NdArray(NdArrayDType::F64),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             crate::data::tensor::SupportedTensorBackend::NdArray,
         )
     }
@@ -113,7 +132,10 @@ mod unit_tests {
         TensorData::new(
             vec![values.len()],
             DType::NdArray(NdArrayDType::I32),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             crate::data::tensor::SupportedTensorBackend::NdArray,
         )
     }
@@ -151,7 +173,8 @@ mod unit_tests {
 
     #[test]
     fn get_backend_str_uses_the_first_observation_tensor() {
-        let action = RelayRLAction::new(Some(f32_tensor(&[1.0])), None, None, 0.0, false, None, None);
+        let action =
+            RelayRLAction::new(Some(f32_tensor(&[1.0])), None, None, 0.0, false, None, None);
         let trajectory = RelayRLTrajectory {
             actions: vec![action],
             max_length: 1,

@@ -1,9 +1,9 @@
 use crate::data::action::{RelayRLAction, RelayRLData};
-use crate::data::tensor::{DType, TensorData};
 #[cfg(feature = "ndarray-backend")]
 use crate::data::tensor::NdArrayDType;
 #[cfg(feature = "tch-backend")]
 use crate::data::tensor::TchDType;
+use crate::data::tensor::{DType, TensorData};
 use crate::data::trajectory::RelayRLTrajectory;
 use csv::{Reader, ReaderBuilder, StringRecord, Trim, Writer, WriterBuilder};
 use serde::Serialize;
@@ -152,13 +152,18 @@ impl TensorAccumulator {
         }
 
         let dtype = self.dtype.ok_or_else(|| {
-            CsvDataError::TrajectoryBuildFailure("Missing tensor dtype while parsing CSV record".to_string())
+            CsvDataError::TrajectoryBuildFailure(
+                "Missing tensor dtype while parsing CSV record".to_string(),
+            )
         })?;
         let shape = self.shape.ok_or_else(|| {
-            CsvDataError::TrajectoryBuildFailure("Missing tensor shape while parsing CSV record".to_string())
+            CsvDataError::TrajectoryBuildFailure(
+                "Missing tensor shape while parsing CSV record".to_string(),
+            )
         })?;
 
-        let tensor = build_tensor_data(dtype, shape, self.f32_data, self.f64_data, self.binary_data)?;
+        let tensor =
+            build_tensor_data(dtype, shape, self.f32_data, self.f64_data, self.binary_data)?;
         Ok(Some(tensor))
     }
 }
@@ -183,13 +188,21 @@ impl CsvTrajectory {
             .as_ref()
             .map(|cache| cache.records.as_slice())
             .ok_or_else(|| {
-                CsvDataError::ReaderCacheNotInitialized("reader cache is not initialized".to_string())
+                CsvDataError::ReaderCacheNotInitialized(
+                    "reader cache is not initialized".to_string(),
+                )
             })
     }
 
-    pub fn to_csv<P: AsRef<Path>>(mut self, path: P, byte_capacity: usize) -> Result<Self, CsvDataError> {
+    pub fn to_csv<P: AsRef<Path>>(
+        mut self,
+        path: P,
+        byte_capacity: usize,
+    ) -> Result<Self, CsvDataError> {
         let trajectory = self.trajectory.clone().ok_or_else(|| {
-            CsvDataError::TrajectoryNotInitialized("No trajectory initialized to write to CSV".to_string())
+            CsvDataError::TrajectoryNotInitialized(
+                "No trajectory initialized to write to CSV".to_string(),
+            )
         })?;
 
         let target_path = path.as_ref().to_path_buf();
@@ -233,7 +246,9 @@ impl CsvTrajectory {
 
         let start_row = if reuse_cache {
             let cache = self.writer_cache.as_ref().ok_or_else(|| {
-                CsvDataError::WriterCacheNotInitialized("writer cache is not initialized".to_string())
+                CsvDataError::WriterCacheNotInitialized(
+                    "writer cache is not initialized".to_string(),
+                )
             })?;
             if trajectory.len() >= cache.rows_written {
                 cache.rows_written
@@ -245,12 +260,11 @@ impl CsvTrajectory {
         };
 
         {
-            let cache = self
-                .writer_cache
-                .as_mut()
-                .ok_or_else(|| {
-                    CsvDataError::WriterCacheNotInitialized("writer cache is not initialized".to_string())
-                })?;
+            let cache = self.writer_cache.as_mut().ok_or_else(|| {
+                CsvDataError::WriterCacheNotInitialized(
+                    "writer cache is not initialized".to_string(),
+                )
+            })?;
             Self::write_trajectory(
                 &mut cache.writer,
                 &trajectory,
@@ -296,7 +310,9 @@ impl CsvTrajectory {
 
         {
             let cache = self.reader_cache.as_mut().ok_or_else(|| {
-                CsvDataError::ReaderCacheNotInitialized("reader cache is not initialized".to_string())
+                CsvDataError::ReaderCacheNotInitialized(
+                    "reader cache is not initialized".to_string(),
+                )
             })?;
 
             if reload_from_file || cache.records.is_empty() {
@@ -312,7 +328,9 @@ impl CsvTrajectory {
             .reader_cache
             .as_ref()
             .ok_or_else(|| {
-                CsvDataError::ReaderCacheNotInitialized("reader cache is not initialized".to_string())
+                CsvDataError::ReaderCacheNotInitialized(
+                    "reader cache is not initialized".to_string(),
+                )
             })?
             .records
             .clone();
@@ -382,7 +400,9 @@ impl CsvTrajectory {
             .take(end_row.saturating_sub(start_row))
         {
             let row = RelayRLAction::to_csv_data(action)?;
-            writer.write_record(&row).map_err(CsvDataError::CsvFailure)?;
+            writer
+                .write_record(&row)
+                .map_err(CsvDataError::CsvFailure)?;
         }
 
         writer.flush().map_err(|error| {
@@ -655,8 +675,8 @@ impl CsvAction for RelayRLAction {
                     if value.is_empty() {
                         action.data = None;
                     } else {
-                        let data: HashMap<String, RelayRLData> =
-                            serde_json::from_str(value).map_err(|error| {
+                        let data: HashMap<String, RelayRLData> = serde_json::from_str(value)
+                            .map_err(|error| {
                                 CsvDataError::TrajectoryBuildFailure(format!(
                                     "Failed to deserialize aux_data JSON: {error}"
                                 ))
@@ -679,7 +699,9 @@ impl CsvAction for RelayRLAction {
 
 fn parse_json_array<T: DeserializeOwned>(value: &str) -> Result<Vec<T>, CsvDataError> {
     serde_json::from_str::<Vec<T>>(value).map_err(|error| {
-        CsvDataError::TrajectoryBuildFailure(format!("Failed to parse JSON array '{value}': {error}"))
+        CsvDataError::TrajectoryBuildFailure(format!(
+            "Failed to parse JSON array '{value}': {error}"
+        ))
     })
 }
 
@@ -707,7 +729,7 @@ fn parse_dtype(value: &str) -> Result<DType, CsvDataError> {
             _ => {
                 return Err(CsvDataError::TrajectoryBuildFailure(format!(
                     "Unsupported NdArray dtype '{inner}'"
-                )))
+                )));
             }
         };
         return Ok(DType::NdArray(dtype));
@@ -730,7 +752,7 @@ fn parse_dtype(value: &str) -> Result<DType, CsvDataError> {
             _ => {
                 return Err(CsvDataError::TrajectoryBuildFailure(format!(
                     "Unsupported Tch dtype '{inner}'"
-                )))
+                )));
             }
         };
         return Ok(DType::Tch(dtype));
@@ -778,12 +800,24 @@ fn tensor_to_csv_fields(
 
     if is_f32_dtype(&tensor.dtype) {
         let f32_values = bytes_to_f32_vec(&tensor.data)?;
-        return Ok((dtype, shape, vec_to_json_string(&f32_values)?, String::new(), String::new()));
+        return Ok((
+            dtype,
+            shape,
+            vec_to_json_string(&f32_values)?,
+            String::new(),
+            String::new(),
+        ));
     }
 
     if is_f64_dtype(&tensor.dtype) {
         let f64_values = bytes_to_f64_vec(&tensor.data)?;
-        return Ok((dtype, shape, String::new(), vec_to_json_string(&f64_values)?, String::new()));
+        return Ok((
+            dtype,
+            shape,
+            String::new(),
+            vec_to_json_string(&f64_values)?,
+            String::new(),
+        ));
     }
 
     Ok((
@@ -860,7 +894,10 @@ mod unit_tests {
         TensorData::new(
             shape,
             DType::NdArray(NdArrayDType::F32),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::F32)),
         )
     }
@@ -869,7 +906,10 @@ mod unit_tests {
         TensorData::new(
             shape,
             DType::NdArray(NdArrayDType::I32),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::I32)),
         )
     }
@@ -931,7 +971,9 @@ mod unit_tests {
             .from_csv(&path, 256, Some(3), Some(4))
             .expect("reading CSV should succeed");
         let records_len = loaded.get_records().unwrap().len();
-        let loaded_trajectory = loaded.trajectory.expect("trajectory should be reconstructed");
+        let loaded_trajectory = loaded
+            .trajectory
+            .expect("trajectory should be reconstructed");
         let action = &loaded_trajectory.actions[0];
 
         assert_eq!(records_len, 1);
@@ -940,9 +982,18 @@ mod unit_tests {
         assert_eq!(loaded_trajectory.get_agent_id(), Some(&agent_id));
         assert_eq!(action.get_rew(), 1.5);
         assert!(action.get_done());
-        assert_eq!(action.get_obs().unwrap().data, f32_tensor(vec![2], &[1.0, 2.0]).data);
-        assert_eq!(action.get_act().unwrap().data, i32_tensor(vec![2], &[3, 4]).data);
-        assert_eq!(action.get_mask().unwrap().data, bool_tensor(vec![2], &[true, false]).data);
+        assert_eq!(
+            action.get_obs().unwrap().data,
+            f32_tensor(vec![2], &[1.0, 2.0]).data
+        );
+        assert_eq!(
+            action.get_act().unwrap().data,
+            i32_tensor(vec![2], &[3, 4]).data
+        );
+        assert_eq!(
+            action.get_mask().unwrap().data,
+            bool_tensor(vec![2], &[true, false]).data
+        );
         assert!(matches!(
             action.get_data().unwrap().get("policy"),
             Some(RelayRLData::String(value)) if value == "ppo"
@@ -957,7 +1008,9 @@ mod unit_tests {
         let mut trajectory = RelayRLTrajectory::new(4);
         trajectory.add_action(sample_action());
 
-        let mut csv = CsvTrajectory::new(Some(trajectory)).to_csv(&path, 128).unwrap();
+        let mut csv = CsvTrajectory::new(Some(trajectory))
+            .to_csv(&path, 128)
+            .unwrap();
         assert_eq!(csv.writer_cache.as_ref().unwrap().rows_written, 1);
 
         csv.trajectory.as_mut().unwrap().add_action(sample_action());
