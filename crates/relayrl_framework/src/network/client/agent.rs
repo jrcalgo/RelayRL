@@ -286,14 +286,16 @@ pub enum ActorTrainingDataMode {
     )]
     Online(TrainingParams),
     /// Training data is recorded to a local file.
-    Offline(Option<LocalTrajectoryFileParams>),
+    OfflineFiles(Option<LocalTrajectoryFileParams>),
+    OfflineMemory,
     /// Experimental: training data is sent to the server and also recorded locally.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    Hybrid(TrainingParams, Option<LocalTrajectoryFileParams>),
+    HybridFiles(TrainingParams, Option<LocalTrajectoryFileParams>),
+    HybridMemory(TrainingParams),
     /// Training data collection and processing is disabled
     Disabled,
 }
@@ -303,7 +305,7 @@ impl Default for ActorTrainingDataMode {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         return Self::Online(TrainingParams::default());
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        return Self::Offline(None);
+        return Self::OfflineFiles(None);
     }
 }
 
@@ -311,10 +313,14 @@ pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     return matches!(
         training_data_mode,
-        ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _)
+        ActorTrainingDataMode::OfflineFiles(_) | ActorTrainingDataMode::HybridFiles(_, _)
     );
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_));
+    return matches!(training_data_mode, ActorTrainingDataMode::OfflineFiles(_));
+}
+
+pub(crate) fn uses_in_memory_data(training_data_mode: &ActorTrainingDataMode) -> bool {
+    return matches!(training_data_mode, ActorTrainingDataMode::OfflineMemory);
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
@@ -875,7 +881,7 @@ impl<
         actor_ids: Option<Vec<ActorUuid>>,
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_) =
             self.coordinator.client_modes.actor_training_data_mode
         {
             log::warn!(
@@ -1013,7 +1019,7 @@ impl<
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
-                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,
@@ -1037,7 +1043,7 @@ impl<
                         .send_client_ids_to_server(actor_entries.clone(), true)
                         .await?;
 
-                    if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+                    if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_) =
                         &self.coordinator.client_modes.actor_training_data_mode
                     {
                         self.coordinator
@@ -1102,7 +1108,7 @@ impl<
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
-                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::HybridFiles(_, _) | ActorTrainingDataMode::HybridMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,
@@ -1212,9 +1218,9 @@ mod unit_tests {
 
     #[test]
     fn offline_returns_true() {
-        assert!(uses_local_file_writing(&ActorTrainingDataMode::Offline(
-            None
-        )));
+        assert!(uses_local_file_writing(
+            &ActorTrainingDataMode::OfflineFiles(None)
+        ));
     }
 
     #[test]

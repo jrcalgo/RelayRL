@@ -4,8 +4,9 @@
 //! the client runtime.
 
 use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
-use crate::network::client::runtime::actor::LocalModelHandle;
-use crate::network::client::runtime::actor::{Actor, ActorEntity};
+use crate::network::client::runtime::actor::{
+    Actor, ActorEntity, InferenceWorkerHandle, LocalModelHandle,
+};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -19,6 +20,7 @@ use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, Rout
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
+use arc_swap::ArcSwapOption;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -78,6 +80,16 @@ pub(crate) struct SharedRouterState {
     pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterNamespace>,
 }
 
+struct LocalModelResource<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
+    device: DeviceType,
+    model_handle: LocalModelHandle<B>,
+    inference_worker: InferenceWorkerHandle<B, D_IN, D_OUT>,
+}
+
 /// In-memory actor state management and global channel transport
 pub(crate) struct StateManager<
     B: Backend + BackendMatcher<Backend = B>,
@@ -95,7 +107,7 @@ pub(crate) struct StateManager<
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     default_model: Option<ModelModule<B>>,
-    shared_local_models: Vec<(DeviceType, LocalModelHandle<B>)>,
+    shared_local_models: Vec<LocalModelResource<B, D_IN, D_OUT>>,
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
@@ -167,10 +179,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &self,
         model_module: Option<ModelModule<B>>,
         device: DeviceType,
-    ) -> Result<Option<HotReloadableModel<B>>, StateManagerError> {
+    ) -> Result<Option<Arc<HotReloadableModel<B>>>, StateManagerError> {
         // Check fn param
         if let Some(model) = model_module {
-            return Ok(Some(
+            return Ok(Some(Arc::new(
                 HotReloadableModel::<B>::new_from_module(model, device)
                     .await
                     .map_err(|_| {
@@ -179,12 +191,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 .to_string(),
                         )
                     })?,
-            ));
+            )));
         }
 
         // Check cached default_model
         if let Some(model) = self.default_model.clone() {
-            return Ok(Some(
+            return Ok(Some(Arc::new(
                 HotReloadableModel::<B>::new_from_module(model, device)
                     .await
                     .map_err(|_| {
@@ -193,14 +205,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 .to_string(),
                         )
                     })?,
-            ));
+            )));
         }
 
         // Try local_model_path
         let local_model_path = self.shared_local_model_path.read().await;
 
         if !local_model_path.to_str().unwrap_or_default().is_empty() {
-            return Ok(Some(
+            return Ok(Some(Arc::new(
                 HotReloadableModel::<B>::new_from_path(local_model_path.as_path(), device)
                     .await
                     .map_err(|_| {
@@ -208,37 +220,51 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             "[StateManager] Failed to load model from local_model_path".to_string(),
                         )
                     })?,
-            ));
+            )));
         }
 
         // No model available
         Ok(None)
     }
 
-    /// Returns a `(LocalModelHandle<B>, needs_handshake)` pair for a new actor on `device`.
+    /// Returns local-model resources plus a `needs_handshake` flag for a new actor on `device`.
     ///
-    /// - **Independent** mode: always creates a fresh `Arc<RwLock<Option<...>>>`.
+    /// - **Independent** mode: always creates a fresh `Arc<ArcSwapOption<...>>`.
     ///   `needs_handshake` is `true` when no model could be pre-loaded.
     /// - **Shared** mode: looks up the per-device pool.  The *first* actor on a given device
     ///   creates the slot (and triggers a handshake if no model is available); every subsequent
     ///   actor on the same device reuses the existing handle with `needs_handshake = false`,
     ///   ensuring only one network round-trip happens per device.
-    async fn get_or_init_model_handle(
+    async fn get_or_init_model_resource(
         &mut self,
         default_model: Option<ModelModule<B>>,
         device: DeviceType,
-    ) -> Result<(LocalModelHandle<B>, bool), StateManagerError> {
+    ) -> Result<
+        (
+            LocalModelHandle<B>,
+            InferenceWorkerHandle<B, D_IN, D_OUT>,
+            bool,
+        ),
+        StateManagerError,
+    >
+    where
+        B: Send + Sync + 'static,
+    {
         match &self.shared_client_modes.actor_inference_mode {
             ActorInferenceMode::Local(ModelMode::Shared) => {
                 // Reuse existing slot for this device (if any).
                 if let Some(idx) = self
                     .shared_local_models
                     .iter()
-                    .position(|(d, _)| d == &device)
+                    .position(|resource| resource.device == device)
                 {
-                    let handle = self.shared_local_models[idx].1.clone();
+                    let resource = &self.shared_local_models[idx];
                     // Subsequent actors never trigger an additional handshake.
-                    return Ok((handle, false));
+                    return Ok((
+                        resource.model_handle.clone(),
+                        resource.inference_worker.clone(),
+                        false,
+                    ));
                 }
 
                 // First actor for this device: create the slot.
@@ -246,9 +272,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
-                self.shared_local_models.push((device, handle.clone()));
-                Ok((handle, needs_handshake))
+                let model_handle: LocalModelHandle<B> = Arc::new(ArcSwapOption::new(reloadable));
+                let inference_worker = InferenceWorkerHandle::new(model_handle.clone());
+                self.shared_local_models.push(LocalModelResource {
+                    device,
+                    model_handle: model_handle.clone(),
+                    inference_worker: inference_worker.clone(),
+                });
+                Ok((model_handle, inference_worker, needs_handshake))
             }
 
             // Independent or Server-inference: every actor gets its own fresh handle.
@@ -257,8 +288,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
-                Ok((handle, needs_handshake))
+                let model_handle: LocalModelHandle<B> = Arc::new(ArcSwapOption::new(reloadable));
+                let inference_worker = InferenceWorkerHandle::new(model_handle.clone());
+                Ok((model_handle, inference_worker, needs_handshake))
             }
         }
     }
@@ -270,7 +302,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
-    ) -> Result<(), StateManagerError> {
+    ) -> Result<(), StateManagerError>
+    where
+        B: Send + Sync + 'static,
+    {
         if self.actor_handles.contains_key(&actor_id) {
             log::warn!(
                 "[StateManager] Actor ID {} already exists, replacing existing actor...",
@@ -299,8 +334,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let client_namespace = self.client_namespace.clone();
 
-        let (model_handle, model_handshake_flag) = self
-            .get_or_init_model_handle(default_model, device.clone())
+        let (model_handle, local_inference_worker, model_handshake_flag) = self
+            .get_or_init_model_resource(default_model, device.clone())
             .await?;
         self.actor_devices.insert(actor_id, device.clone());
 
@@ -310,6 +345,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 actor_id,
                 device.clone(),
                 model_handle,
+                local_inference_worker,
                 shared_local_model_path,
                 shared_max_traj_length,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -360,7 +396,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         device: DeviceType,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
-    ) -> Result<(), StateManagerError> {
+    ) -> Result<(), StateManagerError>
+    where
+        B: Send + Sync + 'static,
+    {
         self.remove_actor(actor_id)?;
         self.new_actor(
             actor_id,
@@ -1131,12 +1170,12 @@ mod unit_tests {
     async fn shared_mode_second_actor_reuses_same_arc() {
         let (mut sm, _rx) = make_state_manager(shared_modes());
 
-        let (h1, needs1) = sm
-            .get_or_init_model_handle(None, DeviceType::Cpu)
+        let (h1, _worker1, needs1) = sm
+            .get_or_init_model_resource(None, DeviceType::Cpu)
             .await
             .unwrap();
-        let (h2, needs2) = sm
-            .get_or_init_model_handle(None, DeviceType::Cpu)
+        let (h2, _worker2, needs2) = sm
+            .get_or_init_model_resource(None, DeviceType::Cpu)
             .await
             .unwrap();
 
@@ -1152,12 +1191,12 @@ mod unit_tests {
     async fn independent_mode_each_actor_gets_fresh_arc() {
         let (mut sm, _rx) = make_state_manager(disabled_modes());
 
-        let (h1, _) = sm
-            .get_or_init_model_handle(None, DeviceType::Cpu)
+        let (h1, _worker1, _) = sm
+            .get_or_init_model_resource(None, DeviceType::Cpu)
             .await
             .unwrap();
-        let (h2, _) = sm
-            .get_or_init_model_handle(None, DeviceType::Cpu)
+        let (h2, _worker2, _) = sm
+            .get_or_init_model_resource(None, DeviceType::Cpu)
             .await
             .unwrap();
 
@@ -1171,8 +1210,8 @@ mod unit_tests {
     async fn no_model_and_empty_path_sets_needs_handshake() {
         let (mut sm, _rx) = make_state_manager(disabled_modes());
         // shared_local_model_path is empty PathBuf, default_model is None
-        let (_, needs_handshake) = sm
-            .get_or_init_model_handle(None, DeviceType::Cpu)
+        let (_, _worker, needs_handshake) = sm
+            .get_or_init_model_resource(None, DeviceType::Cpu)
             .await
             .unwrap();
         assert!(

@@ -23,7 +23,7 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["client", "tch-backend", "metrics", "logging"]
+default = ["client"]
 
 client = []
 training-server = []
@@ -78,6 +78,7 @@ opentelemetry = { version = "0.31.0", optional = true}
 opentelemetry-otlp = { version = "0.31.1", features = ["grpc-tonic"], optional = true }
 log4rs = { version = "1.3.0", optional = true }
 tokio-stream = { version = "0.1.18", optional = true }
+arc-swap = "1.9.1"
 
 [dependencies.flamegraph]
 version = "0.6.7"
