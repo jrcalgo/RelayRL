@@ -198,6 +198,7 @@ pub mod prelude {
             TransportConfigBuilder, TransportConfigParams,
         };
         pub use relayrl_types::HyperparameterArgs;
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         pub mod network_codec {
             pub use relayrl_types::data::utilities::chunking::*;
             pub use relayrl_types::data::utilities::compress::*;
