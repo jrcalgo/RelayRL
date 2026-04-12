@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tempfile::NamedTempFile;
 
 #[cfg(feature = "tch-backend")]
 use crate::data::tensor::TchDType;
@@ -258,15 +256,30 @@ pub fn serialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
     model: &ModelModule<B>,
     dir: PathBuf,
 ) -> Vec<u8> {
-    let temp_file = tempfile::Builder::new()
-        .prefix("_model")
-        .suffix(".pt")
-        .tempfile_in(dir)
-        .expect("Failed to create temp file");
-    let temp_path = temp_file.path();
+    // Save the full model directory (metadata.json + model file) to a temp dir,
+    // then bundle as [4-byte metadata_len][metadata_bytes][model_bytes] so
+    // deserialize_model_module can reconstruct the directory.
+    let temp_dir = tempfile::Builder::new()
+        .prefix("_model_save_")
+        .tempdir_in(dir)
+        .expect("Failed to create temp dir");
+    let temp_path = temp_dir.path().to_path_buf();
 
-    ModelModule::<B>::save(model, temp_path).expect("Failed to save model");
-    std::fs::read(temp_path).expect("Failed to read model bytes")
+    ModelModule::<B>::save(model, &temp_path).expect("Failed to save model");
+
+    let meta_bytes = std::fs::read(temp_path.join("metadata.json"))
+        .expect("Failed to read metadata.json");
+    let model_path = temp_path.join(&model.metadata.model_file);
+    let model_bytes = std::fs::read(&model_path)
+        .expect("Failed to read model file");
+
+    // Bundle: [4LE: meta_len][meta_bytes][model_bytes]
+    let meta_len = meta_bytes.len() as u32;
+    let mut bundle = Vec::with_capacity(4 + meta_bytes.len() + model_bytes.len());
+    bundle.extend_from_slice(&meta_len.to_le_bytes());
+    bundle.extend_from_slice(&meta_bytes);
+    bundle.extend_from_slice(&model_bytes);
+    bundle
 }
 
 /// Deserializes a vector of bytes into a model (`ModelModule`).
@@ -282,19 +295,42 @@ pub fn serialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
 ///
 /// A [`ModelModule`] representing the deserialized model.
 pub fn deserialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
-    model_bytes: Vec<u8>,
+    bundle: Vec<u8>,
     _device: DeviceType,
 ) -> Result<ModelModule<B>, ModelError> {
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(&model_bytes)
-        .expect("Failed to write model bytes");
-    temp_file.flush().expect("Failed to flush temp file");
+    // Unpack bundle: [4LE: meta_len][meta_bytes][model_bytes]
+    if bundle.len() < 4 {
+        return Err(ModelError::InvalidMetadata("bundle too short".into()));
+    }
+    let meta_len = u32::from_le_bytes(bundle[..4].try_into().unwrap()) as usize;
+    if bundle.len() < 4 + meta_len {
+        return Err(ModelError::InvalidMetadata("bundle truncated".into()));
+    }
+    let meta_bytes = &bundle[4..4 + meta_len];
+    let model_bytes = &bundle[4 + meta_len..];
 
-    Ok(
-        ModelModule::<B>::load_from_path(temp_file.path())
-            .expect("Failed to load model from bytes"),
-    )
+    // Write to a temp dir so load_from_path can find metadata.json + model file.
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+
+    // Parse metadata to get the model_file name.
+    let meta_json: serde_json::Value = serde_json::from_slice(meta_bytes)
+        .map_err(|e| ModelError::InvalidMetadata(e.to_string()))?;
+    let model_file = meta_json
+        .get("model_file")
+        .and_then(|v| v.as_str())
+        .unwrap_or("model.onnx");
+
+    std::fs::write(temp_path.join("metadata.json"), meta_bytes)
+        .expect("Failed to write metadata.json");
+    std::fs::write(temp_path.join(model_file), model_bytes)
+        .expect("Failed to write model file");
+
+    // Keep temp_dir alive until load_from_path completes.
+    let result = ModelModule::<B>::load_from_path(temp_path)
+        .map_err(|e| ModelError::InvalidMetadata(format!("{e}")))?;
+    drop(temp_dir);
+    Ok(result)
 }
 
 #[cfg(all(
