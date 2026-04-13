@@ -41,14 +41,21 @@ fn resolve_agent_key(trajectory: &RelayRLTrajectory) -> AgentKey {
 fn sample_buffer_blocking<RB: GenericReplayBuffer>(
     buffer: &RB,
 ) -> Result<Batch, ReplayBufferError> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(buffer.sample_buffer()),
-        Err(_) => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| ReplayBufferError::BufferSamplingError(e.to_string()))?
-            .block_on(buffer.sample_buffer()),
-    }
+    // Spawn a scoped OS thread with a fresh single-thread Tokio runtime so this
+    // function is safe to call from an async context.  A plain `Handle::block_on`
+    // panics with "cannot start a runtime from within a runtime" when the caller is
+    // already inside a Tokio executor.
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| ReplayBufferError::BufferSamplingError(e.to_string()))?
+                .block_on(buffer.sample_buffer())
+        })
+        .join()
+        .map_err(|_| ReplayBufferError::BufferSamplingError("sampler thread panicked".to_string()))?
+    })
 }
 
 #[derive(Default)]
@@ -230,7 +237,7 @@ where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    KN: StepKernelTrait<B, InK, OutK> + Default,
+    KN: StepKernelTrait<B, InK, OutK> + self::kernel::PPOKernelTrait<B, InK, OutK> + Default,
 {
     #[allow(dead_code)]
     pub(crate) fn new(
@@ -282,12 +289,14 @@ where
             self.hyperparams.gamma,
             self.hyperparams.lam,
         );
+        let obs_dim = self.runtime.args.obs_dim;
+        let act_dim = self.runtime.args.act_dim;
         let kernel = self
             .runtime
             .components
             .seed_kernel
             .take()
-            .unwrap_or_default();
+            .unwrap_or_else(|| KN::new_for_actor(obs_dim, act_dim));
         let index = self.runtime.components.agent_slots.len();
         self.runtime
             .components
@@ -318,6 +327,61 @@ where
         for slot in &mut self.runtime.components.agent_slots {
             slot.trajectory_count = 0;
         }
+    }
+
+    /// Reset per-actor trajectory counts.
+    ///
+    /// Call this to prevent `receive_trajectory` from auto-triggering `train_model`
+    /// when resuming from an async context mid-epoch.
+    pub fn reset_epoch(&mut self) {
+        self.reset_agent_counts();
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B, InK, OutK, KN> IndependentPPOAlgorithm<B, InK, OutK, KN>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    KN: StepKernelTrait<B, InK, OutK>
+        + self::kernel::PPOKernelTrait<B, InK, OutK>
+        + crate::templates::base_algorithm::WeightProvider
+        + Default,
+{
+    /// Export the trained policy as an in-memory ONNX model.
+    ///
+    /// Extracts layer specs from the first registered actor's kernel, encodes them as
+    /// a fully-connected MLP in ONNX format, and wraps the result in a `ModelModule`.
+    /// Returns `None` if no actor has been registered or if no training has occurred
+    /// yet (the kernel's `pi_trainer` network is absent).
+    pub fn acquire_model_module(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B>> {
+        use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
+        use relayrl_types::data::tensor::{DType, NdArrayDType};
+        use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
+
+        let slot = self.runtime.components.agent_slots.first()?;
+        let layer_specs = slot.kernel.get_pi_layer_specs()?;
+        if layer_specs.is_empty() {
+            return None;
+        }
+
+        let obs_dim = self.runtime.args.obs_dim;
+        let act_dim = self.runtime.args.act_dim;
+
+        let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
+        let metadata = ModelMetadata {
+            model_file: "model.onnx".to_string(),
+            model_type: ModelFileType::Onnx,
+            input_dtype: DType::NdArray(NdArrayDType::F32),
+            output_dtype: DType::NdArray(NdArrayDType::F32),
+            input_shape: vec![1, obs_dim],
+            output_shape: vec![1, act_dim],
+            default_device: None,
+        };
+        ModelModule::from_onnx_bytes(onnx_bytes, metadata).ok()
     }
 }
 
