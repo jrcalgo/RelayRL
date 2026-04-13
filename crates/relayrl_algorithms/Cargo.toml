@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_algorithms"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A collection of Multi-Agent Deep Reinforcement Learning Algorithms (IPPO, MAPPO, etc.)"
 repository = "https://github.com/jrcalgo/relayrl"
@@ -10,7 +10,7 @@ categories = ['science', 'algorithms', 'simulation', 'concurrency', 'mathematics
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend", "tch-backend"]
+default = ["ndarray-backend"]
 ndarray-backend = ["burn-ndarray", "relayrl_types/ndarray-backend"]
 tch-backend = ["burn-tch", "relayrl_types/tch-backend"]
 
