@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta.1] - 2026-04-13
+
+### Added
+- **In-memory trajectory retrieval** - `RelayRLAgent::get_trajectory_memory()` added for draining accumulated per-actor trajectory memory from the runtime coordinator
+  - Completed trajectories can now be retained in bounded in-memory buffers, and `flag_last_action` now stamps each emitted trajectory with an episode id before dispatch
+- **Overflow inference mode** - `ActorInferenceMode::ServerOverflow(ModelMode, InferenceParams)` added as an experimental transport-gated mode for mixing local model ownership with remote inference fallback
+
+### Changed
+- **Local model/runtime concurrency** - Local actor model handles now use `ArcSwapOption` instead of lock-based storage so inference and model swaps can proceed through snapshot-style loads rather than blocking reload paths
+
+### Fixed
+- **Action request handling** - `request_action()` follow-up fixes improved actor reply coordination and corrected id/reference handling in the runtime action path
+- **Trajectory-length defaults** - Generated config JSON and builder defaults now cap `max_traj_length` at `1000` instead of `100000000` to avoid runaway memory use in default configurations
+
+### Breaking
+- **Feature and codec surface** - Default features dropped `tch-backend`, `relayrl_framework` no longer forces `relayrl_types` `ndarray-backend` / `onnx-model` features in its dependency declaration, and `prelude::config::network_codec` now exists only when `nats-transport` or `zmq-transport` is enabled
+- **Training-data mode API redesign** - `ActorTrainingDataMode` was expanded from the older `Offline` / `Hybrid` shape into explicit file and memory variants such as `OfflineWithFiles`, `OfflineWithMemory`, `OnlineWithFiles`, and `OnlineWithMemory`; the non-transport default is now `OfflineWithMemory`
+
 ## [0.5.0-beta] - 2026-04-06
 
 ### Added
