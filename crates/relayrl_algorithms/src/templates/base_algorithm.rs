@@ -141,6 +141,15 @@ pub trait StepKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK:
     fn get_output_dim(&self) -> usize;
 }
 
+/// Trait for extracting per-layer weight specs from a trained policy network.
+///
+/// Each tuple is `(in_dim, out_dim, flat_weights, flat_biases)` in Burn's row-major
+/// `[in, out]` layout, layers ordered input→output. This lets the training side hand
+/// weights to the ONNX builder without any filesystem I/O.
+pub trait WeightProvider {
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>>;
+}
+
 /// Trait for kernels that support gradient-based training.
 ///
 /// The backend type used for autodiff is encapsulated inside the implementation —
