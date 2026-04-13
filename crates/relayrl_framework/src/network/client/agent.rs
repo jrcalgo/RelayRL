@@ -30,6 +30,7 @@ use active_uuid_registry::interface::list_ids;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, SupportedTensorBackend,
@@ -39,6 +40,7 @@ use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
+use dashmap::DashMap;
 use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
@@ -293,22 +295,32 @@ pub enum ActorTrainingDataMode {
     )]
     Online(TrainingParams),
     /// Training data is recorded to a local file.
-    OfflineFiles(Option<LocalTrajectoryFileParams>),
-    OfflineMemory,
+    OfflineWithFiles(Option<LocalTrajectoryFileParams>),
+    /// Training data is recorded to a local memory buffer.
+    OfflineWithMemory,
+    /// Training data is recorded to a local file and memory buffer.
+    OfflineWithFilesAndMemory(Option<LocalTrajectoryFileParams>),
     /// Experimental: training data is sent to the server and also recorded locally.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    OnlineFiles(TrainingParams, Option<LocalTrajectoryFileParams>),
+    OnlineWithFiles(TrainingParams, Option<LocalTrajectoryFileParams>),
     /// Experimental: training data is sent to the server and also recorded in memory.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    OnlineMemory(TrainingParams),
+    OnlineWithMemory(TrainingParams),
+    /// Experimental: training data is sent to the server and also recorded in file and memory.
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
+    OnlineWithFilesAndMemory(TrainingParams, Option<LocalTrajectoryFileParams>),
     /// Training data collection and processing is disabled
     Disabled,
 }
@@ -318,7 +330,7 @@ impl Default for ActorTrainingDataMode {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         return Self::Online(TrainingParams::default());
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        return Self::OfflineFiles(None);
+        return Self::OfflineWithMemory;
     }
 }
 
@@ -326,14 +338,14 @@ pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     return matches!(
         training_data_mode,
-        ActorTrainingDataMode::OfflineFiles(_) | ActorTrainingDataMode::OnlineFiles(_, _)
+        ActorTrainingDataMode::OfflineWithFiles(_) | ActorTrainingDataMode::OnlineWithFiles(_, _)
     );
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-    return matches!(training_data_mode, ActorTrainingDataMode::OfflineFiles(_));
+    return matches!(training_data_mode, ActorTrainingDataMode::OfflineWithFiles(_));
 }
 
 pub(crate) fn uses_in_memory_data(training_data_mode: &ActorTrainingDataMode) -> bool {
-    return matches!(training_data_mode, ActorTrainingDataMode::OfflineMemory);
+    return matches!(training_data_mode, ActorTrainingDataMode::OfflineWithMemory);
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
@@ -895,8 +907,8 @@ impl<
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let ActorTrainingDataMode::Online(_)
-        | ActorTrainingDataMode::OnlineFiles(_, _)
-        | ActorTrainingDataMode::OnlineMemory(_) =
+        | ActorTrainingDataMode::OnlineWithFiles(_, _)
+        | ActorTrainingDataMode::OnlineWithMemory(_) =
             self.coordinator.client_modes.actor_training_data_mode
         {
             log::warn!(
@@ -923,6 +935,10 @@ impl<
         actor_ids: Vec<Uuid>,
     ) -> Result<Vec<(Uuid, i64)>, ClientError> {
         Ok(self.coordinator.get_model_version(actor_ids).await?)
+    }
+
+    pub async fn get_trajectory_memory(&self) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, ClientError> {
+        Ok(self.coordinator.get_trajectory_memory().await?)
     }
 
     /// Fetch the active client configuration.
@@ -1035,8 +1051,8 @@ impl<
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
                     ActorTrainingDataMode::Online(_)
-                    | ActorTrainingDataMode::OnlineFiles(_, _)
-                    | ActorTrainingDataMode::OnlineMemory(_),
+                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
+                    | ActorTrainingDataMode::OnlineWithMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,
@@ -1061,8 +1077,8 @@ impl<
                         .await?;
 
                     if let ActorTrainingDataMode::Online(_)
-                    | ActorTrainingDataMode::OnlineFiles(_, _)
-                    | ActorTrainingDataMode::OnlineMemory(_) =
+                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
+                    | ActorTrainingDataMode::OnlineWithMemory(_) =
                         &self.coordinator.client_modes.actor_training_data_mode
                     {
                         self.coordinator
@@ -1128,8 +1144,8 @@ impl<
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
                     ActorTrainingDataMode::Online(_)
-                    | ActorTrainingDataMode::OnlineFiles(_, _)
-                    | ActorTrainingDataMode::OnlineMemory(_),
+                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
+                    | ActorTrainingDataMode::OnlineWithMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,
@@ -1240,7 +1256,7 @@ mod unit_tests {
     #[test]
     fn offline_returns_true() {
         assert!(uses_local_file_writing(
-            &ActorTrainingDataMode::OfflineFiles(None)
+            &ActorTrainingDataMode::OfflineWithFiles(None)
         ));
     }
 

@@ -8,7 +8,8 @@ use super::{RoutedMessage, RoutedPayload, RouterError};
 use crate::network::client::agent::ActorTrainingDataMode;
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
-    LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing,
+    LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_in_memory_data,
+    uses_local_file_writing,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
@@ -108,6 +109,10 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
         &mut self,
         shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     ) -> &mut Self;
+    fn with_trajectory_memory(
+        &mut self,
+        traj_memory: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
+    ) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
     fn with_semaphore_capacity(
         &mut self,
@@ -135,6 +140,10 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn with_trajectory_writer(
         &mut self,
         shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
+    ) -> &mut Self;
+    fn with_trajectory_memory(
+        &mut self,
+        traj_memory: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
     ) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
     fn with_semaphore_capacity(
@@ -184,6 +193,7 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
+    shared_traj_memory: Option<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     shared_max_traj_length: Option<Arc<RwLock<usize>>>,
     shared_actor_count: Option<Arc<AtomicUsize>>,
@@ -216,6 +226,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses: None,
             shared_trajectory_file_output: None,
+            shared_traj_memory: None,
             shutdown: None,
             shared_max_traj_length: None,
             shared_actor_count: None,
@@ -242,6 +253,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     ) -> &mut Self {
         self.shared_trajectory_file_output = Some(shared_trajectory_file_output);
+        self
+    }
+
+    fn with_trajectory_memory(
+        &mut self,
+        shared_traj_memory: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
+    ) -> &mut Self {
+        self.shared_traj_memory = Some(shared_traj_memory);
         self
     }
 
@@ -300,6 +319,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let codec = self.codec.clone();
 
         let shared_trajectory_file_output = self.shared_trajectory_file_output.clone();
+
+        let shared_traj_memory = self.shared_traj_memory.clone();
 
         let worker_priority_queue: BinaryHeap<SinkQueueEntry> = BinaryHeap::new();
 
@@ -389,6 +410,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let worker_namespace = namespace.clone();
         let worker_trajectory_file_output = shared_trajectory_file_output.clone();
+        let worker_traj_memory = shared_traj_memory.clone();
+
+        const MAX_TRAJ_MEMORY_SIZE: usize = 1_000;
 
         let _worker_handle = tokio::spawn(async move {
             const BATCH_SIZE: usize = 10;
@@ -440,7 +464,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         // Dispatch each job to enabled sinks
                         for job in jobs_to_process {
                             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                            if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode &&
+                            if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::OnlineWithFiles(_, _) | ActorTrainingDataMode::OnlineWithMemory(_) = &worker_modes.actor_training_data_mode &&
                                 let (Some(dispatcher), Some(transport_addresses)) =
                                     (worker_training_dispatcher.clone(), worker_transport_addresses.clone())
                                 {
@@ -485,7 +509,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                     });
                                 }
 
-
                             if uses_local_file_writing(&worker_modes.actor_training_data_mode) &&
                                 let Some(ref traj_output) = worker_trajectory_file_output {
                                     let local_job = job.clone();
@@ -508,8 +531,27 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                             );
                                         }
                                     });
-
                             }
+
+                            if uses_in_memory_data(&worker_modes.actor_training_data_mode) &&
+                                let Some(ref traj_memory) = worker_traj_memory {
+                                    let actor_id = job.actor_id;
+                                    let traj_clone = job.traj_for_processing.clone();
+                                    
+                                    if let Some(ref mut traj_vec) = traj_memory.get_mut(&actor_id) {
+                                        let room_after_push = MAX_TRAJ_MEMORY_SIZE.saturating_sub(1);
+                                        // trajectory memory is guaranteed to OOM without this check
+                                        if traj_vec.len() > room_after_push {
+                                            let drop = traj_vec.len() - room_after_push;
+                                            traj_vec.drain(..drop);
+
+                                        }
+                                        traj_vec.push(traj_clone);
+                                    } else {
+                                        traj_memory.insert(actor_id, vec![traj_clone]);
+                                    }
+                                }
+                            
                         }
                     }
                 }
@@ -519,7 +561,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             while let Some(job) = worker_queue.pop() {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let Some(transport_addresses) = &worker_transport_addresses
-                    && let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+                    && let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::OnlineWithFiles(_, _) | ActorTrainingDataMode::OnlineWithMemory(_) =
                         &worker_modes.actor_training_data_mode
                 {
                     let encoded = match job.traj_for_processing.encode(&worker_codec) {

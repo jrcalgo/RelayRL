@@ -7,7 +7,7 @@ use crate::network::HyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{ActorInferenceMode, AlgorithmArgs, ModelMode};
-use crate::network::client::agent::{ActorTrainingDataMode, ClientModes, uses_local_file_writing};
+use crate::network::client::agent::{ActorTrainingDataMode, ClientModes, uses_in_memory_data, uses_local_file_writing};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
@@ -42,6 +42,7 @@ use burn_tensor::backend::Backend;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::tensor::BackendMatcher;
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::model::ModelModule;
 
@@ -76,6 +77,8 @@ pub enum ScaleManagerError {
     SpawnTrajectoryBufferError(#[source] TrajectorySinkError),
     #[error("Router runtime params not found: {0}")]
     GetRouterRuntimeParamsError(String),
+    #[error("Trajectory memory not found: {0}")]
+    TrajectoryMemoryNotFoundError(String),
     #[error("Failed to send action request: {0}")]
     SendActionRequestError(String),
     #[error("Failed to receive action response: {0}")]
@@ -134,7 +137,8 @@ pub(crate) struct ScaleManager<
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
-    shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
+    shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
+    pub(crate) shared_trajectory_memory: Option<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -215,7 +219,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_init_hyperparameters = lifecycle.get_init_hyperparameters();
 
-        let shared_trajectory_file_output = lifecycle.get_trajectory_file_output();
+        let shared_trajectory_file_output = if uses_local_file_writing(&shared_client_modes.actor_training_data_mode) {
+            Some(lifecycle.get_trajectory_file_output())
+        } else {
+            None
+        };
+
+        let shared_trajectory_memory = if uses_in_memory_data(&shared_client_modes.actor_training_data_mode) {
+            Some(Arc::new(DashMap::new()))
+        } else {
+            None
+        };
 
         Ok(Self {
             client_namespace,
@@ -239,6 +253,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_init_hyperparameters,
             shared_trajectory_file_output,
+            shared_trajectory_memory,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec: codec.unwrap_or_default(),
             cached_hyperparameters: HashMap::new(),
@@ -359,7 +374,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let algorithm_model_mode =
                         match self.shared_client_modes.actor_training_data_mode.clone() {
                             ActorTrainingDataMode::Online(params) => params.model_mode,
-                            ActorTrainingDataMode::Hybrid(params, _) => params.model_mode,
+                            ActorTrainingDataMode::OnlineWithFiles(params, _) => params.model_mode,
                             _ => ModelMode::Independent,
                         };
 
@@ -525,7 +540,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
             };
 
-            let mut buffer_actor_count: Option<Arc<AtomicUsize>> = None;
             let buffer: Option<ClientTrajectoryBuffer<B>> = {
                 if self.shared_client_modes.actor_training_data_mode
                     != ActorTrainingDataMode::Disabled
@@ -557,8 +571,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
 
                     if uses_local_file_writing(&self.shared_client_modes.actor_training_data_mode) {
-                        buffer_init
-                            .with_trajectory_writer(self.shared_trajectory_file_output.clone());
+                        if let Some(shared_trajectory_file_output) = self.shared_trajectory_file_output.clone() {
+                            buffer_init
+                                .with_trajectory_writer(shared_trajectory_file_output);
+                        }
+                    }
+                    
+                    if uses_in_memory_data(&self.shared_client_modes.actor_training_data_mode) {
+                        if let Some(shared_trajectory_memory) = self.shared_trajectory_memory.clone() {
+                            buffer_init
+                                .with_trajectory_memory(shared_trajectory_memory);
+                        }
                     }
 
                     if let Some(lc) = &self.lifecycle {

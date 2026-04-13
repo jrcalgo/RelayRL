@@ -57,11 +57,13 @@ use active_uuid_registry::{UuidPoolError, registry_uuid::Uuid};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher};
 use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::serialize_model_module;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
 
+use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
@@ -227,6 +229,7 @@ pub trait ClientInterface<
         &self,
         ids: Vec<ActorUuid>,
     ) -> Result<Vec<(ActorUuid, i64)>, CoordinatorError>;
+    async fn get_trajectory_memory(&self) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, CoordinatorError>;
     async fn scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
     async fn scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
     async fn get_config(&self) -> Result<ClientConfigLoader, CoordinatorError>;
@@ -533,11 +536,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
             let training_address_args = match &shared_client_modes.actor_training_data_mode {
                 ActorTrainingDataMode::Online(server_params)
-                | ActorTrainingDataMode::OnlineFiles(server_params, _)
-                | ActorTrainingDataMode::OnlineMemory(server_params) => {
+                | ActorTrainingDataMode::OnlineWithFiles(server_params, _)
+                | ActorTrainingDataMode::OnlineWithMemory(server_params) => {
                     server_params.training_addresses.clone()
                 }
-                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineFiles(_) => None,
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineWithFiles(_) => None,
             };
 
             if inference_address_args.is_some() || training_address_args.is_some() {
@@ -682,9 +685,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         {
             // if args are set in client mode init config, set lifecycle manager trajectory file path
             let local_trajectory_file_params = match &shared_client_modes.actor_training_data_mode {
-                ActorTrainingDataMode::OfflineFiles(Some(params)) => Some(params),
+                ActorTrainingDataMode::OfflineWithFiles(Some(params)) => Some(params),
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorTrainingDataMode::Hybrid(_, Some(params)) => Some(params),
+                ActorTrainingDataMode::OnlineWithFiles(_, Some(params)) => Some(params),
                 _ => None,
             };
 
@@ -728,7 +731,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 };
 
             let training_dispatcher = match shared_client_modes.actor_training_data_mode {
-                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineFiles(_) => None,
+                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineWithFiles(_) => None,
                 _ => {
                     scaling_dispatcher = Some(Arc::new(ScalingDispatcher::<B>::new(
                         shared_transport.clone(),
@@ -756,8 +759,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             {
                 Some(lifecycle.get_transport_addresses())
             } else if let ActorTrainingDataMode::Online(_)
-            | ActorTrainingDataMode::OnlineFiles(_, _)
-            | ActorTrainingDataMode::OnlineMemory(_) =
+            | ActorTrainingDataMode::OnlineWithFiles(_, _)
+            | ActorTrainingDataMode::OnlineWithMemory(_) =
                 shared_client_modes.actor_training_data_mode
             {
                 Some(lifecycle.get_transport_addresses())
@@ -1459,6 +1462,27 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             None => Err(CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
                     "[Coordinator] No runtime instance to get_model_version...".to_string(),
+                ),
+            )),
+        }
+    }
+
+    async fn get_trajectory_memory(&self) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, CoordinatorError> {
+        match &self.runtime_params {
+            Some(params) => {
+                if let Some(mut shared_trajectory_memory) = params.scaling.shared_trajectory_memory.clone() {
+                    Ok(std::mem::replace(&mut shared_trajectory_memory, Arc::new(DashMap::new())))
+                } else {
+                    Err(CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::TrajectoryMemoryNotFoundError(
+                            "[Coordinator] Trajectory memory not found".to_string(),
+                        ),
+                    ))
+                }
+            }
+            None => Err(CoordinatorError::ScaleManagerError(
+                ScaleManagerError::GetRouterRuntimeParamsError(
+                    "[Coordinator] No runtime instance to get_trajectory_memory...".to_string(),
                 ),
             )),
         }
