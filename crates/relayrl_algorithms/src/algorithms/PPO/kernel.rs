@@ -51,6 +51,13 @@ where
 pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>:
     StepKernelTrait<B, InK, OutK>
 {
+    /// Construct a correctly-shaped kernel for a new actor slot.
+    ///
+    /// Used instead of `Default::default()` when registering agents beyond the first,
+    /// so each actor is initialised with the right `obs_dim` / `act_dim` rather than
+    /// the placeholder dimensions that `Default` produces.
+    fn new_for_actor(obs_dim: usize, act_dim: usize) -> Self;
+
     fn ppo_pi_loss(
         &mut self,
         obs: &[TensorData],
@@ -514,6 +521,20 @@ where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
 {
+    fn new_for_actor(obs_dim: usize, act_dim: usize) -> Self {
+        let device = B::Device::default();
+        Self::new(
+            obs_dim,
+            act_dim,
+            true,
+            &[64, 64],
+            ActivationKind::ReLU,
+            3e-4,
+            1e-3,
+            &device,
+        )
+    }
+
     fn ppo_pi_loss(
         &mut self,
         obs: &[TensorData],
@@ -542,5 +563,38 @@ where
         }
 
         0.0
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    crate::templates::base_algorithm::WeightProvider for PPOPolicyWithBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
+    /// Extract per-layer weight specs from the discrete policy trainer network.
+    ///
+    /// Returns `None` if no training has happened yet (the trainer or its network is
+    /// absent) or if this kernel uses a continuous policy (not yet supported).
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        let trainer = self.pi_trainer.as_ref()?;
+        let network = trainer.network.as_ref()?;
+
+        let mut specs = Vec::new();
+        for layer in &network.layers {
+            let w = layer.weight.val();
+            let dims = w.dims();
+            let in_dim = dims[0];
+            let out_dim = dims[1];
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+            } else {
+                vec![0.0; out_dim]
+            };
+            specs.push((in_dim, out_dim, weights, biases));
+        }
+        Some(specs)
     }
 }
