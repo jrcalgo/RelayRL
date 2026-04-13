@@ -3,7 +3,7 @@
 **Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
-**Version:** 0.5.0-beta
+**Version:** 0.5.0-beta.1
 
 **Status:** Under active development, expect breaking changes.
 
@@ -12,8 +12,6 @@
 ## Overview
 
 With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `relayrl_framework` crate now provides a **multi-actor native** client runtime for deep reinforcement learning experiments. The training server (and new inference server) are under development and remain unavailable in this update.
-
-Without transport being fully implemented yet, the client can write data to an `arrow` or `csv` file on your local device.
 
 As of now, the supported beta path is the local/default client runtime. Provide your own
 `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface.
@@ -25,20 +23,21 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 - **Multi-actor native architecture** with concurrent actor execution
 - Local Arrow file sink for **offline trajectory data collection** and training
+- **In-memory** trajectory retrieval for the last 1,000 trajectories collected
 - **Scalable** router-based message dispatching for actor runtimes
 - **Ergonomic builder pattern** API for agent construction
 - **Multiple device type support** via `NdArray` for CPU exclusively and `Tch` for CPU/CUDA/MPS
 
 **Current Limitations:**
 
-- **Data Collection:** Only local Arrow or CSV file sinks are available
-- **Transport Layer:** Network transport (ZMQ/NATS) is implemented, however no complementary server is available at this time
+- **Transport Layer:** Network transport (ZMQ/NATS) is implemented as experimental, however no complementary server is available at this time
 
 **Major Changes:**
 
 - **Architecture Redesign:** Monolithic design of v0.4.5 abstracted into a decoupled layered architecture, enhancing modularity, maintainability, and testability.
 - **Rust-First Design Philosophy:** Complete removal of PyO3 and its Python code dependencies from framework; all core components written entirely in Rust.
 - **Backend Independence:** Replacement of direct `Tch` crate dependency with `Burn`, enabling generic Tensor interfacing with the framework (currently supports Burn's `Tch` and `NdArray` Tensor backends, as well as `TorchScript` and `ONNX` model inference).
+- **Data Persistence:** Trajectory data can be optionally persisted in-memory and/or via `Csv` or `Arrow` file formats.
 - **Improved Error Handling:** Near complete removal of panics and replacement with proper error handling (retries, branches, etc.) and upstream propagation.
 - **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building strong `ZMQ` and `NATS` transport implementations.
 - **Type System:** Moved to a separate crate (`relayrl_types`).
@@ -49,12 +48,13 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 ### 0.5.0-beta Scope
 
-Supported in `0.5.0-beta`:
+Supported in `0.5.0-beta.1`:
 
 - local inference
 - actor lifecycle management
 - router scaling
 - local Arrow/CSV trajectory writing
+- in-memory trajectory retrieval
 
 Experimental in `0.5.0-beta`:
 
