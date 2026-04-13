@@ -82,6 +82,7 @@ pub use algorithms::REINFORCE::{
 };
 pub use templates::base_algorithm::{
     AlgorithmError, AlgorithmTrait, StepKernelTrait, TrainableKernelTrait, TrajectoryData,
+    WeightProvider,
 };
 
 /// Shared filesystem and shape arguments for every trainer constructor in this module.
@@ -345,6 +346,37 @@ where
     ) -> Result<Self, AlgorithmError> {
         Self::new(PpoTrainerSpec::ippo(args, hyperparams), kernel)
     }
+
+    /// Reset per-actor trajectory counts.
+    ///
+    /// Prevents `receive_trajectory` from auto-triggering `train_model` when called
+    /// from an async context at the start of a new epoch.
+    pub fn reset_epoch(&mut self) {
+        match self {
+            Self::PPO(algorithm) => algorithm.reset_epoch(),
+            Self::IPPO(algorithm) => algorithm.reset_epoch(),
+        }
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B, InK, OutK, K> PpoTrainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: PPOKernelTrait<B, InK, OutK> + WeightProvider + Default,
+{
+    /// Export the trained policy as an in-memory ONNX model.
+    ///
+    /// Returns `None` before the first training epoch or when no actors have been
+    /// registered.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::PPO(algorithm) => algorithm.acquire_model_module(),
+            Self::IPPO(algorithm) => algorithm.acquire_model_module(),
+        }
+    }
 }
 
 /// Runtime wrapper for **independent** REINFORCE-family algorithms with kernel `K`.
@@ -433,6 +465,17 @@ where
     ) -> Result<Self, AlgorithmError> {
         Self::new(ReinforceTrainerSpec::ireinforce(args, hyperparams), kernel)
     }
+
+    /// No-op for REINFORCE trainers; trajectory counts are managed internally.
+    pub fn reset_epoch(&mut self) {}
+
+    /// REINFORCE does not support in-memory ONNX export; always returns `None`.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>>
+    where
+        B: BackendMatcher<Backend = B>,
+    {
+        None
+    }
 }
 
 /// Runtime wrapper for **multi-agent** MAPPO and MAREINFORCE.
@@ -517,6 +560,27 @@ where
         hyperparams: Option<MAREINFORCEParams>,
     ) -> Result<Self, AlgorithmError> {
         Self::new(MultiagentTrainerSpec::mareinforce(args, hyperparams))
+    }
+
+    /// No-op for multi-agent trainers; trajectory counts are managed internally.
+    pub fn reset_epoch(&mut self) {}
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B, InK, OutK> MultiagentTrainer<B, InK, OutK>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    /// Export the trained MAPPO policy as an in-memory ONNX model.
+    ///
+    /// Returns `None` for MAREINFORCE or before any training has occurred.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::MAPPO { trainer } => trainer.acquire_model_module(),
+            Self::MAREINFORCE { .. } => None,
+        }
     }
 }
 
