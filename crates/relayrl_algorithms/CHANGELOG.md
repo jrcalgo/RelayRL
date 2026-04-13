@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
   - `PpoTrainer` resets per-actor trajectory counts, while `ReinforceTrainer` and `MultiagentTrainer` expose matching no-op helpers for a consistent API
 - **Policy export support** - Added the `WeightProvider` trait and new `acquire_model_module()` methods for exporting trained PPO-family policies as in-memory `relayrl_types::model::ModelModule` values
   - `PpoTrainer` and `MultiagentTrainer` expose policy export on `ndarray-backend`, while `ReinforceTrainer` now provides a consistent `acquire_model_module()` surface that returns `None`
+- **ONNX MLP byte builder** - Added `algorithms::onnx_builder::build_onnx_mlp_bytes()` for generating serialized ONNX `ModelProto` payloads from extracted policy-layer weights
+  - The builder emits opset 17 models that can be loaded directly through ORT in-memory model-loading paths without an external protobuf dependency
+  - Layer specs from `WeightProvider::get_pi_layer_specs()` are encoded using Burn's `[in, out]` weight layout for ONNX `Gemm` nodes
 
 ### Fixed
 - **Async replay-buffer sampling** - PPO replay-buffer sampling no longer panics when called from within an active Tokio runtime
