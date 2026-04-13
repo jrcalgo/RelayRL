@@ -148,6 +148,33 @@ impl MultiagentPPOKernel {
     pub fn hidden_sizes(&self) -> &[usize] {
         &self.hidden_sizes
     }
+
+    /// Extract per-layer weight specs from the first actor in the shared policy.
+    ///
+    /// Returns `None` if no training has occurred yet (trainer or module absent) or if
+    /// no actors have been registered.
+    #[cfg(feature = "ndarray-backend")]
+    pub fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        let trainer = self.trainer.as_ref()?;
+        let module = trainer.module.as_ref()?;
+        let actor = module.actors.first()?;
+
+        let mut specs = Vec::new();
+        for layer in &actor.layers {
+            let w = layer.weight.val();
+            let dims = w.dims();
+            let in_dim = dims[0];
+            let out_dim = dims[1];
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+            } else {
+                vec![0.0; out_dim]
+            };
+            specs.push((in_dim, out_dim, weights, biases));
+        }
+        Some(specs)
+    }
 }
 
 fn sample_count_for_batch(batch: &AgentBatch) -> usize {
