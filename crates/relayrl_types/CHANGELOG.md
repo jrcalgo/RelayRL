@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-04-13
+
+### Added
+- **In-memory ONNX model construction** - Added APIs for building ONNX-backed models directly from raw bytes without writing model files first
+  - `Model::from_onnx_bytes()` and `ModelModule::from_onnx_bytes()` now support byte-backed initialization for metadata-driven model loading paths
+
+### Changed
+- **Model bundle serialization** - Serialized model modules now carry `metadata.json` alongside the model bytes so deserialization can reconstruct a complete module from one payload
+  - `serialize_model_module()` now packages metadata and model bytes together, and `deserialize_model_module()` restores both before loading the module
+- **Default feature set and feature wiring** - Default builds now target `ndarray-backend` with `onnx-model` instead of enabling `codec-full` and both inference backends by default
+  - `ndarray-backend` and `tch-backend` now pull in `half`
+  - `compression` and `encryption` now pull in `bincode`
+
+### Fixed
+- **Reduced-feature builds** - Corrected optional codec imports so `action` and `trajectory` compile cleanly when `metadata`, `compression`, and `encryption` are not enabled
+
+### Breaking
+- **Hot-reload model handle API** - `HotReloadableModel` now uses atomic swaps internally and exposes `current_module()` for direct access to the active module
+  - The public `Clone` implementation was removed, so code that cloned `HotReloadableModel` directly must switch to external shared ownership
+
 ## [0.5.4] - 2026-03-29
 
 ### Fixed
