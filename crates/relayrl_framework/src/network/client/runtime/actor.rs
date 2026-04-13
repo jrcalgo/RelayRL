@@ -30,7 +30,8 @@ use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::thread;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 #[cfg(feature = "metrics")]
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -127,6 +128,7 @@ pub(crate) struct Actor<
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     model_device: DeviceType,
     current_traj: RelayRLTrajectory,
+    current_episode: AtomicU64,
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_buffer: Sender<RoutedMessage>,
     shared_client_modes: Arc<ClientModes>,
@@ -295,19 +297,20 @@ impl<
             let result = async {
                 {
                     let actor_id = self.actor_id;
-                    let mut last_action =
+                    let last_action =
                         RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
-                    last_action.update_reward(reward);
                     self.current_traj.add_action(last_action);
                 }
 
-                let traj_to_send: RelayRLTrajectory = {
+                let mut traj_to_send: RelayRLTrajectory = {
                     let max_traj_length: usize = *self.shared_max_traj_length.read().await;
                     std::mem::replace(
                         &mut self.current_traj,
                         RelayRLTrajectory::new(max_traj_length),
                     )
                 };
+                let current_episode: u64 = self.current_episode.fetch_add(1, Ordering::SeqCst);
+                traj_to_send.set_episode(current_episode);
 
                 let (duration_ms, duration_ns) = {
                     let now: SystemTime = SystemTime::now();
@@ -409,6 +412,7 @@ impl<
             shared_transport_addresses,
             model_device: device,
             current_traj: RelayRLTrajectory::new(max_traj_length),
+            current_episode: AtomicU64::new(0),
             rx_from_router,
             shared_tx_to_buffer,
             shared_client_modes,
