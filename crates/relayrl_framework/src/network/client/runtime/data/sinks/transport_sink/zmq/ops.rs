@@ -619,6 +619,7 @@ fn build_routed_model_update_message(
         payload: RoutedPayload::ModelUpdate {
             model_bytes,
             version: model_version,
+            reply_to: None,
         },
     }))
 }
@@ -2130,6 +2131,7 @@ mod tests {
             RoutedPayload::ModelUpdate {
                 model_bytes,
                 version,
+                reply_to: None,
             } => {
                 assert_eq!(model_bytes, vec![10, 20]);
                 assert_eq!(version, 7);
