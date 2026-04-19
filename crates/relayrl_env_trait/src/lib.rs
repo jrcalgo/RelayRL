@@ -35,8 +35,8 @@
 //!   downcasting where the runtime requires a concrete layout.
 
 pub mod traits {
+    pub use burn_tensor::{Tensor, TensorKind, backend::Backend};
     use std::any::Any;
-    pub use burn_tensor::{backend::Backend, Tensor, TensorKind};
     pub use thiserror::Error;
     pub use uuid::Uuid;
 
@@ -54,20 +54,44 @@ pub mod traits {
     /// one slot in a [`VectorEnvironment`] step, or the id assigned by a parallel vec-env runner).
     pub type EnvironmentUuid = Uuid;
 
-    pub trait ScalarEnvironment<B: Backend, const D_IN: usize, const D_OUT: usize,  KInput: TensorKind<B>, KOutput: TensorKind<B>>: Environment + Send + Sync + Sized where Self: Sized {
+    pub trait ScalarEnvironment<
+        B: Backend,
+        const D_IN: usize,
+        const D_OUT: usize,
+        KInput: TensorKind<B>,
+        KOutput: TensorKind<B>,
+    >: Environment + Send + Sync + Sized
+    where
+        Self: Sized,
+    {
         type ResetInfo: IntoIterator<Item = (String, String)>;
         type StepInfo: IntoIterator<Item = (String, String)>;
 
-        fn step(&self, action: Tensor<B, D_OUT, KOutput>) -> Result<(Tensor<B, D_IN, KInput>, Self::StepInfo), EnvironmentError>;
+        fn step(
+            &self,
+            action: Tensor<B, D_OUT, KOutput>,
+        ) -> Result<(Tensor<B, D_IN, KInput>, Self::StepInfo), EnvironmentError>;
         fn reset(&self) -> Result<Option<Self::ResetInfo>, EnvironmentError>;
     }
 
-    pub trait VectorEnvironment<B: Backend, const D_IN: usize, const D_OUT: usize,  KInput: TensorKind<B>, KOutput: TensorKind<B>>: Environment + Send + Sync + Sized where Self: Sized {
+    pub trait VectorEnvironment<
+        B: Backend,
+        const D_IN: usize,
+        const D_OUT: usize,
+        KInput: TensorKind<B>,
+        KOutput: TensorKind<B>,
+    >: Environment + Send + Sync + Sized
+    where
+        Self: Sized,
+    {
         type ResetInfo: IntoIterator<Item = (String, String)>;
         type StepInfo: IntoIterator<Item = (String, String)>;
 
         fn init_num_envs(&self, num_envs: usize) -> Result<Vec<EnvironmentUuid>, EnvironmentError>;
-        fn step(&self, actions: &[Tensor<B, D_OUT, KOutput>]) -> Result<Vec<Tensor<B, D_IN, KInput>>, EnvironmentError>;
+        fn step(
+            &self,
+            actions: &[Tensor<B, D_OUT, KOutput>],
+        ) -> Result<Vec<Tensor<B, D_IN, KInput>>, EnvironmentError>;
         fn reset(&self) -> Result<Option<Self::ResetInfo>, EnvironmentError>;
     }
 
@@ -75,7 +99,10 @@ pub mod traits {
     ///
     /// Methods are intentionally parameterless: configuration and mutable state live on the
     /// implementing type (often with interior mutability when shared across threads).
-    pub trait Environment: Clone where Self: Sized {
+    pub trait Environment: Clone
+    where
+        Self: Sized,
+    {
         fn run_environment(&self) -> Result<(), EnvironmentError>;
         fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError>;
     }
