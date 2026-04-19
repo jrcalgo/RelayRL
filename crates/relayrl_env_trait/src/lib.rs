@@ -54,21 +54,21 @@ pub mod traits {
     /// one slot in a [`VectorEnvironment`] step, or the id assigned by a parallel vec-env runner).
     pub type EnvironmentUuid = Uuid;
 
-    pub trait ScalarEnvironment<B: Backend, const D_IN: usize, const D_OUT: usize,  KInput: TensorKind<B>, KOutput: TensorKind<B>>: Environment + Send + Sync {
-        type ResetInfo;
-        type StepInfo;
+    pub trait ScalarEnvironment<B: Backend, const D_IN: usize, const D_OUT: usize,  KInput: TensorKind<B>, KOutput: TensorKind<B>>: Environment + Send + Sync + Sized where Self: Sized {
+        type ResetInfo: IntoIterator<Item = (String, String)>;
+        type StepInfo: IntoIterator<Item = (String, String)>;
 
         fn step(&self, action: Tensor<B, D_OUT, KOutput>) -> Result<(Tensor<B, D_IN, KInput>, Self::StepInfo), EnvironmentError>;
         fn reset(&self) -> Result<Self::ResetInfo, EnvironmentError>;
     }
 
-    pub trait VectorEnvironment<B: Backend, const D_IN: usize, const D_OUT: usize,  KInput: TensorKind<B>, KOutput: TensorKind<B>>: Environment + Send + Sync {
-        type ResetInfo;
-        type StepInfo;
+    pub trait VectorEnvironment<B: Backend, const D_IN: usize, const D_OUT: usize,  KInput: TensorKind<B>, KOutput: TensorKind<B>>: Environment + Send + Sync + Sized where Self: Sized {
+        type ResetInfo: IntoIterator<Item = (String, String)>;
+        type StepInfo: IntoIterator<Item = (String, String)>;
 
         fn init_num_envs(&self, num_envs: usize) -> Result<Vec<EnvironmentUuid>, EnvironmentError>;
         fn step(&self, actions: &[Tensor<B, D_OUT, KOutput>]) -> Result<Vec<Tensor<B, D_IN, KInput>>, EnvironmentError>;
-        fn reset(&self) -> Result<Vec<Self::ResetInfo>, EnvironmentError>;
+        fn reset(&self) -> Result<Option<Self::ResetInfo>, EnvironmentError>;
     }
 
     /// Interface for environments where a model can be trained or evaluated.
