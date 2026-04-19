@@ -59,7 +59,7 @@ pub mod traits {
         type StepInfo: IntoIterator<Item = (String, String)>;
 
         fn step(&self, action: Tensor<B, D_OUT, KOutput>) -> Result<(Tensor<B, D_IN, KInput>, Self::StepInfo), EnvironmentError>;
-        fn reset(&self) -> Result<Self::ResetInfo, EnvironmentError>;
+        fn reset(&self) -> Result<Option<Self::ResetInfo>, EnvironmentError>;
     }
 
     pub trait VectorEnvironment<B: Backend, const D_IN: usize, const D_OUT: usize,  KInput: TensorKind<B>, KOutput: TensorKind<B>>: Environment + Send + Sync + Sized where Self: Sized {
