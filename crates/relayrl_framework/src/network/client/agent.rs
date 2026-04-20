@@ -16,7 +16,7 @@ use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
-    ClientCoordinator, ClientInterface, CoordinatorError,
+    ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
 };
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::prelude::config::ClientConfigLoader;
@@ -27,21 +27,24 @@ use active_uuid_registry::UuidPoolError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::interface::list_ids;
+use prometheus::Counter;
+use relayrl_env_trait::traits::Environment;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, SupportedTensorBackend,
 };
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
-use dashmap::DashMap;
+use async_trait::async_trait;
 use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
 use std::collections::HashMap;
@@ -75,6 +78,8 @@ pub enum ClientError {
     InvalidInferenceMode(String),
     #[error("Invalid trajectory file directory: {0}")]
     InvalidTrajectoryFileDirectory(String),
+    #[error("Invalid env count: {0}")]
+    InvalidEnvCount(String),
     #[error("Model validation failed: {0}")]
     ModelValidationFailed(String),
     #[error("Update model is not supported: {0}")]
@@ -338,14 +343,35 @@ pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     return matches!(
         training_data_mode,
-        ActorTrainingDataMode::OfflineWithFiles(_) | ActorTrainingDataMode::OnlineWithFiles(_, _)
+        ActorTrainingDataMode::OfflineWithFiles(_)
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+            | ActorTrainingDataMode::OnlineWithFiles(_, _)
+            | ActorTrainingDataMode::OnlineWithFilesAndMemory(_, _)
     );
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-    return matches!(training_data_mode, ActorTrainingDataMode::OfflineWithFiles(_));
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::OfflineWithFiles(_)
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+    );
 }
 
 pub(crate) fn uses_in_memory_data(training_data_mode: &ActorTrainingDataMode) -> bool {
-    return matches!(training_data_mode, ActorTrainingDataMode::OfflineWithMemory);
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::OfflineWithMemory
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+            | ActorTrainingDataMode::OnlineWithMemory
+            | ActorTrainingDataMode::OnlineWithFilesAndMemory(_)
+    );
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::OfflineWithMemory
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+    );
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
@@ -937,7 +963,9 @@ impl<
         Ok(self.coordinator.get_model_version(actor_ids).await?)
     }
 
-    pub async fn get_trajectory_memory(&self) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, ClientError> {
+    pub async fn get_trajectory_memory(
+        &self,
+    ) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, ClientError> {
         Ok(self.coordinator.get_trajectory_memory().await?)
     }
 
@@ -1201,6 +1229,53 @@ impl<
             self.coordinator.set_actor_id(current_id, new_id).await?;
             Ok(())
         })
+    }
+}
+
+pub trait RelayRLAgentEnv<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize, KindIn: TensorKind<B>, KindOut: TensorKind<B>> {
+    async fn set_env(
+        &mut self,
+        actor_id: ActorUuid,
+        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        count: u32,
+    ) -> Result<(), ClientError>;
+    async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), ClientError>;
+    async fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, ClientError>;
+    async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError>;
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize, KindIn: TensorKind<B>, KindOut: TensorKind<B>> RelayRLAgentEnv<B, D_IN, D_OUT, KindIn, KindOut>
+    for RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
+{
+    async fn set_env(
+        &mut self,
+        actor_id: ActorUuid,
+        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        count: u32,
+    ) -> Result<(), ClientError> {
+        Ok(self.coordinator.set_env::<KindIn, KindOut>(actor_id, env, count).await?)
+    }
+
+    async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), ClientError> {
+        Ok(self.coordinator.remove_env(actor_id).await?)
+    }
+
+    async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError> {
+        match count {
+            _ if count > 0 => {
+                Ok(self.coordinator.increase_env_count(actor_id, count).await?)
+            }
+            _ if count < 0 => {
+                Ok(self.coordinator.decrease_env_count(actor_id, count).await?)
+            }
+            _ => {
+                Err(ClientError::InvalidEnvCount("count must be greater than 0".to_string()))
+            }
+        }
+    }
+
+    async fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, ClientError> {
+        Ok(self.coordinator.get_env_count(actor_id).await?)
     }
 }
 
