@@ -50,6 +50,14 @@ pub mod traits {
         TrainingPerformanceReturnError(String),
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub enum EnvironmentKind {
+        Scalar,
+        Vector,
+        Other(String),
+        Unknown,
+    }
+
     /// Stable identity for a logical sub-environment in batched or parallel execution (for example
     /// one slot in a [`VectorEnvironment`] step, or the id assigned by a parallel vec-env runner).
     pub type EnvironmentUuid = Uuid;
@@ -60,9 +68,7 @@ pub mod traits {
         const D_OUT: usize,
         KInput: TensorKind<B>,
         KOutput: TensorKind<B>,
-    >: Environment + Send + Sync + Sized
-    where
-        Self: Sized,
+    >: Environment<B, D_IN, D_OUT, KInput, KOutput> + Send + Sync
     {
         type ResetInfo: IntoIterator<Item = (String, String)>;
         type StepInfo: IntoIterator<Item = (String, String)>;
@@ -70,7 +76,7 @@ pub mod traits {
         fn step(
             &self,
             action: Tensor<B, D_OUT, KOutput>,
-        ) -> Result<(Tensor<B, D_IN, KInput>, Self::StepInfo), EnvironmentError>;
+        ) -> Result<(Tensor<B, D_IN, KInput>, Option<Self::StepInfo>), EnvironmentError>;
         fn reset(&self) -> Result<Option<Self::ResetInfo>, EnvironmentError>;
     }
 
@@ -80,9 +86,7 @@ pub mod traits {
         const D_OUT: usize,
         KInput: TensorKind<B>,
         KOutput: TensorKind<B>,
-    >: Environment + Send + Sync + Sized
-    where
-        Self: Sized,
+    >: Environment<B, D_IN, D_OUT, KInput, KOutput> + Send + Sync
     {
         type ResetInfo: IntoIterator<Item = (String, String)>;
         type StepInfo: IntoIterator<Item = (String, String)>;
@@ -91,7 +95,7 @@ pub mod traits {
         fn step(
             &self,
             actions: &[Tensor<B, D_OUT, KOutput>],
-        ) -> Result<Vec<Tensor<B, D_IN, KInput>>, EnvironmentError>;
+        ) -> Result<(Vec<Tensor<B, D_IN, KInput>>, Option<Self::StepInfo>), EnvironmentError>;
         fn reset(&self) -> Result<Option<Self::ResetInfo>, EnvironmentError>;
     }
 
@@ -99,12 +103,17 @@ pub mod traits {
     ///
     /// Methods are intentionally parameterless: configuration and mutable state live on the
     /// implementing type (often with interior mutability when shared across threads).
-    pub trait Environment: Clone
-    where
-        Self: Sized,
+    pub trait Environment<
+        B: Backend,
+        const D_IN: usize,
+        const D_OUT: usize,
+        KInput: TensorKind<B>,
+        KOutput: TensorKind<B>,
+    >: Send + Sync
     {
         fn run_environment(&self) -> Result<(), EnvironmentError>;
         fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError>;
+        fn kind(&self) -> EnvironmentKind;
     }
 
     /// Computes a performance signal (for example return-to-go) for training feedback.
