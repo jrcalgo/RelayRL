@@ -22,6 +22,7 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
+use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
@@ -48,7 +49,7 @@ use active_uuid_registry::{ContextString, NamespaceString};
 
 use thiserror::Error;
 
-use burn_tensor::backend::Backend;
+use burn_tensor::{BasicOps, backend::Backend};
 
 use active_uuid_registry::interface::{
     clear_namespace, remove_namespace, reserve_id_with, reserve_namespace,
@@ -59,14 +60,14 @@ use relayrl_env_trait::traits::Environment;
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher};
-use relayrl_types::prelude::tensor::burn::TensorKind;
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::serialize_model_module;
+use relayrl_types::prelude::tensor::burn::TensorKind;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
 
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
@@ -248,11 +249,16 @@ pub(crate) trait ClientEnvironments<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-> {
-    async fn set_env<KInput: TensorKind<B>, KOutput: TensorKind<B>>(
+    KindIn: TensorKind<B>,
+    KindOut: TensorKind<B>,
+>
+{
+    async fn run_env(&self, actor_id: ActorUuid, step_count: usize)
+    -> Result<(), CoordinatorError>;
+    async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KInput, KOutput>>,
+        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
         count: u32,
     ) -> Result<(), CoordinatorError>;
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), CoordinatorError>;
@@ -288,17 +294,25 @@ pub struct ClientCoordinator<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
+    KindIn: TensorKind<B>,
+    KindOut: TensorKind<B>,
 > {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_type: TransportType,
     pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
+    _phantom: PhantomData<(KindIn, KindOut)>,
 }
 
 // ===== Internal helpers =====
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    ClientCoordinator<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B>,
+    KindOut: TensorKind<B>,
+> ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
 {
     async fn request_model_versions(
         global_dispatcher_tx: Sender<RoutedMessage>,
@@ -482,8 +496,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
 // ===== Client interface implementation =====
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B>,
+    KindOut: TensorKind<B>,
+> ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
 {
     fn new(
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -495,6 +514,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             transport_type,
             client_modes: Arc::new(client_modes),
             runtime_params: None,
+            _phantom: PhantomData,
         }
     }
 
@@ -1418,8 +1438,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    ClientActors<B> for ClientCoordinator<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B>,
+    KindOut: TensorKind<B>,
+> ClientActors<B> for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
 {
     async fn new_actor(
         &mut self,
@@ -1662,30 +1687,73 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    ClientEnvironments<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
+    KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
+> ClientEnvironments<B, D_IN, D_OUT, KindIn, KindOut>
+    for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
 {
-    async fn set_env<KInput: TensorKind<B>, KOutput: TensorKind<B>>(
+    async fn run_env(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+    ) -> Result<(), CoordinatorError> {
+        match &self.runtime_params {
+            Some(params) => {
+                params
+                    .shared_state
+                    .write()
+                    .await
+                    .run_env(actor_id, step_count)?;
+                Ok(())
+            }
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::StepEnvError(
+                    "[Coordinator] No runtime instance to step_env...".to_string(),
+                ),
+            )),
+        }
+    }
+
+    async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KInput, KOutput>>,
+        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
         count: u32,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                params.shared_state.write().await.set_env::<KInput, KOutput>(actor_id, env, count)?;
+                params
+                    .shared_state
+                    .write()
+                    .await
+                    .set_env(actor_id, env, count)?;
                 Ok(())
             }
-            None => Err(CoordinatorError::StateManagerError(StateManagerError::SetEnvError("[Coordinator] No runtime instance to set_env...".to_string()))),
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::SetEnvError(
+                    "[Coordinator] No runtime instance to set_env...".to_string(),
+                ),
+            )),
         }
     }
 
     async fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => {
-                params.shared_state.read().await.get_env_count(actor_id).map_err(CoordinatorError::from)
-            }
-            None => Err(CoordinatorError::StateManagerError(StateManagerError::GetEnvCountError("[Coordinator] No runtime instance to get_env_count...".to_string()))),
+            Some(params) => params
+                .shared_state
+                .read()
+                .await
+                .get_env_count(actor_id)
+                .map_err(CoordinatorError::from),
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::GetEnvCountError(
+                    "[Coordinator] No runtime instance to get_env_count...".to_string(),
+                ),
+            )),
         }
     }
 
@@ -1696,10 +1764,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                params.shared_state.write().await.increase_env_count(actor_id, count)?;
+                params
+                    .shared_state
+                    .write()
+                    .await
+                    .increase_env_count(actor_id, count)?;
                 Ok(())
             }
-            None => Err(CoordinatorError::StateManagerError(StateManagerError::IncreaseEnvCountError("[Coordinator] No runtime instance to increase_env_count...".to_string()))),
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::IncreaseEnvCountError(
+                    "[Coordinator] No runtime instance to increase_env_count...".to_string(),
+                ),
+            )),
         }
     }
 
@@ -1710,10 +1786,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                params.shared_state.write().await.decrease_env_count(actor_id, count)?;
+                params
+                    .shared_state
+                    .write()
+                    .await
+                    .decrease_env_count(actor_id, count)?;
                 Ok(())
             }
-            None => Err(CoordinatorError::StateManagerError(StateManagerError::DecreaseEnvCountError("[Coordinator] No runtime instance to decrease_env_count...".to_string())))
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::DecreaseEnvCountError(
+                    "[Coordinator] No runtime instance to decrease_env_count...".to_string(),
+                ),
+            )),
         }
     }
 
@@ -1723,7 +1807,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 params.shared_state.write().await.remove_env(actor_id)?;
                 Ok(())
             }
-            None => Err(CoordinatorError::StateManagerError(StateManagerError::RemoveEnvError("[Coordinator] No runtime instance to remove_env...".to_string())))
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::RemoveEnvError(
+                    "[Coordinator] No runtime instance to remove_env...".to_string(),
+                ),
+            )),
         }
     }
 }
