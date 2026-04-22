@@ -170,28 +170,14 @@ pub mod traits {
     }
 
     pub type DynVectorEnv<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput> =
-        dyn VectorEnvironment<
-                B,
-                D_IN,
-                D_OUT,
-                KInput,
-                KOutput,
-            >;
+        dyn VectorEnvironment<B, D_IN, D_OUT, KInput, KOutput>;
     pub trait DynScalarEnvironment<
         B: Backend,
         const D_IN: usize,
         const D_OUT: usize,
         KInput: TensorKind<B>,
         KOutput: TensorKind<B>,
-    >:
-        ScalarEnvironment<
-            B,
-            D_IN,
-            D_OUT,
-            KInput,
-            KOutput,
-        > + Send
-        + Sync
+    >: ScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> + Send + Sync
     {
         fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>;
     }
@@ -201,16 +187,7 @@ pub mod traits {
         B: Backend,
         KInput: TensorKind<B>,
         KOutput: TensorKind<B>,
-        T: ScalarEnvironment<
-                B,
-                D_IN,
-                D_OUT,
-                KInput,
-                KOutput,
-            > + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: ScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> + Clone + Send + Sync + 'static,
     {
         fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>> {
             Box::new(self.clone())
