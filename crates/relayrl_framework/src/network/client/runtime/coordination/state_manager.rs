@@ -28,7 +28,6 @@ use thiserror::Error;
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
 use relayrl_env_trait::{Environment, EnvironmentUuid};
-use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType, TensorData};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 use relayrl_types::prelude::tensor::burn::TensorKind;
@@ -760,22 +759,37 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn request_action_direct(
+    async fn request_actions_direct(
         actor_id: ActorUuid,
         inbox: &Sender<RoutedMessage>,
-        observation: AnyBurnTensor<B, D_IN>,
-        reward: f32,
+        batch: Vec<(EnvironmentUuid, String, AnyBurnTensor<B, D_IN>, f32)>,
         device: &DeviceType,
-    ) -> Result<AnyBurnTensor<B, D_OUT>, StateManagerError> {
+    ) -> Result<Vec<(EnvironmentUuid, String, AnyBurnTensor<B, D_OUT>)>, StateManagerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
+        let env_ids: Vec<_> = batch.iter().map(|(env_id, _, _, _)| *env_id).collect();
+        let env_labels: Vec<_> = batch
+            .iter()
+            .map(|(_, env_label, _, _)| env_label.clone())
+            .collect();
+        let observations: Vec<_> = batch
+            .iter()
+            .map(|(_, _, observation, _)| Arc::new(observation.clone()))
+            .collect();
+        let rewards: Vec<_> = batch.iter().map(|(_, _, _, reward)| *reward).collect();
         let msg = RoutedMessage {
             actor_id,
-            protocol: RoutingProtocol::RequestInference,
-            payload: RoutedPayload::RequestInference(Box::new(
-                crate::network::client::runtime::router::InferenceRequest {
-                    observation: Box::new(Arc::new(observation)),
-                    mask: Box::new(None::<Arc<AnyBurnTensor<B, D_OUT>>>),
-                    reward,
+            protocol: RoutingProtocol::RequestInferenceBatch,
+            payload: RoutedPayload::RequestInferenceBatch(Box::new(
+                crate::network::client::runtime::router::BatchedInferenceRequest {
+                    env_ids: env_ids.clone(),
+                    env_labels: env_labels.clone(),
+                    observations: Box::new(observations),
+                    masks: Box::new(
+                        std::iter::repeat_with(|| None::<Arc<AnyBurnTensor<B, D_OUT>>>)
+                            .take(env_ids.len())
+                            .collect::<Vec<_>>(),
+                    ),
+                    rewards,
                     reply_to: reply_tx,
                 },
             )),
@@ -785,27 +799,48 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .send(msg)
             .await
             .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-        let action: Arc<RelayRLAction> = reply_rx
+        let actions = reply_rx
             .await
             .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-        let action_data = action.get_act().ok_or_else(|| {
-            StateManagerError::InferenceRequestError(
-                "[StateManager] Actor returned action without tensor payload".to_string(),
-            )
-        })?;
+        if actions.len() != env_ids.len() {
+            return Err(StateManagerError::InferenceRequestError(format!(
+                "[StateManager] Actor returned {} actions for {} envs",
+                actions.len(),
+                env_ids.len()
+            )));
+        }
 
-        Self::tensor_data_to_any::<D_OUT>(action_data, device)
+        env_ids
+            .into_iter()
+            .zip(env_labels)
+            .zip(actions)
+            .map(|((env_id, env_label), action)| {
+                let action_data = action.get_act().ok_or_else(|| {
+                    StateManagerError::InferenceRequestError(
+                        "[StateManager] Actor returned action without tensor payload".to_string(),
+                    )
+                })?;
+                let action = Self::tensor_data_to_any::<D_OUT>(action_data, device)?;
+                Ok((env_id, env_label, action))
+            })
+            .collect()
     }
 
     async fn flag_last_action_direct(
         actor_id: ActorUuid,
         inbox: &Sender<RoutedMessage>,
         reward: f32,
+        env_id: Option<EnvironmentUuid>,
+        env_label: Option<String>,
     ) -> Result<(), StateManagerError> {
         let msg = RoutedMessage {
             actor_id,
             protocol: RoutingProtocol::FlagLastInference,
-            payload: RoutedPayload::FlagLastInference { reward },
+            payload: RoutedPayload::FlagLastInference {
+                reward,
+                env_id,
+                env_label,
+            },
         };
         inbox
             .send(msg)
@@ -838,6 +873,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     })?;
 
                 let mut rewards: HashMap<EnvironmentUuid, f32> = HashMap::new();
+                let mut env_labels: HashMap<EnvironmentUuid, String> = HashMap::new();
                 let mut env_interface = self.actor_envs.get_mut(&actor_id).ok_or_else(|| {
                     StateManagerError::GetEnvInfoError(format!(
                         "[StateManager] Environment interface not found for {}",
@@ -848,29 +884,52 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 for (env_id, _) in env_interface.ensure_ready()? {
                     rewards.entry(env_id).or_insert(0.0);
                 }
+                let mut known_env_ids: Vec<_> = rewards.keys().copied().collect();
+                known_env_ids.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                for (index, env_id) in known_env_ids.into_iter().enumerate() {
+                    env_labels.insert(env_id, format!("env-{}", index + 1));
+                }
 
                 for _ in 0..step_count {
-                    let observations = env_interface.current_observations()?;
-                    let mut actions = Vec::with_capacity(observations.len());
-
-                    for (env_id, observation) in observations {
-                        let reward = *rewards.get(&env_id).unwrap_or(&0.0);
-                        let action = Self::request_action_direct(
-                            actor_id,
-                            &inbox,
-                            observation,
-                            reward,
-                            &device,
-                        )
-                        .await?;
-                        actions.push((env_id, action));
-                    }
+                    let mut observations = env_interface.current_observations()?;
+                    observations.sort_unstable_by(|(left, _), (right, _)| {
+                        left.as_bytes().cmp(right.as_bytes())
+                    });
+                    let batch: Vec<_> = observations
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (env_id, observation))| {
+                            let reward = *rewards.get(&env_id).unwrap_or(&0.0);
+                            let env_label = env_labels
+                                .entry(env_id)
+                                .or_insert_with(|| format!("env-{}", index + 1))
+                                .clone();
+                            (env_id, env_label, observation, reward)
+                        })
+                        .collect();
+                    let batched_actions =
+                        Self::request_actions_direct(actor_id, &inbox, batch, &device).await?;
+                    let actions: Vec<_> = batched_actions
+                        .into_iter()
+                        .map(|(env_id, _, action)| (env_id, action))
+                        .collect();
 
                     let steps = env_interface.step_once(&actions)?;
                     for step in steps {
                         rewards.insert(step.env_id, step.reward);
                         if step.terminated || step.truncated {
-                            Self::flag_last_action_direct(actor_id, &inbox, step.reward).await?;
+                            let env_label = env_labels
+                                .get(&step.env_id)
+                                .cloned()
+                                .unwrap_or_else(|| step.env_id.to_string());
+                            Self::flag_last_action_direct(
+                                actor_id,
+                                &inbox,
+                                step.reward,
+                                Some(step.env_id),
+                                Some(env_label),
+                            )
+                            .await?;
                             rewards.insert(step.env_id, 0.0);
                         }
                     }
