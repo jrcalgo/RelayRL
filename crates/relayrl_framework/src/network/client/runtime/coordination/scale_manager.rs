@@ -7,7 +7,9 @@ use crate::network::HyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{ActorInferenceMode, AlgorithmArgs, ModelMode};
-use crate::network::client::agent::{ActorTrainingDataMode, ClientModes, uses_in_memory_data, uses_local_file_writing};
+use crate::network::client::agent::{
+    ActorTrainingDataMode, ClientModes, uses_in_memory_data, uses_local_file_writing,
+};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
@@ -219,17 +221,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_init_hyperparameters = lifecycle.get_init_hyperparameters();
 
-        let shared_trajectory_file_output = if uses_local_file_writing(&shared_client_modes.actor_training_data_mode) {
-            Some(lifecycle.get_trajectory_file_output())
-        } else {
-            None
-        };
+        let shared_trajectory_file_output =
+            if uses_local_file_writing(&shared_client_modes.actor_training_data_mode) {
+                Some(lifecycle.get_trajectory_file_output())
+            } else {
+                None
+            };
 
-        let shared_trajectory_memory = if uses_in_memory_data(&shared_client_modes.actor_training_data_mode) {
-            Some(Arc::new(DashMap::new()))
-        } else {
-            None
-        };
+        let shared_trajectory_memory =
+            if uses_in_memory_data(&shared_client_modes.actor_training_data_mode) {
+                Some(Arc::new(DashMap::new()))
+            } else {
+                None
+            };
 
         Ok(Self {
             client_namespace,
@@ -375,6 +379,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         match self.shared_client_modes.actor_training_data_mode.clone() {
                             ActorTrainingDataMode::Online(params) => params.model_mode,
                             ActorTrainingDataMode::OnlineWithFiles(params, _) => params.model_mode,
+                            ActorTrainingDataMode::OnlineWithMemory(params) => params.model_mode,
                             _ => ModelMode::Independent,
                         };
 
@@ -571,16 +576,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
 
                     if uses_local_file_writing(&self.shared_client_modes.actor_training_data_mode) {
-                        if let Some(shared_trajectory_file_output) = self.shared_trajectory_file_output.clone() {
-                            buffer_init
-                                .with_trajectory_writer(shared_trajectory_file_output);
+                        if let Some(shared_trajectory_file_output) =
+                            self.shared_trajectory_file_output.clone()
+                        {
+                            buffer_init.with_trajectory_writer(shared_trajectory_file_output);
                         }
                     }
-                    
+
                     if uses_in_memory_data(&self.shared_client_modes.actor_training_data_mode) {
-                        if let Some(shared_trajectory_memory) = self.shared_trajectory_memory.clone() {
-                            buffer_init
-                                .with_trajectory_memory(shared_trajectory_memory);
+                        if let Some(shared_trajectory_memory) =
+                            self.shared_trajectory_memory.clone()
+                        {
+                            buffer_init.with_trajectory_memory(shared_trajectory_memory);
                         }
                     }
 

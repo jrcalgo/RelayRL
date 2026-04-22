@@ -101,6 +101,7 @@ fn combine_scaling_results(
         _ => Ok(()),
     }
 }
+
 pub(crate) enum ClientTransportInterface<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(feature = "zmq-transport")]
     Sync(Box<dyn SyncClientTransportInterface<B>>),

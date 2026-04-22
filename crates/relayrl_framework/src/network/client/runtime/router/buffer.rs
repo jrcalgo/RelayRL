@@ -15,11 +15,11 @@ use crate::network::client::agent::{
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-use crate::network::client::runtime::data::file_sink::{
+use crate::network::client::runtime::data::sinks::file_sink::{
     FileSinkError, write_local_trajectory_file,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::{
+use crate::network::client::runtime::data::sinks::transport_sink::{
     TransportError, transport_dispatcher::TrainingDispatcher,
 };
 
@@ -537,7 +537,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                 let Some(ref traj_memory) = worker_traj_memory {
                                     let actor_id = job.actor_id;
                                     let traj_clone = job.traj_for_processing.clone();
-                                    
+
                                     if let Some(ref mut traj_vec) = traj_memory.get_mut(&actor_id) {
                                         let room_after_push = MAX_TRAJ_MEMORY_SIZE.saturating_sub(1);
                                         // trajectory memory is guaranteed to OOM without this check
@@ -551,7 +551,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                         traj_memory.insert(actor_id, vec![traj_clone]);
                                     }
                                 }
-                            
+
                         }
                     }
                 }
@@ -561,7 +561,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             while let Some(job) = worker_queue.pop() {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let Some(transport_addresses) = &worker_transport_addresses
-                    && let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::OnlineWithFiles(_, _) | ActorTrainingDataMode::OnlineWithMemory(_) =
+                    && let ActorTrainingDataMode::Online(_)
+                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
+                    | ActorTrainingDataMode::OnlineWithMemory(_) =
                         &worker_modes.actor_training_data_mode
                 {
                     let encoded = match job.traj_for_processing.encode(&worker_codec) {

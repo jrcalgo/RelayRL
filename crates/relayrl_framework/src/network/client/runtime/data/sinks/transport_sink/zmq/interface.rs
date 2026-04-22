@@ -83,7 +83,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
         };
 
         let training_protocol = match shared_client_modes.actor_training_data_mode {
-            ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) => {
+            ActorTrainingDataMode::Online(_)
+            | ActorTrainingDataMode::OnlineWithFiles(_, _)
+            | ActorTrainingDataMode::OnlineWithMemory(_) => {
                 let config = ZmqPolicyConfig::for_training();
                 Some(ZmqProtocol {
                     circuit_breaker: CircuitBreaker::new(

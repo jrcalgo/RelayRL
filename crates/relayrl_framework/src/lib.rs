@@ -222,7 +222,7 @@ pub mod prelude {
         }
 
         pub mod environment {
-            pub use relayrl_env_trait::environment_traits::*;
+            pub use relayrl_env_trait::*;
         }
     }
 

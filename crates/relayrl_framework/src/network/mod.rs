@@ -7,6 +7,8 @@ pub(super) const CLIENT_NAMESPACE_PREFIX: &str = "client";
 #[cfg(feature = "client")]
 pub(super) const ACTOR_CONTEXT: &str = "actor";
 #[cfg(feature = "client")]
+pub(super) const ENVIRONMENT_CONTEXT_PREFIX: &str = "env";
+#[cfg(feature = "client")]
 pub(super) const SCALE_MANAGER_CONTEXT: &str = "scaler";
 #[cfg(all(feature = "client", feature = "zmq-transport"))]
 pub(super) const ZMQ_CLIENT_CONTEXT: &str = "zmq-client";

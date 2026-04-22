@@ -97,7 +97,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
         };
 
         let training_protocol = match shared_client_modes.actor_training_data_mode {
-            ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) => {
+            ActorTrainingDataMode::Online(_)
+            | ActorTrainingDataMode::OnlineWithFiles(_, _)
+            | ActorTrainingDataMode::OnlineWithMemory(_) => {
                 let config = NatsPolicyConfig::for_training();
                 Some(NatsProtocol {
                     circuit_breaker: CircuitBreaker::new(
@@ -117,7 +119,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
         ) {
             (
                 ActorInferenceMode::Local(_),
-                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::Offline(_),
+                ActorTrainingDataMode::Disabled
+                | ActorTrainingDataMode::OfflineWithFiles(_)
+                | ActorTrainingDataMode::OfflineWithMemory(_),
             ) => None,
             _ => {
                 let config = NatsPolicyConfig::for_scaling();
