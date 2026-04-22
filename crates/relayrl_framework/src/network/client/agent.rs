@@ -19,6 +19,7 @@ use crate::network::client::runtime::coordination::coordinator::{
     ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
 };
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 use crate::prelude::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::{Algorithm, NetworkParams};
@@ -27,7 +28,6 @@ use active_uuid_registry::UuidPoolError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::interface::list_ids;
-use prometheus::Counter;
 use relayrl_env_trait::traits::Environment;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
@@ -42,8 +42,7 @@ use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
-use async_trait::async_trait;
-use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
+use burn_tensor::{BasicOps, Bool, Float, Int, Tensor, TensorKind, backend::Backend};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
@@ -617,11 +616,12 @@ impl<
         ClientError,
     > {
         // Initialize agent object
-        let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.transport_type.unwrap_or_default(),
-            self.client_modes,
-        );
+        let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> =
+            RelayRLAgent::<B, D_IN, D_OUT, KindIn, KindOut>::new(
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                self.transport_type.unwrap_or_default(),
+                self.client_modes,
+            );
 
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
@@ -696,11 +696,10 @@ pub struct RelayRLAgent<
     KindIn: TensorKind<B>,
     KindOut: TensorKind<B>,
 > {
-    coordinator: ClientCoordinator<B, D_IN, D_OUT>,
+    coordinator: ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>,
     supported_backend: SupportedTensorBackend,
     input_dtype: Option<DType>,
     output_dtype: Option<DType>,
-    _phantom: PhantomData<(KindIn, KindOut)>,
 }
 
 impl<
@@ -737,7 +736,7 @@ impl<
         client_modes: ClientModes,
     ) -> Self {
         Self {
-            coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
+            coordinator: ClientCoordinator::<B, D_IN, D_OUT, KindIn, KindOut>::new(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 transport_type,
                 client_modes,
@@ -745,7 +744,6 @@ impl<
             supported_backend: B::get_supported_backend(),
             input_dtype: None,
             output_dtype: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -1232,7 +1230,16 @@ impl<
     }
 }
 
-pub trait RelayRLAgentEnv<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize, KindIn: TensorKind<B>, KindOut: TensorKind<B>> {
+#[allow(async_fn_in_trait)]
+pub trait RelayRLActorEnv<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B>,
+    KindOut: TensorKind<B>,
+>
+{
+    async fn run_env(&self, actor_id: ActorUuid, step_count: usize) -> Result<(), ClientError>;
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
@@ -1244,16 +1251,26 @@ pub trait RelayRLAgentEnv<B: Backend + BackendMatcher<Backend = B>, const D_IN: 
     async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError>;
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize, KindIn: TensorKind<B>, KindOut: TensorKind<B>> RelayRLAgentEnv<B, D_IN, D_OUT, KindIn, KindOut>
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
+    KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
+> RelayRLActorEnv<B, D_IN, D_OUT, KindIn, KindOut>
     for RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
 {
+    async fn run_env(&self, actor_id: ActorUuid, step_count: usize) -> Result<(), ClientError> {
+        Ok(self.coordinator.run_env(actor_id, step_count).await?)
+    }
+
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
         env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
         count: u32,
     ) -> Result<(), ClientError> {
-        Ok(self.coordinator.set_env::<KindIn, KindOut>(actor_id, env, count).await?)
+        Ok(self.coordinator.set_env(actor_id, env, count).await?)
     }
 
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), ClientError> {
@@ -1261,16 +1278,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError> {
-        match count {
-            _ if count > 0 => {
-                Ok(self.coordinator.increase_env_count(actor_id, count).await?)
-            }
-            _ if count < 0 => {
-                Ok(self.coordinator.decrease_env_count(actor_id, count).await?)
-            }
-            _ => {
-                Err(ClientError::InvalidEnvCount("count must be greater than 0".to_string()))
-            }
+        let current = self.coordinator.get_env_count(actor_id).await?;
+        match count.cmp(&current) {
+            std::cmp::Ordering::Greater => Ok(self
+                .coordinator
+                .increase_env_count(actor_id, count - current)
+                .await?),
+            std::cmp::Ordering::Less => Ok(self
+                .coordinator
+                .decrease_env_count(actor_id, current - count)
+                .await?),
+            std::cmp::Ordering::Equal => Ok(()),
         }
     }
 
