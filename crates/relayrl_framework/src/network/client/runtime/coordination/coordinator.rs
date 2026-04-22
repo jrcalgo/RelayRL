@@ -1189,7 +1189,11 @@ impl<
                     let flag_last_action_message = RoutedMessage {
                         actor_id: id,
                         protocol: RoutingProtocol::FlagLastInference,
-                        payload: RoutedPayload::FlagLastInference { reward },
+                        payload: RoutedPayload::FlagLastInference {
+                            reward,
+                            env_id: None,
+                            env_label: None,
+                        },
                     };
 
                     if let Err(e) = global_dispatcher_tx
@@ -1831,12 +1835,14 @@ mod unit_tests {
     use burn_ndarray::NdArray;
     use relayrl_types::data::tensor::DeviceType;
     use std::path::PathBuf;
+    use burn_tensor::Float;
     use tokio::sync::mpsc::{self, error::TryRecvError};
 
     type TestBackend = NdArray<f32>;
+    type TestKind = Float;
 
-    fn make_coordinator() -> ClientCoordinator<TestBackend, 4, 1> {
-        ClientCoordinator::<TestBackend, 4, 1>::new(
+    fn make_coordinator() -> ClientCoordinator<TestBackend, 4, 1, TestKind, TestKind> {
+        ClientCoordinator::<TestBackend, 4, 1, TestKind, TestKind>::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
             ClientModes::default(),
@@ -1873,7 +1879,7 @@ mod unit_tests {
     async fn make_runtime_coordinator(
         client_modes: ClientModes,
     ) -> (
-        ClientCoordinator<TestBackend, 4, 1>,
+        ClientCoordinator<TestBackend, 4, 1, TestKind, TestKind>,
         Arc<RwLock<StateManager<TestBackend, 4, 1>>>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
@@ -1924,7 +1930,7 @@ mod unit_tests {
         .unwrap();
         drop(dummy_tx);
 
-        let mut coordinator = ClientCoordinator::<TestBackend, 4, 1>::new(
+        let mut coordinator = ClientCoordinator::<TestBackend, 4, 1, TestKind, TestKind>::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
             client_modes,
@@ -2122,7 +2128,7 @@ mod unit_tests {
             .await
             .unwrap()
             .unwrap();
-        ClientCoordinator::<TestBackend, 4, 1>::dispatch_model_updates(
+        ClientCoordinator::<TestBackend, 4, 1, TestKind, TestKind>::dispatch_model_updates(
             global_dispatcher_tx,
             target_actor_ids,
             vec![1, 2, 3],
