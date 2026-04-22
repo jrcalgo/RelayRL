@@ -350,6 +350,8 @@ impl CsvTrajectory {
             actions: Vec::with_capacity(max_length),
             max_length,
             agent_id: None,
+            env_id: None,
+            env_label: None,
             timestamp: 0,
             episode,
             training_step,
@@ -960,7 +962,8 @@ mod unit_tests {
     fn csv_round_trip_preserves_auxiliary_and_binary_tensor_data() {
         let path = temp_csv_path("roundtrip");
         let agent_id = Uuid::from_u128(9);
-        let mut trajectory = RelayRLTrajectory::with_metadata(4, Some(agent_id), Some(3), Some(4));
+        let mut trajectory =
+            RelayRLTrajectory::with_metadata(4, Some(agent_id), None, None, Some(3), Some(4));
         trajectory.add_action(sample_action());
 
         CsvTrajectory::new(Some(trajectory))

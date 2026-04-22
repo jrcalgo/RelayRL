@@ -110,6 +110,8 @@ impl ArrowTrajectory {
             actions: Vec::with_capacity(batch.num_rows()),
             max_length: batch.num_rows(),
             agent_id: None,
+            env_id: None,
+            env_label: None,
             timestamp: 0,
             episode,
             training_step,
@@ -637,7 +639,8 @@ mod unit_tests {
     fn arrow_round_trip_preserves_float_and_binary_tensors() {
         let path = temp_arrow_path("roundtrip");
         let agent_id = Uuid::new_v4();
-        let mut trajectory = RelayRLTrajectory::with_metadata(4, Some(agent_id), Some(7), Some(11));
+        let mut trajectory =
+            RelayRLTrajectory::with_metadata(4, Some(agent_id), None, None, Some(7), Some(11));
         trajectory.add_action(RelayRLAction::new(
             Some(f32_tensor(vec![2], &[1.0, 2.0])),
             Some(i32_tensor(vec![2], &[3, 4])),
