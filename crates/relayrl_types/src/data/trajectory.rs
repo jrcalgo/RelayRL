@@ -41,6 +41,8 @@ pub struct RelayRLTrajectory {
     pub actions: Vec<RelayRLAction>,
     pub max_length: usize,
     pub agent_id: Option<Uuid>,
+    pub env_id: Option<Uuid>,
+    pub env_label: Option<String>,
     pub timestamp: u64,
     pub episode: Option<u64>,
     pub training_step: Option<u64>,
@@ -53,6 +55,8 @@ impl Default for RelayRLTrajectory {
             actions: Vec::with_capacity(default_length),
             max_length: default_length,
             agent_id: None,
+            env_id: None,
+            env_label: None,
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
@@ -66,6 +70,8 @@ impl RelayRLTrajectory {
             actions: Vec::with_capacity(max_length),
             max_length,
             agent_id: None,
+            env_id: None,
+            env_label: None,
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
@@ -77,6 +83,8 @@ impl RelayRLTrajectory {
             actions: Vec::with_capacity(max_length),
             max_length,
             agent_id: Some(agent_id),
+            env_id: None,
+            env_label: None,
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
@@ -86,6 +94,8 @@ impl RelayRLTrajectory {
     pub fn with_metadata(
         max_length: usize,
         agent_id: Option<Uuid>,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
         episode: Option<u64>,
         training_step: Option<u64>,
     ) -> Self {
@@ -93,6 +103,8 @@ impl RelayRLTrajectory {
             actions: Vec::with_capacity(max_length),
             max_length,
             agent_id,
+            env_id,
+            env_label,
             timestamp: current_timestamp(),
             episode,
             training_step,
@@ -155,6 +167,14 @@ impl RelayRLTrajectory {
         self.agent_id.as_ref()
     }
 
+    pub fn get_env_id(&self) -> Option<&Uuid> {
+        self.env_id.as_ref()
+    }
+
+    pub fn get_env_label(&self) -> Option<&str> {
+        self.env_label.as_deref()
+    }
+
     pub fn get_timestamp(&self) -> u64 {
         self.timestamp
     }
@@ -169,6 +189,14 @@ impl RelayRLTrajectory {
 
     pub fn set_agent_id(&mut self, agent_id: Uuid) {
         self.agent_id = Some(agent_id);
+    }
+
+    pub fn set_env_id(&mut self, env_id: Uuid) {
+        self.env_id = Some(env_id);
+    }
+
+    pub fn set_env_label(&mut self, env_label: impl Into<String>) {
+        self.env_label = Some(env_label.into());
     }
 
     pub fn set_episode(&mut self, episode: u64) {
@@ -495,7 +523,8 @@ mod unit_tests {
     #[test]
     fn metadata_setters_and_getters_round_trip() {
         let agent_id = Uuid::from_u128(42);
-        let mut traj = RelayRLTrajectory::with_metadata(8, Some(agent_id), Some(9), Some(12));
+        let mut traj =
+            RelayRLTrajectory::with_metadata(8, Some(agent_id), None, None, Some(9), Some(12));
 
         assert_eq!(traj.get_agent_id(), Some(&agent_id));
         assert_eq!(traj.get_episode(), Some(9));
@@ -557,7 +586,8 @@ mod unit_tests {
     #[cfg(feature = "metadata")]
     fn encode_decode_round_trip_preserves_metadata_and_actions() {
         let agent_id = Uuid::from_u128(99);
-        let mut traj = RelayRLTrajectory::with_metadata(4, Some(agent_id), Some(7), Some(8));
+        let mut traj =
+            RelayRLTrajectory::with_metadata(4, Some(agent_id), None, None, Some(7), Some(8));
         traj.add_action(RelayRLAction::minimal(0.5, false));
         traj.add_action(RelayRLAction::minimal(1.5, true));
 
