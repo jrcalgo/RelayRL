@@ -40,6 +40,7 @@ pub(crate) struct RoutedMessage {
 pub(crate) enum RoutingProtocol {
     ModelHandshake,
     RequestInference,
+    RequestInferenceBatch,
     FlagLastInference,
     ModelVersion,
     ModelUpdate,
@@ -50,8 +51,11 @@ pub(crate) enum RoutingProtocol {
 pub(crate) enum RoutedPayload {
     ModelHandshake,
     RequestInference(Box<InferenceRequest>),
+    RequestInferenceBatch(Box<BatchedInferenceRequest>),
     FlagLastInference {
         reward: f32,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
     },
     ModelVersion {
         reply_to: oneshot::Sender<i64>,
@@ -76,4 +80,13 @@ pub(crate) struct InferenceRequest {
     pub(crate) mask: Box<dyn Any + Send + Sync>,
     pub(crate) reward: f32,
     pub(crate) reply_to: oneshot::Sender<Arc<RelayRLAction>>,
+}
+
+pub(crate) struct BatchedInferenceRequest {
+    pub(crate) env_ids: Vec<Uuid>,
+    pub(crate) env_labels: Vec<String>,
+    pub(crate) observations: Box<dyn Any + Send + Sync>,
+    pub(crate) masks: Box<dyn Any + Send + Sync>,
+    pub(crate) rewards: Vec<f32>,
+    pub(crate) reply_to: oneshot::Sender<Vec<RelayRLAction>>,
 }
