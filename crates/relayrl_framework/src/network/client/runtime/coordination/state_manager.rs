@@ -11,6 +11,9 @@ use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleM
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
+use crate::network::client::runtime::data::environments::EnvironmentInterface;
+use crate::network::client::runtime::data::environments::EnvironmentInterfaceError;
+use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
@@ -24,19 +27,24 @@ use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
-use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
+use relayrl_env_trait::{Environment, EnvironmentUuid};
+use relayrl_types::data::action::RelayRLAction;
+use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType, TensorData};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
+use relayrl_types::prelude::tensor::burn::TensorKind;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
 use arc_swap::ArcSwapOption;
-use burn_tensor::backend::Backend;
+use burn_tensor::{BasicOps, backend::Backend};
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Error)]
@@ -70,6 +78,28 @@ pub enum StateManagerError {
     GetConfigError(String),
     #[error("Set config failed: {0}")]
     SetConfigError(String),
+    #[error("Set env failed: {0}")]
+    SetEnvError(String),
+    #[error("Step env failed: {0}")]
+    StepEnvError(String),
+    #[error("Get env info failed: {0}")]
+    GetEnvInfoError(String),
+    #[error("Get env count failed: {0}")]
+    GetEnvCountError(String),
+    #[error("Increase env count failed: {0}")]
+    IncreaseEnvCountError(String),
+    #[error("Decrease env count failed: {0}")]
+    DecreaseEnvCountError(String),
+    #[error("Remove envs failed: {0}")]
+    RemoveEnvError(String),
+    #[error("Invalid environment kind: {0}")]
+    InvalidEnvironmentKindError(String),
+    #[error(transparent)]
+    EnvironmentInterfaceError(#[from] EnvironmentInterfaceError),
+    #[error("Tensor conversion failed: {0}")]
+    TensorConversionError(String),
+    #[error("Inference request failed: {0}")]
+    InferenceRequestError(String),
 }
 
 pub type ActorUuid = Uuid;
@@ -101,6 +131,7 @@ pub(crate) struct StateManager<
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) shared_router_state: Arc<SharedRouterState>,
+    actor_envs: DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
@@ -150,6 +181,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     actor_inboxes: DashMap::new(),
                     actor_router_addresses: DashMap::new(),
                 }),
+                actor_envs: DashMap::new(),
                 actor_handles: DashMap::new(),
                 actor_devices: DashMap::new(),
                 actor_model_handles: DashMap::new(),
@@ -308,6 +340,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .get_or_init_model_handle(default_model, device.clone())
             .await?;
         self.actor_devices.insert(actor_id, device.clone());
+        self.actor_envs.insert(
+            actor_id,
+            EnvironmentInterface::new(self.client_namespace.clone(), device.clone()),
+        );
         self.actor_model_handles
             .insert(actor_id, model_handle.clone());
 
@@ -447,6 +483,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
 
         self.shared_router_state.actor_inboxes.remove(&id);
+        self.actor_envs.remove(&id);
         self.actor_devices.remove(&id);
         self.actor_model_handles.remove(&id);
         self.shared_router_state.actor_router_addresses.remove(&id);
@@ -504,6 +541,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.shared_router_state.actor_inboxes.remove(&current_id);
         if let Some((_, current_device)) = self.actor_devices.remove(&current_id) {
             self.actor_devices.insert(new_id, current_device);
+        }
+        if let Some((_, current_env)) = self.actor_envs.remove(&current_id) {
+            self.actor_envs.insert(new_id, current_env);
         }
         if let Some((_, router_namespace)) = self
             .shared_router_state
@@ -664,6 +704,274 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .actor_inboxes
             .get(&id)
             .map(|tx| tx.value().clone())
+    }
+
+    #[allow(unexpected_cfgs)]
+    fn tensor_data_to_any<const D: usize>(
+        tensor_data: &TensorData,
+        _device: &DeviceType,
+    ) -> Result<AnyBurnTensor<B, D>, StateManagerError> {
+        match &tensor_data.dtype {
+            #[cfg(feature = "ndarray-backend")]
+            relayrl_types::data::tensor::DType::NdArray(dtype) => match dtype {
+                relayrl_types::data::tensor::NdArrayDType::F16
+                | relayrl_types::data::tensor::NdArrayDType::F32
+                | relayrl_types::data::tensor::NdArrayDType::F64 => tensor_data
+                    .to_float_tensor::<B, D>(_device)
+                    .map(AnyBurnTensor::Float)
+                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
+                relayrl_types::data::tensor::NdArrayDType::I8
+                | relayrl_types::data::tensor::NdArrayDType::I16
+                | relayrl_types::data::tensor::NdArrayDType::I32
+                | relayrl_types::data::tensor::NdArrayDType::I64 => tensor_data
+                    .to_int_tensor::<B, D>(_device)
+                    .map(AnyBurnTensor::Int)
+                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
+                relayrl_types::data::tensor::NdArrayDType::Bool => tensor_data
+                    .to_bool_tensor::<B, D>(_device)
+                    .map(AnyBurnTensor::Bool)
+                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
+            },
+            #[cfg(feature = "tch-backend")]
+            relayrl_types::data::tensor::DType::Tch(dtype) => match dtype {
+                relayrl_types::data::tensor::TchDType::F16
+                | relayrl_types::data::tensor::TchDType::Bf16
+                | relayrl_types::data::tensor::TchDType::F32
+                | relayrl_types::data::tensor::TchDType::F64 => tensor_data
+                    .to_float_tensor::<B, D>(_device)
+                    .map(AnyBurnTensor::Float)
+                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
+                relayrl_types::data::tensor::TchDType::U8
+                | relayrl_types::data::tensor::TchDType::I8
+                | relayrl_types::data::tensor::TchDType::I16
+                | relayrl_types::data::tensor::TchDType::I32
+                | relayrl_types::data::tensor::TchDType::I64 => tensor_data
+                    .to_int_tensor::<B, D>(_device)
+                    .map(AnyBurnTensor::Int)
+                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
+                relayrl_types::data::tensor::TchDType::Bool => tensor_data
+                    .to_bool_tensor::<B, D>(_device)
+                    .map(AnyBurnTensor::Bool)
+                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
+            },
+            _ => Err(StateManagerError::TensorConversionError(
+                "[StateManager] Unsupported tensor dtype for action conversion".to_string(),
+            )),
+        }
+    }
+
+    async fn request_action_direct(
+        actor_id: ActorUuid,
+        inbox: &Sender<RoutedMessage>,
+        observation: AnyBurnTensor<B, D_IN>,
+        reward: f32,
+        device: &DeviceType,
+    ) -> Result<AnyBurnTensor<B, D_OUT>, StateManagerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let msg = RoutedMessage {
+            actor_id,
+            protocol: RoutingProtocol::RequestInference,
+            payload: RoutedPayload::RequestInference(Box::new(
+                crate::network::client::runtime::router::InferenceRequest {
+                    observation: Box::new(Arc::new(observation)),
+                    mask: Box::new(None::<Arc<AnyBurnTensor<B, D_OUT>>>),
+                    reward,
+                    reply_to: reply_tx,
+                },
+            )),
+        };
+
+        inbox
+            .send(msg)
+            .await
+            .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
+        let action: Arc<RelayRLAction> = reply_rx
+            .await
+            .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
+        let action_data = action.get_act().ok_or_else(|| {
+            StateManagerError::InferenceRequestError(
+                "[StateManager] Actor returned action without tensor payload".to_string(),
+            )
+        })?;
+
+        Self::tensor_data_to_any::<D_OUT>(action_data, device)
+    }
+
+    async fn flag_last_action_direct(
+        actor_id: ActorUuid,
+        inbox: &Sender<RoutedMessage>,
+        reward: f32,
+    ) -> Result<(), StateManagerError> {
+        let msg = RoutedMessage {
+            actor_id,
+            protocol: RoutingProtocol::FlagLastInference,
+            payload: RoutedPayload::FlagLastInference { reward },
+        };
+        inbox
+            .send(msg)
+            .await
+            .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))
+    }
+
+    pub(crate) fn run_env(
+        &mut self,
+        actor_id: ActorUuid,
+        step_count: usize,
+    ) -> Result<(), StateManagerError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let inbox = self.get_actor_inbox(actor_id).ok_or_else(|| {
+                    StateManagerError::ActorInboxNotFoundError(format!(
+                        "[StateManager] Actor inbox not found for {}",
+                        actor_id
+                    ))
+                })?;
+                let device = self
+                    .actor_devices
+                    .get(&actor_id)
+                    .map(|device| device.clone())
+                    .ok_or_else(|| {
+                        StateManagerError::GetEnvInfoError(format!(
+                            "[StateManager] Actor device not found for {}",
+                            actor_id
+                        ))
+                    })?;
+
+                let mut rewards: HashMap<EnvironmentUuid, f32> = HashMap::new();
+                let mut env_interface = self.actor_envs.get_mut(&actor_id).ok_or_else(|| {
+                    StateManagerError::GetEnvInfoError(format!(
+                        "[StateManager] Environment interface not found for {}",
+                        actor_id
+                    ))
+                })?;
+
+                for (env_id, _) in env_interface.ensure_ready()? {
+                    rewards.entry(env_id).or_insert(0.0);
+                }
+
+                for _ in 0..step_count {
+                    let observations = env_interface.current_observations()?;
+                    let mut actions = Vec::with_capacity(observations.len());
+
+                    for (env_id, observation) in observations {
+                        let reward = *rewards.get(&env_id).unwrap_or(&0.0);
+                        let action = Self::request_action_direct(
+                            actor_id,
+                            &inbox,
+                            observation,
+                            reward,
+                            &device,
+                        )
+                        .await?;
+                        actions.push((env_id, action));
+                    }
+
+                    let steps = env_interface.step_once(&actions)?;
+                    for step in steps {
+                        rewards.insert(step.env_id, step.reward);
+                        if step.terminated || step.truncated {
+                            Self::flag_last_action_direct(actor_id, &inbox, step.reward).await?;
+                            rewards.insert(step.env_id, 0.0);
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+        })
+    }
+
+    pub(crate) fn set_env<KindIn, KindOut>(
+        &mut self,
+        id: Uuid,
+        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        count: u32,
+    ) -> Result<(), StateManagerError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
+    {
+        let device = self
+            .actor_devices
+            .get(&id)
+            .map(|device| device.clone())
+            .ok_or_else(|| {
+                StateManagerError::SetEnvError(format!(
+                    "[StateManager] Actor device not found for {}",
+                    id
+                ))
+            })?;
+
+        if let Some(mut env_interface) = self.actor_envs.get_mut(&id) {
+            env_interface.set_env(Some(env), count as usize)?;
+            Ok(())
+        } else {
+            let mut env_interface =
+                EnvironmentInterface::new(self.client_namespace.clone(), device);
+            env_interface.set_env(Some(env), count as usize)?;
+            self.actor_envs.insert(id, env_interface);
+            Ok(())
+        }
+    }
+
+    pub(crate) fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, StateManagerError> {
+        self.actor_envs
+            .get(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::GetEnvCountError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .get_env_count()
+            .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn increase_env_count(
+        &mut self,
+        actor_id: ActorUuid,
+        count: u32,
+    ) -> Result<(), StateManagerError> {
+        self.actor_envs
+            .get_mut(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::IncreaseEnvCountError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .increase_env_count(count)
+            .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn decrease_env_count(
+        &mut self,
+        actor_id: ActorUuid,
+        count: u32,
+    ) -> Result<(), StateManagerError> {
+        self.actor_envs
+            .get_mut(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::DecreaseEnvCountError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .decrease_env_count(count)
+            .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), StateManagerError> {
+        self.actor_envs
+            .get_mut(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::RemoveEnvError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .remove_env()
+            .map_err(StateManagerError::from)
     }
 }
 
