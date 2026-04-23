@@ -4,7 +4,6 @@
 //! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
 
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
-use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
@@ -15,11 +14,12 @@ use crate::network::client::runtime::data::transport_sink::transport_dispatcher:
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+    BatchedInferenceRequest, InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
+use active_uuid_registry::registry_uuid::Uuid;
 use arc_swap::ArcSwapOption;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
@@ -28,6 +28,7 @@ use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -129,6 +130,9 @@ pub(crate) struct Actor<
     model_device: DeviceType,
     current_traj: RelayRLTrajectory,
     current_episode: AtomicU64,
+    per_env_trajs: HashMap<Uuid, RelayRLTrajectory>,
+    per_env_episodes: HashMap<Uuid, u64>,
+    per_env_labels: HashMap<Uuid, String>,
     rx_from_router: Receiver<RoutedMessage>,
     shared_tx_to_buffer: Sender<RoutedMessage>,
     shared_client_modes: Arc<ClientModes>,
@@ -182,6 +186,123 @@ impl<
     }
 
     #[inline(always)]
+    #[allow(clippy::type_complexity)]
+    fn extract_batched_inference_request(
+        msg: RoutedMessage,
+    ) -> Result<
+        (
+            Vec<Uuid>,
+            Vec<String>,
+            Vec<Arc<AnyBurnTensor<B, D_IN>>>,
+            Vec<Option<Arc<AnyBurnTensor<B, D_OUT>>>>,
+            Vec<f32>,
+            oneshot::Sender<Vec<RelayRLAction>>,
+        ),
+        ActorError,
+    > {
+        let RoutedPayload::RequestInferenceBatch(req) = msg.payload else {
+            return Err(ActorError::MessageHandlingError(
+                "Expected RequestInferenceBatch payload".to_string(),
+            ));
+        };
+
+        let BatchedInferenceRequest {
+            env_ids,
+            env_labels,
+            observations,
+            masks,
+            rewards,
+            reply_to,
+        } = *req;
+
+        let observations: Vec<Arc<AnyBurnTensor<B, D_IN>>> = *observations
+            .downcast::<Vec<Arc<AnyBurnTensor<B, D_IN>>>>()
+            .map_err(|_| {
+                ActorError::TypeConversionError("Failed to downcast batched observations".into())
+            })?;
+        let masks: Vec<Option<Arc<AnyBurnTensor<B, D_OUT>>>> = *masks
+            .downcast::<Vec<Option<Arc<AnyBurnTensor<B, D_OUT>>>>>()
+            .map_err(|_| {
+                ActorError::TypeConversionError("Failed to downcast batched masks".into())
+            })?;
+
+        Ok((env_ids, env_labels, observations, masks, rewards, reply_to))
+    }
+
+    fn ensure_env_trajectory(
+        &mut self,
+        env_id: Uuid,
+        env_label: impl Into<String>,
+        max_traj_length: usize,
+    ) -> &mut RelayRLTrajectory {
+        let label = env_label.into();
+        self.per_env_labels
+            .entry(env_id)
+            .or_insert_with(|| label.clone());
+        self.per_env_trajs.entry(env_id).or_insert_with(|| {
+            RelayRLTrajectory::with_metadata(
+                max_traj_length,
+                Some(self.actor_id),
+                Some(env_id),
+                Some(label),
+                None,
+                None,
+            )
+        })
+    }
+
+    async fn flush_env_trajectory(&mut self, env_id: Uuid) -> Result<(), ActorError> {
+        let Some(existing_traj) = self.per_env_trajs.get(&env_id) else {
+            return Ok(());
+        };
+        if existing_traj.actions.is_empty() {
+            return Ok(());
+        }
+
+        let max_traj_length = *self.shared_max_traj_length.read().await;
+        let env_label = self.per_env_labels.get(&env_id).cloned();
+        let mut traj_to_send = self
+            .per_env_trajs
+            .insert(
+                env_id,
+                RelayRLTrajectory::with_metadata(
+                    max_traj_length,
+                    Some(self.actor_id),
+                    Some(env_id),
+                    env_label.clone(),
+                    None,
+                    None,
+                ),
+            )
+            .expect("env trajectory should exist before flush");
+        let episode = self.per_env_episodes.entry(env_id).or_insert(0);
+        traj_to_send.set_episode(*episode);
+        *episode += 1;
+
+        let (duration_ms, duration_ns) = {
+            let now: SystemTime = SystemTime::now();
+            let duration = now
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
+            (duration.as_millis(), duration.as_nanos())
+        };
+
+        let send_traj_msg = RoutedMessage {
+            actor_id: self.actor_id,
+            protocol: RoutingProtocol::SendTrajectory,
+            payload: RoutedPayload::SendTrajectory {
+                timestamp: (duration_ms, duration_ns),
+                trajectory: traj_to_send,
+            },
+        };
+
+        self.shared_tx_to_buffer
+            .send(send_traj_msg)
+            .await
+            .map_err(|e| ActorError::TrajectorySendError(format!("{e:?}")))
+    }
+
+    #[inline(always)]
     async fn handle_inference_kind(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         match self.shared_client_modes.actor_inference_mode {
             ActorInferenceMode::Local(_) => self.perform_local_inference(msg).await,
@@ -217,6 +338,91 @@ impl<
 
             self.current_traj.add_action(rla.clone());
             reply_to.send(Arc::new(rla)).map_err(|e| {
+                ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
+            })?;
+
+            Ok(())
+        }
+        .await;
+
+        #[cfg(feature = "metrics")]
+        match &result {
+            Ok(()) => {
+                let duration = start_time.elapsed().as_secs_f64();
+                self.metrics
+                    .record_histogram("actor_local_inference_latency", duration, &[])
+                    .await;
+                self.metrics
+                    .record_counter("actor_local_inferences", 1, &[])
+                    .await;
+            }
+            Err(_) => {
+                self.metrics
+                    .record_counter("actor_local_inference_failures", 1, &[])
+                    .await;
+            }
+        }
+
+        result
+    }
+
+    async fn perform_local_inference_batch(
+        &mut self,
+        msg: RoutedMessage,
+    ) -> Result<(), ActorError> {
+        #[cfg(feature = "metrics")]
+        let start_time = Instant::now();
+
+        let (env_ids, env_labels, observations, masks, rewards, reply_to) =
+            Self::extract_batched_inference_request(msg)?;
+        let actor_id = self.actor_id;
+
+        let result = async {
+            if env_ids.len() != observations.len()
+                || env_labels.len() != observations.len()
+                || rewards.len() != observations.len()
+                || masks.len() != observations.len()
+            {
+                return Err(ActorError::MessageHandlingError(
+                    "Batched inference payload lengths must match".to_string(),
+                ));
+            }
+
+            let actions = {
+                let guard = self.reloadable_model.load();
+                let reloadable_model = match &*guard {
+                    Some(m) => m,
+                    None => {
+                        return Err(ActorError::SystemError(
+                            "Model not loaded/available for actor inference".to_string(),
+                        ));
+                    }
+                };
+                reloadable_model
+                    .forward_batch::<D_IN, D_OUT>(&observations, &masks, &rewards, actor_id)
+                    .map_err(ActorError::from)?
+            };
+
+            if actions.len() != env_ids.len() {
+                return Err(ActorError::MessageHandlingError(format!(
+                    "Batched inference returned {} actions for {} env ids",
+                    actions.len(),
+                    env_ids.len()
+                )));
+            }
+
+            let max_traj_length = *self.shared_max_traj_length.read().await;
+            for ((env_id, env_label), action) in env_ids
+                .iter()
+                .copied()
+                .zip(env_labels.iter())
+                .zip(actions.iter().cloned())
+            {
+                let traj = self.ensure_env_trajectory(env_id, env_label.clone(), max_traj_length);
+                traj.add_action(action);
+            }
+
+            reply_to.send(actions).map_err(|e| {
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
 
@@ -290,49 +496,74 @@ impl<
     }
 
     async fn perform_flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::FlagLastInference { reward } = msg.payload {
+        if let RoutedPayload::FlagLastInference {
+            reward,
+            env_id,
+            env_label,
+        } = msg.payload
+        {
             #[cfg(feature = "metrics")]
             let start_time = Instant::now();
 
             let result = async {
-                {
+                if let Some(env_id) = env_id {
+                    let max_traj_length: usize = *self.shared_max_traj_length.read().await;
+                    let actor_id = self.actor_id;
+                    let label = env_label.unwrap_or_else(|| {
+                        self.per_env_labels
+                            .get(&env_id)
+                            .cloned()
+                            .unwrap_or_else(|| env_id.to_string())
+                    });
+                    let traj = self.ensure_env_trajectory(env_id, label, max_traj_length);
+                    traj.add_action(RelayRLAction::new(
+                        None,
+                        None,
+                        None,
+                        reward,
+                        true,
+                        None,
+                        Some(actor_id),
+                    ));
+                    self.flush_env_trajectory(env_id).await?;
+                } else {
                     let actor_id = self.actor_id;
                     let last_action =
                         RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
                     self.current_traj.add_action(last_action);
+
+                    let mut traj_to_send: RelayRLTrajectory = {
+                        let max_traj_length: usize = *self.shared_max_traj_length.read().await;
+                        std::mem::replace(
+                            &mut self.current_traj,
+                            RelayRLTrajectory::new(max_traj_length),
+                        )
+                    };
+                    let current_episode: u64 = self.current_episode.fetch_add(1, Ordering::SeqCst);
+                    traj_to_send.set_episode(current_episode);
+
+                    let (duration_ms, duration_ns) = {
+                        let now: SystemTime = SystemTime::now();
+                        let duration = now
+                            .duration_since(UNIX_EPOCH)
+                            .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
+                        (duration.as_millis(), duration.as_nanos())
+                    };
+
+                    let send_traj_msg = RoutedMessage {
+                        actor_id: self.actor_id,
+                        protocol: RoutingProtocol::SendTrajectory,
+                        payload: RoutedPayload::SendTrajectory {
+                            timestamp: (duration_ms, duration_ns),
+                            trajectory: traj_to_send,
+                        },
+                    };
+
+                    self.shared_tx_to_buffer
+                        .send(send_traj_msg)
+                        .await
+                        .map_err(|e| ActorError::TrajectorySendError(format!("{e:?}")))?;
                 }
-
-                let mut traj_to_send: RelayRLTrajectory = {
-                    let max_traj_length: usize = *self.shared_max_traj_length.read().await;
-                    std::mem::replace(
-                        &mut self.current_traj,
-                        RelayRLTrajectory::new(max_traj_length),
-                    )
-                };
-                let current_episode: u64 = self.current_episode.fetch_add(1, Ordering::SeqCst);
-                traj_to_send.set_episode(current_episode);
-
-                let (duration_ms, duration_ns) = {
-                    let now: SystemTime = SystemTime::now();
-                    let duration = now
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
-                    (duration.as_millis(), duration.as_nanos())
-                };
-
-                let send_traj_msg = RoutedMessage {
-                    actor_id: self.actor_id,
-                    protocol: RoutingProtocol::SendTrajectory,
-                    payload: RoutedPayload::SendTrajectory {
-                        timestamp: (duration_ms, duration_ns),
-                        trajectory: traj_to_send,
-                    },
-                };
-
-                self.shared_tx_to_buffer
-                    .send(send_traj_msg)
-                    .await
-                    .map_err(|e| ActorError::TrajectorySendError(format!("{e:?}")))?;
 
                 Ok(())
             }
@@ -413,6 +644,9 @@ impl<
             model_device: device,
             current_traj: RelayRLTrajectory::new(max_traj_length),
             current_episode: AtomicU64::new(0),
+            per_env_trajs: HashMap::new(),
+            per_env_episodes: HashMap::new(),
+            per_env_labels: HashMap::new(),
             rx_from_router,
             shared_tx_to_buffer,
             shared_client_modes,
@@ -432,6 +666,18 @@ impl<
                 RoutingProtocol::RequestInference => {
                     self.handle_inference_kind(msg).await?;
                 }
+                RoutingProtocol::RequestInferenceBatch => match self
+                    .shared_client_modes
+                    .actor_inference_mode
+                {
+                    ActorInferenceMode::Local(_) => self.perform_local_inference_batch(msg).await?,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    ActorInferenceMode::Server(_) => {
+                        return Err(ActorError::SystemError(
+                            "Batched server inference is not implemented".to_string(),
+                        ));
+                    }
+                },
                 RoutingProtocol::FlagLastInference => {
                     self.perform_flag_last_action(msg).await?;
                 }
@@ -726,6 +972,15 @@ impl<
             let _ = self.shared_tx_to_buffer.send(send_traj_msg).await;
         }
 
+        let env_ids_to_flush: Vec<_> = self
+            .per_env_trajs
+            .iter()
+            .filter_map(|(env_id, traj)| (!traj.actions.is_empty()).then_some(*env_id))
+            .collect();
+        for env_id in env_ids_to_flush {
+            let _ = self.flush_env_trajectory(env_id).await;
+        }
+
         active_uuid_registry::interface::remove_id(
             self.client_namespace.as_ref(),
             crate::network::ACTOR_CONTEXT,
@@ -747,13 +1002,15 @@ mod unit_tests {
     use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 
     use active_uuid_registry::registry_uuid::Uuid;
-    use relayrl_types::data::tensor::DeviceType;
+    use relayrl_types::data::tensor::{DType, DeviceType, NdArrayDType};
 
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{RwLock, mpsc, oneshot};
 
     use burn_ndarray::NdArray;
+    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
+    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
     type NdArrayBackend = NdArray<f32>;
 
@@ -769,6 +1026,19 @@ mod unit_tests {
 
     fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
         Arc::new(ArcSwapOption::new(None))
+    }
+
+    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArrayBackend, D_IN>> {
+        let device = NdArrayBackend::get_device(&DeviceType::Cpu).unwrap();
+        let tensor = Tensor::<NdArrayBackend, D_IN, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
+            &device,
+        );
+
+        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }))
     }
 
     async fn create_ndarray_actor(
@@ -921,7 +1191,11 @@ mod unit_tests {
         tx.send(build_msg(
             actor_id,
             RoutingProtocol::FlagLastInference,
-            RoutedPayload::FlagLastInference { reward: 1.0 },
+            RoutedPayload::FlagLastInference {
+                reward: 1.0,
+                env_id: None,
+                env_label: None,
+            },
         ))
         .await
         .unwrap();
@@ -980,7 +1254,11 @@ mod unit_tests {
         tx.send(build_msg(
             actor_id,
             RoutingProtocol::FlagLastInference,
-            RoutedPayload::FlagLastInference { reward: 0.0 },
+            RoutedPayload::FlagLastInference {
+                reward: 0.0,
+                env_id: None,
+                env_label: None,
+            },
         ))
         .await
         .unwrap();
@@ -993,6 +1271,107 @@ mod unit_tests {
         assert!(
             matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
             "FlagLastInference should produce a SendTrajectory message"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_batched_inference_request_preserves_env_order() {
+        let env_id_1 = Uuid::new_v4();
+        let env_id_2 = Uuid::new_v4();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let msg = build_msg(
+            Uuid::new_v4(),
+            RoutingProtocol::RequestInferenceBatch,
+            RoutedPayload::RequestInferenceBatch(Box::new(BatchedInferenceRequest {
+                env_ids: vec![env_id_1, env_id_2],
+                env_labels: vec!["env-1".to_string(), "env-2".to_string()],
+                observations: Box::new(vec![
+                    float_any_tensor(&[1.0, 2.0, 3.0, 4.0]),
+                    float_any_tensor(&[5.0, 6.0, 7.0, 8.0]),
+                ]),
+                masks: Box::new(vec![None::<Arc<AnyBurnTensor<NdArrayBackend, D_OUT>>>; 2]),
+                rewards: vec![1.0, 2.0],
+                reply_to: reply_tx,
+            })),
+        );
+
+        let (env_ids, env_labels, observations, masks, rewards, returned_reply_tx) =
+            Actor::<NdArrayBackend, D_IN, D_OUT>::extract_batched_inference_request(msg).unwrap();
+
+        assert_eq!(env_ids, vec![env_id_1, env_id_2]);
+        assert_eq!(env_labels, vec!["env-1".to_string(), "env-2".to_string()]);
+        assert_eq!(observations.len(), 2);
+        assert_eq!(masks.len(), 2);
+        assert_eq!(rewards, vec![1.0, 2.0]);
+        drop(returned_reply_tx);
+        drop(reply_rx);
+    }
+
+    #[tokio::test]
+    async fn flag_last_action_with_env_id_flushes_only_target_env_traj() {
+        let (mut actor, _tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let env_id_1 = Uuid::new_v4();
+        let env_id_2 = Uuid::new_v4();
+
+        actor.per_env_labels.insert(env_id_1, "env-1".to_string());
+        actor.per_env_labels.insert(env_id_2, "env-2".to_string());
+        let mut traj_1 = RelayRLTrajectory::with_metadata(
+            10,
+            Some(actor.actor_id),
+            Some(env_id_1),
+            Some("env-1".to_string()),
+            None,
+            None,
+        );
+        traj_1.add_action(RelayRLAction::minimal(0.5, false));
+        let mut traj_2 = RelayRLTrajectory::with_metadata(
+            10,
+            Some(actor.actor_id),
+            Some(env_id_2),
+            Some("env-2".to_string()),
+            None,
+            None,
+        );
+        traj_2.add_action(RelayRLAction::minimal(0.25, false));
+        actor.per_env_trajs.insert(env_id_1, traj_1);
+        actor.per_env_trajs.insert(env_id_2, traj_2);
+
+        actor
+            .perform_flag_last_action(build_msg(
+                actor.actor_id,
+                RoutingProtocol::FlagLastInference,
+                RoutedPayload::FlagLastInference {
+                    reward: 1.0,
+                    env_id: Some(env_id_1),
+                    env_label: Some("env-1".to_string()),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let msg = rx_buf.recv().await.expect("expected env trajectory flush");
+        match msg.payload {
+            RoutedPayload::SendTrajectory { trajectory, .. } => {
+                assert_eq!(trajectory.get_env_id(), Some(&env_id_1));
+                assert_eq!(trajectory.get_env_label(), Some("env-1"));
+            }
+            other => panic!(
+                "expected SendTrajectory payload, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        assert!(
+            actor
+                .per_env_trajs
+                .get(&env_id_1)
+                .is_some_and(|trajectory| trajectory.is_empty())
+        );
+        assert!(
+            actor
+                .per_env_trajs
+                .get(&env_id_2)
+                .is_some_and(|trajectory| !trajectory.is_empty())
         );
     }
 
@@ -1042,7 +1421,11 @@ mod unit_tests {
             .perform_flag_last_action(build_msg(
                 actor_id,
                 RoutingProtocol::FlagLastInference,
-                RoutedPayload::FlagLastInference { reward: 0.0 },
+                RoutedPayload::FlagLastInference {
+                    reward: 0.0,
+                    env_id: None,
+                    env_label: None,
+                },
             ))
             .await;
 
