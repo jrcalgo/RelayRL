@@ -397,7 +397,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         self.actor_handles.insert(actor_id, handle);
 
-        self.shared_actor_count.fetch_add(1, Ordering::Relaxed);
+        self.shared_actor_count.fetch_add(1, Ordering::Release);
 
         Ok(())
     }
@@ -492,7 +492,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_envs.remove(&id);
         self.actor_devices.remove(&id);
         self.actor_model_handles.remove(&id);
-        self.shared_actor_count.fetch_sub(1, Ordering::Relaxed);
+        self.shared_actor_count.fetch_sub(1, Ordering::Release);
         remove_id(
             self.client_namespace.as_ref(),
             crate::network::ACTOR_CONTEXT,

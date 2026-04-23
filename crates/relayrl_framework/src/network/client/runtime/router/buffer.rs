@@ -299,7 +299,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         .try_read()
                         .map(|g| *g)
                         .unwrap_or(1000)
-                        .saturating_mul(ac.load(Ordering::Relaxed).max(1));
+                        .saturating_mul(ac.load(Ordering::Acquire).max(1));
                     (Some(Arc::new(Semaphore::new(cap.max(1)))), cap)
                 }
                 _ => (None, 0),
@@ -355,7 +355,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                     let permit = match (&mut rx_semaphore, &recv_max_traj_length, &recv_actor_count) {
                                         (Some(semaphore), Some(traj_length), Some(actor_count)) => {
                                             let new_capacity = (*traj_length.read().await)
-                                                .saturating_mul(actor_count.load(Ordering::Relaxed).max(1));
+                                                .saturating_mul(actor_count.load(Ordering::Acquire).max(1));
                                             if new_capacity > current_semaphore_capacity {
                                                 semaphore.add_permits(new_capacity - current_semaphore_capacity);
                                                 current_semaphore_capacity = new_capacity;
