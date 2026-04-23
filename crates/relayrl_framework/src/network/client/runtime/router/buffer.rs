@@ -281,7 +281,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     }
 
     fn spawn_loop(&mut self) -> Result<(), RouterError> {
-        self.active.store(true, Ordering::SeqCst);
+        self.active.store(true, Ordering::Release);
 
         let mut rx_from_actor = self.rx_from_actor.take().ok_or_else(|| {
             RouterError::TrajectorySinkError(TrajectorySinkError::EncodeTrajectoryError(
@@ -396,7 +396,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
                 }
             }
-            receiver_active.store(false, Ordering::SeqCst);
+            receiver_active.store(false, Ordering::Release);
         });
 
         let mut worker_queue = worker_priority_queue.clone();
@@ -445,7 +445,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
 
                     _ = worker_tick.tick() => {
-                        if !worker_active.load(Ordering::SeqCst) &&
+                        if !worker_active.load(Ordering::Acquire) &&
                              worker_queue.is_empty() {
                                 break;
                             }

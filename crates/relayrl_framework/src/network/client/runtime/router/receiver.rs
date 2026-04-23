@@ -100,7 +100,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) async fn spawn_loop(&mut self) -> Result<(), RouterError> {
-        self.active.store(true, Ordering::SeqCst);
+        self.active.store(true, Ordering::Release);
 
         let entries = get_context_entries(
             self.client_namespace.as_ref(),
@@ -146,7 +146,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         });
         let mut last_forwarded_model_versions: HashMap<ActorUuid, i64> = HashMap::new();
 
-        while self.active.load(Ordering::SeqCst) {
+        while self.active.load(Ordering::Acquire) {
             tokio::select! {
                 biased;
 
@@ -168,7 +168,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         );
                     }
                     listener_handle.abort();
-                    self.active.store(false, Ordering::SeqCst);
+                    self.active.store(false, Ordering::Release);
                 }
 
                 msg = model_update_rx.recv() => {
@@ -193,7 +193,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         None => {
                             log::warn!("[ClientTransportModelReceiver] Model update channel closed, shutting down");
                             listener_handle.abort();
-                            self.active.store(false, Ordering::SeqCst);
+                            self.active.store(false, Ordering::Release);
                         }
                     }
                 }
