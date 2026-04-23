@@ -12,6 +12,7 @@ use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::get_context_entries;
+use crossbeam_utils::CachePadded;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,7 +65,7 @@ pub(crate) struct ClientTransportModelReceiver<
     const D_OUT: usize,
 > {
     client_namespace: Arc<str>,
-    active: AtomicBool,
+    active: CachePadded<AtomicBool>,
     global_dispatcher_tx: Sender<RoutedMessage>,
     training_dispatcher: Arc<TrainingDispatcher<B>>,
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
@@ -84,7 +85,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Self {
         Self {
             client_namespace,
-            active: AtomicBool::new(false),
+            active: CachePadded::new(AtomicBool::new(false)),
             global_dispatcher_tx,
             training_dispatcher,
             shared_state,

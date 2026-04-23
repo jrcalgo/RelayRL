@@ -22,6 +22,7 @@ use crate::network::client::runtime::data::sinks::file_sink::{
 use crate::network::client::runtime::data::sinks::transport_sink::{
     TransportError, transport_dispatcher::TrainingDispatcher,
 };
+use crossbeam_utils::CachePadded;
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::trajectory::EncodedTrajectory;
@@ -182,7 +183,7 @@ pub(crate) trait LocalFileTrajectorySinkTrait<B: Backend + BackendMatcher<Backen
 
 pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
     associated_router_namespace: RouterNamespace,
-    active: AtomicBool,
+    active: CachePadded<AtomicBool>,
     rx_from_actor: Option<Receiver<RoutedMessage>>,
     actor_last_processed: DashMap<Uuid, i64>,
     #[allow(dead_code)]
@@ -216,7 +217,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     ) -> Self {
         Self {
             associated_router_namespace,
-            active: AtomicBool::new(false),
+            active: CachePadded::new(AtomicBool::new(false)),
             rx_from_actor: Some(rx_from_actor),
             actor_last_processed: DashMap::new(),
             traj_queue_tx: None,
