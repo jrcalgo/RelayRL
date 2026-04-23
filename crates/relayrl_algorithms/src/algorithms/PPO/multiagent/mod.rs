@@ -319,9 +319,7 @@ where
     ///
     /// Reads from the first actor in the shared `MultiagentPPOKernel`. Returns `None`
     /// if no training has occurred yet.
-    pub fn acquire_model_module(
-        &self,
-    ) -> Option<relayrl_types::model::ModelModule<B>> {
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
         use relayrl_types::data::tensor::{DType, NdArrayDType};
         use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};

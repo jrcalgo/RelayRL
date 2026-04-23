@@ -589,7 +589,11 @@ where
             let out_dim = dims[1];
             let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
             let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
-                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+                bias_param
+                    .val()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap_or_default()
             } else {
                 vec![0.0; out_dim]
             };

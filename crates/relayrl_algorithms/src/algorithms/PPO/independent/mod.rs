@@ -54,7 +54,9 @@ fn sample_buffer_blocking<RB: GenericReplayBuffer>(
                 .block_on(buffer.sample_buffer())
         })
         .join()
-        .map_err(|_| ReplayBufferError::BufferSamplingError("sampler thread panicked".to_string()))?
+        .map_err(|_| {
+            ReplayBufferError::BufferSamplingError("sampler thread panicked".to_string())
+        })?
     })
 }
 
@@ -355,9 +357,7 @@ where
     /// a fully-connected MLP in ONNX format, and wraps the result in a `ModelModule`.
     /// Returns `None` if no actor has been registered or if no training has occurred
     /// yet (the kernel's `pi_trainer` network is absent).
-    pub fn acquire_model_module(
-        &self,
-    ) -> Option<relayrl_types::model::ModelModule<B>> {
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
         use relayrl_types::data::tensor::{DType, NdArrayDType};
         use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};

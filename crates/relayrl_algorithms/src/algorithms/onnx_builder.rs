@@ -171,13 +171,7 @@ fn build_attribute_int(name: &str, val: i64) -> Vec<u8> {
 ///
 /// `transB=0` because Burn Linear stores weights as `[in, out]` (no transposition
 /// needed).  `alpha = beta = 1.0` are the standard scale factors.
-fn build_gemm_node(
-    name: &str,
-    input: &str,
-    weight: &str,
-    bias: &str,
-    output: &str,
-) -> Vec<u8> {
+fn build_gemm_node(name: &str, input: &str, weight: &str, bias: &str, output: &str) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend(field_str(1, input)); // input[0]
     msg.extend(field_str(1, weight)); // input[1]

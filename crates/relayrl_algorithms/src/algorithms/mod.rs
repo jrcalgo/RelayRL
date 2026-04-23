@@ -1,10 +1,10 @@
 // #[allow(non_snake_case)]
 // pub mod DDPG;
-pub mod onnx_builder;
 #[allow(non_snake_case)]
 pub mod PPO;
 #[allow(non_snake_case)]
 pub mod REINFORCE;
+pub mod onnx_builder;
 // #[allow(non_snake_case)]
 // pub mod TD3;
 
