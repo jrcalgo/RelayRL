@@ -3,7 +3,7 @@
 **Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
-**Version:** 0.5.0-beta.1
+**Version:** 0.5.0-beta.2
 
 **Status:** Under active development, expect breaking changes.
 

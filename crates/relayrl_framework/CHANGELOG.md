@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta.2] - 2026-04-23
+
+### Added
+- **Actor environment control API** - `RelayRLActorEnv` adds `run_env`, `set_env`, `remove_env`, `get_env_count`, and `set_env_count` so local actors can manage scalar and vector environment lifecycles through the coordinator
+- **Batched local inference routing** - `RequestInferenceBatch` and `BatchedInferenceRequest` add batched observation dispatch for vectorized local environments
+  - `FlagLastInference` now carries optional `env_id` and `env_label` so finalized trajectories can preserve environment identity across batched runs
+
+### Changed
+- **Environment trait alignment** - `relayrl_framework` now inherits `relayrl_env_trait` from the workspace and targets the 1.1 environment API surface used by the new actor environment plumbing
+- **Runtime routing and vectorized environment handling** - Coordinator, state-manager, and router paths were reworked around shared router state, batched environment execution, and explicit routing timeouts for `RequestInferenceBatch` and `FlagLastInference`
+- **Hot-path runtime optimizations** - Cache padding and ordering refinements were applied across shared actor counts, router flags, backpressure permits, circuit-breaker counters, and shutdown state to reduce contention and improve responsiveness under load
+
+### Fixed
+- **Action request coordination** - `request_action()` now acquires shared dispatcher and valid-id state in one path and tightens the routing window to reduce actor reply races
+- **Runtime ordering and recovery behavior** - Actor distribution/removal ordering, backpressure wakeups, and circuit-breaker state transitions were tightened to behave more predictably under load
+
+### Breaking
+- **Environment integration surface** - Consumers integrating custom environments must adapt to the newer `relayrl_env_trait` 1.1 generics and method requirements now used by framework environment APIs
+  - Projects that pinned `relayrl_env_trait` `1.0.x` alongside `0.5.0-beta.1` need to align with the workspace-managed env-trait dependency before moving to `0.5.0-beta.2`
+
 ## [0.5.0-beta.1] - 2026-04-13
 
 ### Added
