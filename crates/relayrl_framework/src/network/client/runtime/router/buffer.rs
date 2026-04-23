@@ -118,7 +118,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn with_semaphore_capacity(
         &mut self,
         shared_max_traj_length: Arc<RwLock<usize>>,
-        shared_actor_count: Arc<AtomicUsize>,
+        shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self;
     fn spawn_loop(&mut self) -> Result<(), RouterError>;
     fn _compute_priority(
@@ -150,7 +150,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn with_semaphore_capacity(
         &mut self,
         shared_max_traj_length: Arc<RwLock<usize>>,
-        shared_actor_count: Arc<AtomicUsize>,
+        shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self;
     fn spawn_loop(&mut self) -> Result<(), RouterError>;
     fn _compute_priority(
@@ -197,7 +197,7 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     shared_traj_memory: Option<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>>,
     shutdown: Option<broadcast::Receiver<()>>,
     shared_max_traj_length: Option<Arc<RwLock<usize>>>,
-    shared_actor_count: Option<Arc<AtomicUsize>>,
+    shared_actor_count: Option<Arc<CachePadded<AtomicUsize>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     codec: CodecConfig,
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
@@ -273,7 +273,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     fn with_semaphore_capacity(
         &mut self,
         shared_max_traj_length: Arc<RwLock<usize>>,
-        shared_actor_count: Arc<AtomicUsize>,
+        shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self {
         self.shared_max_traj_length = Some(shared_max_traj_length);
         self.shared_actor_count = Some(shared_actor_count);

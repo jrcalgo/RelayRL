@@ -21,6 +21,7 @@ use crate::network::client::runtime::data::transport_sink::transport_dispatcher:
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
+use crossbeam_utils::CachePadded;
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -134,7 +135,7 @@ pub(crate) struct StateManager<
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
-    pub(crate) shared_actor_count: Arc<AtomicUsize>,
+    pub(crate) shared_actor_count: Arc<CachePadded<AtomicUsize>>,
 }
 
 // ===== Construction and actor lifecycle =====
@@ -184,7 +185,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 actor_handles: DashMap::new(),
                 actor_devices: DashMap::new(),
                 actor_model_handles: DashMap::new(),
-                shared_actor_count: Arc::new(AtomicUsize::new(0)),
+                shared_actor_count: Arc::new(CachePadded::new(AtomicUsize::new(0))),
             },
             global_dispatcher_rx,
         )
