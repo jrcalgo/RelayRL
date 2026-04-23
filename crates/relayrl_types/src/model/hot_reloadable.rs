@@ -137,6 +137,65 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         );
         Ok(r4sa)
     }
+
+    pub fn forward_batch<const D_IN: usize, const D_OUT: usize>(
+        &self,
+        observations: &[Arc<AnyBurnTensor<B, D_IN>>],
+        masks: &[Option<Arc<AnyBurnTensor<B, D_OUT>>>],
+        rewards: &[f32],
+        actor_id: Uuid,
+    ) -> Result<Vec<RelayRLAction>, ModelError> {
+        if observations.len() != rewards.len() {
+            return Err(ModelError::InvalidInputDimension(format!(
+                "batched reward count mismatch: {} observations vs {} rewards",
+                observations.len(),
+                rewards.len()
+            )));
+        }
+
+        let model_module = self.current_module();
+        let steps = model_module.step_batch::<D_IN, D_OUT>(observations, masks)?;
+        if steps.len() != observations.len() {
+            return Err(ModelError::InvalidOutputDimension(format!(
+                "batched action count mismatch: {} actions for {} observations",
+                steps.len(),
+                observations.len()
+            )));
+        }
+
+        Ok(steps
+            .into_iter()
+            .zip(observations.iter())
+            .zip(rewards.iter().copied())
+            .map(|(((act_td, mask_td, aux), observation), reward)| {
+                let obs_td = match observation.as_ref() {
+                    AnyBurnTensor::Float(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                        inner: wrapper.tensor.clone(),
+                        conversion_dtype: model_module.metadata.input_dtype.clone(),
+                    }),
+                    AnyBurnTensor::Int(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                        inner: wrapper.tensor.clone(),
+                        conversion_dtype: model_module.metadata.input_dtype.clone(),
+                    }),
+                    AnyBurnTensor::Bool(wrapper) => TensorData::try_from(ConversionBurnTensor {
+                        inner: wrapper.tensor.clone(),
+                        conversion_dtype: model_module.metadata.input_dtype.clone(),
+                    }),
+                }
+                .map_err(|e| ModelError::BackendError(format!("Tensor conversion failed: {e}")))?;
+
+                Ok::<RelayRLAction, ModelError>(RelayRLAction::new(
+                    Some(obs_td),
+                    Some(act_td),
+                    mask_td,
+                    reward,
+                    false,
+                    Some(aux),
+                    Some(actor_id),
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 #[allow(unused)]
@@ -269,6 +328,28 @@ mod unit_tests {
                 .collect::<Vec<_>>()
         );
         assert!(action.get_data().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn forward_batch_returns_one_action_per_observation() {
+        let reloadable = HotReloadableModel::new_from_module(stub_module(vec![1]), DeviceType::Cpu)
+            .await
+            .unwrap();
+        let actor_id = Uuid::new_v4();
+        let observations = vec![float_any_tensor(&[1.0, 2.0]), float_any_tensor(&[3.0, 4.0])];
+        let masks = vec![None, None];
+        let rewards = vec![1.5, 2.5];
+
+        let actions = reloadable
+            .forward_batch::<1, 1>(&observations, &masks, &rewards, actor_id)
+            .unwrap();
+
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].get_rew(), 1.5);
+        assert_eq!(actions[1].get_rew(), 2.5);
+        assert_eq!(actions[0].get_agent_id(), Some(&actor_id));
+        assert_eq!(actions[1].get_agent_id(), Some(&actor_id));
+        assert!(actions.iter().all(|action| action.get_act().is_some()));
     }
 
     #[test]
