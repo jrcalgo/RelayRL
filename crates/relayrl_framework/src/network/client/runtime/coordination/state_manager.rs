@@ -484,14 +484,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) fn remove_actor(&mut self, id: Uuid) -> Result<(), StateManagerError> {
+        if let Some(mut route) = self.shared_router_state.actor_routes.get_mut(&id) {
+            route.router_namespace = None;
+        }
+
         if let Some((_, handle)) = self.actor_handles.remove(&id) {
             handle.abort();
         }
 
-        self.shared_router_state.actor_routes.remove(&id);
         self.actor_envs.remove(&id);
         self.actor_devices.remove(&id);
         self.actor_model_handles.remove(&id);
+        self.shared_router_state.actor_routes.remove(&id);
         self.shared_actor_count.fetch_sub(1, Ordering::Release);
         remove_id(
             self.client_namespace.as_ref(),
