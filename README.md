@@ -30,10 +30,10 @@ RelayRL is a **monorepo** containing a suite of Rust crates designed for distrib
 
 | Crate | Version | Description |
 |-------|---------|-------------|
-| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-beta.1` | Core library with the local/default client runtime plus experimental server/transport scaffolding |
-| [`relayrl_types`](crates/relayrl_types/) | `0.6.0` | Data types, tensor containers, inference models, and codec pipeline (compression, encryption, integrity) |
+| [`relayrl_framework`](crates/relayrl_framework/) | `0.5.0-beta.2` | Core library with the local/default client runtime plus experimental server/transport scaffolding |
+| [`relayrl_types`](crates/relayrl_types/) | `0.7.0` | Data types, tensor containers, inference models, and codec pipeline (compression, encryption, integrity) |
 | [`relayrl_algorithms`](crates/relayrl_algorithms/) | `0.2.0` | Deep RL algorithms (PPO, REINFORCE, etc.) |
-| [`relayrl_env_trait`](crates/relayrl_env_trait/) | `1.0.0` | Stable trait impl. for integrating environment logic |
+| [`relayrl_env_trait`](crates/relayrl_env_trait/) | `1.1.0` | Stable trait impl. for integrating environment logic |
 | [`relayrl_python`](crates/relayrl_python/) | `0.1.0` | Python bindings via PyO3 — *scaffolding only* |
 | [`relayrl_cli`](crates/relayrl_cli/) | `0.1.0` | Command-line interface with gRPC — *scaffolding only* |
 
