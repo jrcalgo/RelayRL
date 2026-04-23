@@ -539,7 +539,7 @@ impl<
                             RelayRLTrajectory::new(max_traj_length),
                         )
                     };
-                    let current_episode: u64 = self.current_episode.fetch_add(1, Ordering::SeqCst);
+                    let current_episode: u64 = self.current_episode.fetch_add(1, Ordering::Relaxed);
                     traj_to_send.set_episode(current_episode);
 
                     let (duration_ms, duration_ns) = {
