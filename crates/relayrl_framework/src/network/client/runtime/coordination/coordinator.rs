@@ -1073,31 +1073,24 @@ impl<
                         })?
                 };
 
-                // Get the global dispatcher sender
-                let (global_dispatcher_tx, valid_ids) = {
-                    let shared_state = params.shared_state.read().await;
-                    let global_dispatcher_tx = shared_state.global_dispatcher_tx.clone();
-                    let valid_ids = ids
-                        .into_iter()
-                        .filter(|id| {
-                            shared_state
-                                .shared_router_state
-                                .actor_routes
-                                .get(id)
-                                .and_then(|route| route.router_namespace.clone())
-                                .is_some()
-                        })
-                        .collect::<Vec<_>>();
-                    (global_dispatcher_tx, valid_ids)
-                };
+                let shared_state = params.shared_state.read().await;
+                let global_dispatcher_tx = shared_state.global_dispatcher_tx.clone();
+                let mut pending = Vec::with_capacity(ids.len());
 
-                let mut pending = Vec::with_capacity(valid_ids.len());
+                for id in ids {
+                    let is_valid = shared_state
+                        .shared_router_state
+                        .actor_routes
+                        .get(&id)
+                        .and_then(|route| route.router_namespace.clone())
+                        .is_some();
+                    if !is_valid {
+                        continue;
+                    }
 
-                for id in &valid_ids {
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
-
                     let action_request_message = RoutedMessage {
-                        actor_id: id.clone(),
+                        actor_id: id,
                         protocol: RoutingProtocol::RequestInference,
                         payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
                             observation: Box::new(observation.clone()),
@@ -1117,12 +1110,14 @@ impl<
                         ));
                     }
 
-                    pending.push((*id, resp_rx));
+                    pending.push((id, resp_rx));
                 }
+                drop(shared_state);
 
                 let mut join_set = tokio::task::JoinSet::<
                     Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>,
                 >::new();
+                let pending_len = pending.len();
 
                 for (id, rx) in pending {
                     join_set.spawn(async move {
@@ -1136,7 +1131,7 @@ impl<
                 }
 
                 let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
-                    Vec::with_capacity(valid_ids.len());
+                    Vec::with_capacity(pending_len);
                 while let Some(join_result) = join_set.join_next().await {
                     let pair = join_result.map_err(|e| {
                         CoordinatorError::ScaleManagerError(
