@@ -1833,9 +1833,9 @@ mod unit_tests {
     use active_uuid_registry::interface::{clear_namespace, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
+    use burn_tensor::Float;
     use relayrl_types::data::tensor::DeviceType;
     use std::path::PathBuf;
-    use burn_tensor::Float;
     use tokio::sync::mpsc::{self, error::TryRecvError};
 
     type TestBackend = NdArray<f32>;
