@@ -91,23 +91,19 @@ impl CircuitBreaker {
     }
 
     pub fn is_open(&self) -> bool {
-        let state = *self
+        let mut state = self
             .state
-            .read()
+            .write()
             .expect("CircuitBreaker state lock poisoned");
-        match state {
+        match *state {
             CircuitState::Closed => false,
             CircuitState::Open => {
-                if let Some(opened_at) = *self
+                let opened_at = self
                     .opened_at
-                    .read()
-                    .expect("CircuitBreaker opened_at lock poisoned")
-                    && opened_at.elapsed() >= self.open_duration
-                {
-                    *self
-                        .state
-                        .write()
-                        .expect("CircuitBreaker state lock poisoned") = CircuitState::HalfOpen;
+                    .write()
+                    .expect("CircuitBreaker opened_at lock poisoned");
+                if let Some(opened_at) = *opened_at && opened_at.elapsed() >= self.open_duration {
+                    *state = CircuitState::HalfOpen;
                     return false;
                 }
 
@@ -118,34 +114,32 @@ impl CircuitBreaker {
     }
 
     pub fn record_success(&self) {
-        self.failure_count.store(0, Ordering::SeqCst);
-        *self
+        let mut state = self
             .state
             .write()
-            .expect("CircuitBreaker state lock poisoned") = CircuitState::Closed;
-        *self
+            .expect("CircuitBreaker state lock poisoned");
+        let mut opened_at = self
             .opened_at
             .write()
-            .expect("CircuitBreaker opened_at lock poisoned") = None;
+            .expect("CircuitBreaker opened_at lock poisoned");
+        self.failure_count.store(0, Ordering::SeqCst);
+        *state = CircuitState::Closed;
+        *opened_at = None;
     }
 
     pub fn record_failure(&self) {
+        let mut state = self
+            .state
+            .write()
+            .expect("CircuitBreaker state lock poisoned");
+        let mut opened_at = self
+            .opened_at
+            .write()
+            .expect("CircuitBreaker opened_at lock poisoned");
         let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
-        if failures >= self.failure_threshold {
-            let current = *self
-                .state
-                .read()
-                .expect("CircuitBreaker state lock poisoned");
-            if current != CircuitState::Open {
-                *self
-                    .state
-                    .write()
-                    .expect("CircuitBreaker state lock poisoned") = CircuitState::Open;
-                *self
-                    .opened_at
-                    .write()
-                    .expect("CircuitBreaker opened_at lock poisoned") = Some(Instant::now());
-            }
+        if failures >= self.failure_threshold && *state != CircuitState::Open {
+            *state = CircuitState::Open;
+            *opened_at = Some(Instant::now());
         }
     }
 
@@ -252,6 +246,44 @@ impl NatsPolicyConfig {
             max_concurrent_requests: 5,
             timeout: Duration::from_secs(120),
         }
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::{CircuitBreaker, CircuitState};
+    use std::time::Duration;
+
+    #[test]
+    fn record_failure_opens_circuit_at_threshold() {
+        let breaker = CircuitBreaker::new(2, Duration::from_secs(30));
+
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CircuitState::Closed);
+
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn is_open_transitions_to_half_open_after_cooldown() {
+        let breaker = CircuitBreaker::new(1, Duration::ZERO);
+        breaker.record_failure();
+
+        assert!(!breaker.is_open());
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn record_success_clears_failures_and_closes_circuit() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(30));
+        breaker.record_failure();
+
+        breaker.record_success();
+
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        assert_eq!(breaker.failure_count(), 0);
+        assert!(!breaker.is_open());
     }
 }
 
