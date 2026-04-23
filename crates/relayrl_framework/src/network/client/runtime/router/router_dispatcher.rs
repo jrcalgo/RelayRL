@@ -259,9 +259,9 @@ impl RouterDispatcher {
                 // Check router assignment (async operation, no lock needed)
                 let router_namespace = {
                     shared_router_state
-                        .actor_router_addresses
+                        .actor_routes
                         .get(&actor_id)
-                        .map(|entry| entry.value().clone())
+                        .and_then(|entry| entry.value().router_namespace.clone())
                 };
 
                 match router_namespace {
@@ -342,9 +342,9 @@ impl RouterDispatcher {
         // Look up which router this actor is assigned to
         let router_namespace = {
             self.shared_router_state
-                .actor_router_addresses
+                .actor_routes
                 .get(&actor_id)
-                .map(|entry| entry.value().clone())
+                .and_then(|entry| entry.value().router_namespace.clone())
         };
 
         match router_namespace {
@@ -404,7 +404,7 @@ mod unit_tests {
     use crate::network::client::agent::{
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::state_manager::StateManager;
+    use crate::network::client::runtime::coordination::state_manager::{ActorRoute, StateManager};
     use crate::network::client::runtime::router::{RoutedPayload, RoutingProtocol};
     #[cfg(feature = "metrics")]
     use crate::utilities::observability::metrics::MetricsManager;
@@ -463,6 +463,14 @@ mod unit_tests {
             actor_id,
             protocol,
             payload: RoutedPayload::ModelHandshake,
+        }
+    }
+
+    fn make_actor_route(router_namespace: Option<RouterNamespace>) -> ActorRoute {
+        let (tx, _rx) = mpsc::channel::<RoutedMessage>(4);
+        ActorRoute {
+            router_namespace,
+            inbox: tx,
         }
     }
 
@@ -532,8 +540,8 @@ mod unit_tests {
 
         // Register actor → namespace in state
         shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, ns.clone());
+            .actor_routes
+            .insert(actor_id, make_actor_route(Some(ns.clone())));
 
         // Create router channel and register it
         let (router_tx, mut router_rx) = mpsc::channel::<RoutedMessage>(4);
@@ -613,8 +621,8 @@ mod unit_tests {
 
         // Now assign actor to a router
         shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, ns.clone());
+            .actor_routes
+            .insert(actor_id, make_actor_route(Some(ns.clone())));
         router_channels.insert(ns, router_tx);
 
         // Wait for retry loop to deliver (up to 500ms)
@@ -670,8 +678,8 @@ mod unit_tests {
         let ns: RouterNamespace = Arc::from("closed-router-ns");
 
         shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, ns.clone());
+            .actor_routes
+            .insert(actor_id, make_actor_route(Some(ns.clone())));
 
         // Insert a router channel, then immediately drop the rx side
         let (router_tx, router_rx) = mpsc::channel::<RoutedMessage>(4);

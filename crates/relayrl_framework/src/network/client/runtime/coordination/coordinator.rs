@@ -1082,8 +1082,10 @@ impl<
                         .filter(|id| {
                             shared_state
                                 .shared_router_state
-                                .actor_router_addresses
-                                .contains_key(id)
+                                .actor_routes
+                                .get(id)
+                                .and_then(|route| route.router_namespace.clone())
+                                .is_some()
                         })
                         .collect::<Vec<_>>();
                     (global_dispatcher_tx, valid_ids)
@@ -1506,7 +1508,7 @@ impl<
                     .read()
                     .await
                     .shared_router_state
-                    .actor_inboxes
+                    .actor_routes
                     .len();
                 let router_namespace: RouterNamespace =
                     router_namespaces[actor_count % router_namespaces.len()].clone();

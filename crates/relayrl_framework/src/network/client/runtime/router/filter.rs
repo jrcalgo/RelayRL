@@ -1,7 +1,7 @@
 use super::{RoutedMessage, RouterError, RoutingProtocol};
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::{
-    SharedRouterState, StateManager,
+    ActorRoute, SharedRouterState, StateManager,
 };
 
 use active_uuid_registry::registry_uuid::Uuid;
@@ -96,28 +96,38 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Result<(), RouterError> {
         let actor_id: Uuid = msg.actor_id;
 
-        match shared_router_state.actor_router_addresses.get(&actor_id) {
-            Some(assigned_router_namespace) if *assigned_router_namespace == *router_namespace => {
-                match shared_router_state.actor_inboxes.get(&actor_id) {
-                    Some(tx) => {
-                        if let Err(e) = tx.send(msg).await {
-                            return Err(RouterError::FilterError(FilterError::RoutingError(
-                                format!("Cannot send message to actor: {}", e),
-                            )));
-                        }
-                        Ok(())
-                    }
-                    None => Err(RouterError::FilterError(FilterError::RoutingError(
-                        format!("Actor inbox not found: {}", actor_id),
-                    ))),
+        let route = shared_router_state
+            .actor_routes
+            .get(&actor_id)
+            .map(|entry| entry.value().clone());
+
+        match route {
+            Some(ActorRoute {
+                router_namespace: Some(assigned_router_namespace),
+                inbox,
+            }) if assigned_router_namespace == *router_namespace => {
+                if let Err(e) = inbox.send(msg).await {
+                    return Err(RouterError::FilterError(FilterError::RoutingError(
+                        format!("Cannot send message to actor: {}", e),
+                    )));
                 }
+
+                Ok(())
             }
-            Some(other_router_namespace) => Err(RouterError::FilterError(
+            Some(ActorRoute {
+                router_namespace: Some(other_router_namespace),
+                ..
+            }) => Err(RouterError::FilterError(
                 FilterError::RoutingError(format!(
                     "Actor {} is assigned to router {:?}, but message is for router {}",
                     actor_id, other_router_namespace, router_namespace
                 )),
             )),
+            Some(ActorRoute {
+                router_namespace: None,
+                ..
+            })
+            |
             None => Err(RouterError::FilterError(FilterError::RoutingError(
                 format!(
                     "Actor {} is not assigned to any router or does not exist",
@@ -199,11 +209,14 @@ mod unit_tests {
         let actor_id = Uuid::new_v4();
         let (actor_tx, actor_rx) = mpsc::channel::<RoutedMessage>(16);
         sm.shared_router_state
-            .actor_inboxes
-            .insert(actor_id, actor_tx);
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, namespace);
+            .actor_routes
+            .insert(
+                actor_id,
+                ActorRoute {
+                    router_namespace: Some(namespace),
+                    inbox: actor_tx,
+                },
+            );
         (Arc::new(RwLock::new(sm)), actor_id, actor_rx)
     }
 
