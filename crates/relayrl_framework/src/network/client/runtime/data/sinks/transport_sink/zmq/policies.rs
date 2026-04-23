@@ -85,7 +85,7 @@ pub enum CircuitState {
 /// After a cooldown period, allows a single test request (half-open state).
 pub struct CircuitBreaker {
     state: RwLock<CircuitState>,
-    failure_count: AtomicU64,
+    failure_count: CachePadded<AtomicU64>,
     failure_threshold: u64,
     open_duration: Duration,
     opened_at: RwLock<Option<Instant>>,
@@ -95,7 +95,7 @@ impl CircuitBreaker {
     pub fn new(failure_threshold: u64, open_duration: Duration) -> Self {
         Self {
             state: RwLock::new(CircuitState::Closed),
-            failure_count: AtomicU64::new(0),
+            failure_count: CachePadded::new(AtomicU64::new(0)),
             failure_threshold,
             open_duration,
             opened_at: RwLock::new(None),
