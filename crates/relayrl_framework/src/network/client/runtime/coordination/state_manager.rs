@@ -570,7 +570,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             return;
         }
 
-        let actor_ids: Vec<ActorUuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
+        let mut actor_ids: Vec<ActorUuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
+        actor_ids.sort_by_key(|actor_id| actor_id.to_string());
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
             let router_namespace = router_namespaces[i % router_namespaces.len()].clone();
@@ -1139,16 +1140,20 @@ mod unit_tests {
 
         sm.distribute_actors(vec![ns1.clone(), ns2.clone()]);
 
+        let mut sorted_actor_ids = actor_ids.clone();
+        sorted_actor_ids.sort_by_key(|actor_id| actor_id.to_string());
+
         assert_eq!(sm.shared_router_state.actor_routes.len(), 4);
-        for id in &actor_ids {
+        for (index, id) in sorted_actor_ids.iter().enumerate() {
             let assigned = sm
                 .shared_router_state
                 .actor_routes
                 .get(id)
                 .unwrap();
-            assert!(
-                assigned.router_namespace == Some(ns1.clone())
-                    || assigned.router_namespace == Some(ns2.clone()),
+            let expected_namespace = if index % 2 == 0 { ns1.clone() } else { ns2.clone() };
+            assert_eq!(
+                assigned.router_namespace,
+                Some(expected_namespace),
                 "Actor {} assigned to unexpected namespace",
                 id
             );
