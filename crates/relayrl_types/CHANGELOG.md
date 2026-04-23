@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-04-23
+
+### Added
+- **Batched model inference** - `ModelModule::step_batch()` runs a single forward pass over a batch of observations with per-row optional masks, returning action tensors, mask tensors, and auxiliary maps per row
+- **Batched hot-reload forward** - `HotReloadableModel::forward_batch()` maps batched observations and rewards into a `Vec<RelayRLAction>` using the active module
+
+### Changed
+- **Trajectory environment metadata** - `RelayRLTrajectory` now carries optional `env_id` and `env_label` with `get_env_id`, `get_env_label`, `set_env_id`, and `set_env_label`; defaults and constructors initialize them to `None`
+- **Records and trajectory builders** - CSV and Arrow trajectory reconstruction paths construct trajectories with the new fields set to `None` so existing serialized data continues to load without env columns
+
+### Breaking
+- **`RelayRLTrajectory::with_metadata` signature** - The constructor now takes `env_id: Option<Uuid>` and `env_label: Option<String>` after `agent_id`; call sites must pass the two new arguments (or `None`) before `episode` and `training_step`
+
 ## [0.6.0] - 2026-04-13
 
 ### Added
