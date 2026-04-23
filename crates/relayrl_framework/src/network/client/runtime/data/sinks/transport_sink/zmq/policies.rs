@@ -193,6 +193,11 @@ pub struct BackpressurePermit<'a> {
 
 impl<'a> Drop for BackpressurePermit<'a> {
     fn drop(&mut self) {
+        let _wait_guard = self
+            .controller
+            .wait_mutex
+            .lock()
+            .expect("Backpressure wait mutex poisoned");
         self.controller.available.fetch_add(1, Ordering::Release);
         self.controller.condvar.notify_one();
     }
@@ -332,8 +337,10 @@ impl ZmqPolicyConfig {
 
 #[cfg(test)]
 mod unit_tests {
-    use super::{CircuitBreaker, CircuitState};
+    use super::{BackpressureController, CircuitBreaker, CircuitState};
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
+    use std::{thread, time::Duration as StdDuration};
 
     #[test]
     fn record_failure_opens_circuit_at_threshold() {
@@ -365,5 +372,28 @@ mod unit_tests {
         assert_eq!(breaker.state(), CircuitState::Closed);
         assert_eq!(breaker.failure_count(), 0);
         assert!(!breaker.is_open());
+    }
+
+    #[test]
+    fn dropping_permit_wakes_blocked_waiter() {
+        let controller = Arc::new(BackpressureController::new(1));
+        let held_permit = controller.acquire().expect("first permit should succeed");
+        let (tx, rx) = mpsc::channel();
+        let waiting_controller = controller.clone();
+
+        let waiter = thread::spawn(move || {
+            let permit = waiting_controller
+                .acquire()
+                .expect("waiter should acquire after wakeup");
+            tx.send(()).expect("waiter should notify main thread");
+            drop(permit);
+        });
+
+        thread::sleep(StdDuration::from_millis(20));
+        drop(held_permit);
+
+        rx.recv_timeout(StdDuration::from_secs(1))
+            .expect("waiter should wake once the permit is released");
+        waiter.join().expect("waiter thread should exit cleanly");
     }
 }
