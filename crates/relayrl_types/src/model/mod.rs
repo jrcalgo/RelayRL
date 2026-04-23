@@ -396,7 +396,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         &self,
         observations: &[Arc<AnyBurnTensor<B, D_IN>>],
         masks: &[Option<Arc<AnyBurnTensor<B, D_OUT>>>],
-    ) -> Result<Vec<(TensorData, Option<TensorData>, HashMap<String, RelayRLData>)>, ModelError> {
+    ) -> Result<Vec<(TensorData, Option<TensorData>, HashMap<String, RelayRLData>)>, ModelError>
+    {
         if observations.is_empty() {
             return Ok(Vec::new());
         }
@@ -534,7 +535,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         ))
     }
 
-    fn split_tensor_data_rows(batch: TensorData, rows: usize) -> Result<Vec<TensorData>, ModelError> {
+    fn split_tensor_data_rows(
+        batch: TensorData,
+        rows: usize,
+    ) -> Result<Vec<TensorData>, ModelError> {
         if rows == 0 {
             return Ok(Vec::new());
         }
@@ -592,12 +596,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         for _ in 0..rows {
             data.extend_from_slice(&row_zero.data);
         }
-        TensorData::new(
-            shape,
-            row_zero.dtype,
-            data,
-            row_zero.supported_backend,
-        )
+        TensorData::new(shape, row_zero.dtype, data, row_zero.supported_backend)
     }
 
     fn zeros_action<const D_OUT: usize>(&self) -> Result<TensorData, ModelError> {
@@ -907,10 +906,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                     TchTensor::from_slice::<f64>(bytemuck::cast_slice(&input_data.data))
                         .reshape(obs_shape_i64.as_slice())
                 }
-                TchDType::I8 => {
-                    TchTensor::from_slice::<i8>(bytemuck::cast_slice(&input_data.data))
-                        .reshape(obs_shape_i64.as_slice())
-                }
+                TchDType::I8 => TchTensor::from_slice::<i8>(bytemuck::cast_slice(&input_data.data))
+                    .reshape(obs_shape_i64.as_slice()),
                 TchDType::I16 => {
                     TchTensor::from_slice::<i16>(bytemuck::cast_slice(&input_data.data))
                         .reshape(obs_shape_i64.as_slice())
@@ -923,10 +920,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                     TchTensor::from_slice::<i64>(bytemuck::cast_slice(&input_data.data))
                         .reshape(obs_shape_i64.as_slice())
                 }
-                TchDType::U8 => {
-                    TchTensor::from_slice::<u8>(bytemuck::cast_slice(&input_data.data))
-                        .reshape(obs_shape_i64.as_slice())
-                }
+                TchDType::U8 => TchTensor::from_slice::<u8>(bytemuck::cast_slice(&input_data.data))
+                    .reshape(obs_shape_i64.as_slice()),
                 TchDType::Bool => {
                     TchTensor::from_slice::<u8>(bytemuck::cast_slice(&input_data.data))
                         .reshape(obs_shape_i64.as_slice())
@@ -947,31 +942,38 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(dtype) => match dtype {
                 NdArrayDType::F16 => bytemuck::cast_slice(
-                    &Vec::<f16>::try_from(flattened_act).expect("Failed to convert flattened_act to f16"),
+                    &Vec::<f16>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to f16"),
                 )
                 .to_vec(),
                 NdArrayDType::F32 => bytemuck::cast_slice(
-                    &Vec::<f32>::try_from(flattened_act).expect("Failed to convert flattened_act to f32"),
+                    &Vec::<f32>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to f32"),
                 )
                 .to_vec(),
                 NdArrayDType::F64 => bytemuck::cast_slice(
-                    &Vec::<f64>::try_from(flattened_act).expect("Failed to convert flattened_act to f64"),
+                    &Vec::<f64>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to f64"),
                 )
                 .to_vec(),
                 NdArrayDType::I8 => bytemuck::cast_slice(
-                    &Vec::<i8>::try_from(flattened_act).expect("Failed to convert flattened_act to i8"),
+                    &Vec::<i8>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i8"),
                 )
                 .to_vec(),
                 NdArrayDType::I16 => bytemuck::cast_slice(
-                    &Vec::<i16>::try_from(flattened_act).expect("Failed to convert flattened_act to i16"),
+                    &Vec::<i16>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i16"),
                 )
                 .to_vec(),
                 NdArrayDType::I32 => bytemuck::cast_slice(
-                    &Vec::<i32>::try_from(flattened_act).expect("Failed to convert flattened_act to i32"),
+                    &Vec::<i32>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i32"),
                 )
                 .to_vec(),
                 NdArrayDType::I64 => bytemuck::cast_slice(
-                    &Vec::<i64>::try_from(flattened_act).expect("Failed to convert flattened_act to i64"),
+                    &Vec::<i64>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i64"),
                 )
                 .to_vec(),
                 NdArrayDType::Bool => Vec::<bool>::try_from(flattened_act)
@@ -983,39 +985,48 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             #[cfg(feature = "tch-backend")]
             DType::Tch(dtype) => match dtype {
                 TchDType::F16 => bytemuck::cast_slice(
-                    &Vec::<f16>::try_from(flattened_act).expect("Failed to convert flattened_act to f16"),
+                    &Vec::<f16>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to f16"),
                 )
                 .to_vec(),
                 TchDType::Bf16 => bytemuck::cast_slice(
-                    &Vec::<bf16>::try_from(flattened_act).expect("Failed to convert flattened_act to bf16"),
+                    &Vec::<bf16>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to bf16"),
                 )
                 .to_vec(),
                 TchDType::F32 => bytemuck::cast_slice(
-                    &Vec::<f32>::try_from(flattened_act).expect("Failed to convert flattened_act to f32"),
+                    &Vec::<f32>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to f32"),
                 )
                 .to_vec(),
                 TchDType::F64 => bytemuck::cast_slice(
-                    &Vec::<f64>::try_from(flattened_act).expect("Failed to convert flattened_act to f64"),
+                    &Vec::<f64>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to f64"),
                 )
                 .to_vec(),
                 TchDType::I8 => bytemuck::cast_slice(
-                    &Vec::<i8>::try_from(flattened_act).expect("Failed to convert flattened_act to i8"),
+                    &Vec::<i8>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i8"),
                 )
                 .to_vec(),
                 TchDType::I16 => bytemuck::cast_slice(
-                    &Vec::<i16>::try_from(flattened_act).expect("Failed to convert flattened_act to i16"),
+                    &Vec::<i16>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i16"),
                 )
                 .to_vec(),
                 TchDType::I32 => bytemuck::cast_slice(
-                    &Vec::<i32>::try_from(flattened_act).expect("Failed to convert flattened_act to i32"),
+                    &Vec::<i32>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i32"),
                 )
                 .to_vec(),
                 TchDType::I64 => bytemuck::cast_slice(
-                    &Vec::<i64>::try_from(flattened_act).expect("Failed to convert flattened_act to i64"),
+                    &Vec::<i64>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to i64"),
                 )
                 .to_vec(),
                 TchDType::U8 => bytemuck::cast_slice(
-                    &Vec::<u8>::try_from(flattened_act).expect("Failed to convert flattened_act to u8"),
+                    &Vec::<u8>::try_from(flattened_act)
+                        .expect("Failed to convert flattened_act to u8"),
                 )
                 .to_vec(),
                 TchDType::Bool => Vec::<bool>::try_from(flattened_act)
@@ -1062,8 +1073,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             let typed_data: &[IN] = bytemuck::cast_slice(&tensor_data.data);
             let data_vec: Vec<IN> = typed_data.to_vec();
             let shape = ort::tensor::Shape::from(tensor_data.shape.as_slice());
-            let ort_value = OrtValue::from_array((shape, data_vec))
-                .map_err(|e| ModelError::BackendError(format!("Failed to create OrtValue: {}", e)))?;
+            let ort_value = OrtValue::from_array((shape, data_vec)).map_err(|e| {
+                ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
+            })?;
             let input = SessionInputValue::from(ort_value);
             let mut inputs_map = HashMap::new();
             inputs_map.insert("input".to_string(), input);
@@ -1127,27 +1139,89 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         let act_bytes = match &input_data.dtype {
             #[cfg(feature = "ndarray-backend")]
             DType::NdArray(nd) => match nd {
-                NdArrayDType::F16 => match_obs_to_act::<f32>(input_data, self.metadata.output_dtype.clone(), session)?,
-                NdArrayDType::F32 => match_obs_to_act::<f32>(input_data, self.metadata.output_dtype.clone(), session)?,
-                NdArrayDType::F64 => match_obs_to_act::<f64>(input_data, self.metadata.output_dtype.clone(), session)?,
-                NdArrayDType::I8 => match_obs_to_act::<i8>(input_data, self.metadata.output_dtype.clone(), session)?,
-                NdArrayDType::I16 => match_obs_to_act::<i16>(input_data, self.metadata.output_dtype.clone(), session)?,
-                NdArrayDType::I32 => match_obs_to_act::<i32>(input_data, self.metadata.output_dtype.clone(), session)?,
-                NdArrayDType::I64 => match_obs_to_act::<i64>(input_data, self.metadata.output_dtype.clone(), session)?,
-                NdArrayDType::Bool => match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?,
+                NdArrayDType::F16 => match_obs_to_act::<f32>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                NdArrayDType::F32 => match_obs_to_act::<f32>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                NdArrayDType::F64 => match_obs_to_act::<f64>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                NdArrayDType::I8 => {
+                    match_obs_to_act::<i8>(input_data, self.metadata.output_dtype.clone(), session)?
+                }
+                NdArrayDType::I16 => match_obs_to_act::<i16>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                NdArrayDType::I32 => match_obs_to_act::<i32>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                NdArrayDType::I64 => match_obs_to_act::<i64>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                NdArrayDType::Bool => {
+                    match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?
+                }
             },
             #[cfg(feature = "tch-backend")]
             DType::Tch(tch) => match tch {
-                TchDType::F16 => match_obs_to_act::<f32>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::Bf16 => match_obs_to_act::<f32>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::F32 => match_obs_to_act::<f32>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::F64 => match_obs_to_act::<f64>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::I8 => match_obs_to_act::<i8>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::I16 => match_obs_to_act::<i16>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::I32 => match_obs_to_act::<i32>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::I64 => match_obs_to_act::<i64>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::U8 => match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?,
-                TchDType::Bool => match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?,
+                TchDType::F16 => match_obs_to_act::<f32>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                TchDType::Bf16 => match_obs_to_act::<f32>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                TchDType::F32 => match_obs_to_act::<f32>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                TchDType::F64 => match_obs_to_act::<f64>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                TchDType::I8 => {
+                    match_obs_to_act::<i8>(input_data, self.metadata.output_dtype.clone(), session)?
+                }
+                TchDType::I16 => match_obs_to_act::<i16>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                TchDType::I32 => match_obs_to_act::<i32>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                TchDType::I64 => match_obs_to_act::<i64>(
+                    input_data,
+                    self.metadata.output_dtype.clone(),
+                    session,
+                )?,
+                TchDType::U8 => {
+                    match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?
+                }
+                TchDType::Bool => {
+                    match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?
+                }
             },
         };
 

@@ -49,9 +49,9 @@ arrow = { workspace = true }
 burn-tensor = { workspace = true }
 burn-ndarray = { workspace = true, optional = true}
 burn-tch = { workspace = true, optional = true}
-# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.6.0)
-# burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda (probably 0.6.0)
-# burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu (probably 0.6.0)
+# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm 
+# burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda 
+# burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu 
 
 tch = { version = "=0.22.0", features = ["download-libtorch"], default-features = false, optional = true }
 ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"], default-features = false, optional = true }
