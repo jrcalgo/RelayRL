@@ -1073,21 +1073,27 @@ impl<
                         })?
                 };
 
-                let shared_state = params.shared_state.read().await;
-                let global_dispatcher_tx = shared_state.global_dispatcher_tx.clone();
-                let mut pending = Vec::with_capacity(ids.len());
+                let (global_dispatcher_tx, valid_ids) = {
+                    let state = params.shared_state.read().await;
+                    let tx = state.global_dispatcher_tx.clone();
+                    let valid = ids
+                        .iter()
+                        .filter(|id| {
+                            state
+                                .shared_router_state
+                                .actor_routes
+                                .get(id)
+                                .and_then(|route| route.router_namespace.clone())
+                                .is_some()
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    (tx, valid)
+                };
 
-                for id in ids {
-                    let is_valid = shared_state
-                        .shared_router_state
-                        .actor_routes
-                        .get(&id)
-                        .and_then(|route| route.router_namespace.clone())
-                        .is_some();
-                    if !is_valid {
-                        continue;
-                    }
+                let mut pending = Vec::with_capacity(valid_ids.len());
 
+                for id in valid_ids {
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
                     let action_request_message = RoutedMessage {
                         actor_id: id,
@@ -1112,7 +1118,6 @@ impl<
 
                     pending.push((id, resp_rx));
                 }
-                drop(shared_state);
 
                 let mut join_set = tokio::task::JoinSet::<
                     Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>,
