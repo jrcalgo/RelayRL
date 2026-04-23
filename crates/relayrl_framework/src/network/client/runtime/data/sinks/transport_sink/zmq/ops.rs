@@ -15,6 +15,7 @@ use crate::network::client::runtime::data::transport_sink::zmq::{
 };
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
+use crossbeam_utils::CachePadded;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, reserve_id_with};
@@ -79,7 +80,7 @@ pub(super) struct ZmqPool {
     cached_addresses: Option<DashMap<Uuid, Arc<RwLock<SharedTransportAddresses>>>>,
     cached_sockets: Arc<ZmqSocketPool>,
     model_listener_shutdown_flags: DashMap<Uuid, Arc<AtomicBool>>,
-    transport_shutting_down: AtomicBool,
+    transport_shutting_down: CachePadded<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,7 +116,7 @@ impl ZmqPool {
                 scaling_dealer_socket: None,
             }),
             model_listener_shutdown_flags: DashMap::new(),
-            transport_shutting_down: AtomicBool::new(false),
+            transport_shutting_down: CachePadded::new(AtomicBool::new(false)),
         }
     }
 
