@@ -41,7 +41,7 @@ use std::collections::BinaryHeap;
 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -183,7 +183,6 @@ pub(crate) trait LocalFileTrajectorySinkTrait<B: Backend + BackendMatcher<Backen
 
 pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
     associated_router_namespace: RouterNamespace,
-    active: CachePadded<AtomicBool>,
     rx_from_actor: Option<Receiver<RoutedMessage>>,
     actor_last_processed: DashMap<Uuid, i64>,
     #[allow(dead_code)]
@@ -217,7 +216,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     ) -> Self {
         Self {
             associated_router_namespace,
-            active: CachePadded::new(AtomicBool::new(false)),
             rx_from_actor: Some(rx_from_actor),
             actor_last_processed: DashMap::new(),
             traj_queue_tx: None,
@@ -281,8 +279,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     }
 
     fn spawn_loop(&mut self) -> Result<(), RouterError> {
-        self.active.store(true, Ordering::Release);
-
         let mut rx_from_actor = self.rx_from_actor.take().ok_or_else(|| {
             RouterError::TrajectorySinkError(TrajectorySinkError::EncodeTrajectoryError(
                 TrajectoryError::SerializationError("spawn_loop already called".to_string()),
@@ -327,8 +323,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let mut receiver_shutdown_rx = self.shutdown.take();
         let mut worker_shutdown_rx = receiver_shutdown_rx.as_mut().map(|rx| rx.resubscribe());
-        let receiver_active = Arc::new(AtomicBool::new(true));
-        let worker_active = receiver_active.clone();
 
         let receiver_actor_last_processed = actor_last_processed.clone();
         let _receiver_handle = tokio::spawn(async move {
@@ -396,7 +390,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
                 }
             }
-            receiver_active.store(false, Ordering::Release);
         });
 
         let mut worker_queue = worker_priority_queue.clone();
@@ -445,12 +438,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     }
 
                     _ = worker_tick.tick() => {
-                        if !worker_active.load(Ordering::Acquire) &&
-                             worker_queue.is_empty() {
-                                break;
-                            }
-
-
                         let mut jobs_to_process = Vec::with_capacity(BATCH_SIZE);
                         {
                             for _ in 0..BATCH_SIZE {
