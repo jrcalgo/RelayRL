@@ -1,4 +1,5 @@
 use super::ZmqClientError;
+use crossbeam_utils::CachePadded;
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, RwLock};
@@ -188,7 +189,7 @@ impl Default for CircuitBreaker {
 
 /// Semaphore-based concurrency limiter for backpressure control.
 pub struct BackpressureController {
-    available: AtomicUsize,
+    available: CachePadded<AtomicUsize>,
     condvar: Condvar,
     wait_mutex: Mutex<()>,
     max_concurrent: usize,
@@ -208,7 +209,7 @@ impl<'a> Drop for BackpressurePermit<'a> {
 impl BackpressureController {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
-            available: AtomicUsize::new(max_concurrent),
+            available: CachePadded::new(AtomicUsize::new(max_concurrent)),
             condvar: Condvar::new(),
             wait_mutex: Mutex::new(()),
             max_concurrent,
