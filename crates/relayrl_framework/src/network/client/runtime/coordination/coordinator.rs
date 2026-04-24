@@ -1830,13 +1830,16 @@ mod unit_tests {
     use crate::network::client::agent::{
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
+    use crate::network::client::runtime::coordination::state_manager::ActorRoute;
     use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManager;
     use crate::utilities::configuration::ClientConfigLoader;
     use active_uuid_registry::interface::{clear_namespace, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
-    use burn_tensor::Float;
-    use relayrl_types::data::tensor::DeviceType;
+    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
+    use relayrl_types::data::action::RelayRLAction;
+    use relayrl_types::data::tensor::{DType, DeviceType, NdArrayDType};
+    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
     use std::path::PathBuf;
     use tokio::sync::mpsc::{self, error::TryRecvError};
 
@@ -1876,6 +1879,19 @@ mod unit_tests {
             ("test-coordinator".to_string(), String::new()),
             None,
         )
+    }
+
+    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<TestBackend, 4>> {
+        let device = TestBackend::get_device(&DeviceType::Cpu).unwrap();
+        let tensor = Tensor::<TestBackend, 4, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
+            &device,
+        );
+
+        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }))
     }
 
     async fn make_runtime_coordinator(
@@ -1986,6 +2002,97 @@ mod unit_tests {
         let c = make_coordinator();
         let result = c.flag_last_action(vec![], None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn request_action_stays_routed_through_global_dispatcher() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        };
+        let (mut coordinator, shared_state, mut global_dispatcher_rx) =
+            make_runtime_coordinator(client_modes).await;
+        coordinator
+            .runtime_params
+            .as_mut()
+            .expect("runtime params should exist")
+            .scaling
+            .runtime_params = Some(dashmap::DashMap::new());
+        let actor_id = Uuid::new_v4();
+        let (tx_to_actor, _rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        shared_state.write().await.shared_router_state.actor_routes.insert(
+            actor_id,
+            ActorRoute {
+                router_namespace: Some(Arc::from("router-a")),
+                inbox: tx_to_actor,
+            },
+        );
+
+        let responder = tokio::spawn(async move {
+            let message = global_dispatcher_rx.recv().await.expect("expected routed message");
+            assert_eq!(message.actor_id, actor_id);
+            match message.payload {
+                RoutedPayload::RequestInference(req) => {
+                    assert_eq!(req.reward, 0.75);
+                    req.reply_to
+                        .send(Arc::new(RelayRLAction::minimal(0.25, false)))
+                        .expect("reply should be open");
+                }
+                other => panic!(
+                    "expected RequestInference payload, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+            assert!(matches!(global_dispatcher_rx.try_recv(), Err(TryRecvError::Empty)));
+        });
+
+        let actions = coordinator
+            .request_action(vec![actor_id], float_any_tensor(&[1.0, 2.0, 3.0, 4.0]), None, 0.75)
+            .await
+            .unwrap();
+        responder.await.unwrap();
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].0, actor_id);
+        assert_eq!(actions[0].1.get_rew(), 0.25);
+    }
+
+    #[tokio::test]
+    async fn flag_last_action_stays_routed_through_global_dispatcher() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+        };
+        let (coordinator, _shared_state, mut global_dispatcher_rx) =
+            make_runtime_coordinator(client_modes).await;
+        let actor_id = Uuid::new_v4();
+
+        coordinator
+            .flag_last_action(vec![actor_id], Some(1.5))
+            .await
+            .unwrap();
+
+        let message = global_dispatcher_rx
+            .recv()
+            .await
+            .expect("expected routed flag-last-action message");
+        assert_eq!(message.actor_id, actor_id);
+        match message.payload {
+            RoutedPayload::FlagLastInference {
+                reward,
+                env_id,
+                env_label,
+            } => {
+                assert_eq!(reward, 1.5);
+                assert_eq!(env_id, None);
+                assert_eq!(env_label, None);
+            }
+            other => panic!(
+                "expected FlagLastInference payload, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+        assert!(matches!(global_dispatcher_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
