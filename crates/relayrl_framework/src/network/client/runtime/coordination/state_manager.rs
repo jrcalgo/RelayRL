@@ -41,7 +41,6 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -136,7 +135,7 @@ pub(crate) struct StateManager<
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) shared_router_state: Arc<SharedRouterState>,
-    actor_envs: DashMap<ActorUuid, Arc<Mutex<EnvironmentInterface<B, D_IN, D_OUT>>>>,
+    actor_envs: DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
@@ -324,13 +323,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        self.shared_router_state.actor_routes.insert(
-            actor_id,
-            ActorRoute {
-                router_namespace: Some(router_namespace.clone()),
-                inbox: tx_to_actor.clone(),
-            },
-        );
+        self.shared_router_state
+            .actor_routes
+            .insert(
+                actor_id,
+                ActorRoute {
+                    router_namespace: Some(router_namespace.clone()),
+                    inbox: tx_to_actor.clone(),
+                },
+            );
 
         let shared_local_model_path = self.shared_local_model_path.clone();
         let shared_max_traj_length = self.shared_max_traj_length.clone();
@@ -354,7 +355,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_devices.insert(actor_id, device.clone());
         self.actor_envs.insert(
             actor_id,
-            Arc::new(Mutex::new(EnvironmentInterface::new(self.client_namespace.clone(), device.clone()))),
+            EnvironmentInterface::new(self.client_namespace.clone(), device.clone()),
         );
         self.actor_model_handles
             .insert(actor_id, model_handle.clone());
@@ -805,13 +806,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .take(env_ids.len())
             .collect::<Vec<_>>();
         let actions = runtime
-            .perform_local_inference_batch(
-                env_ids.clone(),
-                env_labels.clone(),
-                observations,
-                masks,
-                rewards,
-            )
+            .perform_local_inference_batch(env_ids.clone(), env_labels.clone(), observations, masks, rewards)
             .await
             .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
         if actions.len() != env_ids.len() {
@@ -855,93 +850,99 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         actor_id: ActorUuid,
         step_count: usize,
     ) -> Result<(), StateManagerError> {
-        if !matches!(
-            self.shared_client_modes.actor_inference_mode,
-            ActorInferenceMode::Local(_)
-        ) {
-            return Err(StateManagerError::InferenceRequestError(
-                "[StateManager] Batched direct env inference requires local actor inference"
-                    .to_string(),
-            ));
-        }
-        let runtime = self.get_actor_runtime(actor_id).ok_or_else(|| {
-            StateManagerError::ActorHandleNotFoundError(format!(
-                "[StateManager] Actor runtime not found for {}",
-                actor_id
-            ))
-        })?;
-        let device = self
-            .actor_devices
-            .get(&actor_id)
-            .map(|device| device.clone())
-            .ok_or_else(|| {
-                StateManagerError::GetEnvInfoError(format!(
-                    "[StateManager] Actor device not found for {}",
-                    actor_id
-                ))
-            })?;
-
-        let mut rewards: HashMap<EnvironmentUuid, f32> = HashMap::new();
-        let mut env_labels: HashMap<EnvironmentUuid, String> = HashMap::new();
-        let mut env_interface = self.actor_envs.get_mut(&actor_id).ok_or_else(|| {
-            StateManagerError::GetEnvInfoError(format!(
-                "[StateManager] Environment interface not found for {}",
-                actor_id
-            ))
-        })?;
-
-        for (env_id, _) in env_interface.ensure_ready()? {
-            rewards.entry(env_id).or_insert(0.0);
-        }
-        let mut known_env_ids: Vec<_> = rewards.keys().copied().collect();
-        known_env_ids.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        for (index, env_id) in known_env_ids.into_iter().enumerate() {
-            env_labels.insert(env_id, format!("env-{}", index + 1));
-        }
-
-        for _ in 0..step_count {
-            let mut observations = env_interface.current_observations()?;
-            observations
-                .sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
-            let batch: Vec<_> = observations
-                .into_iter()
-                .enumerate()
-                .map(|(index, (env_id, observation))| {
-                    let reward = *rewards.get(&env_id).unwrap_or(&0.0);
-                    let env_label = env_labels
-                        .entry(env_id)
-                        .or_insert_with(|| format!("env-{}", index + 1))
-                        .clone();
-                    (env_id, env_label, observation, reward)
-                })
-                .collect();
-            let batched_actions = Self::request_actions_direct(&runtime, batch, &device).await?;
-            let actions: Vec<_> = batched_actions
-                .into_iter()
-                .map(|(env_id, _, action)| (env_id, action))
-                .collect();
-
-            let steps = env_interface.step_once(&actions)?;
-            for step in steps {
-                rewards.insert(step.env_id, step.reward);
-                if step.terminated || step.truncated {
-                    let env_label = env_labels
-                        .get(&step.env_id)
-                        .cloned()
-                        .unwrap_or_else(|| step.env_id.to_string());
-                    Self::flag_last_action_direct(
-                        &runtime,
-                        step.reward,
-                        Some(step.env_id),
-                        Some(env_label),
-                    )
-                    .await?;
-                    rewards.insert(step.env_id, 0.0);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if !matches!(
+                    self.shared_client_modes.actor_inference_mode,
+                    ActorInferenceMode::Local(_)
+                ) {
+                    return Err(StateManagerError::InferenceRequestError(
+                        "[StateManager] Batched direct env inference requires local actor inference"
+                            .to_string(),
+                    ));
                 }
-            }
-        }
+                let runtime = self.get_actor_runtime(actor_id).ok_or_else(|| {
+                    StateManagerError::ActorHandleNotFoundError(format!(
+                        "[StateManager] Actor runtime not found for {}",
+                        actor_id
+                    ))
+                })?;
+                let device = self
+                    .actor_devices
+                    .get(&actor_id)
+                    .map(|device| device.clone())
+                    .ok_or_else(|| {
+                        StateManagerError::GetEnvInfoError(format!(
+                            "[StateManager] Actor device not found for {}",
+                            actor_id
+                        ))
+                    })?;
 
-        Ok(())
+                let mut rewards: HashMap<EnvironmentUuid, f32> = HashMap::new();
+                let mut env_labels: HashMap<EnvironmentUuid, String> = HashMap::new();
+                let mut env_interface = self.actor_envs.get_mut(&actor_id).ok_or_else(|| {
+                    StateManagerError::GetEnvInfoError(format!(
+                        "[StateManager] Environment interface not found for {}",
+                        actor_id
+                    ))
+                })?;
+
+                for (env_id, _) in env_interface.ensure_ready()? {
+                    rewards.entry(env_id).or_insert(0.0);
+                }
+                let mut known_env_ids: Vec<_> = rewards.keys().copied().collect();
+                known_env_ids.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                for (index, env_id) in known_env_ids.into_iter().enumerate() {
+                    env_labels.insert(env_id, format!("env-{}", index + 1));
+                }
+
+                for _ in 0..step_count {
+                    let mut observations = env_interface.current_observations()?;
+                    observations.sort_unstable_by(|(left, _), (right, _)| {
+                        left.as_bytes().cmp(right.as_bytes())
+                    });
+                    let batch: Vec<_> = observations
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (env_id, observation))| {
+                            let reward = *rewards.get(&env_id).unwrap_or(&0.0);
+                            let env_label = env_labels
+                                .entry(env_id)
+                                .or_insert_with(|| format!("env-{}", index + 1))
+                                .clone();
+                            (env_id, env_label, observation, reward)
+                        })
+                        .collect();
+                    let batched_actions =
+                        Self::request_actions_direct(&runtime, batch, &device).await?;
+                    let actions: Vec<_> = batched_actions
+                        .into_iter()
+                        .map(|(env_id, _, action)| (env_id, action))
+                        .collect();
+
+                    let steps = env_interface.step_once(&actions)?;
+                    for step in steps {
+                        rewards.insert(step.env_id, step.reward);
+                        if step.terminated || step.truncated {
+                            let env_label = env_labels
+                                .get(&step.env_id)
+                                .cloned()
+                                .unwrap_or_else(|| step.env_id.to_string());
+                            Self::flag_last_action_direct(
+                                &runtime,
+                                step.reward,
+                                Some(step.env_id),
+                                Some(env_label),
+                            )
+                            .await?;
+                            rewards.insert(step.env_id, 0.0);
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+        })
     }
 
     pub(crate) fn set_env<KindIn, KindOut>(
@@ -1140,7 +1141,8 @@ mod unit_tests {
         for id in &actor_ids {
             let handle = Arc::new(tokio::spawn(async {}));
             sm.actor_handles.insert(*id, handle);
-            let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            let (tx_to_actor, _actor_inbox_rx) =
+                mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
             sm.shared_router_state.actor_routes.insert(
                 *id,
                 ActorRoute {
@@ -1157,12 +1159,12 @@ mod unit_tests {
 
         assert_eq!(sm.shared_router_state.actor_routes.len(), 4);
         for (index, id) in sorted_actor_ids.iter().enumerate() {
-            let assigned = sm.shared_router_state.actor_routes.get(id).unwrap();
-            let expected_namespace = if index % 2 == 0 {
-                ns1.clone()
-            } else {
-                ns2.clone()
-            };
+            let assigned = sm
+                .shared_router_state
+                .actor_routes
+                .get(id)
+                .unwrap();
+            let expected_namespace = if index % 2 == 0 { ns1.clone() } else { ns2.clone() };
             assert_eq!(
                 assigned.router_namespace,
                 Some(expected_namespace),
@@ -1180,17 +1182,23 @@ mod unit_tests {
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
         let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        sm.shared_router_state.actor_routes.insert(
-            actor_id,
-            ActorRoute {
-                router_namespace: Some(original_ns.clone()),
-                inbox: tx_to_actor,
-            },
-        );
+        sm.shared_router_state
+            .actor_routes
+            .insert(
+                actor_id,
+                ActorRoute {
+                    router_namespace: Some(original_ns.clone()),
+                    inbox: tx_to_actor,
+                },
+            );
 
         sm.distribute_actors(vec![]);
 
-        let assigned = sm.shared_router_state.actor_routes.get(&actor_id).unwrap();
+        let assigned = sm
+            .shared_router_state
+            .actor_routes
+            .get(&actor_id)
+            .unwrap();
         assert_eq!(
             assigned.router_namespace,
             Some(original_ns),
@@ -1207,7 +1215,8 @@ mod unit_tests {
         for id in &actor_ids {
             sm.actor_handles
                 .insert(*id, Arc::new(tokio::spawn(async {})));
-            let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            let (tx_to_actor, _actor_inbox_rx) =
+                mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
             sm.shared_router_state.actor_routes.insert(
                 *id,
                 ActorRoute {
@@ -1220,7 +1229,11 @@ mod unit_tests {
         sm.distribute_actors(vec![ns.clone()]);
 
         for id in &actor_ids {
-            let assigned = sm.shared_router_state.actor_routes.get(id).unwrap();
+            let assigned = sm
+                .shared_router_state
+                .actor_routes
+                .get(id)
+                .unwrap();
             assert_eq!(assigned.router_namespace, Some(ns.clone()));
         }
     }
@@ -1259,7 +1272,11 @@ mod unit_tests {
             ),
             "Old mapping should be cleared while preserving the inbox"
         );
-        let assigned = sm.shared_router_state.actor_routes.get(&new_id).unwrap();
+        let assigned = sm
+            .shared_router_state
+            .actor_routes
+            .get(&new_id)
+            .unwrap();
         assert_eq!(assigned.router_namespace, Some(new_ns));
     }
 
@@ -1358,19 +1375,26 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state.actor_routes.insert(
-            actor_id,
-            ActorRoute {
-                router_namespace: Some(Arc::from("router-a")),
-                inbox: tx_to_actor,
-            },
-        );
+        sm.shared_router_state
+            .actor_routes
+            .insert(
+                actor_id,
+                ActorRoute {
+                    router_namespace: Some(Arc::from("router-a")),
+                    inbox: tx_to_actor,
+                },
+            );
         sm.actor_devices.insert(actor_id, DeviceType::Cpu);
 
         sm.remove_actor(actor_id).unwrap();
 
         assert!(sm.actor_handles.get(&actor_id).is_none());
-        assert!(sm.shared_router_state.actor_routes.get(&actor_id).is_none());
+        assert!(
+            sm.shared_router_state
+                .actor_routes
+                .get(&actor_id)
+                .is_none()
+        );
         assert!(sm.actor_devices.get(&actor_id).is_none());
     }
 
@@ -1390,13 +1414,15 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(current_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state.actor_routes.insert(
-            current_id,
-            ActorRoute {
-                router_namespace: Some(Arc::from("router-a")),
-                inbox: tx_to_actor,
-            },
-        );
+        sm.shared_router_state
+            .actor_routes
+            .insert(
+                current_id,
+                ActorRoute {
+                    router_namespace: Some(Arc::from("router-a")),
+                    inbox: tx_to_actor,
+                },
+            );
         sm.actor_devices.insert(current_id, DeviceType::Cpu);
 
         sm.set_actor_id(current_id, new_id).unwrap();
@@ -1656,10 +1682,7 @@ mod unit_tests {
         .unwrap();
 
         assert!(matches!(rx_from_actor.try_recv(), Err(TryRecvError::Empty)));
-        let msg = rx_from_buffer
-            .recv()
-            .await
-            .expect("expected trajectory flush");
+        let msg = rx_from_buffer.recv().await.expect("expected trajectory flush");
         match msg.payload {
             RoutedPayload::SendTrajectory { trajectory, .. } => {
                 assert_eq!(trajectory.get_env_id(), Some(&env_id));
@@ -1700,20 +1723,12 @@ mod unit_tests {
 
         let result = StateManager::<TestBackend, D_IN, D_OUT>::request_actions_direct(
             &runtime,
-            vec![(
-                env_id,
-                "env-1".to_string(),
-                float_any_tensor(&[1.0, 2.0, 3.0, 4.0]),
-                0.5,
-            )],
+            vec![(env_id, "env-1".to_string(), float_any_tensor(&[1.0, 2.0, 3.0, 4.0]), 0.5)],
             &DeviceType::Cpu,
         )
         .await;
 
         assert!(matches!(rx_from_actor.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(
-            result,
-            Err(StateManagerError::InferenceRequestError(_))
-        ));
+        assert!(matches!(result, Err(StateManagerError::InferenceRequestError(_))));
     }
 }
