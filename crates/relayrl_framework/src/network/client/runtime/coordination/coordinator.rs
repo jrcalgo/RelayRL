@@ -1135,8 +1135,7 @@ impl<
                     });
                 }
 
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
-                    Vec::with_capacity(pending_len);
+                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(pending_len);
                 while let Some(join_result) = join_set.join_next().await {
                     let pair = join_result.map_err(|e| {
                         CoordinatorError::ScaleManagerError(
@@ -1830,8 +1829,8 @@ mod unit_tests {
     use crate::network::client::agent::{
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::state_manager::ActorRoute;
     use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManager;
+    use crate::network::client::runtime::coordination::state_manager::ActorRoute;
     use crate::utilities::configuration::ClientConfigLoader;
     use active_uuid_registry::interface::{clear_namespace, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
@@ -2020,16 +2019,24 @@ mod unit_tests {
             .runtime_params = Some(dashmap::DashMap::new());
         let actor_id = Uuid::new_v4();
         let (tx_to_actor, _rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        shared_state.write().await.shared_router_state.actor_routes.insert(
-            actor_id,
-            ActorRoute {
-                router_namespace: Some(Arc::from("router-a")),
-                inbox: tx_to_actor,
-            },
-        );
+        shared_state
+            .write()
+            .await
+            .shared_router_state
+            .actor_routes
+            .insert(
+                actor_id,
+                ActorRoute {
+                    router_namespace: Some(Arc::from("router-a")),
+                    inbox: tx_to_actor,
+                },
+            );
 
         let responder = tokio::spawn(async move {
-            let message = global_dispatcher_rx.recv().await.expect("expected routed message");
+            let message = global_dispatcher_rx
+                .recv()
+                .await
+                .expect("expected routed message");
             assert_eq!(message.actor_id, actor_id);
             match message.payload {
                 RoutedPayload::RequestInference(req) => {
@@ -2043,11 +2050,19 @@ mod unit_tests {
                     std::mem::discriminant(&other)
                 ),
             }
-            assert!(matches!(global_dispatcher_rx.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(
+                global_dispatcher_rx.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
         });
 
         let actions = coordinator
-            .request_action(vec![actor_id], float_any_tensor(&[1.0, 2.0, 3.0, 4.0]), None, 0.75)
+            .request_action(
+                vec![actor_id],
+                float_any_tensor(&[1.0, 2.0, 3.0, 4.0]),
+                None,
+                0.75,
+            )
             .await
             .unwrap();
         responder.await.unwrap();
@@ -2092,7 +2107,10 @@ mod unit_tests {
                 std::mem::discriminant(&other)
             ),
         }
-        assert!(matches!(global_dispatcher_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(
+            global_dispatcher_rx.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

@@ -115,7 +115,9 @@ impl CircuitBreaker {
                     .opened_at
                     .write()
                     .expect("CircuitBreaker opened_at lock poisoned");
-                if let Some(opened_at) = *opened_at && opened_at.elapsed() >= self.open_duration {
+                if let Some(opened_at) = *opened_at
+                    && opened_at.elapsed() >= self.open_duration
+                {
                     *state = CircuitState::HalfOpen;
                     return false; // Allow the test request
                 }

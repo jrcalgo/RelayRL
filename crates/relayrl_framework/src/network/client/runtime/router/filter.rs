@@ -117,18 +117,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             Some(ActorRoute {
                 router_namespace: Some(other_router_namespace),
                 ..
-            }) => Err(RouterError::FilterError(
-                FilterError::RoutingError(format!(
+            }) => Err(RouterError::FilterError(FilterError::RoutingError(
+                format!(
                     "Actor {} is assigned to router {:?}, but message is for router {}",
                     actor_id, other_router_namespace, router_namespace
-                )),
-            )),
+                ),
+            ))),
             Some(ActorRoute {
                 router_namespace: None,
                 ..
             })
-            |
-            None => Err(RouterError::FilterError(FilterError::RoutingError(
+            | None => Err(RouterError::FilterError(FilterError::RoutingError(
                 format!(
                     "Actor {} is not assigned to any router or does not exist",
                     actor_id
@@ -208,15 +207,13 @@ mod unit_tests {
         let (sm, _global_rx) = make_state_manager();
         let actor_id = Uuid::new_v4();
         let (actor_tx, actor_rx) = mpsc::channel::<RoutedMessage>(16);
-        sm.shared_router_state
-            .actor_routes
-            .insert(
-                actor_id,
-                ActorRoute {
-                    router_namespace: Some(namespace),
-                    inbox: actor_tx,
-                },
-            );
+        sm.shared_router_state.actor_routes.insert(
+            actor_id,
+            ActorRoute {
+                router_namespace: Some(namespace),
+                inbox: actor_tx,
+            },
+        );
         (Arc::new(RwLock::new(sm)), actor_id, actor_rx)
     }
 

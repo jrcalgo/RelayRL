@@ -41,6 +41,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -135,7 +136,7 @@ pub(crate) struct StateManager<
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) shared_router_state: Arc<SharedRouterState>,
-    actor_envs: DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>,
+    actor_envs: DashMap<ActorUuid, Arc<Mutex<EnvironmentInterface<B, D_IN, D_OUT>>>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
@@ -353,7 +354,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_devices.insert(actor_id, device.clone());
         self.actor_envs.insert(
             actor_id,
-            EnvironmentInterface::new(self.client_namespace.clone(), device.clone()),
+            Arc::new(Mutex::new(EnvironmentInterface::new(self.client_namespace.clone(), device.clone()))),
         );
         self.actor_model_handles
             .insert(actor_id, model_handle.clone());

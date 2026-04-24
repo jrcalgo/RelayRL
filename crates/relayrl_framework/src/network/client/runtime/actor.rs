@@ -34,9 +34,9 @@ use std::sync::Arc;
 #[cfg(feature = "metrics")]
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, RwLock};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
+use tokio::sync::{Mutex, RwLock};
 
 use burn_tensor::backend::Backend;
 use thiserror::Error;
@@ -146,8 +146,10 @@ impl ActorTrajectoryState {
         let last_action = RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
         self.current_traj.add_action(last_action);
 
-        let mut traj_to_send =
-            std::mem::replace(&mut self.current_traj, RelayRLTrajectory::new(max_traj_length));
+        let mut traj_to_send = std::mem::replace(
+            &mut self.current_traj,
+            RelayRLTrajectory::new(max_traj_length),
+        );
         traj_to_send.set_episode(self.current_episode);
         self.current_episode += 1;
         traj_to_send
@@ -245,7 +247,8 @@ impl<
     }
 
     async fn send_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(), ActorError> {
-        if self.shared_tx_to_buffer.is_closed() {  // indicates that the buffer is disabled via client mode OR is shutdown
+        if self.shared_tx_to_buffer.is_closed() {
+            // indicates that the buffer is disabled via client mode OR is shutdown
             return Ok(());
         }
         let send_traj_msg = self.build_send_trajectory_message(trajectory)?;
@@ -340,12 +343,7 @@ impl<
                     }
                 };
                 reloadable_model
-                    .forward_batch::<D_IN, D_OUT>(
-                        &observations,
-                        &masks,
-                        &rewards,
-                        self.actor_id,
-                    )
+                    .forward_batch::<D_IN, D_OUT>(&observations, &masks, &rewards, self.actor_id)
                     .map_err(ActorError::from)?
             };
 
@@ -651,7 +649,10 @@ impl<
 
     async fn perform_local_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
-        let action = self.runtime.perform_local_inference(obs, mask, reward).await?;
+        let action = self
+            .runtime
+            .perform_local_inference(obs, mask, reward)
+            .await?;
         reply_to.send(Arc::new(action)).map_err(|e| {
             ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
         })?;
@@ -726,7 +727,10 @@ impl<
             env_label,
         } = msg.payload
         {
-            return self.runtime.flag_last_action(reward, env_id, env_label).await;
+            return self
+                .runtime
+                .flag_last_action(reward, env_id, env_label)
+                .await;
         }
         Ok(())
     }
@@ -913,9 +917,7 @@ impl<
                                             .await
                                             .map_err(ActorError::from)?,
                                         );
-                                        self.runtime
-                                            .reloadable_model
-                                            .store(Some(reloadable_model));
+                                        self.runtime.reloadable_model.store(Some(reloadable_model));
                                     }
                                 }
 
