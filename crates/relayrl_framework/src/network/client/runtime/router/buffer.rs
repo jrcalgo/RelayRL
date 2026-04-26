@@ -392,7 +392,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             }
         });
 
-        let mut worker_queue = worker_priority_queue.clone();
+        let mut worker_queue: BinaryHeap<SinkQueueEntry> = worker_priority_queue.clone();
         let worker_actor_last_processed = actor_last_processed.clone();
         let worker_modes = shared_client_modes.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -409,8 +409,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         const MAX_TRAJ_MEMORY_SIZE: usize = 1_000;
 
         let _worker_handle = tokio::spawn(async move {
-            const BATCH_SIZE: usize = 10;
-            let mut worker_tick = tokio::time::interval(Duration::from_millis(100));
+            const BATCH_SIZE: usize = 10_000;
+            let mut worker_tick = tokio::time::interval(Duration::from_millis(1));
 
             loop {
                 tokio::select! {
