@@ -244,12 +244,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
                     .map_err(|e| ModelError::BackendError(e.to_string()))?,
             ));
             let raw_bytes: Arc<[u8]> = bytes.into();
-            return Ok(Self {
+            Ok(Self {
                 file_type: ModelFileType::Onnx,
                 raw_bytes,
                 inference: InferenceModel::Onnx(session),
                 _phantom: PhantomData,
-            });
+            })
         }
         #[cfg(not(feature = "onnx-model"))]
         {
