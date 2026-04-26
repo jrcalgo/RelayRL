@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - 2026-04-26
+
+### Added
+- **Flattened batched model inference helpers** - `ModelModule::flat_batch_inference()` exposes direct `TensorData`-to-`TensorData` inference via the existing flattened tensor-data path, and `ModelModule::flat_batch_zeros()` exposes flattened zero-action batch creation for callers that already operate on batched tensor payloads
+
+### Changed
+- **Package metadata** - `relayrl_types` crate version is now `0.7.1`
+- **README changelog badge** - Updated the README changelog badge from `0.5.4` to `0.7.0`
+
 ## [0.7.0] - 2026-04-23
 
 ### Added
