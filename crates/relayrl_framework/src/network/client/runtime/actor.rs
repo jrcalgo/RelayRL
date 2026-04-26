@@ -14,15 +14,18 @@ use crate::network::client::runtime::data::transport_sink::transport_dispatcher:
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::{
-    BatchedInferenceRequest, InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
 };
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
 use active_uuid_registry::registry_uuid::Uuid;
 use arc_swap::ArcSwapOption;
+use relayrl_env_trait::{EnvDType, EnvNdArrayDType, EnvTchDType};
 use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
+use relayrl_types::data::tensor::{
+    BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
+};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
@@ -40,6 +43,261 @@ use tokio::sync::{Mutex, RwLock};
 
 use burn_tensor::backend::Backend;
 use thiserror::Error;
+
+fn env_dtype_to_dtype(dtype: &EnvDType) -> Result<DType, ActorError> {
+    match dtype {
+        EnvDType::NdArray(nd_type) => Ok(DType::NdArray(match nd_type {
+            EnvNdArrayDType::F16 => NdArrayDType::F16,
+            EnvNdArrayDType::F32 => NdArrayDType::F32,
+            EnvNdArrayDType::F64 => NdArrayDType::F64,
+            EnvNdArrayDType::I8 => NdArrayDType::I8,
+            EnvNdArrayDType::I16 => NdArrayDType::I16,
+            EnvNdArrayDType::I32 => NdArrayDType::I32,
+            EnvNdArrayDType::I64 => NdArrayDType::I64,
+            EnvNdArrayDType::Bool => NdArrayDType::Bool,
+        })),
+        #[cfg(feature = "tch-backend")]
+        EnvDType::Tch(tch_type) => Ok(DType::Tch(match tch_type {
+            EnvTchDType::F16 => TchDType::F16,
+            EnvTchDType::Bf16 => TchDType::Bf16,
+            EnvTchDType::F32 => TchDType::F32,
+            EnvTchDType::F64 => TchDType::F64,
+            EnvTchDType::I8 => TchDType::I8,
+            EnvTchDType::I16 => TchDType::I16,
+            EnvTchDType::I32 => TchDType::I32,
+            EnvTchDType::I64 => TchDType::I64,
+            EnvTchDType::U8 => TchDType::U8,
+            EnvTchDType::Bool => TchDType::Bool,
+        })),
+        _ => Err(ActorError::TypeConversionError(format!(
+            "Unsupported environment dtype: {dtype:?}"
+        ))),
+    }
+}
+
+/// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
+fn decode_argmax(
+    data: &[u8],
+    dtype: &relayrl_types::data::tensor::DType,
+    n_envs: usize,
+    act_dim: usize,
+) -> Vec<u8> {
+    macro_rules! argmax_float {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs)
+                .map(|i| {
+                    vals[i * act_dim..(i + 1) * act_dim]
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(j, _)| j as u8)
+                        .unwrap_or(0)
+                })
+                .collect()
+        }};
+    }
+
+    macro_rules! argmax_int {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs)
+                .map(|i| {
+                    vals[i * act_dim..(i + 1) * act_dim]
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.cmp(b))
+                        .map(|(j, _)| j as u8)
+                        .unwrap_or(0)
+                })
+                .collect()
+        }};
+    }
+
+    match dtype {
+        DType::NdArray(NdArrayDType::F16) => argmax_float!(half::f16),
+        DType::NdArray(NdArrayDType::F32) => argmax_float!(f32),
+        DType::NdArray(NdArrayDType::F64) => argmax_float!(f64),
+        DType::NdArray(NdArrayDType::I8) => argmax_int!(i8),
+        DType::NdArray(NdArrayDType::I16) => argmax_int!(i16),
+        DType::NdArray(NdArrayDType::I32) => argmax_int!(i32),
+        DType::NdArray(NdArrayDType::I64) => argmax_int!(i64),
+        DType::NdArray(NdArrayDType::Bool) => argmax_int!(u8),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch_type) => match tch_type {
+            TchDType::F16 => argmax_float!(half::f16),
+            TchDType::Bf16 => argmax_float!(half::bf16),
+            TchDType::F32 => argmax_float!(f32),
+            TchDType::F64 => argmax_float!(f64),
+            TchDType::I8 => argmax_int!(i8),
+            TchDType::I16 => argmax_int!(i16),
+            TchDType::I32 => argmax_int!(i32),
+            TchDType::I64 => argmax_int!(i64),
+            TchDType::Bool => argmax_int!(u8),
+            TchDType::U8 => argmax_int!(u8),
+        },
+    }
+}
+
+fn decode_continuous_bytes(
+    data: &[u8],
+    src_dtype: &DType,
+    count: usize,
+    tgt_dtype: &DType,
+) -> Vec<u8> {
+    let as_f64: Vec<f64> = match src_dtype {
+        DType::NdArray(NdArrayDType::F16) => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
+            .iter()
+            .map(|&x| f64::from(x))
+            .collect(),
+        DType::NdArray(NdArrayDType::F32) => bytemuck::cast_slice::<u8, f32>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::F64) => {
+            bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec()
+        }
+        DType::NdArray(NdArrayDType::I8) => bytemuck::cast_slice::<u8, i8>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I16) => bytemuck::cast_slice::<u8, i16>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I32) => bytemuck::cast_slice::<u8, i32>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I64) => bytemuck::cast_slice::<u8, i64>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::Bool) => data[..count]
+            .iter()
+            .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
+            .collect(),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tc) => {
+            use relayrl_types::data::tensor::TchDType;
+            match tc {
+                TchDType::F16 => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect(),
+                TchDType::Bf16 => bytemuck::cast_slice::<u8, half::bf16>(data)[..count]
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect(),
+                TchDType::F32 => bytemuck::cast_slice::<u8, f32>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::F64 => bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec(),
+                TchDType::I8 => bytemuck::cast_slice::<u8, i8>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I16 => bytemuck::cast_slice::<u8, i16>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I32 => bytemuck::cast_slice::<u8, i32>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I64 => bytemuck::cast_slice::<u8, i64>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::U8 => data[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::Bool => data[..count]
+                    .iter()
+                    .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
+                    .collect(),
+            }
+        }
+    };
+
+    match tgt_dtype {
+        DType::NdArray(NdArrayDType::F16) => {
+            let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
+            bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::F32) => {
+            let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
+            bytemuck::cast_slice::<f32, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::F64) => bytemuck::cast_slice::<f64, u8>(&as_f64).to_vec(),
+        DType::NdArray(NdArrayDType::I8) => {
+            let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
+            bytemuck::cast_slice::<i8, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I16) => {
+            let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
+            bytemuck::cast_slice::<i16, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I32) => {
+            let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
+            bytemuck::cast_slice::<i32, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I64) => {
+            let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
+            bytemuck::cast_slice::<i64, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::Bool) => as_f64
+            .iter()
+            .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
+            .collect(),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch_type) => match tch_type {
+            TchDType::F16 => {
+                let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
+                bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
+            }
+            TchDType::Bf16 => {
+                let v: Vec<half::bf16> = as_f64.iter().map(|&x| half::bf16::from_f64(x)).collect();
+                bytemuck::cast_slice::<half::bf16, u8>(&v).to_vec()
+            }
+            TchDType::F32 => {
+                let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
+                bytemuck::cast_slice::<f32, u8>(&v).to_vec()
+            }
+            TchDType::F64 => {
+                let v: Vec<f64> = as_f64.iter().map(|&x| x as f64).collect();
+                bytemuck::cast_slice::<f64, u8>(&v).to_vec()
+            }
+            TchDType::I8 => {
+                let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
+                bytemuck::cast_slice::<i8, u8>(&v).to_vec()
+            }
+            TchDType::I16 => {
+                let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
+                bytemuck::cast_slice::<i16, u8>(&v).to_vec()
+            }
+            TchDType::I32 => {
+                let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
+                bytemuck::cast_slice::<i32, u8>(&v).to_vec()
+            }
+            TchDType::I64 => {
+                let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
+                bytemuck::cast_slice::<i64, u8>(&v).to_vec()
+            }
+            TchDType::U8 => {
+                let v: Vec<u8> = as_f64.iter().map(|&x| x as u8).collect();
+                bytemuck::cast_slice::<u8, u8>(&v).to_vec()
+            }
+            TchDType::Bool => as_f64
+                .iter()
+                .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
+                .collect(),
+        },
+    }
+}
 
 /// Shared handle to a hot-reloadable model.
 ///
@@ -310,91 +568,49 @@ impl<
         result
     }
 
-    pub(crate) async fn perform_local_inference_batch(
+    pub(crate) async fn perform_local_byte_inference(
         &self,
-        env_ids: Vec<Uuid>,
-        env_labels: Vec<String>,
-        observations: Vec<Arc<AnyBurnTensor<B, D_IN>>>,
-        masks: Vec<Option<Arc<AnyBurnTensor<B, D_OUT>>>>,
-        rewards: Vec<f32>,
-    ) -> Result<Vec<RelayRLAction>, ActorError> {
-        #[cfg(feature = "metrics")]
-        let start_time = Instant::now();
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &EnvDType,
+        act_dtype: &EnvDType,
+        discrete: bool,
+    ) -> Result<Vec<u8>, ActorError> {
+        let loaded_model = self.reloadable_model.load();
+        let reloadable_model_ref = loaded_model.as_ref().ok_or_else(|| {
+            ActorError::SystemError("Model not loaded/available for actor inference".to_string())
+        })?;
+        let module = reloadable_model_ref.current_module();
 
-        let result = async {
-            if env_ids.len() != observations.len()
-                || env_labels.len() != observations.len()
-                || rewards.len() != observations.len()
-                || masks.len() != observations.len()
-            {
-                return Err(ActorError::MessageHandlingError(
-                    "Batched inference payload lengths must match".to_string(),
-                ));
-            }
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            env_dtype_to_dtype(obs_dtype)?,
+            obs_bytes.to_vec(),
+            SupportedTensorBackend::NdArray,
+        );
+        let output = module
+            .flat_batch_inference(input)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
 
-            let actions = {
-                let guard = self.reloadable_model.load();
-                let reloadable_model = match &*guard {
-                    Some(m) => m,
-                    None => {
-                        return Err(ActorError::SystemError(
-                            "Model not loaded/available for actor inference".to_string(),
-                        ));
-                    }
-                };
-                reloadable_model
-                    .forward_batch::<D_IN, D_OUT>(&observations, &masks, &rewards, self.actor_id)
-                    .map_err(ActorError::from)?
-            };
+        let action_bytes = if discrete {
+            decode_argmax(
+                &output.data,
+                &env_dtype_to_dtype(act_dtype)?,
+                n_envs,
+                act_dim,
+            )
+        } else {
+            decode_continuous_bytes(
+                &output.data,
+                &output.dtype,
+                n_envs * act_dim,
+                &env_dtype_to_dtype(act_dtype)?,
+            )
+        };
 
-            if actions.len() != env_ids.len() {
-                return Err(ActorError::MessageHandlingError(format!(
-                    "Batched inference returned {} actions for {} env ids",
-                    actions.len(),
-                    env_ids.len()
-                )));
-            }
-
-            let max_traj_length = *self.shared_max_traj_length.read().await;
-            let mut trajectories = self.trajectories.lock().await;
-            for ((env_id, env_label), action) in env_ids
-                .iter()
-                .copied()
-                .zip(env_labels.iter())
-                .zip(actions.iter().cloned())
-            {
-                let traj = trajectories.ensure_env_trajectory(
-                    self.actor_id,
-                    env_id,
-                    env_label.clone(),
-                    max_traj_length,
-                );
-                traj.add_action(action);
-            }
-
-            Ok(actions)
-        }
-        .await;
-
-        #[cfg(feature = "metrics")]
-        match &result {
-            Ok(_) => {
-                let duration = start_time.elapsed().as_secs_f64();
-                self.metrics
-                    .record_histogram("actor_local_inference_latency", duration, &[])
-                    .await;
-                self.metrics
-                    .record_counter("actor_local_inferences", 1, &[])
-                    .await;
-            }
-            Err(_) => {
-                self.metrics
-                    .record_counter("actor_local_inference_failures", 1, &[])
-                    .await;
-            }
-        }
-
-        result
+        Ok(action_bytes)
     }
 
     pub(crate) async fn flag_last_action(
@@ -595,50 +811,6 @@ impl<
     }
 
     #[inline(always)]
-    #[allow(clippy::type_complexity)]
-    fn extract_batched_inference_request(
-        msg: RoutedMessage,
-    ) -> Result<
-        (
-            Vec<Uuid>,
-            Vec<String>,
-            Vec<Arc<AnyBurnTensor<B, D_IN>>>,
-            Vec<Option<Arc<AnyBurnTensor<B, D_OUT>>>>,
-            Vec<f32>,
-            oneshot::Sender<Vec<RelayRLAction>>,
-        ),
-        ActorError,
-    > {
-        let RoutedPayload::RequestInferenceBatch(req) = msg.payload else {
-            return Err(ActorError::MessageHandlingError(
-                "Expected RequestInferenceBatch payload".to_string(),
-            ));
-        };
-
-        let BatchedInferenceRequest {
-            env_ids,
-            env_labels,
-            observations,
-            masks,
-            rewards,
-            reply_to,
-        } = *req;
-
-        let observations: Vec<Arc<AnyBurnTensor<B, D_IN>>> = *observations
-            .downcast::<Vec<Arc<AnyBurnTensor<B, D_IN>>>>()
-            .map_err(|_| {
-                ActorError::TypeConversionError("Failed to downcast batched observations".into())
-            })?;
-        let masks: Vec<Option<Arc<AnyBurnTensor<B, D_OUT>>>> = *masks
-            .downcast::<Vec<Option<Arc<AnyBurnTensor<B, D_OUT>>>>>()
-            .map_err(|_| {
-                ActorError::TypeConversionError("Failed to downcast batched masks".into())
-            })?;
-
-        Ok((env_ids, env_labels, observations, masks, rewards, reply_to))
-    }
-
-    #[inline(always)]
     async fn handle_inference_kind(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         match self.shared_client_modes.actor_inference_mode {
             ActorInferenceMode::Local(_) => self.perform_local_inference(msg).await,
@@ -654,22 +826,6 @@ impl<
             .perform_local_inference(obs, mask, reward)
             .await?;
         reply_to.send(Arc::new(action)).map_err(|e| {
-            ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
-        })?;
-        Ok(())
-    }
-
-    async fn perform_local_inference_batch(
-        &mut self,
-        msg: RoutedMessage,
-    ) -> Result<(), ActorError> {
-        let (env_ids, env_labels, observations, masks, rewards, reply_to) =
-            Self::extract_batched_inference_request(msg)?;
-        let actions = self
-            .runtime
-            .perform_local_inference_batch(env_ids, env_labels, observations, masks, rewards)
-            .await?;
-        reply_to.send(actions).map_err(|e| {
             ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
         })?;
         Ok(())
@@ -798,18 +954,6 @@ impl<
                 RoutingProtocol::RequestInference => {
                     self.handle_inference_kind(msg).await?;
                 }
-                RoutingProtocol::RequestInferenceBatch => match self
-                    .shared_client_modes
-                    .actor_inference_mode
-                {
-                    ActorInferenceMode::Local(_) => self.perform_local_inference_batch(msg).await?,
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    ActorInferenceMode::Server(_) => {
-                        return Err(ActorError::SystemError(
-                            "Batched server inference is not implemented".to_string(),
-                        ));
-                    }
-                },
                 RoutingProtocol::FlagLastInference => {
                     self.perform_flag_last_action(msg).await?;
                 }
@@ -1376,39 +1520,6 @@ mod unit_tests {
             matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
             "FlagLastInference should produce a SendTrajectory message"
         );
-    }
-
-    #[tokio::test]
-    async fn extract_batched_inference_request_preserves_env_order() {
-        let env_id_1 = Uuid::new_v4();
-        let env_id_2 = Uuid::new_v4();
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let msg = build_msg(
-            Uuid::new_v4(),
-            RoutingProtocol::RequestInferenceBatch,
-            RoutedPayload::RequestInferenceBatch(Box::new(BatchedInferenceRequest {
-                env_ids: vec![env_id_1, env_id_2],
-                env_labels: vec!["env-1".to_string(), "env-2".to_string()],
-                observations: Box::new(vec![
-                    float_any_tensor(&[1.0, 2.0, 3.0, 4.0]),
-                    float_any_tensor(&[5.0, 6.0, 7.0, 8.0]),
-                ]),
-                masks: Box::new(vec![None::<Arc<AnyBurnTensor<NdArrayBackend, D_OUT>>>; 2]),
-                rewards: vec![1.0, 2.0],
-                reply_to: reply_tx,
-            })),
-        );
-
-        let (env_ids, env_labels, observations, masks, rewards, returned_reply_tx) =
-            Actor::<NdArrayBackend, D_IN, D_OUT>::extract_batched_inference_request(msg).unwrap();
-
-        assert_eq!(env_ids, vec![env_id_1, env_id_2]);
-        assert_eq!(env_labels, vec!["env-1".to_string(), "env-2".to_string()]);
-        assert_eq!(observations.len(), 2);
-        assert_eq!(masks.len(), 2);
-        assert_eq!(rewards, vec![1.0, 2.0]);
-        drop(returned_reply_tx);
-        drop(reply_rx);
     }
 
     #[tokio::test]
