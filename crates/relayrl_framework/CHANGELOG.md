@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta.3] - 2026-04-26
+
+### Added
+- **Actor runtime direct-operation handle** - Added `ActorRuntime` ownership for local model state, trajectory state, max-trajectory length, buffer sending, and metrics so coordinator/state-manager paths can execute selected actor operations directly without routing every operation through the actor inbox
+- **Flattened byte inference path for environments** - `ActorRuntime::perform_local_byte_inference()` converts flat environment observation bytes into `TensorData`, calls `ModelModule::flat_batch_inference()`, falls back to `flat_batch_zeros()` on inference failure, and decodes model outputs back to action bytes for discrete and continuous action spaces
+- **Environment byte-buffer execution support** - Environment interfaces and scalar/vector wrappers now expose `n_envs_dims()`, `flat_observation_bytes()`, `step_bytes()`, `flat_env_ids()`, and `action_is_discrete()` so `run_env()` can drive scalar and vector environments through the `relayrl_env_trait` 1.2 flattened API
+- **Action decoding utilities** - Added dtype mapping plus `decode_argmax()` and `decode_continuous_bytes()` helpers for NdArray and Tch environment action dtypes, including half/bfloat16 handling where supported
+- **Action-routing regression coverage** - Added coordinator/state-manager tests for direct `flag_last_action` behavior and request-action routing through the global dispatcher
+
+### Changed
+- **Package metadata and dependencies** - `relayrl_framework` crate version is now `0.5.0-beta.3`, and `half` is a direct dependency for half/bfloat16 byte decoding
+- **Environment integration API alignment** - `RelayRLActorEnv::set_env()`, `ClientEnvironments::set_env()`, and state-manager environment storage now accept `Box<dyn relayrl_env_trait::Environment>` instead of the old backend/dimension/tensor-kind-generic environment trait object
+- **Environment run loop** - `run_env()` now supports the local inference mode by pulling an `ActorRuntime` and shared environment map, then executing `step_count` iterations of observation bytes -> local model inference -> environment `step_bytes()` -> per-environment `flag_last_action` when done
+- **Scalar and vector environment wrappers** - `ScalarVecEnv` now maintains stable environment ordering and flat observation/action byte strides; `BatchVecEnv` delegates flattened observation, step, dimension, id, and action-space queries to the wrapped vector environment
+- **Router protocol shape** - Environment batching now happens through the local byte path, so router-level `RequestInferenceBatch` routing was removed from timeout handling and dispatch
+- **Runtime locking and handle storage** - State-manager environment operations use shared/read access with interior concurrent maps, actor runtimes are stored alongside actor model handles, and runtime handles are updated/cleared during actor id changes, removals, and shutdown
+- **Buffer worker throughput constants** - Trajectory buffer worker batching changed from `10` items every `100ms` to `10_000` items every `1ms` as a temporary throughput patch
+- **Internal sink module layout** - The memory sink module moved under `runtime/data/sinks/memory_sink`, aligning it with the transport sink layout
+
+### Fixed
+- **Online memory mode detection** - `uses_in_memory_data()` now recognizes transport-enabled `OnlineWithMemory(TrainingParams)` and `OnlineWithFilesAndMemory(TrainingParams, Option<LocalTrajectoryFileParams>)`
+- **Training address extraction** - Coordinator startup now includes `OnlineWithFilesAndMemory` when deriving training server address arguments, and treats offline memory/file-and-memory modes as local-only
+- **Transport sink import paths** - Internal transport imports now point at `runtime/data/sinks/transport_sink`, matching the current sink module location
+- **Optional codec startup wiring** - Agent `start()` and `restart()` now pass transport codecs as `Some(codec)` into coordinator startup when transport features are enabled
+
+### Removed
+- **Router-level batched inference messages** - Removed `RoutingProtocol::RequestInferenceBatch`, `RoutedPayload::RequestInferenceBatch`, and `BatchedInferenceRequest`
+- **Old benchmark files** - Deleted the stale `benches/old` network/runtime benchmark files that no longer matched the current runtime architecture
+- **Legacy environment tensor conversion path** - Removed the framework-side `IntoAnyTensorKind` requirement and old `TensorData`-to-`AnyBurnTensor` environment action conversion path in favor of byte-buffer environment stepping
+
+### Breaking
+- **Custom environment integration** - Code passing generic `Environment<B, D_IN, D_OUT, KindIn, KindOut>` objects into `RelayRLActorEnv::set_env()` must migrate to the `relayrl_env_trait` 1.2 object-safe `Environment` API and provide flattened byte observation/action methods
+- **Internal router integrations** - Any crate-internal or downstream code depending on `RequestInferenceBatch`/`BatchedInferenceRequest` must use the live `request_action` path or the new local environment byte path instead
+- **Internal module paths** - References to the old `runtime/data/memory_sink` location must move to `runtime/data/sinks/memory_sink`
+
 ## [0.5.0-beta.2] - 2026-04-23
 
 ### Added
