@@ -1,7 +1,7 @@
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ModelMode};
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::data::transport_sink::{
+use crate::network::client::runtime::data::sinks::transport_sink::{
     AsyncClientInferenceTransportOps, AsyncClientScalingTransportOps,
     AsyncClientTrainingTransportOps, AsyncClientTransportInterface, ScalingOperation,
     TransportError, TransportUuid,
@@ -94,6 +94,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
                 })
             }
             ActorInferenceMode::Local(_) => None,
+            ActorInferenceMode::ServerOverflow(_, _) => todo!(),
         };
 
         let training_protocol = match shared_client_modes.actor_training_data_mode {
@@ -121,7 +122,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
                 ActorInferenceMode::Local(_),
                 ActorTrainingDataMode::Disabled
                 | ActorTrainingDataMode::OfflineWithFiles(_)
-                | ActorTrainingDataMode::OfflineWithMemory(_),
+                | ActorTrainingDataMode::OfflineWithMemory
+                | ActorTrainingDataMode::OfflineWithFilesAndMemory(_),
             ) => None,
             _ => {
                 let config = NatsPolicyConfig::for_scaling();

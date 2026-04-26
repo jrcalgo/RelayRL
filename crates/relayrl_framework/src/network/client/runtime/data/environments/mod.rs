@@ -3,8 +3,7 @@ use crate::network::client::runtime::data::environments::vec_env::{
 };
 
 use relayrl_env_trait::*;
-use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DType, DeviceType};
-use relayrl_types::prelude::tensor::burn::{TensorKind, backend::Backend};
+use relayrl_types::data::tensor::{DType, DeviceType};
 
 pub(crate) mod vec_env;
 
@@ -103,13 +102,15 @@ impl EnvironmentInterface {
                     EnvDType::NdArray(_) => Some(env.observation_dtype()),
                     #[cfg(feature = "tch-backend")]
                     EnvDType::Tch(_) => Some(env.observation_dtype()),
-                    _ => None,
+                    #[cfg(not(feature = "tch-backend"))]
+                    EnvDType::Tch(_) => None,
                 };
                 self.act_dtype = match env.action_dtype() {
                     EnvDType::NdArray(_) => Some(env.action_dtype()),
                     #[cfg(feature = "tch-backend")]
                     EnvDType::Tch(_) => Some(env.action_dtype()),
-                    _ => None,
+                    #[cfg(not(feature = "tch-backend"))]
+                    EnvDType::Tch(_) => None,
                 };
 
                 let obs_dtype = map_env_dtype(env.observation_dtype())?;
@@ -170,7 +171,7 @@ impl EnvironmentInterface {
         count: u32,
     ) -> Result<(), EnvironmentInterfaceError> {
         if let Some(env) = &mut self.env {
-            env.resize(env.get_env_count()? as usize + count as usize)
+            env.resize(env.get_env_count()? + count as usize)
                 .map_err(EnvironmentInterfaceError::from)
         } else {
             Err(EnvironmentInterfaceError::EnvironmentNotSetError(
@@ -186,8 +187,7 @@ impl EnvironmentInterface {
         if let Some(env) = &mut self.env {
             let current = env.get_env_count()?;
             let next = current.saturating_sub(count as usize);
-            env.resize(next as usize)
-                .map_err(EnvironmentInterfaceError::from)
+            env.resize(next).map_err(EnvironmentInterfaceError::from)
         } else {
             Err(EnvironmentInterfaceError::EnvironmentNotSetError(
                 "[EnvironmentInterface] Environment not set".to_string(),

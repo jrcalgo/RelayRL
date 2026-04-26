@@ -8,9 +8,9 @@ use crate::network::client::agent::{ActorInferenceMode, ClientModes};
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::TransportError;
+use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::{
@@ -21,10 +21,14 @@ use crate::utilities::observability::metrics::MetricsManager;
 
 use active_uuid_registry::registry_uuid::Uuid;
 use arc_swap::ArcSwapOption;
-use relayrl_env_trait::{EnvDType, EnvNdArrayDType, EnvTchDType};
+#[cfg(feature = "tch-backend")]
+use relayrl_env_trait::EnvTchDType;
+use relayrl_env_trait::{EnvDType, EnvNdArrayDType};
 use relayrl_types::data::action::RelayRLAction;
+#[cfg(feature = "tch-backend")]
+use relayrl_types::data::tensor::TchDType;
 use relayrl_types::data::tensor::{
-    BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
+    BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TensorData,
 };
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::utils::{deserialize_model_module, validate_module};
@@ -69,7 +73,8 @@ fn env_dtype_to_dtype(dtype: &EnvDType) -> Result<DType, ActorError> {
             EnvTchDType::U8 => TchDType::U8,
             EnvTchDType::Bool => TchDType::Bool,
         })),
-        _ => Err(ActorError::TypeConversionError(format!(
+        #[cfg(not(feature = "tch-backend"))]
+        EnvDType::Tch(_) => Err(ActorError::TypeConversionError(format!(
             "Unsupported environment dtype: {dtype:?}"
         ))),
     }
@@ -568,6 +573,7 @@ impl<
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn perform_local_byte_inference(
         &self,
         obs_bytes: &[u8],
@@ -816,6 +822,10 @@ impl<
             ActorInferenceMode::Local(_) => self.perform_local_inference(msg).await,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             ActorInferenceMode::Server(_) => self.request_server_inference(msg).await,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            ActorInferenceMode::ServerOverflow(_, _) => {
+                self.request_server_overflow_inference(msg).await
+            }
         }
     }
 
@@ -874,6 +884,14 @@ impl<
         }
 
         Ok(())
+    }
+
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    async fn request_server_overflow_inference(
+        &mut self,
+        msg: RoutedMessage,
+    ) -> Result<(), ActorError> {
+        todo!()
     }
 
     async fn perform_flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {

@@ -216,7 +216,7 @@ impl LocalTrajectoryFileParams {
         if !directory.is_dir() {
             return Err(ClientError::InvalidTrajectoryFileDirectory(format!(
                 "Path is not a directory, {}",
-                directory.display().to_string()
+                directory.display()
             )));
         }
 
@@ -360,8 +360,8 @@ pub(crate) fn uses_in_memory_data(training_data_mode: &ActorTrainingDataMode) ->
         training_data_mode,
         ActorTrainingDataMode::OfflineWithMemory
             | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
-            | ActorTrainingDataMode::OnlineWithMemory
-            | ActorTrainingDataMode::OnlineWithFilesAndMemory(_)
+            | ActorTrainingDataMode::OnlineWithMemory(_)
+            | ActorTrainingDataMode::OnlineWithFilesAndMemory(_, _)
     );
 
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
@@ -780,7 +780,7 @@ impl<
                 default_model,
                 config_path,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                codec,
+                Some(codec),
             )
             .await
             .map_err(Into::<ClientError>::into)?;
@@ -819,7 +819,7 @@ impl<
                 default_model,
                 config_path,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                codec,
+                Some(codec),
             )
             .await?;
         Ok(())

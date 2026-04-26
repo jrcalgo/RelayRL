@@ -8,11 +8,11 @@ use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 #[cfg(feature = "nats-transport")]
-use crate::network::client::runtime::data::transport_sink::nats::interface::NatsInterface;
+use crate::network::client::runtime::data::sinks::transport_sink::nats::interface::NatsInterface;
 #[cfg(feature = "zmq-transport")]
-use crate::network::client::runtime::data::transport_sink::zmq::ZmqClientError;
+use crate::network::client::runtime::data::sinks::transport_sink::zmq::ZmqClientError;
 #[cfg(feature = "zmq-transport")]
-use crate::network::client::runtime::data::transport_sink::zmq::interface::ZmqInterface;
+use crate::network::client::runtime::data::sinks::transport_sink::zmq::interface::ZmqInterface;
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::prelude::network::ClientModes;
 use crate::utilities::configuration::Algorithm;

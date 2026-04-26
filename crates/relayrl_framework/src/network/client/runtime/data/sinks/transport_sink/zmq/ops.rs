@@ -9,8 +9,8 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
     SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
-use crate::network::client::runtime::data::transport_sink::TransportError;
-use crate::network::client::runtime::data::transport_sink::zmq::{
+use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
+use crate::network::client::runtime::data::sinks::transport_sink::zmq::{
     ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
 };
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
@@ -620,7 +620,6 @@ fn build_routed_model_update_message(
         payload: RoutedPayload::ModelUpdate {
             model_bytes,
             version: model_version,
-            reply_to: None,
         },
     }))
 }
@@ -2132,7 +2131,6 @@ mod tests {
             RoutedPayload::ModelUpdate {
                 model_bytes,
                 version,
-                reply_to: None,
             } => {
                 assert_eq!(model_bytes, vec![10, 20]);
                 assert_eq!(version, 7);

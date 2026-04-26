@@ -71,6 +71,7 @@ pub struct MetricsManager {
     prometheus_registry: Option<Arc<Mutex<Registry>>>,
     prometheus_counters: Arc<Mutex<HashMap<MetricKey, PrometheusCounter>>>,
     prometheus_histograms: Arc<Mutex<HashMap<MetricKey, PrometheusHistogram>>>,
+    #[allow(clippy::type_complexity)]
     metrics_args: Arc<Mutex<Arc<RwLock<(String, String)>>>>,
     cached_metrics_args: Arc<Mutex<MetricsConfig>>,
 }

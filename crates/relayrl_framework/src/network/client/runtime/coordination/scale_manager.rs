@@ -18,9 +18,9 @@ use crate::network::client::runtime::coordination::lifecycle_manager::{
 };
 use crate::network::client::runtime::coordination::state_manager::StateManager;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::TransportError;
+use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     ProcessInitRequest, ScalingDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, TrajectorySinkError};
@@ -51,7 +51,6 @@ use relayrl_types::model::ModelModule;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Receiver;
@@ -392,6 +391,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ProcessInitFlag::InferenceModelInit(default_model) => {
                     let model_mode = match self.shared_client_modes.actor_inference_mode.clone() {
                         ActorInferenceMode::Server(params) => params.model_mode,
+                        ActorInferenceMode::ServerOverflow(_, _) => todo!(),
                         ActorInferenceMode::Local(params) => params,
                     };
 
@@ -575,21 +575,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         );
                     }
 
-                    if uses_local_file_writing(&self.shared_client_modes.actor_training_data_mode) {
-                        if let Some(shared_trajectory_file_output) =
+                    if uses_local_file_writing(&self.shared_client_modes.actor_training_data_mode)
+                        && let Some(shared_trajectory_file_output) =
                             self.shared_trajectory_file_output.clone()
-                        {
-                            buffer_init.with_trajectory_writer(shared_trajectory_file_output);
-                        }
+                    {
+                        buffer_init.with_trajectory_writer(shared_trajectory_file_output);
                     }
 
-                    if uses_in_memory_data(&self.shared_client_modes.actor_training_data_mode) {
-                        if let Some(shared_trajectory_memory) =
+                    if uses_in_memory_data(&self.shared_client_modes.actor_training_data_mode)
+                        && let Some(shared_trajectory_memory) =
                             self.shared_trajectory_memory.clone()
-                        {
-                            buffer_init.with_trajectory_memory(shared_trajectory_memory);
-                        }
-                    }
+                    {
+                        buffer_init.with_trajectory_memory(shared_trajectory_memory);
+                    };
 
                     if let Some(lc) = &self.lifecycle {
                         buffer_init.with_shutdown(

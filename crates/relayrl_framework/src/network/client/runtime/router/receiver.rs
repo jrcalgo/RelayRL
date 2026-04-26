@@ -1,8 +1,8 @@
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::state_manager::{ActorUuid, StateManager};
-use crate::network::client::runtime::data::transport_sink::TransportError;
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::TrainingDispatcher;
+use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::TrainingDispatcher;
 use crate::network::client::runtime::router::{
     RoutedMessage, RoutedPayload, RouterError, RoutingProtocol,
 };

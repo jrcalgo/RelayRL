@@ -5,7 +5,7 @@ use active_uuid_registry::{
 };
 use relayrl_env_trait::*;
 use relayrl_types::data::tensor::NdArrayDType;
-use relayrl_types::data::tensor::{BackendMatcher, DType, DeviceType};
+use relayrl_types::data::tensor::{DType, DeviceType};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -64,7 +64,7 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     }
     /// Step all sub-envs; `actions` bytes layout mirrors `flat_obs_clone`.
     /// Returns `(new_obs_bytes, rewards, dones)`.
-    fn step_bytes(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+    fn step_bytes(&mut self, _actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
         None
     }
     /// Stable env UUIDs in flat-path order, or None if fast path unsupported.
@@ -218,14 +218,14 @@ impl VecEnvTrait for ScalarVecEnv {
             let env = self
                 .envs
                 .get(env_id)
-                .ok_or_else(|| VecEnvError::UnknownEnv(*env_id))?;
+                .ok_or(VecEnvError::UnknownEnv(*env_id))?;
             env.reset()?;
             // Keep obs_flat in sync when fast path is active
-            if obs_bytes_per_env > 0 {
-                if let Some(idx) = self.ordered_ids.iter().position(|id| id == env_id) {
-                    self.obs_flat[idx * obs_bytes_per_env..(idx + 1) * obs_bytes_per_env]
-                        .copy_from_slice(&env.dyn_flat_obs());
-                }
+            if obs_bytes_per_env > 0
+                && let Some(idx) = self.ordered_ids.iter().position(|id| id == env_id)
+            {
+                self.obs_flat[idx * obs_bytes_per_env..(idx + 1) * obs_bytes_per_env]
+                    .copy_from_slice(&env.dyn_flat_obs());
             }
         }
         Ok(())

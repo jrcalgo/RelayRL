@@ -4,7 +4,9 @@
 //! this module remain experimental.
 
 use crate::network::client::agent::ModelMode;
-use crate::network::client::runtime::data::transport_sink::{ScalingOperation, TransportError};
+use crate::network::client::runtime::data::sinks::transport_sink::{
+    ScalingOperation, TransportError,
+};
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
 

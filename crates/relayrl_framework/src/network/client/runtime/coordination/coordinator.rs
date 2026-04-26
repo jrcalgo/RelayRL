@@ -23,11 +23,11 @@ use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::{
+use crate::network::client::runtime::data::sinks::transport_sink::{
     ClientTransportInterface, TransportError, client_transport_factory,
 };
 use crate::network::client::runtime::router::{
@@ -48,7 +48,7 @@ use active_uuid_registry::{ContextString, NamespaceString};
 
 use thiserror::Error;
 
-use burn_tensor::{BasicOps, backend::Backend};
+use burn_tensor::backend::Backend;
 
 use active_uuid_registry::interface::{
     clear_namespace, remove_namespace, reserve_id_with, reserve_namespace,
@@ -587,12 +587,14 @@ impl<
             let training_address_args = match &shared_client_modes.actor_training_data_mode {
                 ActorTrainingDataMode::Online(server_params)
                 | ActorTrainingDataMode::OnlineWithFiles(server_params, _)
-                | ActorTrainingDataMode::OnlineWithMemory(server_params) => {
+                | ActorTrainingDataMode::OnlineWithMemory(server_params)
+                | ActorTrainingDataMode::OnlineWithFilesAndMemory(server_params, _) => {
                     server_params.training_addresses.clone()
                 }
-                ActorTrainingDataMode::Disabled | ActorTrainingDataMode::OfflineWithFiles(_) => {
-                    None
-                }
+                ActorTrainingDataMode::Disabled
+                | ActorTrainingDataMode::OfflineWithFiles(_)
+                | ActorTrainingDataMode::OfflineWithMemory
+                | ActorTrainingDataMode::OfflineWithFilesAndMemory(_) => None,
             };
 
             if inference_address_args.is_some() || training_address_args.is_some() {

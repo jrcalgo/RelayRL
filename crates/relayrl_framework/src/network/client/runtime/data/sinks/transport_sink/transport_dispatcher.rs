@@ -1,7 +1,7 @@
 use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::data::transport_sink::ScalingOperation;
-use crate::network::client::runtime::data::transport_sink::{
+use crate::network::client::runtime::data::sinks::transport_sink::ScalingOperation;
+use crate::network::client::runtime::data::sinks::transport_sink::{
     ClientTransportInterface, RoutedMessage, TransportError,
 };
 use crate::utilities::configuration::Algorithm;

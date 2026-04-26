@@ -14,7 +14,7 @@ use crate::network::client::runtime::coordination::scale_manager::RouterNamespac
 use crate::network::client::runtime::data::environments::EnvironmentInterface;
 use crate::network::client::runtime::data::environments::EnvironmentInterfaceError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
@@ -28,13 +28,13 @@ use thiserror::Error;
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
 use relayrl_env_trait::{EnvDType, EnvNdArrayDType, Environment, EnvironmentUuid};
-use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType, TensorData};
+use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
 use arc_swap::ArcSwapOption;
-use burn_tensor::{BasicOps, backend::Backend};
+use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -603,7 +603,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &self,
         mappings: Vec<(ActorUuid, RouterNamespace)>,
     ) {
-        let mappings_by_actor: HashMap<ActorUuid, RouterNamespace> = mappings.into_iter().collect();
+        let mappings_by_actor: std::collections::HashMap<ActorUuid, RouterNamespace> =
+            mappings.into_iter().collect();
 
         for mut route in self.shared_router_state.actor_routes.iter_mut() {
             route.router_namespace = mappings_by_actor.get(route.key()).cloned();
@@ -729,59 +730,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map(|runtime| Arc::clone(runtime.value()))
     }
 
-    #[allow(unreachable_patterns)]
-    fn tensor_data_to_any<const D: usize>(
-        tensor_data: &TensorData,
-        _device: &DeviceType,
-    ) -> Result<AnyBurnTensor<B, D>, StateManagerError> {
-        match &tensor_data.dtype {
-            relayrl_types::data::tensor::DType::NdArray(dtype) => match dtype {
-                relayrl_types::data::tensor::NdArrayDType::F16
-                | relayrl_types::data::tensor::NdArrayDType::F32
-                | relayrl_types::data::tensor::NdArrayDType::F64 => tensor_data
-                    .to_float_tensor::<B, D>(_device)
-                    .map(AnyBurnTensor::Float)
-                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
-                relayrl_types::data::tensor::NdArrayDType::I8
-                | relayrl_types::data::tensor::NdArrayDType::I16
-                | relayrl_types::data::tensor::NdArrayDType::I32
-                | relayrl_types::data::tensor::NdArrayDType::I64 => tensor_data
-                    .to_int_tensor::<B, D>(_device)
-                    .map(AnyBurnTensor::Int)
-                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
-                relayrl_types::data::tensor::NdArrayDType::Bool => tensor_data
-                    .to_bool_tensor::<B, D>(_device)
-                    .map(AnyBurnTensor::Bool)
-                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
-            },
-            #[cfg(feature = "tch-backend")]
-            relayrl_types::data::tensor::DType::Tch(dtype) => match dtype {
-                relayrl_types::data::tensor::TchDType::F16
-                | relayrl_types::data::tensor::TchDType::Bf16
-                | relayrl_types::data::tensor::TchDType::F32
-                | relayrl_types::data::tensor::TchDType::F64 => tensor_data
-                    .to_float_tensor::<B, D>(_device)
-                    .map(AnyBurnTensor::Float)
-                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
-                relayrl_types::data::tensor::TchDType::U8
-                | relayrl_types::data::tensor::TchDType::I8
-                | relayrl_types::data::tensor::TchDType::I16
-                | relayrl_types::data::tensor::TchDType::I32
-                | relayrl_types::data::tensor::TchDType::I64 => tensor_data
-                    .to_int_tensor::<B, D>(_device)
-                    .map(AnyBurnTensor::Int)
-                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
-                relayrl_types::data::tensor::TchDType::Bool => tensor_data
-                    .to_bool_tensor::<B, D>(_device)
-                    .map(AnyBurnTensor::Bool)
-                    .map_err(|e| StateManagerError::TensorConversionError(e.to_string())),
-            },
-            _ => Err(StateManagerError::TensorConversionError(
-                "[StateManager] Unsupported tensor dtype for action conversion".to_string(),
-            )),
-        }
-    }
-
     async fn flag_last_action_direct(
         runtime: &Arc<ActorRuntime<B, D_IN, D_OUT>>,
         reward: f32,
@@ -883,6 +831,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map_err(StateManagerError::from)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn get_run_env_handles(
         &self,
         actor_id: ActorUuid,

@@ -54,6 +54,7 @@ pub(crate) struct SinkQueueEntry {
     priority: PriorityRank, // lower = sooner, higher = later
     actor_id: ActorUuid,
     traj_for_processing: Arc<RelayRLTrajectory>,
+    #[allow(unused)]
     permit: Option<Arc<OwnedSemaphorePermit>>,
 }
 
@@ -182,6 +183,7 @@ pub(crate) trait LocalFileTrajectorySinkTrait<B: Backend + BackendMatcher<Backen
 }
 
 pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
+    #[allow(unused)]
     associated_router_namespace: RouterNamespace,
     rx_from_actor: Option<Receiver<RoutedMessage>>,
     actor_last_processed: DashMap<Uuid, i64>,
