@@ -19,7 +19,6 @@ use crate::network::client::runtime::coordination::coordinator::{
     ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
 };
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 use crate::prelude::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::{Algorithm, NetworkParams};
@@ -1243,7 +1242,7 @@ pub trait RelayRLActorEnv<
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        env: Box<dyn Environment>,
         count: u32,
     ) -> Result<(), ClientError>;
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), ClientError>;
@@ -1255,7 +1254,7 @@ impl<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
+    KindIn: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
     KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
 > RelayRLActorEnv<B, D_IN, D_OUT, KindIn, KindOut>
     for RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
@@ -1267,7 +1266,7 @@ impl<
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        env: Box<dyn Environment>,
         count: u32,
     ) -> Result<(), ClientError> {
         Ok(self.coordinator.set_env(actor_id, env, count).await?)
