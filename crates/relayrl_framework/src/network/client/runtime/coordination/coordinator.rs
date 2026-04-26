@@ -22,7 +22,6 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
-use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
@@ -249,8 +248,6 @@ pub(crate) trait ClientEnvironments<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
 >
 {
     async fn run_env(&self, actor_id: ActorUuid, step_count: usize)
@@ -258,7 +255,7 @@ pub(crate) trait ClientEnvironments<
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        env: Box<dyn Environment>,
         count: u32,
     ) -> Result<(), CoordinatorError>;
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), CoordinatorError>;
@@ -1696,10 +1693,9 @@ impl<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
-    KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
-> ClientEnvironments<B, D_IN, D_OUT, KindIn, KindOut>
-    for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
+    KindIn: TensorKind<B> + Send + Sync + 'static,
+    KindOut: TensorKind<B> + Send + Sync + 'static,
+> ClientEnvironments<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
 {
     async fn run_env(
         &self,
@@ -1707,14 +1703,27 @@ impl<
         step_count: usize,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => {
-                params
-                    .shared_state
-                    .write()
-                    .await
-                    .run_env(actor_id, step_count)?;
-                Ok(())
-            }
+            Some(params) => match self.client_modes.actor_inference_mode {
+                ActorInferenceMode::Local(_) => {
+                    let (runtime, env_map) = params
+                        .shared_state
+                        .read()
+                        .await
+                        .get_run_env_handles(actor_id)
+                        .map_err(CoordinatorError::from)?;
+
+                    StateManager::<B, D_IN, D_OUT>::run_env_step_loop(
+                        actor_id, runtime, env_map, step_count,
+                    )
+                    .map_err(CoordinatorError::from)
+                }
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
+                    unimplemented!(
+                        "Not supported yet; this will request that the inference server handle the environment step"
+                    )
+                }
+            },
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::StepEnvError(
                     "[Coordinator] No runtime instance to step_env...".to_string(),
@@ -1726,14 +1735,14 @@ impl<
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        env: Box<dyn Environment>,
         count: u32,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
                 params
                     .shared_state
-                    .write()
+                    .read()
                     .await
                     .set_env(actor_id, env, count)?;
                 Ok(())
@@ -1771,7 +1780,7 @@ impl<
             Some(params) => {
                 params
                     .shared_state
-                    .write()
+                    .read()
                     .await
                     .increase_env_count(actor_id, count)?;
                 Ok(())
@@ -1793,7 +1802,7 @@ impl<
             Some(params) => {
                 params
                     .shared_state
-                    .write()
+                    .read()
                     .await
                     .decrease_env_count(actor_id, count)?;
                 Ok(())
@@ -1809,7 +1818,7 @@ impl<
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                params.shared_state.write().await.remove_env(actor_id)?;
+                params.shared_state.read().await.remove_env(actor_id)?;
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(
