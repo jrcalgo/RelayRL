@@ -11,9 +11,9 @@ resolver = "2"
 
 [workspace.dependencies]
 relayrl_framework = { version = "0.5.0-beta.1", path = "crates/relayrl_framework"}
-relayrl_types = { version = "0.7.0", path = "crates/relayrl_types"}
+relayrl_types = { version = "0.7.1", path = "crates/relayrl_types"}
 relayrl_algorithms = { version = "0.2.0", path = "crates/relayrl_algorithms"}
-relayrl_env_trait = { version = "1.1.0", path = "crates/relayrl_env_trait"}
+relayrl_env_trait = { version = "1.2.0", path = "crates/relayrl_env_trait"}
 
 burn-tensor = "0.20.1"
 burn-ndarray = "0.20.1"
