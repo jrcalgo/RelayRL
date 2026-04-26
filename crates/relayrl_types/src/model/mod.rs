@@ -830,6 +830,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         }
     }
 
+    pub fn flat_batch_inference(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
+        self.run_inference_tensor_data(input_data)
+    }
+
+    pub fn flat_batch_zeros(&self, rows: usize) -> TensorData {
+        self.zeros_batch_action(rows)
+    }
+
     fn run_inference_tensor_data(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
         match self.model.inference() {
             #[cfg(feature = "tch-model")]
