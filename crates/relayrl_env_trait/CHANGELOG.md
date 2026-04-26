@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-04-26
+
+### Added
+- **Flattened byte-oriented environment APIs** - `Environment` now exposes `observation_dim()`, `action_dim()`, `flat_observation_bytes()`, and `action_is_discrete()` so runtimes can consume observations and action metadata without depending on Burn tensor generics
+- **Dynamic scalar environment helpers** - `DynScalarEnvironment` now provides `dyn_flat_obs()`, `dyn_step()`, and `dyn_act_dim()` forwarding helpers for object-safe flattened observation, step, and action-dimension access
+- **Vector environment runtime helpers** - `VectorEnvironment` now exposes `n_envs()` and `step_bytes()` for byte-buffer batched stepping that returns flattened observations, rewards, and completion flags
+
+### Changed
+- **Package metadata** - `relayrl_env_trait` crate version is now `1.2.0`
+- **Environment reset payloads** - `ScalarEnvReset` and `VectorEnvReset` now carry observations as `Vec<u8>` instead of `burn_tensor::Tensor` values
+- **Trait object and handle types** - `DynVectorEnv`, `DynScalarEnvironment`, `EnvironmentHandle`, `Environment`, `ScalarEnvironment`, and `VectorEnvironment` no longer require backend, dimension, or tensor-kind generic parameters
+- **Scalar stepping API** - `ScalarEnvironment` now uses `step_bytes(&[u8]) -> Option<(Vec<u8>, f32, bool)>` instead of accepting a typed action tensor and returning `ScalarEnvStep`
+- **Vector stepping API** - `VectorEnvironment` now uses `step_bytes(&[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)>` instead of accepting `(EnvironmentUuid, Tensor)` action pairs and returning `VectorEnvStep` values
+
+### Removed
+- **Burn tensor dependency** - Removed the `burn-tensor` dependency and the public re-export of `Backend`, `Tensor`, and `TensorKind`
+- **Step result structs** - Removed `ScalarEnvStep` and `VectorEnvStep`; step methods now return flattened observation bytes, rewards, and completion flags directly
+
+### Breaking
+- **Environment trait implementation signatures** - Implementors must remove Burn tensor generic parameters from environment traits and implement the new flattened byte API methods
+- **Observation and action representation** - Callers that used typed Burn tensors in reset or step payloads must convert to/from `Vec<u8>` plus explicit dtype and dimension metadata
+- **Truncation and per-step info payloads** - The new `step_bytes()` return tuples expose completion flags but no longer include separate `truncated` booleans or optional `EnvInfo` values from the removed step result structs
+
 ## [1.1.0] - 2026-04-23
 
 ### Added
