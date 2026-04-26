@@ -35,7 +35,6 @@
 //!   downcasting where the runtime requires a concrete layout.
 
 pub mod traits {
-    pub use burn_tensor::{Tensor, TensorKind, backend::Backend};
     use std::any::Any;
     pub use thiserror::Error;
     pub use uuid::Uuid;
@@ -138,135 +137,86 @@ pub mod traits {
     pub type EnvInfo = Vec<(String, String)>;
 
     #[derive(Debug, Clone)]
-    pub struct ScalarEnvReset<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
-        pub observation: Tensor<B, D_IN, KInput>,
+    pub struct ScalarEnvReset {
+        pub observation: Vec<u8>,
         pub info: Option<EnvInfo>,
     }
 
     #[derive(Debug, Clone)]
-    pub struct ScalarEnvStep<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
-        pub observation: Tensor<B, D_IN, KInput>,
-        pub reward: f32,
-        pub terminated: bool,
-        pub truncated: bool,
-        pub info: Option<EnvInfo>,
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct VectorEnvReset<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
+    pub struct VectorEnvReset {
         pub env_id: EnvironmentUuid,
-        pub observation: Tensor<B, D_IN, KInput>,
+        pub observation: Vec<u8>,
         pub info: Option<EnvInfo>,
     }
 
-    #[derive(Debug, Clone)]
-    pub struct VectorEnvStep<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
-        pub env_id: EnvironmentUuid,
-        pub observation: Tensor<B, D_IN, KInput>,
-        pub reward: f32,
-        pub terminated: bool,
-        pub truncated: bool,
-        pub info: Option<EnvInfo>,
-    }
-
-    pub type DynVectorEnv<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput> =
-        dyn VectorEnvironment<B, D_IN, D_OUT, KInput, KOutput>;
+    pub type DynVectorEnv =
+        dyn VectorEnvironment;
     pub trait DynScalarEnvironment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
-    >: ScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> + Send + Sync
+    >: ScalarEnvironment + Send + Sync
     {
-        fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>;
+        fn clone_box(&self) -> Box<dyn DynScalarEnvironment>;
+        fn dyn_flat_obs(&self) -> Vec<u8> { self.flat_observation_bytes() }
+        fn dyn_step(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
+            self.step_bytes(action)
+        }
+        fn dyn_act_dim(&self) -> usize { self.action_dim() }
     }
-    impl<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput, T>
-        DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> for T
+    impl<T> DynScalarEnvironment for T
     where
-        B: Backend,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
-        T: ScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> + Clone + Send + Sync + 'static,
+        T: ScalarEnvironment + Clone + Send + Sync + 'static,
     {
-        fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>> {
+        fn clone_box(&self) -> Box<dyn DynScalarEnvironment> {
             Box::new(self.clone())
         }
     }
-    impl<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput> Clone
-        for Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>
-    where
-        B: Backend,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
+    impl Clone
+        for Box<dyn DynScalarEnvironment>
     {
         fn clone(&self) -> Self {
             self.clone_box()
         }
     }
-    pub enum EnvironmentHandle<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
-    > {
-        Scalar(Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>),
-        Vector(Box<DynVectorEnv<B, D_IN, D_OUT, KInput, KOutput>>),
+    pub enum EnvironmentHandle {
+        Scalar(Box<dyn DynScalarEnvironment>),
+        Vector(Box<DynVectorEnv>),
     }
 
-    pub trait ScalarEnvironment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KindIn: TensorKind<B>,
-        KindOut: TensorKind<B>,
-    >: Environment<B, D_IN, D_OUT, KindIn, KindOut> + Send + Sync
+    pub trait ScalarEnvironment
+    : Environment + Send + Sync
     {
-        fn step(
-            &self,
-            action: Tensor<B, D_OUT, KindOut>,
-        ) -> Result<ScalarEnvStep<B, D_IN, KindIn>, EnvironmentError>;
-        fn reset(&self) -> Result<ScalarEnvReset<B, D_IN, KindIn>, EnvironmentError>;
+        fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError>;
+        fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)>;
     }
 
-    pub trait VectorEnvironment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KindIn: TensorKind<B>,
-        KindOut: TensorKind<B>,
-    >: Environment<B, D_IN, D_OUT, KindIn, KindOut> + Send + Sync
+    pub trait VectorEnvironment
+    : Environment + Send + Sync
     {
         fn init_num_envs(&self, num_envs: usize) -> Result<Vec<EnvironmentUuid>, EnvironmentError>;
-        fn step(
-            &self,
-            actions: &[(EnvironmentUuid, Tensor<B, D_OUT, KindOut>)],
-        ) -> Result<Vec<VectorEnvStep<B, D_IN, KindIn>>, EnvironmentError>;
         fn reset(
             &self,
             env_ids: &[EnvironmentUuid],
-        ) -> Result<Vec<VectorEnvReset<B, D_IN, KindIn>>, EnvironmentError>;
+        ) -> Result<Vec<VectorEnvReset>, EnvironmentError>;
+        fn n_envs(&self) -> usize;
+        fn step_bytes(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)>;
     }
 
     /// Interface for environments where a model can be trained or evaluated.
     ///
     /// Methods are intentionally parameterless: configuration and mutable state live on the
     /// implementing type (often with interior mutability when shared across threads).
-    pub trait Environment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KindIn: TensorKind<B>,
-        KindOut: TensorKind<B>,
-    >: Send + Sync
+    pub trait Environment
+    : Send + Sync
     {
         fn run_environment(&self) -> Result<(), EnvironmentError>;
         fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError>;
         fn observation_dtype(&self) -> EnvDType;
         fn action_dtype(&self) -> EnvDType;
+        fn observation_dim(&self) -> usize;
+        fn action_dim(&self) -> usize;
+        fn flat_observation_bytes(&self) -> Vec<u8>;
+        fn action_is_discrete(&self) -> bool;
         fn kind(&self) -> EnvironmentKind;
-        fn into_handle(self: Box<Self>) -> EnvironmentHandle<B, D_IN, D_OUT, KindIn, KindOut>;
+        fn into_handle(self: Box<Self>) -> EnvironmentHandle;
     }
 
     /// Computes a performance signal (for example return-to-go) for training feedback.

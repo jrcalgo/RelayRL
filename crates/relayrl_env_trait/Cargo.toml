@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_env_trait"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "Traits for training and testing environments in the RelayRL framework."
 repository = "https://github.com/jrcalgo/relayrl"
@@ -12,4 +12,3 @@ license = "Apache-2.0"
 [dependencies]
 thiserror = { workspace = true }
 uuid = { workspace = true }
-burn-tensor = { workspace = true }
