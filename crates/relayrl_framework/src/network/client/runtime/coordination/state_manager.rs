@@ -3,7 +3,7 @@
 //! This module tracks actor task handles, inboxes, router assignments, and local model handles for
 //! the client runtime.
 
-use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode, AlgorithmArgs};
+use crate::network::client::agent::{ActorInferenceMode, AlgorithmArgs, ClientModes, ModelMode};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{Actor, ActorEntity, ActorRuntime};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
@@ -17,7 +17,7 @@ use crate::network::client::runtime::data::environments::EnvironmentInterfaceErr
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol, ControlPayload};
+use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 use crossbeam_utils::CachePadded;

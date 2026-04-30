@@ -3,7 +3,7 @@
 //! This module handles local file output for the beta-supported local/default runtime and can also
 //! fan out trajectories to experimental transport-backed training sinks.
 
-use super::{RoutedMessage, RoutingProtocol, ControlPayload, DataPayload, RouterError};
+use super::{ControlPayload, DataPayload, RoutedMessage, RouterError, RoutingProtocol};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::ActorTrainingDataMode;
 use crate::network::client::agent::ClientModes;
@@ -770,7 +770,10 @@ mod unit_tests {
         let ts = now_millis();
         RoutedMessage {
             actor_id,
-            protocol: RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp: (ts, ts * 1_000_000), trajectory: traj }),
+            protocol: RoutingProtocol::Data(DataPayload::SendTrajectory {
+                timestamp: (ts, ts * 1_000_000),
+                trajectory: traj,
+            }),
         }
     }
 

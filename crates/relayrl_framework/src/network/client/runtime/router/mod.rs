@@ -43,13 +43,8 @@ pub(crate) enum RoutingProtocol {
 
 pub(crate) enum ControlPayload {
     ModelHandshake,
-    ModelVersion {
-        reply_to: oneshot::Sender<i64>,
-    },
-    ModelUpdate {
-        model_bytes: Vec<u8>,
-        version: i64,
-    },
+    ModelVersion { reply_to: oneshot::Sender<i64> },
+    ModelUpdate { model_bytes: Vec<u8>, version: i64 },
     Shutdown,
 }
 

@@ -87,10 +87,10 @@ pub(crate) struct ScalarVecEnv {
     envs: Vec<Box<dyn DynScalarEnvironment>>,
     ordered_ids: Vec<EnvironmentUuid>,
     uuid_to_idx: HashMap<EnvironmentUuid, usize>,
-    obs_flat: Vec<u8>, // raw bytes; element dtype = observation_dtype
-    obs_dim: usize, // obs elements per env (for ONNX shape)
+    obs_flat: Vec<u8>,        // raw bytes; element dtype = observation_dtype
+    obs_dim: usize,           // obs elements per env (for ONNX shape)
     obs_bytes_per_env: usize, // obs_flat stride per env
-    act_dim: usize, // action elements per env
+    act_dim: usize,           // action elements per env
     act_bytes_per_env: usize, // action bytes per env (1 for discrete, dtype-sized for continuous)
     #[allow(dead_code)]
     device: DeviceType,
@@ -119,7 +119,7 @@ impl ScalarVecEnv {
         let mut envs = Vec::with_capacity(count);
         let mut ordered_ids = Vec::with_capacity(count);
         let mut uuid_to_idx = HashMap::with_capacity(count);
-        
+
         for i in 0..count {
             let env_id = reserve_id(client_namespace.as_ref(), env_context.as_ref())?;
             envs.push(env.clone());
@@ -289,7 +289,11 @@ impl VecEnvTrait for ScalarVecEnv {
             return None;
         }
         let n = self.envs.len();
-        if n == 0 { None } else { Some((n, self.obs_dim, self.act_dim)) }
+        if n == 0 {
+            None
+        } else {
+            Some((n, self.obs_dim, self.act_dim))
+        }
     }
 
     fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
@@ -309,10 +313,10 @@ impl VecEnvTrait for ScalarVecEnv {
 
         if n >= RAYON_STEP_MIN_ENVS {
             let mut rewards = vec![0.0f32; n];
-            let mut dones   = vec![false;   n];
+            let mut dones = vec![false; n];
 
             // Disjoint field borrows across the closure boundary.
-            let env_vec  = &self.envs;
+            let env_vec = &self.envs;
             let obs_flat = &mut self.obs_flat;
 
             let ok: bool = env_vec
@@ -325,15 +329,19 @@ impl VecEnvTrait for ScalarVecEnv {
                     let (obs, r, d) = env.dyn_step(env_act)?;
                     obs_chunk.copy_from_slice(&obs);
                     *reward = r;
-                    *done   = d;
+                    *done = d;
                     Some(())
                 })
                 .all(|r| r.is_some());
 
-            if ok { Some((self.obs_flat.clone(), rewards, dones)) } else { None }
+            if ok {
+                Some((self.obs_flat.clone(), rewards, dones))
+            } else {
+                None
+            }
         } else {
             let mut rewards = Vec::with_capacity(n);
-            let mut dones   = Vec::with_capacity(n);
+            let mut dones = Vec::with_capacity(n);
 
             for (i, env) in self.envs.iter().enumerate() {
                 let env_act = &actions[i * act_bpe..(i + 1) * act_bpe];

@@ -1,6 +1,8 @@
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::{ActorUuid, SharedRouterState};
-use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol, ControlPayload, DataPayload};
+use crate::network::client::runtime::router::{
+    ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
+};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
@@ -144,10 +146,24 @@ impl RouterDispatcher {
     fn get_timeout_for_message_protocol(protocol: &RoutingProtocol) -> Duration {
         match protocol {
             RoutingProtocol::Data(DataPayload::RequestInference(_)) => Duration::from_secs(10),
-            RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: _}) => Duration::from_secs(15),
-            RoutingProtocol::Data(DataPayload::FlagLastAction { reward: _, env_id: _, env_label: _ }) => Duration::from_secs(20),
-            RoutingProtocol::Control(ControlPayload::ModelHandshake) | RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp: _, trajectory: _ }) => Duration::from_secs(30),
-            RoutingProtocol::Control(ControlPayload::ModelUpdate { model_bytes: _, version: _ }) | RoutingProtocol::Control(ControlPayload::Shutdown) => Duration::from_secs(60),
+            RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: _ }) => {
+                Duration::from_secs(15)
+            }
+            RoutingProtocol::Data(DataPayload::FlagLastAction {
+                reward: _,
+                env_id: _,
+                env_label: _,
+            }) => Duration::from_secs(20),
+            RoutingProtocol::Control(ControlPayload::ModelHandshake)
+            | RoutingProtocol::Data(DataPayload::SendTrajectory {
+                timestamp: _,
+                trajectory: _,
+            }) => Duration::from_secs(30),
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                model_bytes: _,
+                version: _,
+            })
+            | RoutingProtocol::Control(ControlPayload::Shutdown) => Duration::from_secs(60),
         }
     }
 
@@ -454,10 +470,7 @@ mod unit_tests {
     }
 
     fn make_routed_message(actor_id: Uuid, protocol: RoutingProtocol) -> RoutedMessage {
-        RoutedMessage {
-            actor_id,
-            protocol,
-        }
+        RoutedMessage { actor_id, protocol }
     }
 
     fn make_actor_route(router_namespace: Option<RouterNamespace>) -> ActorRoute {

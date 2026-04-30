@@ -1,4 +1,4 @@
-use super::{RoutedMessage, RouterError, RoutingProtocol, ControlPayload};
+use super::{ControlPayload, RoutedMessage, RouterError, RoutingProtocol};
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::{
     ActorRoute, SharedRouterState, StateManager,
@@ -217,14 +217,8 @@ mod unit_tests {
         (Arc::new(RwLock::new(sm)), actor_id, actor_rx)
     }
 
-    fn make_msg(
-        actor_id: Uuid,
-        protocol: RoutingProtocol,
-    ) -> RoutedMessage {
-        RoutedMessage {
-            actor_id,
-            protocol,
-        }
+    fn make_msg(actor_id: Uuid, protocol: RoutingProtocol) -> RoutedMessage {
+        RoutedMessage { actor_id, protocol }
     }
 
     fn make_filter(
