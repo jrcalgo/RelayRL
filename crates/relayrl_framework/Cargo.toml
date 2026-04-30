@@ -47,6 +47,7 @@ active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
 tokio = { workspace = true, features = ["full"] }
+rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 rand = { workspace = true }
 log = { workspace = true, features = ["kv"] }
@@ -58,7 +59,7 @@ once_cell = "1.19.0"
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 bytemuck = { workspace = true }
-half = { version = "2.7.1", feature = ["bytemuck"]}
+half = { version = "2.7.1"}
 bincode = { workspace = true }
 bytes = "1.11.1"
 generic-array = { workspace = true }
