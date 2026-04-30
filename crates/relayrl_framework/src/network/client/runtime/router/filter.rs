@@ -1,4 +1,4 @@
-use super::{RoutedMessage, RouterError, RoutingProtocol};
+use super::{RoutedMessage, RouterError, RoutingProtocol, ControlPayload};
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::{
     ActorRoute, SharedRouterState, StateManager,
@@ -68,7 +68,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 msg_opt = rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
-                            if let RoutingProtocol::Shutdown = msg.protocol {
+                            if let RoutingProtocol::Control(ControlPayload::Shutdown) = msg.protocol {
                                 Self::route_message(msg, &this_router_namespace, &shared_router_state).await?;
                                 break Ok(());
                             }
@@ -220,12 +220,10 @@ mod unit_tests {
     fn make_msg(
         actor_id: Uuid,
         protocol: RoutingProtocol,
-        payload: RoutedPayload,
     ) -> RoutedMessage {
         RoutedMessage {
             actor_id,
             protocol,
-            payload,
         }
     }
 
@@ -253,8 +251,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 actor_id,
-                RoutingProtocol::ModelHandshake,
-                RoutedPayload::ModelHandshake,
+                RoutingProtocol::Control(ControlPayload::ModelHandshake),
             ))
             .await
             .unwrap();
@@ -281,8 +278,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 actor_id,
-                RoutingProtocol::ModelHandshake,
-                RoutedPayload::ModelHandshake,
+                RoutingProtocol::Control(ControlPayload::ModelHandshake),
             ))
             .await
             .unwrap();
@@ -308,8 +304,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 unknown,
-                RoutingProtocol::ModelHandshake,
-                RoutedPayload::ModelHandshake,
+                RoutingProtocol::Control(ControlPayload::ModelHandshake),
             ))
             .await
             .unwrap();
@@ -373,8 +368,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 actor_id,
-                RoutingProtocol::Shutdown,
-                RoutedPayload::Shutdown,
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
@@ -408,8 +402,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 actor_id,
-                RoutingProtocol::ModelHandshake,
-                RoutedPayload::ModelHandshake,
+                RoutingProtocol::Control(ControlPayload::ModelHandshake),
             ))
             .await
             .unwrap();

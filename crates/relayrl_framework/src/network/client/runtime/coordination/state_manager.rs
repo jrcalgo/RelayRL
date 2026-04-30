@@ -3,7 +3,7 @@
 //! This module tracks actor task handles, inboxes, router assignments, and local model handles for
 //! the client runtime.
 
-use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
+use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode, AlgorithmArgs};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{Actor, ActorEntity, ActorRuntime};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
@@ -17,7 +17,7 @@ use crate::network::client::runtime::data::environments::EnvironmentInterfaceErr
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol, ControlPayload};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 use crossbeam_utils::CachePadded;
@@ -392,8 +392,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             if model_handshake_flag {
                 let model_handshake_ms = RoutedMessage {
                     actor_id,
-                    protocol: RoutingProtocol::ModelHandshake,
-                    payload: RoutedPayload::ModelHandshake,
+                    protocol: RoutingProtocol::Control(ControlPayload::ModelHandshake),
                 };
                 let _ = tx_to_actor.send(model_handshake_ms).await;
             }
@@ -438,8 +437,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let tx: Sender<RoutedMessage> = entry.value().inbox.clone();
             let shutdown_msg = RoutedMessage {
                 actor_id,
-                protocol: RoutingProtocol::Shutdown,
-                payload: RoutedPayload::Shutdown,
+                protocol: RoutingProtocol::Control(ControlPayload::Shutdown),
             };
             let _ = tx.send(shutdown_msg).await;
 
@@ -864,6 +862,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
         step_count: usize,
+        algorithm_gradient: Option<(AlgorithmArgs, crate::network::client::agent::MaxTrajLength)>,
     ) -> Result<(), StateManagerError> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {

@@ -7,8 +7,9 @@
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes};
+use crate::network::client::agent::AlgorithmArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::{AlgorithmArgs, InferenceAddressesArgs, TrainingAddressesArgs};
+use crate::network::client::agent::{InferenceAddressesArgs, TrainingAddressesArgs};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifecycleManager, LifecycleManagerError,
 };
@@ -31,7 +32,7 @@ use crate::network::client::runtime::data::sinks::transport_sink::{
     ClientTransportInterface, TransportError, client_transport_factory,
 };
 use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+    InferenceRequest, RoutedMessage, RoutingProtocol, ControlPayload, DataPayload,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::TransportConfigParams;
@@ -250,7 +251,7 @@ pub(crate) trait ClientEnvironments<
     const D_OUT: usize,
 >
 {
-    async fn run_env(&self, actor_id: ActorUuid, step_count: usize)
+    async fn run_env(&self, actor_id: ActorUuid, step_count: usize, algorithm_gradient: Option<(AlgorithmArgs, crate::network::client::agent::MaxTrajLength)>)
     -> Result<(), CoordinatorError>;
     async fn set_env(
         &mut self,
@@ -322,8 +323,7 @@ impl<
 
             let model_version_message = RoutedMessage {
                 actor_id: id,
-                protocol: RoutingProtocol::ModelVersion,
-                payload: RoutedPayload::ModelVersion { reply_to: resp_tx },
+                protocol: RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: resp_tx }),
             };
 
             if let Err(e) = global_dispatcher_tx
@@ -365,11 +365,10 @@ impl<
             };
             let model_update_message = RoutedMessage {
                 actor_id,
-                protocol: RoutingProtocol::ModelUpdate,
-                payload: RoutedPayload::ModelUpdate {
+                protocol: RoutingProtocol::Control(ControlPayload::ModelUpdate {
                     model_bytes: model_bytes.clone(),
                     version: next_version,
-                },
+                }),
             };
 
             if let Err(e) = global_dispatcher_tx
@@ -1096,13 +1095,12 @@ impl<
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
                     let action_request_message = RoutedMessage {
                         actor_id: id,
-                        protocol: RoutingProtocol::RequestInference,
-                        payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
+                        protocol: RoutingProtocol::Data(DataPayload::RequestInference(Box::new(InferenceRequest {
                             observation: Box::new(observation.clone()),
                             mask: Box::new(mask.clone()),
                             reward,
                             reply_to: resp_tx,
-                        })),
+                        }))),
                     };
 
                     if let Err(e) = global_dispatcher_tx
@@ -1188,12 +1186,11 @@ impl<
                     let reward: f32 = reward.unwrap_or(0.0);
                     let flag_last_action_message = RoutedMessage {
                         actor_id: id,
-                        protocol: RoutingProtocol::FlagLastInference,
-                        payload: RoutedPayload::FlagLastInference {
+                        protocol: RoutingProtocol::Data(DataPayload::FlagLastAction {
                             reward,
                             env_id: None,
                             env_label: None,
-                        },
+                        }),
                     };
 
                     if let Err(e) = global_dispatcher_tx
@@ -1703,6 +1700,7 @@ impl<
         &self,
         actor_id: ActorUuid,
         step_count: usize,
+        algorithm_gradient: Option<(AlgorithmArgs, crate::network::client::agent::MaxTrajLength)>,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => match self.client_modes.actor_inference_mode {
@@ -1715,7 +1713,7 @@ impl<
                         .map_err(CoordinatorError::from)?;
 
                     StateManager::<B, D_IN, D_OUT>::run_env_step_loop(
-                        actor_id, runtime, env_map, step_count,
+                        actor_id, runtime, env_map, step_count, algorithm_gradient,
                     )
                     .map_err(CoordinatorError::from)
                 }

@@ -14,7 +14,7 @@ use crate::network::client::runtime::data::sinks::transport_sink::transport_disp
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+    InferenceRequest, RoutedMessage, ControlPayload, DataPayload, RoutingProtocol,
 };
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
@@ -501,11 +501,7 @@ impl<
             .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
         Ok(RoutedMessage {
             actor_id: self.actor_id,
-            protocol: RoutingProtocol::SendTrajectory,
-            payload: RoutedPayload::SendTrajectory {
-                timestamp: (duration.as_millis(), duration.as_nanos()),
-                trajectory,
-            },
+            protocol: RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp: (duration.as_millis(), duration.as_nanos()), trajectory }),
         })
     }
 
@@ -790,7 +786,7 @@ impl<
         ),
         ActorError,
     > {
-        let RoutedPayload::RequestInference(req) = msg.payload else {
+        let RoutingProtocol::Data(DataPayload::RequestInference(req)) = msg.protocol else {
             return Err(ActorError::MessageHandlingError(
                 "Expected RequestInference payload".to_string(),
             ));
@@ -895,12 +891,7 @@ impl<
     }
 
     async fn perform_flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::FlagLastInference {
-            reward,
-            env_id,
-            env_label,
-        } = msg.payload
-        {
+        if let RoutingProtocol::Data(DataPayload::FlagLastAction { reward, env_id, env_label }) = msg.protocol {
             return self
                 .runtime
                 .flag_last_action(reward, env_id, env_label)
@@ -966,22 +957,22 @@ impl<
     async fn spawn_loop(&mut self) -> Result<(), ActorError> {
         while let Some(msg) = self.rx_from_router.recv().await {
             match msg.protocol {
-                RoutingProtocol::ModelHandshake => {
+                RoutingProtocol::Control(ControlPayload::ModelHandshake) => {
                     self.initial_model_handshake(msg).await?;
                 }
-                RoutingProtocol::RequestInference => {
+                RoutingProtocol::Data(DataPayload::RequestInference(_)) => {
                     self.handle_inference_kind(msg).await?;
                 }
-                RoutingProtocol::FlagLastInference => {
+                RoutingProtocol::Data(DataPayload::FlagLastAction{reward: _, env_id: _, env_label: _}) => {
                     self.perform_flag_last_action(msg).await?;
                 }
-                RoutingProtocol::ModelVersion => {
+                RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: _ }) => {
                     self.get_model_version(msg).await?;
                 }
-                RoutingProtocol::ModelUpdate => {
+                RoutingProtocol::Control(ControlPayload::ModelUpdate { model_bytes: _, version: _ }) => {
                     self.refresh_model(msg).await?;
                 }
-                RoutingProtocol::Shutdown => {
+                RoutingProtocol::Control(ControlPayload::Shutdown) => {
                     self.handle_shutdown(msg).await?;
                     break;
                 }
@@ -992,7 +983,7 @@ impl<
     }
 
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::ModelHandshake = msg.payload {
+        if let RoutingProtocol::Control(ControlPayload::ModelHandshake) = msg.protocol {
             // Fast path: skip the handshake when a model is already available locally.
             if self.runtime.reloadable_model.load_full().is_some() {
                 log::warn!(
@@ -1138,7 +1129,7 @@ impl<
     }
 
     async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::ModelVersion { reply_to } = msg.payload {
+        if let RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to }) = msg.protocol {
             let version = self
                 .runtime
                 .reloadable_model
@@ -1154,10 +1145,10 @@ impl<
     }
 
     async fn refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::ModelUpdate {
+        if let RoutingProtocol::Control(ControlPayload::ModelUpdate {
             model_bytes,
             version,
-        } = msg.payload
+        }) = msg.protocol
         {
             #[cfg(feature = "metrics")]
             let start_time = Instant::now();
@@ -1347,12 +1338,10 @@ mod unit_tests {
     fn build_msg(
         actor_id: ActorUuid,
         protocol: RoutingProtocol,
-        payload: RoutedPayload,
     ) -> RoutedMessage {
         RoutedMessage {
             actor_id,
             protocol,
-            payload,
         }
     }
 
@@ -1397,8 +1386,7 @@ mod unit_tests {
 
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -1423,8 +1411,7 @@ mod unit_tests {
         let (reply_tx, reply_rx) = oneshot::channel::<i64>();
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::ModelVersion,
-            RoutedPayload::ModelVersion { reply_to: reply_tx },
+            RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: reply_tx }),
         ))
         .await
         .unwrap();
@@ -1439,8 +1426,7 @@ mod unit_tests {
         // Shutdown the actor
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -1456,12 +1442,7 @@ mod unit_tests {
         // Build trajectory via FlagLastInference (adds a terminal action)
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::FlagLastInference,
-            RoutedPayload::FlagLastInference {
-                reward: 1.0,
-                env_id: None,
-                env_label: None,
-            },
+            RoutingProtocol::Data(DataPayload::FlagLastAction { reward: 1.0, env_id: None, env_label: None }),
         ))
         .await
         .unwrap();
@@ -1480,8 +1461,7 @@ mod unit_tests {
         // Now send Shutdown
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -1497,8 +1477,7 @@ mod unit_tests {
         // Send Shutdown immediately without adding any actions
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -1519,12 +1498,7 @@ mod unit_tests {
 
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::FlagLastInference,
-            RoutedPayload::FlagLastInference {
-                reward: 0.0,
-                env_id: None,
-                env_label: None,
-            },
+            RoutingProtocol::Data(DataPayload::FlagLastAction { reward: 0.0, env_id: None, env_label: None }),
         ))
         .await
         .unwrap();
@@ -1578,12 +1552,7 @@ mod unit_tests {
         actor
             .perform_flag_last_action(build_msg(
                 actor.actor_id,
-                RoutingProtocol::FlagLastInference,
-                RoutedPayload::FlagLastInference {
-                    reward: 1.0,
-                    env_id: Some(env_id_1),
-                    env_label: Some("env-1".to_string()),
-                },
+                RoutingProtocol::Data(DataPayload::FlagLastAction { reward: 1.0, env_id: Some(env_id_1), env_label: Some("env-1".to_string()) }),
             ))
             .await
             .unwrap();
@@ -1632,8 +1601,7 @@ mod unit_tests {
             // Immediately shut each actor down
             tx.send(build_msg(
                 actor_id,
-                RoutingProtocol::Shutdown,
-                RoutedPayload::Shutdown,
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
@@ -1660,12 +1628,7 @@ mod unit_tests {
         let result = actor
             .perform_flag_last_action(build_msg(
                 actor_id,
-                RoutingProtocol::FlagLastInference,
-                RoutedPayload::FlagLastInference {
-                    reward: 0.0,
-                    env_id: None,
-                    env_label: None,
-                },
+                RoutingProtocol::Data(DataPayload::FlagLastAction { reward: 0.0, env_id: None, env_label: None }),
             ))
             .await;
 
@@ -1689,8 +1652,7 @@ mod unit_tests {
         let result = actor
             .get_model_version(build_msg(
                 actor_id,
-                RoutingProtocol::ModelVersion,
-                RoutedPayload::ModelVersion { reply_to: reply_tx },
+                RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: reply_tx }),
             ))
             .await;
 

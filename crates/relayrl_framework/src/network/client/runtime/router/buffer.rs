@@ -3,7 +3,7 @@
 //! This module handles local file output for the beta-supported local/default runtime and can also
 //! fan out trajectories to experimental transport-backed training sinks.
 
-use super::{RoutedMessage, RoutedPayload, RouterError};
+use super::{RoutedMessage, RoutingProtocol, ControlPayload, DataPayload, RouterError};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::ActorTrainingDataMode;
 use crate::network::client::agent::ClientModes;
@@ -347,7 +347,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         match msg_opt {
                             Some(msg) => {
                                 // Only process SendTrajectory payloads
-                                if let RoutedPayload::SendTrajectory { timestamp, trajectory } = msg.payload {
+                                if let RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp, trajectory }) = msg.protocol {
                                     let permit = match (&mut rx_semaphore, &recv_max_traj_length, &recv_actor_count) {
                                         (Some(semaphore), Some(traj_length), Some(actor_count)) => {
                                             let new_capacity = (*traj_length.read().await)
@@ -770,11 +770,7 @@ mod unit_tests {
         let ts = now_millis();
         RoutedMessage {
             actor_id,
-            protocol: RoutingProtocol::SendTrajectory,
-            payload: RoutedPayload::SendTrajectory {
-                timestamp: (ts, ts * 1_000_000),
-                trajectory: traj,
-            },
+            protocol: RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp: (ts, ts * 1_000_000), trajectory: traj }),
         }
     }
 
@@ -945,8 +941,7 @@ mod unit_tests {
         // Send a Shutdown message (non-trajectory payload)
         tx.send(RoutedMessage {
             actor_id,
-            protocol: RoutingProtocol::Shutdown,
-            payload: RoutedPayload::Shutdown,
+            protocol: RoutingProtocol::Control(ControlPayload::Shutdown),
         })
         .await
         .unwrap();
