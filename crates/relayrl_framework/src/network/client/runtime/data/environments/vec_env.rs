@@ -1,4 +1,5 @@
 use crate::network::ENVIRONMENT_CONTEXT_PREFIX;
+
 use active_uuid_registry::{
     ContextString, UuidPoolError,
     interface::{add_id, remove_id, reserve_id},
@@ -6,9 +7,13 @@ use active_uuid_registry::{
 use relayrl_env_trait::*;
 use relayrl_types::data::tensor::NdArrayDType;
 use relayrl_types::data::tensor::{DType, DeviceType};
+
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
+
+const RAYON_STEP_MIN_ENVS: usize = 8;
 
 #[derive(Debug, Error)]
 pub enum VecEnvError {
@@ -53,7 +58,6 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     fn reset_all(&mut self) -> Result<(), VecEnvError>;
     fn reset_where(&mut self, env_ids: &[EnvironmentUuid]) -> Result<(), VecEnvError>;
 
-    // ── Flat-buffer fast path (opt-in via VectorEnvironment defaults) ────────────
     /// Returns `(n_envs, obs_dim, act_dim)` if the underlying env supports the flat path.
     fn n_envs_dims(&self) -> Option<(usize, usize, usize)> {
         None
@@ -62,7 +66,6 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
         None
     }
-    /// Step all sub-envs; `actions` bytes layout mirrors `flat_obs_clone`.
     /// Returns `(new_obs_bytes, rewards, dones)`.
     fn step_bytes(&mut self, _actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
         None
@@ -81,13 +84,13 @@ pub(crate) struct ScalarVecEnv {
     client_namespace: Arc<str>,
     env_context: ContextString,
     prototype: Box<dyn DynScalarEnvironment>,
-    envs: HashMap<EnvironmentUuid, Box<dyn DynScalarEnvironment>>,
-    // Fast-path: stable ordering and flat obs/action byte buffers
+    envs: Vec<Box<dyn DynScalarEnvironment>>,
     ordered_ids: Vec<EnvironmentUuid>,
-    obs_flat: Vec<u8>,        // raw bytes; element dtype = observation_dtype
-    obs_dim: usize,           // obs elements per env (for ONNX shape)
+    uuid_to_idx: HashMap<EnvironmentUuid, usize>,
+    obs_flat: Vec<u8>, // raw bytes; element dtype = observation_dtype
+    obs_dim: usize, // obs elements per env (for ONNX shape)
     obs_bytes_per_env: usize, // obs_flat stride per env
-    act_dim: usize,           // action elements per env
+    act_dim: usize, // action elements per env
     act_bytes_per_env: usize, // action bytes per env (1 for discrete, dtype-sized for continuous)
     #[allow(dead_code)]
     device: DeviceType,
@@ -113,12 +116,15 @@ impl ScalarVecEnv {
         }
 
         let env_context = format!("{}:scalar", ENVIRONMENT_CONTEXT_PREFIX);
-        let mut envs = HashMap::with_capacity(count);
+        let mut envs = Vec::with_capacity(count);
         let mut ordered_ids = Vec::with_capacity(count);
-        for _ in 0..count {
+        let mut uuid_to_idx = HashMap::with_capacity(count);
+        
+        for i in 0..count {
             let env_id = reserve_id(client_namespace.as_ref(), env_context.as_ref())?;
-            envs.insert(env_id, env.clone());
+            envs.push(env.clone());
             ordered_ids.push(env_id);
+            uuid_to_idx.insert(env_id, i);
         }
 
         // Probe fast-path support from the prototype env.
@@ -140,8 +146,8 @@ impl ScalarVecEnv {
 
         let obs_flat = if obs_bytes_per_env > 0 && act_dim > 0 {
             let mut buf = Vec::with_capacity(count * obs_bytes_per_env);
-            for uuid in &ordered_ids {
-                buf.extend_from_slice(&envs[uuid].dyn_flat_obs());
+            for e in &envs {
+                buf.extend_from_slice(&e.dyn_flat_obs());
             }
             buf
         } else {
@@ -154,6 +160,7 @@ impl ScalarVecEnv {
             prototype: env,
             envs,
             ordered_ids,
+            uuid_to_idx,
             obs_flat,
             obs_dim,
             obs_bytes_per_env,
@@ -172,7 +179,7 @@ impl VecEnvTrait for ScalarVecEnv {
     }
 
     fn env_ids(&self) -> Vec<EnvironmentUuid> {
-        self.envs.keys().copied().collect()
+        self.ordered_ids.clone()
     }
 
     fn resize(&mut self, count: usize) -> Result<(), VecEnvError> {
@@ -181,14 +188,15 @@ impl VecEnvTrait for ScalarVecEnv {
             return Ok(());
         }
         if count > current {
-            for _ in 0..(count - current) {
+            for i in 0..(count - current) {
                 let env_id = reserve_id(self.client_namespace.as_ref(), self.env_context.as_ref())?;
                 let new_env = self.prototype.clone();
                 if self.obs_bytes_per_env > 0 {
                     self.obs_flat.extend_from_slice(&new_env.dyn_flat_obs());
                 }
-                self.envs.insert(env_id, new_env);
+                self.envs.push(new_env);
                 self.ordered_ids.push(env_id);
+                self.uuid_to_idx.insert(env_id, i);
             }
         } else {
             let removed: Vec<_> = self.ordered_ids.drain(count..).collect();
@@ -196,7 +204,7 @@ impl VecEnvTrait for ScalarVecEnv {
                 self.obs_flat.truncate(count * self.obs_bytes_per_env);
             }
             for env_id in removed {
-                self.envs.remove(&env_id);
+                self.uuid_to_idx.remove(&env_id);
                 remove_id(
                     self.client_namespace.as_ref(),
                     self.env_context.as_ref(),
@@ -208,41 +216,80 @@ impl VecEnvTrait for ScalarVecEnv {
     }
 
     fn reset_all(&mut self) -> Result<(), VecEnvError> {
-        let ids = self.env_ids();
-        self.reset_where(&ids)
-    }
+        let obs_bpe = self.obs_bytes_per_env;
+        let n = self.envs.len();
 
-    fn reset_where(&mut self, env_ids: &[EnvironmentUuid]) -> Result<(), VecEnvError> {
-        let obs_bytes_per_env = self.obs_bytes_per_env;
-        for env_id in env_ids {
-            let env = self
-                .envs
-                .get(env_id)
-                .ok_or(VecEnvError::UnknownEnv(*env_id))?;
-            env.reset()?;
-            // Keep obs_flat in sync when fast path is active
-            if obs_bytes_per_env > 0
-                && let Some(idx) = self.ordered_ids.iter().position(|id| id == env_id)
-            {
-                self.obs_flat[idx * obs_bytes_per_env..(idx + 1) * obs_bytes_per_env]
-                    .copy_from_slice(&env.dyn_flat_obs());
+        if n >= RAYON_STEP_MIN_ENVS && obs_bpe > 0 {
+            let env_vec = &self.envs;
+            let obs_flat = &mut self.obs_flat;
+            env_vec
+                .par_iter()
+                .zip(obs_flat.par_chunks_mut(obs_bpe))
+                .for_each(|(env, obs_chunk)| {
+                    let _ = env.reset();
+                    let obs = env.dyn_flat_obs();
+                    obs_chunk.copy_from_slice(&obs);
+                });
+        } else if n >= RAYON_STEP_MIN_ENVS {
+            self.envs.par_iter().for_each(|env| {
+                let _ = env.reset();
+            });
+        } else {
+            for (i, env) in self.envs.iter().enumerate() {
+                env.reset()?;
+                if obs_bpe > 0 {
+                    let obs = env.dyn_flat_obs();
+                    self.obs_flat[i * obs_bpe..(i + 1) * obs_bpe].copy_from_slice(&obs);
+                }
             }
         }
         Ok(())
     }
 
-    // ── Fast-path overrides ──────────────────────────────────────────────────────
+    fn reset_where(&mut self, env_ids: &[EnvironmentUuid]) -> Result<(), VecEnvError> {
+        if env_ids.is_empty() {
+            return Ok(());
+        }
+        let obs_bpe = self.obs_bytes_per_env;
+
+        // Validate all UUIDs upfront; fail before any reset starts.
+        let indices: Vec<usize> = env_ids
+            .iter()
+            .map(|uuid| {
+                self.uuid_to_idx
+                    .get(uuid)
+                    .copied()
+                    .ok_or(VecEnvError::UnknownEnv(*uuid))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if indices.len() >= RAYON_STEP_MIN_ENVS {
+            let env_vec = &self.envs;
+            indices.par_iter().for_each(|&idx| {
+                let _ = env_vec[idx].reset();
+            });
+        } else {
+            for &idx in &indices {
+                self.envs[idx].reset()?;
+            }
+        }
+
+        // Sequential obs_flat sync over arbitrary indices.
+        if obs_bpe > 0 {
+            for &idx in &indices {
+                let obs = self.envs[idx].dyn_flat_obs();
+                self.obs_flat[idx * obs_bpe..(idx + 1) * obs_bpe].copy_from_slice(&obs);
+            }
+        }
+        Ok(())
+    }
 
     fn n_envs_dims(&self) -> Option<(usize, usize, usize)> {
         if self.obs_bytes_per_env == 0 || self.act_dim == 0 {
             return None;
         }
-        let n = self.ordered_ids.len();
-        if n == 0 {
-            None
-        } else {
-            Some((n, self.obs_dim, self.act_dim))
-        }
+        let n = self.envs.len();
+        if n == 0 { None } else { Some((n, self.obs_dim, self.act_dim)) }
     }
 
     fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
@@ -256,21 +303,47 @@ impl VecEnvTrait for ScalarVecEnv {
         if self.obs_bytes_per_env == 0 {
             return None;
         }
-        let n = self.ordered_ids.len();
-        let obs_bytes_per_env = self.obs_bytes_per_env;
-        let act_bytes_per_env = self.act_bytes_per_env;
-        let mut rewards = Vec::with_capacity(n);
-        let mut dones = Vec::with_capacity(n);
+        let n = self.envs.len();
+        let obs_bpe = self.obs_bytes_per_env;
+        let act_bpe = self.act_bytes_per_env;
 
-        for (i, uuid) in self.ordered_ids.iter().enumerate() {
-            let env = self.envs.get(uuid)?;
-            let env_act = &actions[i * act_bytes_per_env..(i + 1) * act_bytes_per_env];
-            let (obs, reward, done) = env.dyn_step(env_act)?;
-            self.obs_flat[i * obs_bytes_per_env..(i + 1) * obs_bytes_per_env].copy_from_slice(&obs);
-            rewards.push(reward);
-            dones.push(done);
+        if n >= RAYON_STEP_MIN_ENVS {
+            let mut rewards = vec![0.0f32; n];
+            let mut dones   = vec![false;   n];
+
+            // Disjoint field borrows across the closure boundary.
+            let env_vec  = &self.envs;
+            let obs_flat = &mut self.obs_flat;
+
+            let ok: bool = env_vec
+                .par_iter()
+                .zip(obs_flat.par_chunks_mut(obs_bpe))
+                .zip(actions.par_chunks(act_bpe))
+                .zip(rewards.par_iter_mut())
+                .zip(dones.par_iter_mut())
+                .map(|((((env, obs_chunk), env_act), reward), done)| {
+                    let (obs, r, d) = env.dyn_step(env_act)?;
+                    obs_chunk.copy_from_slice(&obs);
+                    *reward = r;
+                    *done   = d;
+                    Some(())
+                })
+                .all(|r| r.is_some());
+
+            if ok { Some((self.obs_flat.clone(), rewards, dones)) } else { None }
+        } else {
+            let mut rewards = Vec::with_capacity(n);
+            let mut dones   = Vec::with_capacity(n);
+
+            for (i, env) in self.envs.iter().enumerate() {
+                let env_act = &actions[i * act_bpe..(i + 1) * act_bpe];
+                let (obs, reward, done) = env.dyn_step(env_act)?;
+                self.obs_flat[i * obs_bpe..(i + 1) * obs_bpe].copy_from_slice(&obs);
+                rewards.push(reward);
+                dones.push(done);
+            }
+            Some((self.obs_flat.clone(), rewards, dones))
         }
-        Some((self.obs_flat.clone(), rewards, dones))
     }
 
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
@@ -284,13 +357,12 @@ impl VecEnvTrait for ScalarVecEnv {
         if self.obs_bytes_per_env == 0 {
             return None;
         }
-        let discrete = self
-            .ordered_ids
-            .first()
-            .and_then(|uuid| self.envs.get(uuid))
-            .map(|env| env.action_is_discrete())
-            .unwrap_or(true);
-        Some(discrete)
+        Some(
+            self.envs
+                .first()
+                .map(|env| env.action_is_discrete())
+                .unwrap_or(true),
+        )
     }
 }
 
