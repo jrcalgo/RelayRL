@@ -80,11 +80,7 @@ impl<B: Backend + BackendMatcher> DeterministicActorNet<B> {
 
 // ── DefaultTD3Kernel ──────────────────────────────────────────────────────────
 
-pub struct DefaultTD3Kernel<
-    B: Backend + BackendMatcher,
-    InK: TensorKind<B>,
-    OutK: TensorKind<B>,
-> {
+pub struct DefaultTD3Kernel<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
     pub inference_actor: DeterministicActorNet<B>,
     pub obs_dim: usize,
     pub act_dim: usize,
@@ -264,7 +260,12 @@ pub mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> ActorMlp<B> {
-        pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            hidden_sizes: &[usize],
+            act_dim: usize,
+            device: &B::Device,
+        ) -> Self {
             let mut dims = vec![obs_dim];
             dims.extend_from_slice(hidden_sizes);
             dims.push(act_dim);
@@ -272,14 +273,23 @@ pub mod training {
                 .windows(2)
                 .map(|w| LinearConfig::new(w[0], w[1]).init(device))
                 .collect();
-            Self { layers, relu: Relu::new(), obs_dim, act_dim }
+            Self {
+                layers,
+                relu: Relu::new(),
+                obs_dim,
+                act_dim,
+            }
         }
 
         pub fn forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
             let mut x = input;
             for (i, layer) in self.layers.iter().enumerate() {
                 x = layer.forward(x);
-                if i < self.layers.len() - 1 { x = self.relu.forward(x); } else { x = x.tanh(); }
+                if i < self.layers.len() - 1 {
+                    x = self.relu.forward(x);
+                } else {
+                    x = x.tanh();
+                }
             }
             x
         }
@@ -296,7 +306,12 @@ pub mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> TwinCriticMlp<B> {
-        pub fn new(obs_dim: usize, act_dim: usize, hidden_sizes: &[usize], device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            act_dim: usize,
+            hidden_sizes: &[usize],
+            device: &B::Device,
+        ) -> Self {
             let input_dim = obs_dim + act_dim;
             let mut dims = vec![input_dim];
             dims.extend_from_slice(hidden_sizes);
@@ -309,7 +324,12 @@ pub mod training {
                 .windows(2)
                 .map(|w| LinearConfig::new(w[0], w[1]).init(device))
                 .collect();
-            Self { q1_layers, q2_layers, relu: Relu::new(), input_dim }
+            Self {
+                q1_layers,
+                q2_layers,
+                relu: Relu::new(),
+                input_dim,
+            }
         }
 
         fn forward_q(
@@ -321,7 +341,9 @@ pub mod training {
             let mut x = Tensor::cat(vec![obs, act], 1);
             for (i, layer) in layers.iter().enumerate() {
                 x = layer.forward(x);
-                if i < layers.len() - 1 { x = relu.forward(x); }
+                if i < layers.len() - 1 {
+                    x = relu.forward(x);
+                }
             }
             x
         }
@@ -355,7 +377,12 @@ pub mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> CriticMlp<B> {
-        pub fn new(obs_dim: usize, act_dim: usize, hidden_sizes: &[usize], device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            act_dim: usize,
+            hidden_sizes: &[usize],
+            device: &B::Device,
+        ) -> Self {
             let input_dim = obs_dim + act_dim;
             let mut dims = vec![input_dim];
             dims.extend_from_slice(hidden_sizes);
@@ -364,14 +391,24 @@ pub mod training {
                 .windows(2)
                 .map(|w| LinearConfig::new(w[0], w[1]).init(device))
                 .collect();
-            Self { layers, relu: Relu::new(), input_dim }
+            Self {
+                layers,
+                relu: Relu::new(),
+                input_dim,
+            }
         }
 
-        pub fn forward(&self, obs: Tensor<B, 2, Float>, act: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+        pub fn forward(
+            &self,
+            obs: Tensor<B, 2, Float>,
+            act: Tensor<B, 2, Float>,
+        ) -> Tensor<B, 2, Float> {
             let mut x = Tensor::cat(vec![obs, act], 1);
             for (i, layer) in self.layers.iter().enumerate() {
                 x = layer.forward(x);
-                if i < self.layers.len() - 1 { x = self.relu.forward(x); }
+                if i < self.layers.len() - 1 {
+                    x = self.relu.forward(x);
+                }
             }
             x
         }
@@ -407,7 +444,12 @@ pub mod training {
             Self {
                 actor: Some(ActorMlp::new(obs_dim, hidden_sizes, act_dim, &device_tb)),
                 actor_target: Some(ActorMlp::new(obs_dim, hidden_sizes, act_dim, &device_nd)),
-                critic: Some(TwinCriticMlp::new(obs_dim, act_dim, hidden_sizes, &device_tb)),
+                critic: Some(TwinCriticMlp::new(
+                    obs_dim,
+                    act_dim,
+                    hidden_sizes,
+                    &device_tb,
+                )),
                 critic_target: Some(CriticMlp::new(obs_dim, act_dim, hidden_sizes, &device_nd)),
                 actor_optimizer: AdamConfig::new().init::<TB, ActorMlp<TB>>(),
                 critic_optimizer: AdamConfig::new().init::<TB, TwinCriticMlp<TB>>(),
@@ -444,24 +486,58 @@ pub mod training {
                 return TD3TrainMetrics::default();
             }
 
-            let actor = match self.actor.take() { Some(a) => a, None => return TD3TrainMetrics::default() };
-            let critic = match self.critic.take() { Some(c) => c, None => { self.actor = Some(actor); return TD3TrainMetrics::default(); } };
-            let actor_target = match self.actor_target.take() { Some(a) => a, None => { self.actor = Some(actor); self.critic = Some(critic); return TD3TrainMetrics::default(); } };
-            let critic_target = match self.critic_target.take() { Some(c) => c, None => { self.actor = Some(actor); self.critic = Some(critic); self.actor_target = Some(actor_target); return TD3TrainMetrics::default(); } };
+            let actor = match self.actor.take() {
+                Some(a) => a,
+                None => return TD3TrainMetrics::default(),
+            };
+            let critic = match self.critic.take() {
+                Some(c) => c,
+                None => {
+                    self.actor = Some(actor);
+                    return TD3TrainMetrics::default();
+                }
+            };
+            let actor_target = match self.actor_target.take() {
+                Some(a) => a,
+                None => {
+                    self.actor = Some(actor);
+                    self.critic = Some(critic);
+                    return TD3TrainMetrics::default();
+                }
+            };
+            let critic_target = match self.critic_target.take() {
+                Some(c) => c,
+                None => {
+                    self.actor = Some(actor);
+                    self.critic = Some(critic);
+                    self.actor_target = Some(actor_target);
+                    return TD3TrainMetrics::default();
+                }
+            };
 
             let device_tb = <TB as Backend>::Device::default();
             let device_nd = <NdArray as Backend>::Device::default();
 
             let obs = Tensor::<TB, 2, Float>::from_data(
-                BurnTensorData::new(tensor_flat(obs_tensors), [n, self.obs_dim]), &device_tb);
+                BurnTensorData::new(tensor_flat(obs_tensors), [n, self.obs_dim]),
+                &device_tb,
+            );
             let act = Tensor::<TB, 2, Float>::from_data(
-                BurnTensorData::new(tensor_flat(act_tensors), [n, self.act_dim]), &device_tb);
+                BurnTensorData::new(tensor_flat(act_tensors), [n, self.act_dim]),
+                &device_tb,
+            );
             let next_obs_nd = Tensor::<NdArray, 2, Float>::from_data(
-                BurnTensorData::new(tensor_flat(next_obs_tensors), [n, self.obs_dim]), &device_nd);
+                BurnTensorData::new(tensor_flat(next_obs_tensors), [n, self.obs_dim]),
+                &device_nd,
+            );
             let rew = Tensor::<TB, 1, Float>::from_data(
-                BurnTensorData::new(rewards[..n].to_vec(), [n]), &device_tb);
+                BurnTensorData::new(rewards[..n].to_vec(), [n]),
+                &device_tb,
+            );
             let done = Tensor::<TB, 1, Float>::from_data(
-                BurnTensorData::new(dones[..n].to_vec(), [n]), &device_tb);
+                BurnTensorData::new(dones[..n].to_vec(), [n]),
+                &device_tb,
+            );
 
             // Target policy smoothing: next_act = clamp(actor_target(s') + noise, -1, 1)
             let next_act_raw_nd = actor_target.forward(next_obs_nd.clone());
@@ -473,21 +549,33 @@ pub mod training {
                 })
                 .collect();
             let noise_tensor_nd = Tensor::<NdArray, 2, Float>::from_data(
-                BurnTensorData::new(noise_nd, [n, self.act_dim]), &device_nd);
+                BurnTensorData::new(noise_nd, [n, self.act_dim]),
+                &device_nd,
+            );
             let next_act_nd = (next_act_raw_nd + noise_tensor_nd).clamp(-1.0, 1.0);
 
             // Target Q: min(Q1_target, Q2_target) — approximate with single critic target
-            let tgt_q1_nd = critic_target.forward(next_obs_nd.clone(), next_act_nd.clone()).reshape([n]);
+            let tgt_q1_nd = critic_target
+                .forward(next_obs_nd.clone(), next_act_nd.clone())
+                .reshape([n]);
             // Use same critic_target for Q2 approximation (single target critic for simplicity)
             let tgt_q2_nd = critic_target.forward(next_obs_nd, next_act_nd).reshape([n]);
             let tgt_q_vals: Vec<f32> = tgt_q1_nd
-                .into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n])
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or_else(|_| vec![0.0; n])
                 .iter()
-                .zip(tgt_q2_nd.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]).iter())
+                .zip(
+                    tgt_q2_nd
+                        .into_data()
+                        .to_vec::<f32>()
+                        .unwrap_or_else(|_| vec![0.0; n])
+                        .iter(),
+                )
                 .map(|(a, b)| a.min(*b))
                 .collect();
-            let tgt_q_tb = Tensor::<TB, 1, Float>::from_data(
-                BurnTensorData::new(tgt_q_vals, [n]), &device_tb);
+            let tgt_q_tb =
+                Tensor::<TB, 1, Float>::from_data(BurnTensorData::new(tgt_q_vals, [n]), &device_tb);
             let not_done = done.neg().add_scalar(1.0f32);
             let target = rew + not_done * tgt_q_tb * gamma;
 
@@ -497,8 +585,11 @@ pub mod training {
                 + (q2.reshape([n]) - target).powf_scalar(2.0).mean();
             let critic_loss_val = scalar_f32(&critic_loss);
             let grads_c = critic_loss.backward();
-            let critic_grads = GradientsParams::from_grads::<TB, TwinCriticMlp<TB>>(grads_c, &critic);
-            let critic = self.critic_optimizer.step(self.critic_lr, critic, critic_grads);
+            let critic_grads =
+                GradientsParams::from_grads::<TB, TwinCriticMlp<TB>>(grads_c, &critic);
+            let critic = self
+                .critic_optimizer
+                .step(self.critic_lr, critic, critic_grads);
 
             // ── Delayed actor update ──────────────────────────────────────────
             let policy_updated = self.total_it % policy_frequency as u64 == 0;
@@ -553,7 +644,11 @@ pub mod training {
         }
     }
 
-    fn soft_update_critic_target(critic: &TwinCriticMlp<TB>, target: &mut CriticMlp<NdArray>, tau: f32) {
+    fn soft_update_critic_target(
+        critic: &TwinCriticMlp<TB>,
+        target: &mut CriticMlp<NdArray>,
+        tau: f32,
+    ) {
         // Update target using Q1 layers from twin critic
         for (c_layer, t_layer) in critic.q1_layers.iter().zip(target.layers.iter_mut()) {
             let cur_w = c_layer.weight.val().inner();
@@ -568,7 +663,10 @@ pub mod training {
     }
 
     fn scalar_f32(t: &Tensor<TB, 1, Float>) -> f32 {
-        t.clone().into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0])[0]
+        t.clone()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap_or_else(|_| vec![0.0])[0]
     }
 
     pub fn tensor_flat(tensors: &[TensorData]) -> Vec<f32> {

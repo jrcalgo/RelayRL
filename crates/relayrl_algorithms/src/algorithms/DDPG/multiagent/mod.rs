@@ -6,9 +6,7 @@ pub use replay_buffer::*;
 
 use crate::logging::{EpochLogger, SessionLogger};
 use crate::templates::base_algorithm::{AlgorithmError, AlgorithmTrait, TrajectoryData};
-use crate::templates::base_replay_buffer::{
-    Batch, GenericReplayBuffer, ReplayBufferError,
-};
+use crate::templates::base_replay_buffer::{Batch, GenericReplayBuffer, ReplayBufferError};
 
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;

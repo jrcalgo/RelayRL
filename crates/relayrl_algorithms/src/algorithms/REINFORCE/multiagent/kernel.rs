@@ -163,14 +163,12 @@ impl MultiagentReinforceKernel {
     }
 }
 
+use crate::templates::base_algorithm::{MultiagentKernelTrait, StepAction, StepKernelTrait};
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
-use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
-use crate::templates::base_algorithm::{
-    MultiagentKernelTrait, StepAction, StepKernelTrait,
-};
-use relayrl_types::prelude::tensor::relayrl::TensorError;
 use relayrl_types::prelude::tensor::burn::Tensor;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+use relayrl_types::prelude::tensor::relayrl::TensorError;
 use std::collections::HashMap;
 
 /// Kernel trait for multi-agent REINFORCE algorithms.
@@ -183,10 +181,7 @@ pub trait MultiagentReinforceKernelTrait<
     OutK: TensorKind<B>,
 >: MultiagentKernelTrait<B, InK, OutK>
 {
-    fn train_epoch(
-        &mut self,
-        agent_batches: &[AgentBatch],
-    ) -> MultiagentTrainMetrics;
+    fn train_epoch(&mut self, agent_batches: &[AgentBatch]) -> MultiagentTrainMetrics;
 }
 
 impl<B, InK, OutK> StepKernelTrait<B, InK, OutK> for MultiagentReinforceKernel
@@ -199,7 +194,13 @@ where
         &self,
         _obs: Tensor<B, IN_D, InK>,
         _mask: Tensor<B, OUT_D, OutK>,
-    ) -> Result<(StepAction<B>, HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>), TensorError> {
+    ) -> Result<
+        (
+            StepAction<B>,
+            HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>,
+        ),
+        TensorError,
+    > {
         Err(TensorError::BackendError(
             "MultiagentReinforceKernel inference should be performed through the framework actor, not directly".to_string(),
         ))
@@ -231,10 +232,7 @@ where
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
 {
-    fn train_epoch(
-        &mut self,
-        agent_batches: &[AgentBatch],
-    ) -> MultiagentTrainMetrics {
+    fn train_epoch(&mut self, agent_batches: &[AgentBatch]) -> MultiagentTrainMetrics {
         MultiagentReinforceKernel::train_epoch(self, agent_batches)
     }
 }

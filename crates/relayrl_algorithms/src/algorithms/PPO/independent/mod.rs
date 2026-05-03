@@ -80,6 +80,7 @@ impl AgentRegistry {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IPPOParams {
     pub discrete: bool,
     pub gamma: f32,

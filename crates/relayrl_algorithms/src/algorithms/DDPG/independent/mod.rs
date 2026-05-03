@@ -5,8 +5,12 @@ pub use kernel::*;
 pub use replay_buffer::*;
 
 use crate::logging::{EpochLogger, SessionLogger};
-use crate::templates::base_algorithm::{AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData};
-use crate::templates::base_replay_buffer::{Batch, BatchKey, BufferSample, GenericReplayBuffer, ReplayBufferError, SampleScalars};
+use crate::templates::base_algorithm::{
+    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData,
+};
+use crate::templates::base_replay_buffer::{
+    Batch, BatchKey, BufferSample, GenericReplayBuffer, ReplayBufferError, SampleScalars,
+};
 
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
@@ -147,8 +151,7 @@ where
     }
 }
 
-struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN>
-{
+struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN> {
     epoch_logger: EpochLogger,
     epoch_count: u64,
     agent_registry: AgentRegistry,
@@ -447,9 +450,9 @@ where
                     _ => continue,
                 };
 
-                let metrics =
-                    slot.kernel
-                        .ddpg_train_step(obs, act, next_obs, rew, done, gamma, tau);
+                let metrics = slot
+                    .kernel
+                    .ddpg_train_step(obs, act, next_obs, rew, done, gamma, tau);
                 slot.step_count = slot.step_count.saturating_add(0); // counts already updated
 
                 self.runtime

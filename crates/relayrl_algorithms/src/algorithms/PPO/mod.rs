@@ -11,4 +11,6 @@ pub use independent::{
 };
 pub use multiagent::kernel::MultiagentPPOKernel;
 pub use multiagent::replay_buffer::MultiagentPPOReplayBuffer;
-pub use multiagent::{MAPPOAlgorithm, MAPPOParams, MultiagentPPOAlgorithm, MultiagentPPOKernelTrait};
+pub use multiagent::{
+    MAPPOAlgorithm, MAPPOParams, MultiagentPPOAlgorithm, MultiagentPPOKernelTrait,
+};

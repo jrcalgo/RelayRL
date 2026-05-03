@@ -64,13 +64,7 @@ impl Default for MultiagentDDPGKernel {
 }
 
 impl MultiagentDDPGKernel {
-    pub fn new(
-        obs_dim: usize,
-        act_dim: usize,
-        actor_lr: f32,
-        critic_lr: f32,
-        tau: f32,
-    ) -> Self {
+    pub fn new(obs_dim: usize, act_dim: usize, actor_lr: f32, critic_lr: f32, tau: f32) -> Self {
         let hidden_sizes = vec![256usize, 256];
         Self {
             obs_dim,
@@ -161,14 +155,12 @@ impl MultiagentDDPGKernel {
 // Kernel traits
 // ─────────────────────────────────────────────────────────────────────────────
 
+use crate::templates::base_algorithm::{MultiagentKernelTrait, StepAction, StepKernelTrait};
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
-use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
-use crate::templates::base_algorithm::{
-    MultiagentKernelTrait, StepAction, StepKernelTrait,
-};
-use relayrl_types::prelude::tensor::relayrl::TensorError;
 use relayrl_types::prelude::tensor::burn::Tensor;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+use relayrl_types::prelude::tensor::relayrl::TensorError;
 use std::collections::HashMap;
 
 /// Kernel trait for multi-agent DDPG algorithms.
@@ -200,7 +192,13 @@ where
         &self,
         _obs: Tensor<B, IN_D, InK>,
         _mask: Tensor<B, OUT_D, OutK>,
-    ) -> Result<(StepAction<B>, HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>), TensorError> {
+    ) -> Result<
+        (
+            StepAction<B>,
+            HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>,
+        ),
+        TensorError,
+    > {
         Err(TensorError::BackendError(
             "MultiagentDDPGKernel inference should be performed through the framework actor, not directly".to_string(),
         ))
@@ -378,8 +376,12 @@ pub mod training {
         }
 
         pub fn add_agent(&mut self, hidden_sizes: &[usize], device: &<TB as Backend>::Device) {
-            self.actors
-                .push(ActorMlp::new(self.obs_dim, hidden_sizes, self.act_dim, device));
+            self.actors.push(ActorMlp::new(
+                self.obs_dim,
+                hidden_sizes,
+                self.act_dim,
+                device,
+            ));
         }
     }
 
@@ -436,10 +438,7 @@ pub mod training {
         }
 
         pub fn agent_count(&self) -> usize {
-            self.module
-                .as_ref()
-                .map(|m| m.actors.len())
-                .unwrap_or(0)
+            self.module.as_ref().map(|m| m.actors.len()).unwrap_or(0)
         }
 
         pub fn train_epoch(
@@ -548,7 +547,9 @@ pub mod training {
             let grads_c = critic_loss_combined.backward();
             let critic_grads =
                 GradientsParams::from_grads::<TB, SharedDDPGModule>(grads_c, &module);
-            let module = self.actor_optimizer.step(self.critic_lr, module, critic_grads);
+            let module = self
+                .actor_optimizer
+                .step(self.critic_lr, module, critic_grads);
 
             // Actor loss across all agents
             let mut total_actor_loss_tensor: Option<Tensor<TB, 1, Float>> = None;
@@ -578,7 +579,8 @@ pub mod training {
                 let grads_a = actor_loss_combined.backward();
                 let actor_grads =
                     GradientsParams::from_grads::<TB, SharedDDPGModule>(grads_a, &module);
-                self.actor_optimizer.step(self.actor_lr, module, actor_grads)
+                self.actor_optimizer
+                    .step(self.actor_lr, module, actor_grads)
             } else {
                 module
             };

@@ -12,4 +12,7 @@ pub use independent::{
 };
 pub use multiagent::kernel::MultiagentReinforceKernel;
 pub use multiagent::replay_buffer::MultiagentReinforceReplayBuffer;
-pub use multiagent::{MAREINFORCEAlgorithm, MAREINFORCEParams, MultiagentReinforceAlgorithm, MultiagentReinforceKernelTrait};
+pub use multiagent::{
+    MAREINFORCEAlgorithm, MAREINFORCEParams, MultiagentReinforceAlgorithm,
+    MultiagentReinforceKernelTrait,
+};

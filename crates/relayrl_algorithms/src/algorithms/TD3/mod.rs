@@ -11,4 +11,6 @@ pub use independent::{
 };
 pub use multiagent::kernel::MultiagentTD3Kernel;
 pub use multiagent::replay_buffer::MultiagentTD3ReplayBuffer;
-pub use multiagent::{MATD3Algorithm, MATD3Params, MultiagentTD3Algorithm, MultiagentTD3KernelTrait};
+pub use multiagent::{
+    MATD3Algorithm, MATD3Params, MultiagentTD3Algorithm, MultiagentTD3KernelTrait,
+};

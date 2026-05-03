@@ -71,6 +71,7 @@ impl AgentRegistry {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IREINFORCEParams {
     pub discrete: bool,
     pub with_vf_baseline: bool,

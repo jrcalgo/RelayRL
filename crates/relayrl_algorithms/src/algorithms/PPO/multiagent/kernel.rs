@@ -191,14 +191,12 @@ fn sample_count_for_batch(batch: &AgentBatch) -> usize {
         .min(batch.logp_old.len())
 }
 
+use crate::templates::base_algorithm::{MultiagentKernelTrait, StepAction, StepKernelTrait};
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
-use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
-use crate::templates::base_algorithm::{
-    MultiagentKernelTrait, StepAction, StepKernelTrait,
-};
-use relayrl_types::prelude::tensor::relayrl::TensorError;
 use relayrl_types::prelude::tensor::burn::Tensor;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+use relayrl_types::prelude::tensor::relayrl::TensorError;
 use std::collections::HashMap;
 
 /// Kernel trait for multi-agent PPO algorithms.
@@ -231,7 +229,13 @@ where
         &self,
         _obs: Tensor<B, IN_D, InK>,
         _mask: Tensor<B, OUT_D, OutK>,
-    ) -> Result<(StepAction<B>, HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>), TensorError> {
+    ) -> Result<
+        (
+            StepAction<B>,
+            HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>,
+        ),
+        TensorError,
+    > {
         Err(TensorError::BackendError(
             "MultiagentPPOKernel inference should be performed through the framework actor, not directly".to_string(),
         ))

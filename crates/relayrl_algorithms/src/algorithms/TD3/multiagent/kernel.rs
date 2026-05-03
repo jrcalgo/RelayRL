@@ -33,7 +33,13 @@ impl AgentBatch {
             _ => return None,
         };
 
-        Some(Self { obs, act, next_obs, rew, done })
+        Some(Self {
+            obs,
+            act,
+            next_obs,
+            rew,
+            done,
+        })
     }
 }
 
@@ -115,11 +121,17 @@ impl MultiagentTD3Kernel {
     }
 
     #[allow(dead_code)]
-    pub fn obs_dim(&self) -> usize { self.obs_dim }
+    pub fn obs_dim(&self) -> usize {
+        self.obs_dim
+    }
     #[allow(dead_code)]
-    pub fn act_dim(&self) -> usize { self.act_dim }
+    pub fn act_dim(&self) -> usize {
+        self.act_dim
+    }
     #[allow(dead_code)]
-    pub fn hidden_sizes(&self) -> &[usize] { &self.hidden_sizes }
+    pub fn hidden_sizes(&self) -> &[usize] {
+        &self.hidden_sizes
+    }
 
     #[cfg(feature = "ndarray-backend")]
     pub fn get_actor_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
@@ -149,14 +161,12 @@ impl MultiagentTD3Kernel {
 // Kernel traits
 // ─────────────────────────────────────────────────────────────────────────────
 
+use crate::templates::base_algorithm::{MultiagentKernelTrait, StepAction, StepKernelTrait};
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
-use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
-use crate::templates::base_algorithm::{
-    MultiagentKernelTrait, StepAction, StepKernelTrait,
-};
-use relayrl_types::prelude::tensor::relayrl::TensorError;
 use relayrl_types::prelude::tensor::burn::Tensor;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+use relayrl_types::prelude::tensor::relayrl::TensorError;
 use std::collections::HashMap;
 
 /// Kernel trait for multi-agent TD3 algorithms.
@@ -190,7 +200,13 @@ where
         &self,
         _obs: Tensor<B, IN_D, InK>,
         _mask: Tensor<B, OUT_D, OutK>,
-    ) -> Result<(StepAction<B>, HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>), TensorError> {
+    ) -> Result<
+        (
+            StepAction<B>,
+            HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>,
+        ),
+        TensorError,
+    > {
         Err(TensorError::BackendError(
             "MultiagentTD3Kernel inference should be performed through the framework actor, not directly".to_string(),
         ))
@@ -271,19 +287,36 @@ pub mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> ActorMlp<B> {
-        pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            hidden_sizes: &[usize],
+            act_dim: usize,
+            device: &B::Device,
+        ) -> Self {
             let mut dims = vec![obs_dim];
             dims.extend_from_slice(hidden_sizes);
             dims.push(act_dim);
-            let layers = dims.windows(2).map(|w| LinearConfig::new(w[0], w[1]).init(device)).collect();
-            Self { layers, relu: Relu::new(), obs_dim, act_dim }
+            let layers = dims
+                .windows(2)
+                .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+                .collect();
+            Self {
+                layers,
+                relu: Relu::new(),
+                obs_dim,
+                act_dim,
+            }
         }
 
         pub fn forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
             let mut x = input;
             for (i, layer) in self.layers.iter().enumerate() {
                 x = layer.forward(x);
-                if i < self.layers.len() - 1 { x = self.relu.forward(x); } else { x = x.tanh(); }
+                if i < self.layers.len() - 1 {
+                    x = self.relu.forward(x);
+                } else {
+                    x = x.tanh();
+                }
             }
             x
         }
@@ -298,31 +331,64 @@ pub mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> TwinCriticMlp<B> {
-        pub fn new(obs_dim: usize, act_dim: usize, hidden_sizes: &[usize], device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            act_dim: usize,
+            hidden_sizes: &[usize],
+            device: &B::Device,
+        ) -> Self {
             let input_dim = obs_dim + act_dim;
             let mut dims = vec![input_dim];
             dims.extend_from_slice(hidden_sizes);
             dims.push(1);
-            let q1_layers = dims.windows(2).map(|w| LinearConfig::new(w[0], w[1]).init(device)).collect();
-            let q2_layers = dims.windows(2).map(|w| LinearConfig::new(w[0], w[1]).init(device)).collect();
-            Self { q1_layers, q2_layers, relu: Relu::new(), input_dim }
+            let q1_layers = dims
+                .windows(2)
+                .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+                .collect();
+            let q2_layers = dims
+                .windows(2)
+                .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+                .collect();
+            Self {
+                q1_layers,
+                q2_layers,
+                relu: Relu::new(),
+                input_dim,
+            }
         }
 
-        fn fwd(layers: &[Linear<B>], relu: &Relu, obs: Tensor<B, 2, Float>, act: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+        fn fwd(
+            layers: &[Linear<B>],
+            relu: &Relu,
+            obs: Tensor<B, 2, Float>,
+            act: Tensor<B, 2, Float>,
+        ) -> Tensor<B, 2, Float> {
             let mut x = Tensor::cat(vec![obs, act], 1);
             for (i, layer) in layers.iter().enumerate() {
                 x = layer.forward(x);
-                if i < layers.len() - 1 { x = relu.forward(x); }
+                if i < layers.len() - 1 {
+                    x = relu.forward(x);
+                }
             }
             x
         }
 
-        pub fn forward_both(&self, obs: Tensor<B, 2, Float>, act: Tensor<B, 2, Float>) -> (Tensor<B, 2, Float>, Tensor<B, 2, Float>) {
-            (Self::fwd(&self.q1_layers, &self.relu, obs.clone(), act.clone()),
-             Self::fwd(&self.q2_layers, &self.relu, obs, act))
+        pub fn forward_both(
+            &self,
+            obs: Tensor<B, 2, Float>,
+            act: Tensor<B, 2, Float>,
+        ) -> (Tensor<B, 2, Float>, Tensor<B, 2, Float>) {
+            (
+                Self::fwd(&self.q1_layers, &self.relu, obs.clone(), act.clone()),
+                Self::fwd(&self.q2_layers, &self.relu, obs, act),
+            )
         }
 
-        pub fn forward_q1(&self, obs: Tensor<B, 2, Float>, act: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+        pub fn forward_q1(
+            &self,
+            obs: Tensor<B, 2, Float>,
+            act: Tensor<B, 2, Float>,
+        ) -> Tensor<B, 2, Float> {
             Self::fwd(&self.q1_layers, &self.relu, obs, act)
         }
     }
@@ -335,20 +401,38 @@ pub mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> CriticMlp<B> {
-        pub fn new(obs_dim: usize, act_dim: usize, hidden_sizes: &[usize], device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            act_dim: usize,
+            hidden_sizes: &[usize],
+            device: &B::Device,
+        ) -> Self {
             let input_dim = obs_dim + act_dim;
             let mut dims = vec![input_dim];
             dims.extend_from_slice(hidden_sizes);
             dims.push(1);
-            let layers = dims.windows(2).map(|w| LinearConfig::new(w[0], w[1]).init(device)).collect();
-            Self { layers, relu: Relu::new(), input_dim }
+            let layers = dims
+                .windows(2)
+                .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+                .collect();
+            Self {
+                layers,
+                relu: Relu::new(),
+                input_dim,
+            }
         }
 
-        pub fn forward(&self, obs: Tensor<B, 2, Float>, act: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+        pub fn forward(
+            &self,
+            obs: Tensor<B, 2, Float>,
+            act: Tensor<B, 2, Float>,
+        ) -> Tensor<B, 2, Float> {
             let mut x = Tensor::cat(vec![obs, act], 1);
             for (i, layer) in self.layers.iter().enumerate() {
                 x = layer.forward(x);
-                if i < self.layers.len() - 1 { x = self.relu.forward(x); }
+                if i < self.layers.len() - 1 {
+                    x = self.relu.forward(x);
+                }
             }
             x
         }
@@ -363,13 +447,31 @@ pub mod training {
     }
 
     impl SharedTD3Module {
-        pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, agent_count: usize, device: &<TB as Backend>::Device) -> Self {
-            let actors = (0..agent_count).map(|_| ActorMlp::new(obs_dim, hidden_sizes, act_dim, device)).collect();
-            Self { actors, critic: TwinCriticMlp::new(obs_dim, act_dim, hidden_sizes, device), obs_dim, act_dim }
+        pub fn new(
+            obs_dim: usize,
+            hidden_sizes: &[usize],
+            act_dim: usize,
+            agent_count: usize,
+            device: &<TB as Backend>::Device,
+        ) -> Self {
+            let actors = (0..agent_count)
+                .map(|_| ActorMlp::new(obs_dim, hidden_sizes, act_dim, device))
+                .collect();
+            Self {
+                actors,
+                critic: TwinCriticMlp::new(obs_dim, act_dim, hidden_sizes, device),
+                obs_dim,
+                act_dim,
+            }
         }
 
         pub fn add_agent(&mut self, hidden_sizes: &[usize], device: &<TB as Backend>::Device) {
-            self.actors.push(ActorMlp::new(self.obs_dim, hidden_sizes, self.act_dim, device));
+            self.actors.push(ActorMlp::new(
+                self.obs_dim,
+                hidden_sizes,
+                self.act_dim,
+                device,
+            ));
         }
     }
 
@@ -386,7 +488,14 @@ pub mod training {
     }
 
     impl SharedTD3Trainer {
-        pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, actor_lr: f64, critic_lr: f64, tau: f32) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            hidden_sizes: &[usize],
+            act_dim: usize,
+            actor_lr: f64,
+            critic_lr: f64,
+            tau: f32,
+        ) -> Self {
             let device_tb = <TB as Backend>::Device::default();
             let device_nd = <NdArray as Backend>::Device::default();
             let module = SharedTD3Module::new(obs_dim, hidden_sizes, act_dim, 0, &device_tb);
@@ -396,7 +505,9 @@ pub mod training {
                 actor_targets: Vec::new(),
                 critic_target: Some(critic_target),
                 actor_optimizer: AdamConfig::new().init::<TB, SharedTD3Module>(),
-                tau, actor_lr, critic_lr,
+                tau,
+                actor_lr,
+                critic_lr,
                 hidden_sizes: hidden_sizes.to_vec(),
                 total_it: 0,
             }
@@ -407,7 +518,12 @@ pub mod training {
                 let device_tb = <TB as Backend>::Device::default();
                 let device_nd = <NdArray as Backend>::Device::default();
                 module.add_agent(&self.hidden_sizes, &device_tb);
-                self.actor_targets.push(ActorMlp::new(module.obs_dim, &self.hidden_sizes, module.act_dim, &device_nd));
+                self.actor_targets.push(ActorMlp::new(
+                    module.obs_dim,
+                    &self.hidden_sizes,
+                    module.act_dim,
+                    &device_nd,
+                ));
             }
         }
 
@@ -425,9 +541,14 @@ pub mod training {
             policy_frequency: usize,
         ) -> MultiagentTD3TrainMetrics {
             self.total_it += 1;
-            if agent_batches.is_empty() { return MultiagentTD3TrainMetrics::default(); }
+            if agent_batches.is_empty() {
+                return MultiagentTD3TrainMetrics::default();
+            }
 
-            let module = match self.module.take() { Some(m) => m, None => return MultiagentTD3TrainMetrics::default() };
+            let module = match self.module.take() {
+                Some(m) => m,
+                None => return MultiagentTD3TrainMetrics::default(),
+            };
             let device_tb = <TB as Backend>::Device::default();
             let device_nd = <NdArray as Backend>::Device::default();
 
@@ -436,71 +557,146 @@ pub mod training {
             let mut terms = 0usize;
 
             for (agent_idx, batch) in agent_batches.iter().enumerate() {
-                if agent_idx >= module.actors.len() { continue; }
-                let n = batch.obs.len().min(batch.act.len()).min(batch.next_obs.len()).min(batch.rew.len()).min(batch.done.len());
-                if n == 0 { continue; }
+                if agent_idx >= module.actors.len() {
+                    continue;
+                }
+                let n = batch
+                    .obs
+                    .len()
+                    .min(batch.act.len())
+                    .min(batch.next_obs.len())
+                    .min(batch.rew.len())
+                    .min(batch.done.len());
+                if n == 0 {
+                    continue;
+                }
 
-                let obs = Tensor::<TB, 2, Float>::from_data(BurnTensorData::new(flat_f32(&batch.obs[..n]), [n, module.obs_dim]), &device_tb);
-                let act = Tensor::<TB, 2, Float>::from_data(BurnTensorData::new(flat_f32(&batch.act[..n]), [n, module.act_dim]), &device_tb);
-                let next_obs_nd = Tensor::<NdArray, 2, Float>::from_data(BurnTensorData::new(flat_f32(&batch.next_obs[..n]), [n, module.obs_dim]), &device_nd);
-                let rew = Tensor::<TB, 1, Float>::from_data(BurnTensorData::new(batch.rew[..n].to_vec(), [n]), &device_tb);
-                let done = Tensor::<TB, 1, Float>::from_data(BurnTensorData::new(batch.done[..n].to_vec(), [n]), &device_tb);
+                let obs = Tensor::<TB, 2, Float>::from_data(
+                    BurnTensorData::new(flat_f32(&batch.obs[..n]), [n, module.obs_dim]),
+                    &device_tb,
+                );
+                let act = Tensor::<TB, 2, Float>::from_data(
+                    BurnTensorData::new(flat_f32(&batch.act[..n]), [n, module.act_dim]),
+                    &device_tb,
+                );
+                let next_obs_nd = Tensor::<NdArray, 2, Float>::from_data(
+                    BurnTensorData::new(flat_f32(&batch.next_obs[..n]), [n, module.obs_dim]),
+                    &device_nd,
+                );
+                let rew = Tensor::<TB, 1, Float>::from_data(
+                    BurnTensorData::new(batch.rew[..n].to_vec(), [n]),
+                    &device_tb,
+                );
+                let done = Tensor::<TB, 1, Float>::from_data(
+                    BurnTensorData::new(batch.done[..n].to_vec(), [n]),
+                    &device_tb,
+                );
 
                 if let Some(actor_tgt) = self.actor_targets.get(agent_idx) {
                     let next_act_raw = actor_tgt.forward(next_obs_nd.clone());
                     // Add policy noise
-                    let noise: Vec<f32> = (0..n * module.act_dim).map(|_| {
-                        use rand::Rng;
-                        let v: f32 = rand::rng().random::<f32>() * 2.0 - 1.0;
-                        v.clamp(-noise_clip, noise_clip) * policy_noise
-                    }).collect();
-                    let noise_nd = Tensor::<NdArray, 2, Float>::from_data(BurnTensorData::new(noise, [n, module.act_dim]), &device_nd);
+                    let noise: Vec<f32> = (0..n * module.act_dim)
+                        .map(|_| {
+                            use rand::Rng;
+                            let v: f32 = rand::rng().random::<f32>() * 2.0 - 1.0;
+                            v.clamp(-noise_clip, noise_clip) * policy_noise
+                        })
+                        .collect();
+                    let noise_nd = Tensor::<NdArray, 2, Float>::from_data(
+                        BurnTensorData::new(noise, [n, module.act_dim]),
+                        &device_nd,
+                    );
                     let next_act_nd = (next_act_raw + noise_nd).clamp(-1.0, 1.0);
 
                     if let Some(critic_tgt) = &self.critic_target {
-                        let tq1: Vec<f32> = critic_tgt.forward(next_obs_nd.clone(), next_act_nd.clone()).reshape([n]).into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]);
-                        let tq2: Vec<f32> = critic_tgt.forward(next_obs_nd, next_act_nd).reshape([n]).into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]);
-                        let tq: Vec<f32> = tq1.iter().zip(tq2.iter()).map(|(a, b)| a.min(*b)).collect();
-                        let tq_tb = Tensor::<TB, 1, Float>::from_data(BurnTensorData::new(tq, [n]), &device_tb);
+                        let tq1: Vec<f32> = critic_tgt
+                            .forward(next_obs_nd.clone(), next_act_nd.clone())
+                            .reshape([n])
+                            .into_data()
+                            .to_vec::<f32>()
+                            .unwrap_or_else(|_| vec![0.0; n]);
+                        let tq2: Vec<f32> = critic_tgt
+                            .forward(next_obs_nd, next_act_nd)
+                            .reshape([n])
+                            .into_data()
+                            .to_vec::<f32>()
+                            .unwrap_or_else(|_| vec![0.0; n]);
+                        let tq: Vec<f32> =
+                            tq1.iter().zip(tq2.iter()).map(|(a, b)| a.min(*b)).collect();
+                        let tq_tb = Tensor::<TB, 1, Float>::from_data(
+                            BurnTensorData::new(tq, [n]),
+                            &device_tb,
+                        );
                         let not_done = done.neg().add_scalar(1.0f32);
                         let target = rew + not_done * tq_tb * gamma;
 
                         let (q1, q2) = module.critic.forward_both(obs.clone(), act);
-                        let cl = (q1.reshape([n]) - target.clone()).powf_scalar(2.0).mean() + (q2.reshape([n]) - target).powf_scalar(2.0).mean();
+                        let cl = (q1.reshape([n]) - target.clone()).powf_scalar(2.0).mean()
+                            + (q2.reshape([n]) - target).powf_scalar(2.0).mean();
                         total_critic_loss += scalar_f32(&cl);
-                        critic_loss_tensor = Some(match critic_loss_tensor { Some(a) => a + cl, None => cl });
+                        critic_loss_tensor = Some(match critic_loss_tensor {
+                            Some(a) => a + cl,
+                            None => cl,
+                        });
                         terms += 1;
                     }
                 }
                 drop(obs);
             }
 
-            if terms == 0 { self.module = Some(module); return MultiagentTD3TrainMetrics::default(); }
+            if terms == 0 {
+                self.module = Some(module);
+                return MultiagentTD3TrainMetrics::default();
+            }
 
-            let cl_combined = match critic_loss_tensor { Some(l) => l, None => { self.module = Some(module); return MultiagentTD3TrainMetrics::default(); } };
+            let cl_combined = match critic_loss_tensor {
+                Some(l) => l,
+                None => {
+                    self.module = Some(module);
+                    return MultiagentTD3TrainMetrics::default();
+                }
+            };
             let grads_c = cl_combined.backward();
             let critic_grads = GradientsParams::from_grads::<TB, SharedTD3Module>(grads_c, &module);
-            let module = self.actor_optimizer.step(self.critic_lr, module, critic_grads);
+            let module = self
+                .actor_optimizer
+                .step(self.critic_lr, module, critic_grads);
 
             let mut total_actor_loss = 0.0f32;
             let module = if self.total_it % policy_frequency as u64 == 0 {
                 let mut al_tensor: Option<Tensor<TB, 1, Float>> = None;
                 for (agent_idx, batch) in agent_batches.iter().enumerate() {
-                    if agent_idx >= module.actors.len() { continue; }
+                    if agent_idx >= module.actors.len() {
+                        continue;
+                    }
                     let n = batch.obs.len().min(batch.act.len());
-                    if n == 0 { continue; }
-                    let obs = Tensor::<TB, 2, Float>::from_data(BurnTensorData::new(flat_f32(&batch.obs[..n]), [n, module.obs_dim]), &device_tb);
+                    if n == 0 {
+                        continue;
+                    }
+                    let obs = Tensor::<TB, 2, Float>::from_data(
+                        BurnTensorData::new(flat_f32(&batch.obs[..n]), [n, module.obs_dim]),
+                        &device_tb,
+                    );
                     let aa = module.actors[agent_idx].forward(obs.clone());
                     let aq = module.critic.forward_q1(obs, aa).reshape([n]).mean().neg();
                     total_actor_loss += scalar_f32(&aq);
-                    al_tensor = Some(match al_tensor { Some(a) => a + aq, None => aq });
+                    al_tensor = Some(match al_tensor {
+                        Some(a) => a + aq,
+                        None => aq,
+                    });
                 }
                 if let Some(al) = al_tensor {
                     let grads_a = al.backward();
-                    let actor_grads = GradientsParams::from_grads::<TB, SharedTD3Module>(grads_a, &module);
-                    self.actor_optimizer.step(self.actor_lr, module, actor_grads)
-                } else { module }
-            } else { module };
+                    let actor_grads =
+                        GradientsParams::from_grads::<TB, SharedTD3Module>(grads_a, &module);
+                    self.actor_optimizer
+                        .step(self.actor_lr, module, actor_grads)
+                } else {
+                    module
+                }
+            } else {
+                module
+            };
 
             // Soft update targets
             if self.total_it % policy_frequency as u64 == 0 {
@@ -534,7 +730,11 @@ pub mod training {
         }
     }
 
-    fn soft_update_critic_td3(critic: &TwinCriticMlp<TB>, target: &mut CriticMlp<NdArray>, tau: f32) {
+    fn soft_update_critic_td3(
+        critic: &TwinCriticMlp<TB>,
+        target: &mut CriticMlp<NdArray>,
+        tau: f32,
+    ) {
         for (c, t) in critic.q1_layers.iter().zip(target.layers.iter_mut()) {
             let nw = c.weight.val().inner() * tau + t.weight.val() * (1.0 - tau);
             t.weight = Param::initialized(ParamId::new(), nw);
@@ -546,11 +746,17 @@ pub mod training {
     }
 
     fn scalar_f32(t: &Tensor<TB, 1, Float>) -> f32 {
-        t.clone().into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0])[0]
+        t.clone()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap_or_else(|_| vec![0.0])[0]
     }
 
     pub fn flat_f32(tensors: &[TensorData]) -> Vec<f32> {
-        tensors.iter().flat_map(|t| bytemuck::cast_slice::<u8, f32>(&t.data).to_vec()).collect()
+        tensors
+            .iter()
+            .flat_map(|t| bytemuck::cast_slice::<u8, f32>(&t.data).to_vec())
+            .collect()
     }
 }
 

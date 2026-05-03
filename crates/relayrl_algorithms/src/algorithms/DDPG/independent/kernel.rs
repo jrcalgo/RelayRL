@@ -77,11 +77,7 @@ impl<B: Backend + BackendMatcher> DeterministicActorNet<B> {
 
 // ── DefaultDDPGKernel ──────────────────────────────────────────────────────────
 
-pub struct DefaultDDPGKernel<
-    B: Backend + BackendMatcher,
-    InK: TensorKind<B>,
-    OutK: TensorKind<B>,
-> {
+pub struct DefaultDDPGKernel<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
     pub inference_actor: DeterministicActorNet<B>,
     pub obs_dim: usize,
     pub act_dim: usize,
@@ -102,12 +98,7 @@ where
         let device = B::Device::default();
         let hidden_sizes = vec![256usize, 256];
         Self {
-            inference_actor: DeterministicActorNet::new(
-                obs_dim,
-                &hidden_sizes,
-                act_dim,
-                &device,
-            ),
+            inference_actor: DeterministicActorNet::new(obs_dim, &hidden_sizes, act_dim, &device),
             obs_dim,
             act_dim,
             #[cfg(feature = "ndarray-backend")]
@@ -300,7 +291,12 @@ pub mod training {
     }
 
     impl<B: burn_tensor::backend::Backend> CriticMlp<B> {
-        pub fn new(obs_dim: usize, act_dim: usize, hidden_sizes: &[usize], device: &B::Device) -> Self {
+        pub fn new(
+            obs_dim: usize,
+            act_dim: usize,
+            hidden_sizes: &[usize],
+            device: &B::Device,
+        ) -> Self {
             let input_dim = obs_dim + act_dim;
             let mut dims = vec![input_dim];
             dims.extend_from_slice(hidden_sizes);
@@ -456,9 +452,7 @@ pub mod training {
 
             // Compute target Q using target networks (NdArray, no grad)
             let next_act_nd = actor_target.forward(next_obs_nd.clone());
-            let target_q_nd = critic_target
-                .forward(next_obs_nd, next_act_nd)
-                .reshape([n]);
+            let target_q_nd = critic_target.forward(next_obs_nd, next_act_nd).reshape([n]);
             let target_q_vals: Vec<f32> = target_q_nd
                 .into_data()
                 .to_vec::<f32>()
@@ -477,9 +471,10 @@ pub mod training {
             let critic_loss = (current_q - target).powf_scalar(2.0).mean();
             let critic_loss_val = scalar_f32(&critic_loss);
             let grads_c = critic_loss.backward();
-            let critic_grads =
-                GradientsParams::from_grads::<TB, CriticMlp<TB>>(grads_c, &critic);
-            let critic = self.critic_optimizer.step(self.critic_lr, critic, critic_grads);
+            let critic_grads = GradientsParams::from_grads::<TB, CriticMlp<TB>>(grads_c, &critic);
+            let critic = self
+                .critic_optimizer
+                .step(self.critic_lr, critic, critic_grads);
 
             // ── Actor update ─────────────────────────────────────────────────
             let actor_actions = actor.forward(obs.clone());
