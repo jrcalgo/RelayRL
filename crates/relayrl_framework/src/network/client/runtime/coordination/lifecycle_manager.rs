@@ -8,18 +8,19 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::AlgorithmArgs;
+use crate::network::client::agent::AlgorithmCfg;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::prelude::config::TransportConfigParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::Algorithm;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::utilities::configuration::NetworkParams;
 #[cfg(feature = "metrics")]
 use crate::utilities::configuration::OtlpEndpointParams;
-use crate::utilities::configuration::{ClientConfigLoader, LocalModelModuleParams};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
+use crate::utilities::configuration::{
+    ClientConfigLoader, HyperparameterConfig, LocalModelModuleParams,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use std::collections::HashMap;
 use std::env;
@@ -242,7 +243,8 @@ pub enum LifecycleManagerError {
 #[derive(Debug, Clone)]
 pub(crate) struct LifecycleManager {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    algorithm_args: Arc<AlgorithmArgs>,
+    algorithm_cfg: Arc<AlgorithmCfg>,
+    algorithm_config_init: Arc<RwLock<AlgorithmCfg>>,
     max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
@@ -264,7 +266,7 @@ pub(crate) struct LifecycleManager {
 impl LifecycleManager {
     pub(crate) fn new(
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: AlgorithmArgs,
+        algorithm_cfg: AlgorithmCfg,
         config: &ClientConfigLoader,
         config_path: PathBuf,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -290,7 +292,8 @@ impl LifecycleManager {
 
         Self {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args: Arc::new(algorithm_args),
+            algorithm_cfg: Arc::new(algorithm_cfg),
+            algorithm_config_init: Arc::new(RwLock::new(AlgorithmCfg::ConfigInit)),
             max_traj_length: Arc::new(RwLock::new(max_traj_length)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_addresses: Arc::new(RwLock::new(construct_transport_addresses(
@@ -364,8 +367,43 @@ impl LifecycleManager {
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) fn get_algorithm_args(&self) -> Arc<AlgorithmArgs> {
-        self.algorithm_args.clone()
+    pub fn get_algorithm_cfg_args(&self) -> Arc<AlgorithmCfg> {
+        self.algorithm_cfg_args.clone()
+    }
+
+    pub(crate) fn get_algorithm_config_init(&self) -> Arc<RwLock<AlgorithmCfg>> {
+        self.algorithm_config_init.clone()
+    }
+
+    pub(crate) async fn set_algorithm_config_init(
+        &self,
+        algorithm_name: &str,
+        init_hyperparameters: &HyperparameterConfig,
+    ) -> Result<(), LifecycleManagerError> {
+        let config = match algorithm_name {
+            "PPO" => AlgorithmCfg::PPO(init_hyperparameters.ppo.clone()),
+            "IPPO" => AlgorithmCfg::IPPO(init_hyperparameters.ippo.clone()),
+            "MAPPO" => AlgorithmCfg::MAPPO(init_hyperparameters.mappo.clone()),
+            "REINFORCE" => AlgorithmCfg::REINFORCE(init_hyperparameters.reinforce.clone()),
+            "IREINFORCE" => AlgorithmCfg::IREINFORCE(init_hyperparameters.ireinforce.clone()),
+            "MAREINFORCE" => AlgorithmCfg::MAREINFORCE(init_hyperparameters.mareinforce.clone()),
+            "DDPG" => AlgorithmCfg::DDPG(init_hyperparameters.ddpg.clone()),
+            "IDDPG" => AlgorithmCfg::IDDPG(init_hyperparameters.iddpg.clone()),
+            "MADDPG" => AlgorithmCfg::MADDPG(init_hyperparameters.maddpg.clone()),
+            "TD3" => AlgorithmCfg::TD3(init_hyperparameters.td3.clone()),
+            "ITD3" => AlgorithmCfg::ITD3(init_hyperparameters.itd3.clone()),
+            "MATD3" => AlgorithmCfg::MATD3(init_hyperparameters.matd3.clone()),
+            other => {
+                return Err(LifecycleManagerError::ConfigError(format!(
+                    "Unknown algorithm: {other}"
+                )));
+            }
+        };
+        let mut algorithm_config_init_guard: tokio::sync::RwLockWriteGuard<'_, AlgorithmCfg> =
+            self.algorithm_config_init.write().await;
+
+        *algorithm_config_init_guard = config;
+        Ok(())
     }
 
     pub(crate) async fn set_max_traj_length(
@@ -387,7 +425,7 @@ impl LifecycleManager {
         let mut transport_addresses_guard = self.transport_addresses.write().await;
         *transport_addresses_guard =
             construct_transport_addresses(transport_params, transport_type);
-        Ok(())
+        Ok(()) 
     }
 
     #[cfg(feature = "metrics")]
@@ -500,6 +538,10 @@ impl LifecycleManager {
             not(feature = "metrics")
         ))]
         tokio::try_join!(
+            self.set_algorithm_config_init(
+                &new_config.client_config.algorithm_name,
+                &new_config.client_config.init_hyperparameters
+            ),
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
@@ -515,6 +557,10 @@ impl LifecycleManager {
             feature = "metrics"
         ))]
         tokio::try_join!(
+            self.set_algorithm_config_init(
+                &new_config.client_config.algorithm_name,
+                &new_config.client_config.init_hyperparameters
+            ),
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
@@ -534,6 +580,10 @@ impl LifecycleManager {
             not(feature = "metrics")
         ))]
         tokio::try_join!(
+            self.set_algorithm_config_init(
+                &new_config.client_config.algorithm_name,
+                &new_config.client_config.init_hyperparameters
+            ),
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
@@ -547,6 +597,10 @@ impl LifecycleManager {
             feature = "metrics"
         ))]
         tokio::try_join!(
+            self.set_algorithm_config_init(
+                &new_config.client_config.algorithm_name,
+                &new_config.client_config.init_hyperparameters
+            ),
             self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
