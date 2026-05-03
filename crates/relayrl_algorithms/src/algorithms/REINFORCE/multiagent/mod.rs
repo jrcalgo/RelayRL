@@ -130,20 +130,26 @@ impl AgentRuntimeSlot {
     }
 }
 
-struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
+struct RuntimeComponents<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK>,
+> {
     epoch_logger: EpochLogger,
     epoch_count: u64,
     agent_registry: AgentRegistry,
     agent_slots: Vec<AgentRuntimeSlot>,
-    kernel: MultiagentReinforceKernel,
+    kernel: KN,
     _phantom: PhantomData<(B, InK, OutK)>,
 }
 
-impl<B, InK, OutK> Default for RuntimeComponents<B, InK, OutK>
+impl<B, InK, OutK, KN> Default for RuntimeComponents<B, InK, OutK, KN>
 where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK> + Default,
 {
     fn default() -> Self {
         Self {
@@ -151,23 +157,29 @@ where
             epoch_count: 0,
             agent_registry: AgentRegistry::default(),
             agent_slots: Vec::new(),
-            kernel: MultiagentReinforceKernel::default(),
+            kernel: KN::default(),
             _phantom: PhantomData,
         }
     }
 }
 
-struct RuntimeParams<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
+struct RuntimeParams<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK>,
+> {
     #[allow(dead_code)]
     args: RuntimeArgs,
-    components: RuntimeComponents<B, InK, OutK>,
+    components: RuntimeComponents<B, InK, OutK, KN>,
 }
 
-impl<B, InK, OutK> Default for RuntimeParams<B, InK, OutK>
+impl<B, InK, OutK, KN> Default for RuntimeParams<B, InK, OutK, KN>
 where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK> + Default,
 {
     fn default() -> Self {
         Self {
@@ -181,18 +193,20 @@ pub struct MultiagentReinforceAlgorithm<
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK>,
 > {
-    runtime: RuntimeParams<B, InK, OutK>,
+    runtime: RuntimeParams<B, InK, OutK, KN>,
     hyperparams: MAREINFORCEParams,
 }
 
-pub type MAREINFORCEAlgorithm<B, InK, OutK> = MultiagentReinforceAlgorithm<B, InK, OutK>;
+pub type MAREINFORCEAlgorithm<B, InK, OutK, KN> = MultiagentReinforceAlgorithm<B, InK, OutK, KN>;
 
-impl<B, InK, OutK> Default for MultiagentReinforceAlgorithm<B, InK, OutK>
+impl<B, InK, OutK, KN> Default for MultiagentReinforceAlgorithm<B, InK, OutK, KN>
 where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK> + Default,
 {
     fn default() -> Self {
         Self {
@@ -202,11 +216,12 @@ where
     }
 }
 
-impl<B, InK, OutK> MultiagentReinforceAlgorithm<B, InK, OutK>
+impl<B, InK, OutK, KN> MultiagentReinforceAlgorithm<B, InK, OutK, KN>
 where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK> + Default,
 {
     #[allow(dead_code)]
     pub(crate) fn new(
@@ -216,11 +231,12 @@ where
         obs_dim: usize,
         act_dim: usize,
         buffer_size: usize,
+        kernel: KN,
     ) -> Result<Self, AlgorithmError> {
         let hyperparams = hyperparams.unwrap_or_default();
 
         let algorithm = MultiagentReinforceAlgorithm {
-            runtime: RuntimeParams::<B, InK, OutK> {
+            runtime: RuntimeParams::<B, InK, OutK, KN> {
                 args: RuntimeArgs {
                     env_dir: env_dir.to_path_buf(),
                     save_model_path: save_model_path.to_path_buf(),
@@ -228,18 +244,12 @@ where
                     act_dim,
                     buffer_size,
                 },
-                components: RuntimeComponents::<B, InK, OutK> {
+                components: RuntimeComponents::<B, InK, OutK, KN> {
                     epoch_logger: EpochLogger::new(),
                     epoch_count: 0,
                     agent_registry: AgentRegistry::default(),
                     agent_slots: Vec::new(),
-                    kernel: MultiagentReinforceKernel::new(
-                        obs_dim,
-                        act_dim,
-                        hyperparams.discrete,
-                        hyperparams.pi_lr,
-                        hyperparams.vf_lr,
-                    ),
+                    kernel,
                     _phantom: PhantomData,
                 },
             },
@@ -295,16 +305,19 @@ where
 }
 
 #[cfg(feature = "ndarray-backend")]
-impl<B, InK, OutK> MultiagentReinforceAlgorithm<B, InK, OutK>
+impl<B, InK, OutK, KN> MultiagentReinforceAlgorithm<B, InK, OutK, KN>
 where
     B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK>
+        + crate::templates::base_algorithm::WeightProvider
+        + Default,
 {
     /// Export the shared policy as an in-memory ONNX model.
     ///
-    /// Reads from the first actor in the shared `MultiagentReinforceKernel`. Returns `None`
-    /// if no training has occurred yet.
+    /// Returns `None` before the first training epoch or when the kernel has no
+    /// exportable weights.
     pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
         use relayrl_types::data::tensor::{DType, NdArrayDType};
@@ -332,11 +345,12 @@ where
     }
 }
 
-impl<B, InK, OutK, T> AlgorithmTrait<T> for MultiagentReinforceAlgorithm<B, InK, OutK>
+impl<B, InK, OutK, KN, T> AlgorithmTrait<T> for MultiagentReinforceAlgorithm<B, InK, OutK, KN>
 where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    KN: MultiagentReinforceKernelTrait<B, InK, OutK> + Default,
     T: TrajectoryData,
 {
     fn save(&self, _filename: &str) {}

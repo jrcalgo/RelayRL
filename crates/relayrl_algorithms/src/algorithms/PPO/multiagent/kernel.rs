@@ -191,6 +191,97 @@ fn sample_count_for_batch(batch: &AgentBatch) -> usize {
         .min(batch.logp_old.len())
 }
 
+use burn_tensor::TensorKind;
+use burn_tensor::backend::Backend;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+use crate::templates::base_algorithm::{
+    MultiagentKernelTrait, StepAction, StepKernelTrait,
+};
+use relayrl_types::prelude::tensor::relayrl::TensorError;
+use relayrl_types::prelude::tensor::burn::Tensor;
+use std::collections::HashMap;
+
+/// Kernel trait for multi-agent PPO algorithms.
+///
+/// Extends [`MultiagentKernelTrait`] (which itself extends [`StepKernelTrait`]) with
+/// the PPO-specific batched training method used by [`MultiagentPPOAlgorithm`].
+pub trait MultiagentPPOKernelTrait<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+>: MultiagentKernelTrait<B, InK, OutK>
+{
+    fn train_epoch(
+        &mut self,
+        agent_batches: &[AgentBatch],
+        clip_ratio: f32,
+        target_kl: f32,
+        train_pi_iters: u64,
+        train_vf_iters: u64,
+    ) -> MultiagentPPOTrainMetrics;
+}
+
+impl<B, InK, OutK> StepKernelTrait<B, InK, OutK> for MultiagentPPOKernel
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    fn step<const IN_D: usize, const OUT_D: usize>(
+        &self,
+        _obs: Tensor<B, IN_D, InK>,
+        _mask: Tensor<B, OUT_D, OutK>,
+    ) -> Result<(StepAction<B>, HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>), TensorError> {
+        Err(TensorError::BackendError(
+            "MultiagentPPOKernel inference should be performed through the framework actor, not directly".to_string(),
+        ))
+    }
+
+    fn get_input_dim(&self) -> usize {
+        self.obs_dim
+    }
+
+    fn get_output_dim(&self) -> usize {
+        self.act_dim
+    }
+}
+
+impl<B, InK, OutK> MultiagentKernelTrait<B, InK, OutK> for MultiagentPPOKernel
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    fn register_agent(&mut self) {
+        MultiagentPPOKernel::register_agent(self);
+    }
+}
+
+impl<B, InK, OutK> MultiagentPPOKernelTrait<B, InK, OutK> for MultiagentPPOKernel
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    fn train_epoch(
+        &mut self,
+        agent_batches: &[AgentBatch],
+        clip_ratio: f32,
+        target_kl: f32,
+        train_pi_iters: u64,
+        train_vf_iters: u64,
+    ) -> MultiagentPPOTrainMetrics {
+        MultiagentPPOKernel::train_epoch(
+            self,
+            agent_batches,
+            clip_ratio,
+            target_kl,
+            train_pi_iters,
+            train_vf_iters,
+        )
+    }
+}
+
 #[cfg(feature = "ndarray-backend")]
 mod training {
     use super::{AgentBatch, MultiagentPPOTrainMetrics, sample_count_for_batch};

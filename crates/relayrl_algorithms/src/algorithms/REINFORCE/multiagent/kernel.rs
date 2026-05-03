@@ -163,6 +163,82 @@ impl MultiagentReinforceKernel {
     }
 }
 
+use burn_tensor::TensorKind;
+use burn_tensor::backend::Backend;
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+use crate::templates::base_algorithm::{
+    MultiagentKernelTrait, StepAction, StepKernelTrait,
+};
+use relayrl_types::prelude::tensor::relayrl::TensorError;
+use relayrl_types::prelude::tensor::burn::Tensor;
+use std::collections::HashMap;
+
+/// Kernel trait for multi-agent REINFORCE algorithms.
+///
+/// Extends [`MultiagentKernelTrait`] with the REINFORCE-specific batched training
+/// method used by [`MultiagentReinforceAlgorithm`].
+pub trait MultiagentReinforceKernelTrait<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+>: MultiagentKernelTrait<B, InK, OutK>
+{
+    fn train_epoch(
+        &mut self,
+        agent_batches: &[AgentBatch],
+    ) -> MultiagentTrainMetrics;
+}
+
+impl<B, InK, OutK> StepKernelTrait<B, InK, OutK> for MultiagentReinforceKernel
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    fn step<const IN_D: usize, const OUT_D: usize>(
+        &self,
+        _obs: Tensor<B, IN_D, InK>,
+        _mask: Tensor<B, OUT_D, OutK>,
+    ) -> Result<(StepAction<B>, HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>), TensorError> {
+        Err(TensorError::BackendError(
+            "MultiagentReinforceKernel inference should be performed through the framework actor, not directly".to_string(),
+        ))
+    }
+
+    fn get_input_dim(&self) -> usize {
+        self.obs_dim
+    }
+
+    fn get_output_dim(&self) -> usize {
+        self.act_dim
+    }
+}
+
+impl<B, InK, OutK> MultiagentKernelTrait<B, InK, OutK> for MultiagentReinforceKernel
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    fn register_agent(&mut self) {
+        MultiagentReinforceKernel::register_agent(self);
+    }
+}
+
+impl<B, InK, OutK> MultiagentReinforceKernelTrait<B, InK, OutK> for MultiagentReinforceKernel
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    fn train_epoch(
+        &mut self,
+        agent_batches: &[AgentBatch],
+    ) -> MultiagentTrainMetrics {
+        MultiagentReinforceKernel::train_epoch(self, agent_batches)
+    }
+}
+
 #[cfg(feature = "ndarray-backend")]
 mod training {
     use super::{AgentBatch, MultiagentTrainMetrics};
