@@ -592,6 +592,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     }
 
     /// Round robin priority computation
+    ///
+    /// This computation is only ever relevant when multiple actors are sending trajectories to the same buffer/are assigned to the same router process.
+    ///
+    /// The client's builder defaults to one router process per actor, which can be overridden by the user for their scaling/integration needs.
+    ///
+    /// In other words, the priority computation is rarely important.
     fn _compute_priority(
         actor_id: &ActorUuid,
         actor_last_sent: &DashMap<Uuid, i64>,
