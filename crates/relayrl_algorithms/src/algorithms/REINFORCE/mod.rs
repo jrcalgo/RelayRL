@@ -4,6 +4,7 @@ mod replay_buffer;
 pub mod independent;
 pub mod multiagent;
 
+pub use kernel::REINFORCEKernelTrait;
 pub use independent::kernel::*;
 pub use independent::replay_buffer::*;
 pub use independent::{

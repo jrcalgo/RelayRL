@@ -16,7 +16,7 @@
 //! ## Re-exports
 //!
 //! This module re-exports algorithm structs and hyperparameter types (`PPOParams`, `MAPPOParams`,
-//! …) plus kernel traits ([`PPOKernelTrait`], [`StepKernelTrait`], [`TrainableKernelTrait`]) so
+//! …) plus kernel traits ([`PPOKernelTrait`], [`StepKernelTrait`], [`REINFORCEKernelTrait`]) so
 //! callers can supply custom kernels without digging through submodule paths.
 //!
 //! ## Generics
@@ -83,14 +83,14 @@ pub use algorithms::PPO::{
 };
 pub use algorithms::REINFORCE::{
     IREINFORCEAlgorithm, IREINFORCEParams, MAREINFORCEAlgorithm, MAREINFORCEParams,
-    MultiagentReinforceKernelTrait, REINFORCEParams, ReinforceAlgorithm,
+    MultiagentReinforceKernelTrait, REINFORCEKernelTrait, REINFORCEParams, ReinforceAlgorithm,
 };
 pub use algorithms::TD3::{
     ITD3Algorithm, ITD3Params, MATD3Algorithm, MATD3Params, MultiagentTD3KernelTrait, TD3Algorithm,
     TD3KernelTrait, TD3Params,
 };
 pub use templates::base_algorithm::{
-    AlgorithmError, AlgorithmTrait, MultiagentKernelTrait, StepKernelTrait, TrainableKernelTrait,
+    AlgorithmError, AlgorithmTrait, MultiagentKernelTrait, StepKernelTrait,
     TrajectoryData, WeightProvider,
 };
 
@@ -183,7 +183,7 @@ impl PpoTrainerSpec {
 /// [`REINFORCE`] and [`IREINFORCE`](Self::IREINFORCE) mirror the PPO case: same underlying type,
 /// different hyperparameter names.
 ///
-/// Use with [`ReinforceTrainer::new`] and `K: StepKernelTrait + TrainableKernelTrait + Default`.
+/// Use with [`ReinforceTrainer::new`] and `K: StepKernelTrait + REINFORCEKernelTrait + Default`.
 ///
 /// # Examples
 ///
@@ -436,7 +436,7 @@ where
 
 /// Runtime wrapper for **independent** REINFORCE-family algorithms with kernel `K`.
 ///
-/// `K` must support stepping ([`StepKernelTrait`]) and the scalar training hooks ([`TrainableKernelTrait`]),
+/// `K` must support stepping ([`StepKernelTrait`]) and the scalar training hooks ([`REINFORCEKernelTrait`]),
 /// plus [`Default`] for per-agent kernel cloning inside the algorithm.
 ///
 /// # Examples
@@ -471,7 +471,7 @@ where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: StepKernelTrait<B, InK, OutK> + TrainableKernelTrait + Default,
+    K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
 {
     /// Constructs a trainer from a [`ReinforceTrainerSpec`] and a kernel instance.
     pub fn new(spec: ReinforceTrainerSpec, kernel: K) -> Result<Self, AlgorithmError> {
@@ -802,7 +802,7 @@ impl RelayRLTrainer {
         B: Backend + BackendMatcher,
         InK: TensorKind<B>,
         OutK: TensorKind<B>,
-        K: StepKernelTrait<B, InK, OutK> + TrainableKernelTrait + Default,
+        K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
     {
         ReinforceTrainer::<B, InK, OutK, K>::reinforce(args, hyperparams, kernel)
     }
@@ -817,7 +817,7 @@ impl RelayRLTrainer {
         B: Backend + BackendMatcher,
         InK: TensorKind<B>,
         OutK: TensorKind<B>,
-        K: StepKernelTrait<B, InK, OutK> + TrainableKernelTrait + Default,
+        K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
     {
         ReinforceTrainer::<B, InK, OutK, K>::ireinforce(args, hyperparams, kernel)
     }
@@ -907,7 +907,7 @@ where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: StepKernelTrait<B, InK, OutK> + TrainableKernelTrait + Default,
+    K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
     T: TrajectoryData,
 {
     fn save(&self, filename: &str) {

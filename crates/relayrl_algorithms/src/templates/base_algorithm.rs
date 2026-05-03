@@ -167,31 +167,3 @@ pub trait MultiagentKernelTrait<
     /// Called once per distinct agent key encountered during training.
     fn register_agent(&mut self);
 }
-
-/// Trait for kernels that support gradient-based training.
-///
-/// The backend type used for autodiff is encapsulated inside the implementation —
-/// callers only deal with `TensorData` (serialized tensors from the replay buffer)
-/// and scalar outputs. This decouples the inference backend from the training backend,
-/// allowing the concrete kernel to use `Autodiff<NdArray>` internally while
-/// the algorithm stays generic over `B: Backend + BackendMatcher`.
-pub trait TrainableKernelTrait {
-    /// Compute and apply the policy gradient update step.
-    ///
-    /// Returns `(scalar_loss, info)` where `info` contains:
-    ///   - `"kl"` — approximate KL divergence between old and new policy
-    ///   - `"entropy"` — policy entropy
-    fn train_pi_step(
-        &mut self,
-        obs: &[TensorData],
-        act: &[TensorData],
-        mask: &[TensorData],
-        adv: &[f32],
-        logp_old: &[TensorData],
-    ) -> (f32, HashMap<String, f32>);
-
-    /// Compute and apply the value function update step.
-    ///
-    /// Returns the scalar MSE loss.
-    fn train_vf_step(&mut self, obs: &[TensorData], mask: &[TensorData], ret: &[f32]) -> f32;
-}

@@ -5,8 +5,9 @@ pub use kernel::*;
 pub use replay_buffer::*;
 
 use crate::logging::{EpochLogger, SessionLogger};
+use crate::algorithms::REINFORCE::REINFORCEKernelTrait;
 use crate::templates::base_algorithm::{
-    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrainableKernelTrait, TrajectoryData,
+    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData,
 };
 use crate::templates::base_replay_buffer::{
     Batch, BatchKey, BufferSample, GenericReplayBuffer, ReplayBufferError, SampleScalars,
@@ -330,7 +331,7 @@ where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    KN: StepKernelTrait<B, InK, OutK> + TrainableKernelTrait + Default,
+    KN: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
     T: TrajectoryData,
 {
     fn save(&self, _filename: &str) {}

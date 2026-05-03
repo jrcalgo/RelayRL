@@ -70,7 +70,7 @@ impl AgentRegistry {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MATD3Params {
     pub gamma: f32,
     pub tau: f32,

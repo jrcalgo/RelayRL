@@ -1,7 +1,7 @@
 #![allow(non_upper_case_globals)]
 
 use crate::templates::base_algorithm::{
-    ForwardKernelTrait, ForwardOutput, StepAction, StepKernelTrait, TrainableKernelTrait,
+    ForwardKernelTrait, ForwardOutput, StepAction, StepKernelTrait,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +18,36 @@ use std::marker::PhantomData;
 use relayrl_types::data::tensor::{
     BackendMatcher, ConversionBurnTensor, DType, SupportedTensorBackend, TensorData, TensorError,
 };
+
+/// Trait for kernels that support REINFORCE-style gradient-based training.
+///
+/// The backend type used for autodiff is encapsulated inside the implementation —
+/// callers only deal with `TensorData` (serialized tensors from the replay buffer)
+/// and scalar outputs. This decouples the inference backend from the training backend,
+/// allowing the concrete kernel to use `Autodiff<NdArray>` internally while
+/// the algorithm stays generic over `B: Backend + BackendMatcher`.
+pub trait REINFORCEKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>:
+    StepKernelTrait<B, InK, OutK>
+{
+    /// Compute and apply the policy gradient update step.
+    ///
+    /// Returns `(scalar_loss, info)` where `info` contains:
+    ///   - `"kl"` — approximate KL divergence between old and new policy
+    ///   - `"entropy"` — policy entropy
+    fn train_pi_step(
+        &mut self,
+        obs: &[TensorData],
+        act: &[TensorData],
+        mask: &[TensorData],
+        adv: &[f32],
+        logp_old: &[TensorData],
+    ) -> (f32, HashMap<String, f32>);
+
+    /// Compute and apply the value function update step.
+    ///
+    /// Returns the scalar MSE loss.
+    fn train_vf_step(&mut self, obs: &[TensorData], mask: &[TensorData], ret: &[f32]) -> f32;
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ActivationKind {
@@ -793,7 +823,7 @@ where
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> TrainableKernelTrait
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> REINFORCEKernelTrait<B, InK, OutK>
     for PolicyWithBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
@@ -950,7 +980,7 @@ where
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> TrainableKernelTrait
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> REINFORCEKernelTrait<B, InK, OutK>
     for PolicyWithoutBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
