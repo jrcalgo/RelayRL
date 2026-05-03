@@ -73,16 +73,25 @@ use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
 use std::path::PathBuf;
 
+pub use algorithms::DDPG::{
+    DDPGAlgorithm, DDPGKernelTrait, DDPGParams, IDDPGAlgorithm, IDDPGParams, MADDPGAlgorithm,
+    MADDPGParams, MultiagentDDPGKernelTrait,
+};
 pub use algorithms::PPO::{
-    IPPOAlgorithm, IPPOParams, MAPPOAlgorithm, MAPPOParams, PPOAlgorithm, PPOKernelTrait, PPOParams,
+    IPPOAlgorithm, IPPOParams, MAPPOAlgorithm, MAPPOParams, MultiagentPPOKernelTrait, PPOAlgorithm,
+    PPOKernelTrait, PPOParams,
 };
 pub use algorithms::REINFORCE::{
     IREINFORCEAlgorithm, IREINFORCEParams, MAREINFORCEAlgorithm, MAREINFORCEParams,
-    REINFORCEParams, ReinforceAlgorithm,
+    MultiagentReinforceKernelTrait, REINFORCEParams, ReinforceAlgorithm,
+};
+pub use algorithms::TD3::{
+    ITD3Algorithm, ITD3Params, MATD3Algorithm, MATD3Params, MultiagentTD3KernelTrait, TD3Algorithm,
+    TD3KernelTrait, TD3Params,
 };
 pub use templates::base_algorithm::{
-    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrainableKernelTrait, TrajectoryData,
-    WeightProvider,
+    AlgorithmError, AlgorithmTrait, MultiagentKernelTrait, StepKernelTrait, TrainableKernelTrait,
+    TrajectoryData, WeightProvider,
 };
 
 /// Shared filesystem and shape arguments for every trainer constructor in this module.
@@ -184,6 +193,7 @@ impl PpoTrainerSpec {
 /// let args = TrainerArgs { /* ... */ };
 /// let spec = ReinforceTrainerSpec::reinforce(args, None);
 /// ```
+///
 pub enum ReinforceTrainerSpec {
     /// Independent REINFORCE with [`REINFORCEParams`].
     REINFORCE {
@@ -209,10 +219,11 @@ impl ReinforceTrainerSpec {
     }
 }
 
-/// Describes **which** multi-agent trainer to build (MAPPO or MAREINFORCE).
+/// Describes **which** multi-agent trainer to build and carries a user-supplied kernel `K`.
 ///
-/// Unlike independent trainers, this spec carries **no** kernel: the multi-agent implementations
-/// construct their internal kernels from hyperparameters.
+/// `K` must implement the algorithm-specific sub-trait for whichever variant is chosen.  
+/// When passed to [`MultiagentTrainer::new`], `K` must satisfy all four sub-traits so the
+/// compiler can validate it at the call site regardless of which variant is selected.
 ///
 /// # Examples
 ///
@@ -220,31 +231,75 @@ impl ReinforceTrainerSpec {
 /// use relayrl_algorithms::{MultiagentTrainerSpec, TrainerArgs};
 ///
 /// let args = TrainerArgs { /* ... */ };
-/// let spec = MultiagentTrainerSpec::mappo(args, None);
-/// // Then: MultiagentTrainer::<B, InK, OutK>::new(spec)?
+/// let spec = MultiagentTrainerSpec::mappo(args, None, kernel);
+/// // Then: MultiagentTrainer::<B, InK, OutK, _>::new(spec)?
 /// ```
-pub enum MultiagentTrainerSpec {
+pub enum MultiagentTrainerSpec<K> {
+    /// Multi-agent DDPG with [`MADDPGParams`].
+    MADDPG {
+        args: TrainerArgs,
+        hyperparams: Option<MADDPGParams>,
+        kernel: K,
+    },
     /// Multi-agent PPO with [`MAPPOParams`].
     MAPPO {
         args: TrainerArgs,
         hyperparams: Option<MAPPOParams>,
+        kernel: K,
     },
     /// Multi-agent REINFORCE with [`MAREINFORCEParams`].
     MAREINFORCE {
         args: TrainerArgs,
         hyperparams: Option<MAREINFORCEParams>,
+        kernel: K,
+    },
+    /// Multi-agent TD3 with [`MATD3Params`].
+    MATD3 {
+        args: TrainerArgs,
+        hyperparams: Option<MATD3Params>,
+        kernel: K,
     },
 }
 
-impl MultiagentTrainerSpec {
+impl<K> MultiagentTrainerSpec<K> {
+    /// Builds a [`MultiagentTrainerSpec::MADDPG`] variant.
+    pub fn maddpg(args: TrainerArgs, hyperparams: Option<MADDPGParams>, kernel: K) -> Self {
+        Self::MADDPG {
+            args,
+            hyperparams,
+            kernel,
+        }
+    }
+
     /// Builds a [`MultiagentTrainerSpec::MAPPO`] variant.
-    pub fn mappo(args: TrainerArgs, hyperparams: Option<MAPPOParams>) -> Self {
-        Self::MAPPO { args, hyperparams }
+    pub fn mappo(args: TrainerArgs, hyperparams: Option<MAPPOParams>, kernel: K) -> Self {
+        Self::MAPPO {
+            args,
+            hyperparams,
+            kernel,
+        }
     }
 
     /// Builds a [`MultiagentTrainerSpec::MAREINFORCE`] variant.
-    pub fn mareinforce(args: TrainerArgs, hyperparams: Option<MAREINFORCEParams>) -> Self {
-        Self::MAREINFORCE { args, hyperparams }
+    pub fn mareinforce(
+        args: TrainerArgs,
+        hyperparams: Option<MAREINFORCEParams>,
+        kernel: K,
+    ) -> Self {
+        Self::MAREINFORCE {
+            args,
+            hyperparams,
+            kernel,
+        }
+    }
+
+    /// Builds a [`MultiagentTrainerSpec::MATD3`] variant.
+    pub fn matd3(args: TrainerArgs, hyperparams: Option<MATD3Params>, kernel: K) -> Self {
+        Self::MATD3 {
+            args,
+            hyperparams,
+            kernel,
+        }
     }
 }
 
@@ -478,67 +533,132 @@ where
     }
 }
 
-/// Runtime wrapper for **multi-agent** MAPPO and MAREINFORCE.
+/// Runtime wrapper for **multi-agent** algorithms, parameterized by your kernel `K`.
 ///
-/// No kernel type parameter: hyperparameters drive internal multi-agent kernels. Use
-/// [`MultiagentTrainer::mappo`] / [`MultiagentTrainer::mareinforce`] or [`MultiagentTrainer::new`]
-/// with a [`MultiagentTrainerSpec`].
+/// `K` must implement all four multi-agent sub-traits so that a single `MultiagentTrainer<K>`
+/// value can hold any of the four algorithm variants. Use [`MultiagentTrainer::new`] with a
+/// [`MultiagentTrainerSpec`] or the convenience constructors (`mappo`, `mareinforce`, `maddpg`,
+/// `matd3`).
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use relayrl_algorithms::{MultiagentTrainer, TrainerArgs};
 ///
-/// fn open<B, InK, OutK>(args: TrainerArgs) -> Result<MultiagentTrainer<B, InK, OutK>, _> {
-///     MultiagentTrainer::mappo(args, None)
+/// fn open<B, InK, OutK, K>(args: TrainerArgs, kernel: K)
+///     -> Result<MultiagentTrainer<B, InK, OutK, K>, _>
+/// {
+///     MultiagentTrainer::mappo(args, None, kernel)
 /// }
 /// ```
 ///
 /// ## [`AlgorithmTrait`] behavior
 ///
-/// Implements [`AlgorithmTrait`] by delegating to the inner [`MAPPOAlgorithm`] or
-/// [`MAREINFORCEAlgorithm`].
+/// Implements [`AlgorithmTrait`] by delegating to the inner algorithm variant.
 #[allow(clippy::large_enum_variant)]
-pub enum MultiagentTrainer<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
+pub enum MultiagentTrainer<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: MultiagentPPOKernelTrait<B, InK, OutK>
+        + MultiagentReinforceKernelTrait<B, InK, OutK>
+        + MultiagentDDPGKernelTrait<B, InK, OutK>
+        + MultiagentTD3KernelTrait<B, InK, OutK>,
+> {
+    /// Multi-agent DDPG; see field `trainer`.
+    MADDPG {
+        /// The constructed [`MADDPGAlgorithm`].
+        trainer: MADDPGAlgorithm<B, InK, OutK, K>,
+    },
     /// Multi-agent PPO; see field `trainer`.
     MAPPO {
         /// The constructed [`MAPPOAlgorithm`].
-        trainer: MAPPOAlgorithm<B, InK, OutK>,
+        trainer: MAPPOAlgorithm<B, InK, OutK, K>,
     },
     /// Multi-agent REINFORCE; see field `trainer`.
     MAREINFORCE {
         /// The constructed [`MAREINFORCEAlgorithm`].
-        trainer: MAREINFORCEAlgorithm<B, InK, OutK>,
+        trainer: MAREINFORCEAlgorithm<B, InK, OutK, K>,
+    },
+    /// Multi-agent TD3; see field `trainer`.
+    MATD3 {
+        /// The constructed [`MATD3Algorithm`].
+        trainer: MATD3Algorithm<B, InK, OutK, K>,
     },
 }
 
-impl<B, InK, OutK> MultiagentTrainer<B, InK, OutK>
+impl<B, InK, OutK, K> MultiagentTrainer<B, InK, OutK, K>
 where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    K: MultiagentPPOKernelTrait<B, InK, OutK>
+        + MultiagentReinforceKernelTrait<B, InK, OutK>
+        + MultiagentDDPGKernelTrait<B, InK, OutK>
+        + MultiagentTD3KernelTrait<B, InK, OutK>
+        + Default,
 {
-    /// Builds from a [`MultiagentTrainerSpec`] (MAPPO or MAREINFORCE).
-    pub fn new(spec: MultiagentTrainerSpec) -> Result<Self, AlgorithmError> {
+    /// Builds from a [`MultiagentTrainerSpec`].
+    pub fn new(spec: MultiagentTrainerSpec<K>) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
-            MultiagentTrainerSpec::MAPPO { args, hyperparams } => Self::MAPPO {
-                trainer: MAPPOAlgorithm::<B, InK, OutK>::new(
+            MultiagentTrainerSpec::MADDPG {
+                args,
+                hyperparams,
+                kernel,
+            } => Self::MADDPG {
+                trainer: MADDPGAlgorithm::<B, InK, OutK, K>::new(
                     hyperparams,
                     &args.env_dir,
                     &args.save_model_path,
                     args.obs_dim,
                     args.act_dim,
                     args.buffer_size,
+                    kernel,
                 )?,
             },
-            MultiagentTrainerSpec::MAREINFORCE { args, hyperparams } => Self::MAREINFORCE {
-                trainer: MAREINFORCEAlgorithm::<B, InK, OutK>::new(
+            MultiagentTrainerSpec::MAPPO {
+                args,
+                hyperparams,
+                kernel,
+            } => Self::MAPPO {
+                trainer: MAPPOAlgorithm::<B, InK, OutK, K>::new(
                     hyperparams,
                     &args.env_dir,
                     &args.save_model_path,
                     args.obs_dim,
                     args.act_dim,
                     args.buffer_size,
+                    kernel,
+                )?,
+            },
+            MultiagentTrainerSpec::MAREINFORCE {
+                args,
+                hyperparams,
+                kernel,
+            } => Self::MAREINFORCE {
+                trainer: MAREINFORCEAlgorithm::<B, InK, OutK, K>::new(
+                    hyperparams,
+                    &args.env_dir,
+                    &args.save_model_path,
+                    args.obs_dim,
+                    args.act_dim,
+                    args.buffer_size,
+                    kernel,
+                )?,
+            },
+            MultiagentTrainerSpec::MATD3 {
+                args,
+                hyperparams,
+                kernel,
+            } => Self::MATD3 {
+                trainer: MATD3Algorithm::<B, InK, OutK, K>::new(
+                    hyperparams,
+                    &args.env_dir,
+                    &args.save_model_path,
+                    args.obs_dim,
+                    args.act_dim,
+                    args.buffer_size,
+                    kernel,
                 )?,
             },
         };
@@ -546,20 +666,44 @@ where
         Ok(trainer)
     }
 
-    /// Shorthand for `MultiagentTrainer::new(MultiagentTrainerSpec::mappo(args, hyperparams))`.
+    /// Shorthand for building a MAPPO trainer.
     pub fn mappo(
         args: TrainerArgs,
         hyperparams: Option<MAPPOParams>,
+        kernel: K,
     ) -> Result<Self, AlgorithmError> {
-        Self::new(MultiagentTrainerSpec::mappo(args, hyperparams))
+        Self::new(MultiagentTrainerSpec::mappo(args, hyperparams, kernel))
     }
 
-    /// Shorthand for `MultiagentTrainer::new(MultiagentTrainerSpec::mareinforce(args, hyperparams))`.
+    /// Shorthand for building a MAREINFORCE trainer.
     pub fn mareinforce(
         args: TrainerArgs,
         hyperparams: Option<MAREINFORCEParams>,
+        kernel: K,
     ) -> Result<Self, AlgorithmError> {
-        Self::new(MultiagentTrainerSpec::mareinforce(args, hyperparams))
+        Self::new(MultiagentTrainerSpec::mareinforce(
+            args,
+            hyperparams,
+            kernel,
+        ))
+    }
+
+    /// Shorthand for building a MADDPG trainer.
+    pub fn maddpg(
+        args: TrainerArgs,
+        hyperparams: Option<MADDPGParams>,
+        kernel: K,
+    ) -> Result<Self, AlgorithmError> {
+        Self::new(MultiagentTrainerSpec::maddpg(args, hyperparams, kernel))
+    }
+
+    /// Shorthand for building a MATD3 trainer.
+    pub fn matd3(
+        args: TrainerArgs,
+        hyperparams: Option<MATD3Params>,
+        kernel: K,
+    ) -> Result<Self, AlgorithmError> {
+        Self::new(MultiagentTrainerSpec::matd3(args, hyperparams, kernel))
     }
 
     /// No-op for multi-agent trainers; trajectory counts are managed internally.
@@ -567,19 +711,25 @@ where
 }
 
 #[cfg(feature = "ndarray-backend")]
-impl<B, InK, OutK> MultiagentTrainer<B, InK, OutK>
+impl<B, InK, OutK, K> MultiagentTrainer<B, InK, OutK, K>
 where
     B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    K: MultiagentPPOKernelTrait<B, InK, OutK>
+        + MultiagentReinforceKernelTrait<B, InK, OutK>
+        + MultiagentDDPGKernelTrait<B, InK, OutK>
+        + MultiagentTD3KernelTrait<B, InK, OutK>
+        + WeightProvider
+        + Default,
 {
-    /// Export the trained MAPPO policy as an in-memory ONNX model.
-    ///
-    /// Returns `None` for MAREINFORCE or before any training has occurred.
+    /// Export the trained policy as an in-memory ONNX model.
     pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         match self {
+            Self::MADDPG { trainer } => trainer.acquire_model_module(),
             Self::MAPPO { trainer } => trainer.acquire_model_module(),
-            Self::MAREINFORCE { .. } => None,
+            Self::MAREINFORCE { trainer } => trainer.acquire_model_module(),
+            Self::MATD3 { trainer } => trainer.acquire_model_module(),
         }
     }
 }
@@ -673,29 +823,41 @@ impl RelayRLTrainer {
     }
 
     /// See [`MultiagentTrainer::mappo`].
-    pub fn mappo<B, InK, OutK>(
+    pub fn mappo<B, InK, OutK, K>(
         args: TrainerArgs,
         hyperparams: Option<MAPPOParams>,
-    ) -> Result<MultiagentTrainer<B, InK, OutK>, AlgorithmError>
+        kernel: K,
+    ) -> Result<MultiagentTrainer<B, InK, OutK, K>, AlgorithmError>
     where
         B: Backend + BackendMatcher,
         InK: TensorKind<B>,
         OutK: TensorKind<B>,
+        K: MultiagentPPOKernelTrait<B, InK, OutK>
+            + MultiagentReinforceKernelTrait<B, InK, OutK>
+            + MultiagentDDPGKernelTrait<B, InK, OutK>
+            + MultiagentTD3KernelTrait<B, InK, OutK>
+            + Default,
     {
-        MultiagentTrainer::<B, InK, OutK>::mappo(args, hyperparams)
+        MultiagentTrainer::<B, InK, OutK, K>::mappo(args, hyperparams, kernel)
     }
 
     /// See [`MultiagentTrainer::mareinforce`].
-    pub fn mareinforce<B, InK, OutK>(
+    pub fn mareinforce<B, InK, OutK, K>(
         args: TrainerArgs,
         hyperparams: Option<MAREINFORCEParams>,
-    ) -> Result<MultiagentTrainer<B, InK, OutK>, AlgorithmError>
+        kernel: K,
+    ) -> Result<MultiagentTrainer<B, InK, OutK, K>, AlgorithmError>
     where
         B: Backend + BackendMatcher,
         InK: TensorKind<B>,
         OutK: TensorKind<B>,
+        K: MultiagentPPOKernelTrait<B, InK, OutK>
+            + MultiagentReinforceKernelTrait<B, InK, OutK>
+            + MultiagentDDPGKernelTrait<B, InK, OutK>
+            + MultiagentTD3KernelTrait<B, InK, OutK>
+            + Default,
     {
-        MultiagentTrainer::<B, InK, OutK>::mareinforce(args, hyperparams)
+        MultiagentTrainer::<B, InK, OutK, K>::mareinforce(args, hyperparams, kernel)
     }
 }
 
@@ -781,26 +943,39 @@ where
     }
 }
 
-impl<B, InK, OutK, T> AlgorithmTrait<T> for MultiagentTrainer<B, InK, OutK>
+impl<B, InK, OutK, K, T> AlgorithmTrait<T> for MultiagentTrainer<B, InK, OutK, K>
 where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
+    K: MultiagentPPOKernelTrait<B, InK, OutK>
+        + MultiagentReinforceKernelTrait<B, InK, OutK>
+        + MultiagentDDPGKernelTrait<B, InK, OutK>
+        + MultiagentTD3KernelTrait<B, InK, OutK>
+        + Default,
     T: TrajectoryData,
 {
     fn save(&self, filename: &str) {
         match self {
+            Self::MADDPG { trainer } => AlgorithmTrait::<T>::save(trainer, filename),
             Self::MAPPO { trainer } => AlgorithmTrait::<T>::save(trainer, filename),
             Self::MAREINFORCE { trainer } => AlgorithmTrait::<T>::save(trainer, filename),
+            Self::MATD3 { trainer } => AlgorithmTrait::<T>::save(trainer, filename),
         }
     }
 
     async fn receive_trajectory(&mut self, trajectory: T) -> Result<bool, AlgorithmError> {
         match self {
+            Self::MADDPG { trainer } => {
+                AlgorithmTrait::<T>::receive_trajectory(trainer, trajectory).await
+            }
             Self::MAPPO { trainer } => {
                 AlgorithmTrait::<T>::receive_trajectory(trainer, trajectory).await
             }
             Self::MAREINFORCE { trainer } => {
+                AlgorithmTrait::<T>::receive_trajectory(trainer, trajectory).await
+            }
+            Self::MATD3 { trainer } => {
                 AlgorithmTrait::<T>::receive_trajectory(trainer, trajectory).await
             }
         }
@@ -808,15 +983,355 @@ where
 
     fn train_model(&mut self) {
         match self {
+            Self::MADDPG { trainer } => AlgorithmTrait::<T>::train_model(trainer),
             Self::MAPPO { trainer } => AlgorithmTrait::<T>::train_model(trainer),
             Self::MAREINFORCE { trainer } => AlgorithmTrait::<T>::train_model(trainer),
+            Self::MATD3 { trainer } => AlgorithmTrait::<T>::train_model(trainer),
         }
     }
 
     fn log_epoch(&mut self) {
         match self {
+            Self::MADDPG { trainer } => AlgorithmTrait::<T>::log_epoch(trainer),
             Self::MAPPO { trainer } => AlgorithmTrait::<T>::log_epoch(trainer),
             Self::MAREINFORCE { trainer } => AlgorithmTrait::<T>::log_epoch(trainer),
+            Self::MATD3 { trainer } => AlgorithmTrait::<T>::log_epoch(trainer),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DdpgTrainer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which independent DDPG trainer to build.
+pub enum DdpgTrainerSpec {
+    /// Independent DDPG with [`DDPGParams`].
+    DDPG {
+        args: TrainerArgs,
+        hyperparams: Option<DDPGParams>,
+    },
+    /// Same algorithm named with the `I`-prefix convention.
+    IDDPG {
+        args: TrainerArgs,
+        hyperparams: Option<IDDPGParams>,
+    },
+}
+
+impl DdpgTrainerSpec {
+    pub fn ddpg(args: TrainerArgs, hyperparams: Option<DDPGParams>) -> Self {
+        Self::DDPG { args, hyperparams }
+    }
+
+    pub fn iddpg(args: TrainerArgs, hyperparams: Option<IDDPGParams>) -> Self {
+        Self::IDDPG { args, hyperparams }
+    }
+}
+
+/// Runtime wrapper for independent DDPG-family algorithms with kernel `K`.
+#[allow(clippy::large_enum_variant)]
+pub enum DdpgTrainer<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: StepKernelTrait<B, InK, OutK>,
+> {
+    DDPG(DDPGAlgorithm<B, InK, OutK, K>),
+    IDDPG(IDDPGAlgorithm<B, InK, OutK, K>),
+}
+
+impl<B, InK, OutK, K> DdpgTrainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: DDPGKernelTrait<B, InK, OutK> + Default,
+{
+    pub fn new(spec: DdpgTrainerSpec, kernel: K) -> Result<Self, AlgorithmError> {
+        let trainer = match spec {
+            DdpgTrainerSpec::DDPG { args, hyperparams } => {
+                Self::DDPG(DDPGAlgorithm::<B, InK, OutK, K>::new(
+                    hyperparams,
+                    &args.env_dir,
+                    &args.save_model_path,
+                    args.obs_dim,
+                    args.act_dim,
+                    args.buffer_size,
+                    kernel,
+                )?)
+            }
+            DdpgTrainerSpec::IDDPG { args, hyperparams } => {
+                Self::IDDPG(IDDPGAlgorithm::<B, InK, OutK, K>::new(
+                    hyperparams,
+                    &args.env_dir,
+                    &args.save_model_path,
+                    args.obs_dim,
+                    args.act_dim,
+                    args.buffer_size,
+                    kernel,
+                )?)
+            }
+        };
+        Ok(trainer)
+    }
+
+    pub fn ddpg(
+        args: TrainerArgs,
+        hyperparams: Option<DDPGParams>,
+        kernel: K,
+    ) -> Result<Self, AlgorithmError> {
+        Self::new(DdpgTrainerSpec::ddpg(args, hyperparams), kernel)
+    }
+
+    pub fn iddpg(
+        args: TrainerArgs,
+        hyperparams: Option<IDDPGParams>,
+        kernel: K,
+    ) -> Result<Self, AlgorithmError> {
+        Self::new(DdpgTrainerSpec::iddpg(args, hyperparams), kernel)
+    }
+
+    pub fn reset_epoch(&mut self) {
+        match self {
+            Self::DDPG(a) => a.reset_epoch(),
+            Self::IDDPG(a) => a.reset_epoch(),
+        }
+    }
+}
+
+impl<B, InK, OutK, K, T> AlgorithmTrait<T> for DdpgTrainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: DDPGKernelTrait<B, InK, OutK> + Default,
+    T: TrajectoryData,
+{
+    fn save(&self, filename: &str) {
+        match self {
+            Self::DDPG(a) => AlgorithmTrait::<T>::save(a, filename),
+            Self::IDDPG(a) => AlgorithmTrait::<T>::save(a, filename),
+        }
+    }
+
+    async fn receive_trajectory(&mut self, trajectory: T) -> Result<bool, AlgorithmError> {
+        match self {
+            Self::DDPG(a) => AlgorithmTrait::<T>::receive_trajectory(a, trajectory).await,
+            Self::IDDPG(a) => AlgorithmTrait::<T>::receive_trajectory(a, trajectory).await,
+        }
+    }
+
+    fn train_model(&mut self) {
+        match self {
+            Self::DDPG(a) => AlgorithmTrait::<T>::train_model(a),
+            Self::IDDPG(a) => AlgorithmTrait::<T>::train_model(a),
+        }
+    }
+
+    fn log_epoch(&mut self) {
+        match self {
+            Self::DDPG(a) => AlgorithmTrait::<T>::log_epoch(a),
+            Self::IDDPG(a) => AlgorithmTrait::<T>::log_epoch(a),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Td3Trainer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which independent TD3 trainer to build.
+pub enum Td3TrainerSpec {
+    TD3 {
+        args: TrainerArgs,
+        hyperparams: Option<TD3Params>,
+    },
+    ITD3 {
+        args: TrainerArgs,
+        hyperparams: Option<ITD3Params>,
+    },
+}
+
+impl Td3TrainerSpec {
+    pub fn td3(args: TrainerArgs, hyperparams: Option<TD3Params>) -> Self {
+        Self::TD3 { args, hyperparams }
+    }
+
+    pub fn itd3(args: TrainerArgs, hyperparams: Option<ITD3Params>) -> Self {
+        Self::ITD3 { args, hyperparams }
+    }
+}
+
+/// Runtime wrapper for independent TD3-family algorithms with kernel `K`.
+#[allow(clippy::large_enum_variant)]
+pub enum Td3Trainer<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: StepKernelTrait<B, InK, OutK>,
+> {
+    TD3(TD3Algorithm<B, InK, OutK, K>),
+    ITD3(ITD3Algorithm<B, InK, OutK, K>),
+}
+
+impl<B, InK, OutK, K> Td3Trainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: TD3KernelTrait<B, InK, OutK> + Default,
+{
+    pub fn new(spec: Td3TrainerSpec, kernel: K) -> Result<Self, AlgorithmError> {
+        let trainer = match spec {
+            Td3TrainerSpec::TD3 { args, hyperparams } => {
+                Self::TD3(TD3Algorithm::<B, InK, OutK, K>::new(
+                    hyperparams,
+                    &args.env_dir,
+                    &args.save_model_path,
+                    args.obs_dim,
+                    args.act_dim,
+                    args.buffer_size,
+                    kernel,
+                )?)
+            }
+            Td3TrainerSpec::ITD3 { args, hyperparams } => {
+                Self::ITD3(ITD3Algorithm::<B, InK, OutK, K>::new(
+                    hyperparams,
+                    &args.env_dir,
+                    &args.save_model_path,
+                    args.obs_dim,
+                    args.act_dim,
+                    args.buffer_size,
+                    kernel,
+                )?)
+            }
+        };
+        Ok(trainer)
+    }
+
+    pub fn td3(
+        args: TrainerArgs,
+        hyperparams: Option<TD3Params>,
+        kernel: K,
+    ) -> Result<Self, AlgorithmError> {
+        Self::new(Td3TrainerSpec::td3(args, hyperparams), kernel)
+    }
+
+    pub fn itd3(
+        args: TrainerArgs,
+        hyperparams: Option<ITD3Params>,
+        kernel: K,
+    ) -> Result<Self, AlgorithmError> {
+        Self::new(Td3TrainerSpec::itd3(args, hyperparams), kernel)
+    }
+
+    pub fn reset_epoch(&mut self) {
+        match self {
+            Self::TD3(a) => a.reset_epoch(),
+            Self::ITD3(a) => a.reset_epoch(),
+        }
+    }
+}
+
+impl<B, InK, OutK, K, T> AlgorithmTrait<T> for Td3Trainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: TD3KernelTrait<B, InK, OutK> + Default,
+    T: TrajectoryData,
+{
+    fn save(&self, filename: &str) {
+        match self {
+            Self::TD3(a) => AlgorithmTrait::<T>::save(a, filename),
+            Self::ITD3(a) => AlgorithmTrait::<T>::save(a, filename),
+        }
+    }
+
+    async fn receive_trajectory(&mut self, trajectory: T) -> Result<bool, AlgorithmError> {
+        match self {
+            Self::TD3(a) => AlgorithmTrait::<T>::receive_trajectory(a, trajectory).await,
+            Self::ITD3(a) => AlgorithmTrait::<T>::receive_trajectory(a, trajectory).await,
+        }
+    }
+
+    fn train_model(&mut self) {
+        match self {
+            Self::TD3(a) => AlgorithmTrait::<T>::train_model(a),
+            Self::ITD3(a) => AlgorithmTrait::<T>::train_model(a),
+        }
+    }
+
+    fn log_epoch(&mut self) {
+        match self {
+            Self::TD3(a) => AlgorithmTrait::<T>::log_epoch(a),
+            Self::ITD3(a) => AlgorithmTrait::<T>::log_epoch(a),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RelayRLTrainer extensions for DDPG and TD3
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl RelayRLTrainer {
+    /// See [`DdpgTrainer::ddpg`].
+    pub fn ddpg<B, InK, OutK, K>(
+        args: TrainerArgs,
+        hyperparams: Option<DDPGParams>,
+        kernel: K,
+    ) -> Result<DdpgTrainer<B, InK, OutK, K>, AlgorithmError>
+    where
+        B: Backend + BackendMatcher,
+        InK: TensorKind<B>,
+        OutK: TensorKind<B>,
+        K: DDPGKernelTrait<B, InK, OutK> + Default,
+    {
+        DdpgTrainer::<B, InK, OutK, K>::ddpg(args, hyperparams, kernel)
+    }
+
+    /// See [`DdpgTrainer::iddpg`].
+    pub fn iddpg<B, InK, OutK, K>(
+        args: TrainerArgs,
+        hyperparams: Option<IDDPGParams>,
+        kernel: K,
+    ) -> Result<DdpgTrainer<B, InK, OutK, K>, AlgorithmError>
+    where
+        B: Backend + BackendMatcher,
+        InK: TensorKind<B>,
+        OutK: TensorKind<B>,
+        K: DDPGKernelTrait<B, InK, OutK> + Default,
+    {
+        DdpgTrainer::<B, InK, OutK, K>::iddpg(args, hyperparams, kernel)
+    }
+
+    /// See [`Td3Trainer::td3`].
+    pub fn td3<B, InK, OutK, K>(
+        args: TrainerArgs,
+        hyperparams: Option<TD3Params>,
+        kernel: K,
+    ) -> Result<Td3Trainer<B, InK, OutK, K>, AlgorithmError>
+    where
+        B: Backend + BackendMatcher,
+        InK: TensorKind<B>,
+        OutK: TensorKind<B>,
+        K: TD3KernelTrait<B, InK, OutK> + Default,
+    {
+        Td3Trainer::<B, InK, OutK, K>::td3(args, hyperparams, kernel)
+    }
+
+    /// See [`Td3Trainer::itd3`].
+    pub fn itd3<B, InK, OutK, K>(
+        args: TrainerArgs,
+        hyperparams: Option<ITD3Params>,
+        kernel: K,
+    ) -> Result<Td3Trainer<B, InK, OutK, K>, AlgorithmError>
+    where
+        B: Backend + BackendMatcher,
+        InK: TensorKind<B>,
+        OutK: TensorKind<B>,
+        K: TD3KernelTrait<B, InK, OutK> + Default,
+    {
+        Td3Trainer::<B, InK, OutK, K>::itd3(args, hyperparams, kernel)
     }
 }
