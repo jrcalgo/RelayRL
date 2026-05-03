@@ -6,10 +6,11 @@
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::AlgorithmArgs;
+use crate::network::client::agent::AlgorithmCfg;
 use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{InferenceAddressesArgs, TrainingAddressesArgs};
+use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifecycleManager, LifecycleManagerError,
 };
@@ -251,12 +252,25 @@ pub(crate) trait ClientEnvironments<
     const D_OUT: usize,
 >
 {
-    async fn run_env(
+    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_gradient: Option<(AlgorithmArgs, crate::network::client::agent::MaxTrajLength)>,
-    ) -> Result<(), CoordinatorError>;
+        algorithm_gradient: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+    ) -> Result<(), CoordinatorError>
+    where
+        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + Default
+            + Send
+            + 'static;
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
@@ -296,25 +310,17 @@ pub struct ClientCoordinator<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
 > {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_type: TransportType,
     pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
-    _phantom: PhantomData<(KindIn, KindOut)>,
 }
 
 // ===== Internal helpers =====
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
-> ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    ClientCoordinator<B, D_IN, D_OUT>
 {
     async fn request_model_versions(
         global_dispatcher_tx: Sender<RoutedMessage>,
@@ -498,13 +504,8 @@ impl<
 
 // ===== Client interface implementation =====
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
-> ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    ClientInterface<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
 {
     fn new(
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -516,7 +517,6 @@ impl<
             transport_type,
             client_modes: Arc::new(client_modes),
             runtime_params: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -829,6 +829,8 @@ impl<
                 None
             };
 
+            let shared_algorithm_config_init = lifecycle.get_algorithm_config_init();
+
             let (state, global_dispatcher_rx) = {
                 let shared_local_model_path = lifecycle.get_local_model_path();
 
@@ -845,6 +847,7 @@ impl<
                     training_dispatcher.clone(),
                     shared_client_modes.clone(),
                     shared_max_traj_length,
+                    shared_algorithm_config_init,
                     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                     shared_transport_addresses.clone(),
                     shared_local_model_path,
@@ -1447,13 +1450,8 @@ impl<
     }
 }
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
-> ClientActors<B> for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    ClientActors<B> for ClientCoordinator<B, D_IN, D_OUT>
 {
     async fn new_actor(
         &mut self,
@@ -1696,36 +1694,78 @@ impl<
     }
 }
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B> + Send + Sync + 'static,
-    KindOut: TensorKind<B> + Send + Sync + 'static,
-> ClientEnvironments<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    ClientEnvironments<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
 {
-    async fn run_env(
+    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_gradient: Option<(AlgorithmArgs, crate::network::client::agent::MaxTrajLength)>,
-    ) -> Result<(), CoordinatorError> {
+        algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+    ) -> Result<(), CoordinatorError>
+    where
+        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + Default
+            + Send
+            + 'static,
+    {
         match &self.runtime_params {
             Some(params) => match self.client_modes.actor_inference_mode {
                 ActorInferenceMode::Local(_) => {
-                    let (runtime, env_map) = params
-                        .shared_state
-                        .read()
-                        .await
-                        .get_run_env_handles(actor_id)
-                        .map_err(CoordinatorError::from)?;
+                    let (runtime, env_map, algorithm_config_init) = {
+                        let shared_state_guard = params.shared_state.read().await;
+                        let (runtime, env_map) = shared_state_guard
+                            .get_run_env_handles(actor_id)
+                            .map_err(CoordinatorError::from)?;
+                        let algorithm_config_init = match algorithm_cfg {
+                            Some(_) => {
+                                Some(shared_state_guard.shared_algorithm_config_init.clone())
+                            }
+                            None => None,
+                        };
 
-                    StateManager::<B, D_IN, D_OUT>::run_env_step_loop(
+                        (runtime, env_map, algorithm_config_init)
+                    };
+
+                    let algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)> =
+                        if let Some((config, model_path, buffer_size, kernel)) = algorithm_cfg {
+                            if config == AlgorithmCfg::ConfigInit {
+                                match algorithm_config_init {
+                                    Some(init_config) => Some((
+                                        init_config.read().await.clone(),
+                                        model_path,
+                                        buffer_size,
+                                        kernel,
+                                    )),
+                                    None => {
+                                        return Err(CoordinatorError::StateManagerError(
+                                            StateManagerError::AlgorithmConfigInitError(
+                                                "Algorithm config init not found".to_string(),
+                                            ),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                Some((config, model_path, buffer_size, kernel))
+                            }
+                        } else {
+                            None
+                        };
+
+                    StateManager::<B, D_IN, D_OUT>::run_env_step_loop::<KindIn, KindOut, KN>(
                         actor_id,
                         runtime,
                         env_map,
                         step_count,
-                        algorithm_gradient,
+                        algorithm_cfg,
                     )
                     .map_err(CoordinatorError::from)
                 }

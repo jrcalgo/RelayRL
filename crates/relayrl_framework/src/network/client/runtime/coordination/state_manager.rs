@@ -3,7 +3,8 @@
 //! This module tracks actor task handles, inboxes, router assignments, and local model handles for
 //! the client runtime.
 
-use crate::network::client::agent::{ActorInferenceMode, AlgorithmArgs, ClientModes, ModelMode};
+use crate::network::client::agent::{ActorInferenceMode, AlgorithmCfg, ClientModes, ModelMode};
+use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{Actor, ActorEntity, ActorRuntime};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
@@ -27,9 +28,12 @@ use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
+use relayrl_algorithms::templates::base_algorithm::AlgorithmTrait;
 use relayrl_env_trait::{EnvDType, EnvNdArrayDType, Environment, EnvironmentUuid};
 use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::{HotReloadableModel, ModelModule};
+use relayrl_types::prelude::tensor::burn::TensorKind;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
@@ -96,6 +100,12 @@ pub enum StateManagerError {
     TensorConversionError(String),
     #[error("Inference request failed: {0}")]
     InferenceRequestError(String),
+    #[error("Environment training error: {0}")]
+    TrainerError(String),
+    #[error(transparent)]
+    AlgorithmError(#[from] relayrl_algorithms::AlgorithmError),
+    #[error("Algorithm config init failed: {0}")]
+    AlgorithmConfigInitError(String),
 }
 
 pub type ActorUuid = Uuid;
@@ -123,6 +133,7 @@ pub(crate) struct StateManager<
     shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
     shared_client_modes: Arc<ClientModes>,
     shared_max_traj_length: Arc<RwLock<usize>>,
+    pub(crate) shared_algorithm_config_init: Arc<RwLock<AlgorithmCfg>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -154,6 +165,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
         shared_client_modes: Arc<ClientModes>,
         shared_max_traj_length: Arc<RwLock<usize>>,
+        shared_algorithm_config_init: Arc<RwLock<AlgorithmCfg>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -171,6 +183,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 shared_training_dispatcher,
                 shared_client_modes,
                 shared_max_traj_length,
+                shared_algorithm_config_init,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_transport_addresses,
                 shared_local_model_path,
@@ -733,9 +746,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         reward: f32,
         env_id: Option<EnvironmentUuid>,
         env_label: Option<String>,
-    ) -> Result<(), StateManagerError> {
+        return_traj_override: bool,
+    ) -> Result<Option<RelayRLTrajectory>, StateManagerError> {
         runtime
-            .flag_last_action(reward, env_id, env_label)
+            .flag_last_action(reward, env_id, env_label, return_traj_override)
             .await
             .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))
     }
@@ -857,13 +871,27 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok((runtime, self.actor_envs.clone()))
     }
 
-    pub(crate) fn run_env_step_loop(
+    pub(crate) fn run_env_step_loop<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
         actor_id: ActorUuid,
         runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
         step_count: usize,
-        algorithm_gradient: Option<(AlgorithmArgs, crate::network::client::agent::MaxTrajLength)>,
-    ) -> Result<(), StateManagerError> {
+        algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+    ) -> Result<(), StateManagerError>
+    where
+        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + Default
+            + Send
+            + 'static,
+    {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
@@ -896,6 +924,102 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
                 let discrete = env_interface.action_is_discrete().unwrap_or(true);
 
+                use relayrl_algorithms::{DdpgTrainer, PpoTrainer, ReinforceTrainer, Td3Trainer, MultiagentTrainer, StepKernelTrait, REINFORCEKernelTrait};
+                use relayrl_types::prelude::tensor::burn::TensorKind;
+
+                enum AlgorithmTrainer<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>, K: StepKernelTrait<B, KindIn, KindOut> + REINFORCEKernelTrait<B, KindIn, KindOut> + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut> + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut> + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut> + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut> + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut> + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut> + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut> + Default>  {
+                    DDPG(DdpgTrainer<B, KindIn, KindOut, K>),
+                    PPO(PpoTrainer<B, KindIn, KindOut, K>),
+                    REINFORCE(ReinforceTrainer<B, KindIn, KindOut, K>),
+                    TD3(Td3Trainer<B, KindIn, KindOut, K>),
+                    MULTIAGENT(MultiagentTrainer<B, KindIn, KindOut, K>),
+                    // CUSTOM(CustomTrainer<B, KindIn, KindOut, K>),
+                }
+
+                let mut _temp_env_dir: Option<tempfile::TempDir> = None;
+
+                let mut algorithm_trainer = if let Some((algorithm_cfg, save_model_path, replay_buffer_size, kernel)) = algorithm_cfg {
+                    let obs_dim = env_interface.obs_dim().unwrap_or(0);
+                    let act_dim = env_interface.act_dim().unwrap_or(0);
+
+                    let temp_env_dir = tempfile::tempdir().map_err(|e| StateManagerError::StepEnvError(e.to_string()))?;
+
+                    let trainer_args = relayrl_algorithms::TrainerArgs {
+                        env_dir: temp_env_dir.path().to_path_buf(),
+                        save_model_path,
+                        obs_dim,
+                        act_dim,
+                        buffer_size: replay_buffer_size,
+                    };
+
+                    use relayrl_algorithms::{DdpgTrainerSpec, PpoTrainerSpec, ReinforceTrainerSpec, Td3TrainerSpec, MultiagentTrainerSpec};
+
+                    let trainer: Option<AlgorithmTrainer<B, KindIn, KindOut, KN>> = match algorithm_cfg {
+                        AlgorithmCfg::DDPG(params) => {
+                            let spec = DdpgTrainerSpec::ddpg(trainer_args, params);
+                            Some(AlgorithmTrainer::DDPG(DdpgTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::IDDPG(params) => {
+                            let spec = DdpgTrainerSpec::iddpg(trainer_args, params);
+                            Some(AlgorithmTrainer::DDPG(DdpgTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::MADDPG(params) => {
+                            let spec = MultiagentTrainerSpec::maddpg(trainer_args, params, kernel);
+                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::PPO(params) => {
+                            let spec = PpoTrainerSpec::ppo(trainer_args, params);
+                            Some(AlgorithmTrainer::PPO(PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::IPPO(params) => {
+                            let spec = PpoTrainerSpec::ippo(trainer_args, params);
+                            Some(AlgorithmTrainer::PPO(PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::MAPPO(params) => {
+                            let spec = MultiagentTrainerSpec::mappo(trainer_args, params, kernel);
+                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::REINFORCE(params) => {
+                            let spec = ReinforceTrainerSpec::reinforce(trainer_args, params);
+                            Some(AlgorithmTrainer::REINFORCE(ReinforceTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::IREINFORCE(params) => {
+                            let spec = ReinforceTrainerSpec::ireinforce(trainer_args, params);
+                            Some(AlgorithmTrainer::REINFORCE(ReinforceTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::MAREINFORCE(params) => {
+                            let spec = MultiagentTrainerSpec::mareinforce(trainer_args, params, kernel);
+                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::TD3(params) => {
+                            let spec = Td3TrainerSpec::td3(trainer_args, params);
+                            Some(AlgorithmTrainer::TD3(Td3Trainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::ITD3(params) => {
+                            let spec = Td3TrainerSpec::itd3(trainer_args, params);
+                            Some(AlgorithmTrainer::TD3(Td3Trainer::new(spec, kernel).map_err(StateManagerError::from)?))
+                        }
+                        AlgorithmCfg::MATD3(params) => {
+                            let spec = MultiagentTrainerSpec::matd3(trainer_args, params, kernel);
+                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
+                        }
+                        // AlgorithmCfg::CUSTOM { name, params } => {
+                        //     let spec = CustomTrainerSpec::custom(trainer_args, name, params);
+                        //     Some(AlgorithmTrainer::CUSTOM(CustomTrainer::new(spec, kernel)?))
+                        // }
+                        _ => {
+                            // covers the ConfigInit case, which is handled by the caller in the coordinator
+                            log::error!("[StateManager] Unsupported algorithm configuration: {:?}; algorithm not initialized!", algorithm_cfg);
+                            None
+                        }
+                    };
+                    _temp_env_dir = Some(temp_env_dir);
+
+                    trainer
+                } else {
+                    None
+                };
+
                 let env_labels: Vec<String> =
                     (0..n_envs).map(|i| format!("env-{}", i + 1)).collect();
                 let mut step_rewards = vec![0.0f32; n_envs];
@@ -921,17 +1045,31 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             )
                         })?;
 
-                    for i in 0..n_envs {
-                        step_rewards[i] = rewards[i];
-                        if dones[i] {
-                            Self::flag_last_action_direct(
+                    if let Some(ref mut trainer) = algorithm_trainer {
+                        for i in 0..n_envs {
+                            step_rewards[i] = rewards[i];
+                            let maybe_trajectory = Self::flag_last_action_direct(
                                 &runtime,
                                 step_rewards[i],
                                 Some(flat_ids[i]),
                                 Some(env_labels[i].clone()),
-                            )
-                            .await?;
+                                true,
+                            ).await?;
+
                             step_rewards[i] = 0.0;
+
+                            if let Some(trajectory) = maybe_trajectory {
+                                // upon reaching required number of trajectories, algorithm trains and exposes epoch metrics
+                                match trainer {
+                                    AlgorithmTrainer::DDPG(ddpg) => AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(ddpg, trajectory).await.map(|_| ()).map_err(|e| StateManagerError::TrainerError(e.to_string()))?,
+                                    AlgorithmTrainer::PPO(ppo) => AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(ppo, trajectory).await.map(|_| ()).map_err(|e| StateManagerError::TrainerError(e.to_string()))?,
+                                    AlgorithmTrainer::REINFORCE(reinforce) => AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(reinforce, trajectory).await.map(|_| ()).map_err(|e| StateManagerError::TrainerError(e.to_string()))?,
+                                    AlgorithmTrainer::TD3(td3) => AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(td3, trajectory).await.map(|_| ()).map_err(|e| StateManagerError::TrainerError(e.to_string()))?,
+                                    AlgorithmTrainer::MULTIAGENT(multiagent) => AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(multiagent, trajectory).await.map(|_| ()).map_err(|e| StateManagerError::TrainerError(e.to_string()))?,
+                                    // AlgorithmTrainer::CUSTOM(custom_args) => AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory().await.map(|_| ()).map_err(|e| StateManagerError::TrainerError(e.to_string()))?,
+                                }
+
+                            }
                         }
                     }
                 }

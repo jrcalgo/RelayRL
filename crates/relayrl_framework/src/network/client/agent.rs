@@ -11,7 +11,6 @@
 //! - Experimental: transport-backed and server-backed workflows enabled by
 //!   `zmq-transport` or `nats-transport`.
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
@@ -21,7 +20,7 @@ use crate::network::client::runtime::coordination::coordinator::{
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::prelude::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::utilities::configuration::{Algorithm, NetworkParams};
+use crate::utilities::configuration::NetworkParams;
 
 use active_uuid_registry::UuidPoolError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -98,20 +97,30 @@ pub enum RuntimeStatisticsReturnType {
     Hashmap(HashMap<String, String>),
 }
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-#[derive(Debug, Clone)]
-pub struct AlgorithmArgs {
-    pub algorithm: Algorithm,
-    pub hyperparams: Option<HyperparameterArgs>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlgorithmCfg {
+    PPO(Option<relayrl_algorithms::PPOParams>),
+    IPPO(Option<relayrl_algorithms::IPPOParams>),
+    MAPPO(Option<relayrl_algorithms::MAPPOParams>),
+    REINFORCE(Option<relayrl_algorithms::REINFORCEParams>),
+    IREINFORCE(Option<relayrl_algorithms::IREINFORCEParams>),
+    MAREINFORCE(Option<relayrl_algorithms::MAREINFORCEParams>),
+    DDPG(Option<relayrl_algorithms::DDPGParams>),
+    IDDPG(Option<relayrl_algorithms::IDDPGParams>),
+    MADDPG(Option<relayrl_algorithms::MADDPGParams>),
+    TD3(Option<relayrl_algorithms::TD3Params>),
+    ITD3(Option<relayrl_algorithms::ITD3Params>),
+    MATD3(Option<relayrl_algorithms::MATD3Params>),
+    // CUSTOM {
+    //     name: String,
+    //     params: HyperparameterArgs,
+    // },
+    ConfigInit,
 }
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-impl Default for AlgorithmArgs {
+impl Default for AlgorithmCfg {
     fn default() -> Self {
-        Self {
-            algorithm: Algorithm::ConfigInit,
-            hyperparams: None,
-        }
+        Self::ConfigInit
     }
 }
 
@@ -390,7 +399,7 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    pub algorithm_args: AlgorithmArgs,
+    pub online_algorithm_cfg: AlgorithmCfg,
     pub actor_count: u32,
     pub router_scale: u32,
     pub default_device: DeviceType,
@@ -475,14 +484,12 @@ pub struct AgentBuilder<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B> + Send + Sync,
-    KindOut: TensorKind<B> + Send + Sync,
 > {
     pub client_modes: ClientModes,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub transport_type: Option<TransportType>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub algorithm_args: Option<AlgorithmArgs>,
+    pub algorithm_cfg: Option<AlgorithmCfg>,
     pub actor_count: Option<u32>,
     pub router_scale: Option<u32>,
     pub default_device: Option<DeviceType>,
@@ -490,16 +497,10 @@ pub struct AgentBuilder<
     pub config_path: Option<PathBuf>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub codec: Option<CodecConfig>,
-    _phantom: PhantomData<(KindIn, KindOut)>,
 }
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B> + Send + Sync,
-    KindOut: TensorKind<B> + Send + Sync,
-> AgentBuilder<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    AgentBuilder<B, D_IN, D_OUT>
 {
     /// Create a new builder initialized with sensible default values.
     ///
@@ -512,7 +513,7 @@ impl<
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_type: Some(TransportType::default()),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args: Some(AlgorithmArgs::default()),
+            algorithm_cfg: Some(AlgorithmCfg::default()),
             actor_count: None,
             router_scale: None,
             default_device: None,
@@ -520,7 +521,6 @@ impl<
             config_path: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -564,29 +564,8 @@ impl<
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub fn algorithm(mut self, algorithm: Algorithm) -> Self {
-        let hyperparams = match self.algorithm_args {
-            Some(args) => args.hyperparams,
-            None => None,
-        };
-        self.algorithm_args = Some(AlgorithmArgs {
-            algorithm,
-            hyperparams,
-        });
-        self
-    }
-
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub fn hyperparams(mut self, hyperparams: HyperparameterArgs) -> Self {
-        let algorithm = match self.algorithm_args {
-            Some(args) => args.algorithm,
-            None => Algorithm::ConfigInit,
-        };
-
-        self.algorithm_args = Some(AlgorithmArgs {
-            algorithm,
-            hyperparams: Some(hyperparams),
-        });
+    pub fn algorithm_cfg(mut self, algorithm_cfg: AlgorithmCfg) -> Self {
+        self.algorithm_cfg = Some(algorithm_cfg);
         self
     }
 
@@ -607,25 +586,18 @@ impl<
     /// Returns an error if the selected modes are internally inconsistent.
     pub async fn build(
         self,
-    ) -> Result<
-        (
-            RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>,
-            AgentStartParameters<B>,
-        ),
-        ClientError,
-    > {
+    ) -> Result<(RelayRLAgent<B, D_IN, D_OUT>, AgentStartParameters<B>), ClientError> {
         // Initialize agent object
-        let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> =
-            RelayRLAgent::<B, D_IN, D_OUT, KindIn, KindOut>::new(
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                self.transport_type.unwrap_or_default(),
-                self.client_modes,
-            );
+        let agent: RelayRLAgent<B, D_IN, D_OUT> = RelayRLAgent::<B, D_IN, D_OUT>::new(
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            self.transport_type.unwrap_or_default(),
+            self.client_modes,
+        );
 
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args: self.algorithm_args.unwrap_or_default(),
+            algorithm_cfg: self.algorithm_cfg.unwrap_or_default(),
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
@@ -692,35 +664,23 @@ pub struct RelayRLAgent<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
 > {
-    coordinator: ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>,
+    coordinator: ClientCoordinator<B, D_IN, D_OUT>,
     supported_backend: SupportedTensorBackend,
     input_dtype: Option<DType>,
     output_dtype: Option<DType>,
 }
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B> + Send + Sync,
-    KindOut: TensorKind<B> + Send + Sync,
-> std::fmt::Debug for RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    std::fmt::Debug for RelayRLAgent<B, D_IN, D_OUT>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RLAgent")
     }
 }
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B> + Send + Sync,
-    KindOut: TensorKind<B> + Send + Sync,
-> RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    RelayRLAgent<B, D_IN, D_OUT>
 {
     /// Create a new agent facade using runtime-invariant parameters.
     ///
@@ -735,7 +695,7 @@ impl<
         client_modes: ClientModes,
     ) -> Self {
         Self {
-            coordinator: ClientCoordinator::<B, D_IN, D_OUT, KindIn, KindOut>::new(
+            coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 transport_type,
                 client_modes,
@@ -760,7 +720,7 @@ impl<
 
         let AgentStartParameters {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args,
+            online_algorithm_cfg,
             actor_count,
             router_scale,
             default_device,
@@ -773,7 +733,7 @@ impl<
         self.coordinator
             .start(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                algorithm_args,
+                online_algorithm_cfg,
                 actor_count,
                 router_scale,
                 default_device,
@@ -799,7 +759,7 @@ impl<
 
         let AgentStartParameters {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args,
+            online_algorithm_cfg,
             actor_count,
             router_scale,
             default_device,
@@ -812,7 +772,7 @@ impl<
         self.coordinator
             .restart(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                algorithm_args,
+                online_algorithm_cfg,
                 actor_count,
                 router_scale,
                 default_device,
@@ -864,7 +824,7 @@ impl<
     /// # Errors
     /// Returns [`ClientError::BackendMismatchError`] if the agent’s backend `B` does not match
     /// the configured runtime backend.
-    pub async fn request_action(
+    pub async fn request_action<KindIn: TensorKind<B>, KindOut: TensorKind<B>>(
         &self,
         ids: Vec<Uuid>,
         observation: Tensor<B, D_IN, KindIn>,
@@ -983,8 +943,6 @@ pub trait RelayRLAgentActors<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
 >
 {
     fn new_actor(
@@ -1014,14 +972,8 @@ pub trait RelayRLAgentActors<
     ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + '_>>;
 }
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B> + Send + Sync,
-    KindOut: TensorKind<B> + Send + Sync,
-> RelayRLAgentActors<B, D_IN, D_OUT, KindIn, KindOut>
-    for RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    RelayRLAgentActors<B, D_IN, D_OUT> for RelayRLAgent<B, D_IN, D_OUT>
 {
     /// Creates a new actor instance on the specified device with the specified model
     fn new_actor(
@@ -1229,16 +1181,35 @@ impl<
     }
 }
 
+pub type ReplayBufferSize = usize;
+pub type SaveModelPath = PathBuf;
+
 #[allow(async_fn_in_trait)]
 pub trait RelayRLActorEnv<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
 >
 {
-    async fn run_env(&self, actor_id: ActorUuid, step_count: usize) -> Result<(), ClientError>;
+    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+    ) -> Result<(), ClientError>
+    where
+        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + Default
+            + Send
+            + 'static;
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
@@ -1250,17 +1221,33 @@ pub trait RelayRLActorEnv<
     async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError>;
 }
 
-impl<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-    KindIn: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
-    KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
-> RelayRLActorEnv<B, D_IN, D_OUT, KindIn, KindOut>
-    for RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
+impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+    RelayRLActorEnv<B, D_IN, D_OUT> for RelayRLAgent<B, D_IN, D_OUT>
 {
-    async fn run_env(&self, actor_id: ActorUuid, step_count: usize) -> Result<(), ClientError> {
-        Ok(self.coordinator.run_env(actor_id, step_count).await?)
+    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+    ) -> Result<(), ClientError>
+    where
+        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + Default
+            + Send
+            + 'static,
+    {
+        Ok(self
+            .coordinator
+            .run_env::<KindIn, KindOut, KN>(actor_id, step_count, algorithm_cfg)
+            .await?)
     }
 
     async fn set_env(
