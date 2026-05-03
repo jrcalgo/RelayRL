@@ -1,463 +1,31 @@
 use crate::network::client::agent::LocalTrajectoryFileParams;
+pub use crate::utilities::config_json::*;
 
+use relayrl_algorithms::{
+    DDPGParams, IDDPGParams, IPPOParams, IREINFORCEParams, ITD3Params, MADDPGParams, MAPPOParams,
+    MAREINFORCEParams, MATD3Params, PPOParams, REINFORCEParams, TD3Params,
+};
 use relayrl_types::HyperparameterArgs;
 
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::{fs, fs::File, io::Read, path::PathBuf};
-
-#[macro_use]
-pub mod client_config_macros {
-    /// Resolves config json file between argument and default value.
-    #[macro_export]
-    macro_rules! resolve_client_config_json_path {
-        ($path: expr) => {
-            match $path {
-                Some(p) => get_or_create_client_config_json_path!(p.clone()),
-                None => DEFAULT_CLIENT_CONFIG_PATH.clone(),
-            }
-        };
-        ($path: literal) => {
-            get_or_create_client_config_json_path!(std::path::PathBuf::from($path))
-        };
-    }
-
-    /// Will write config file if not found in provided path.
-    /// Reads file if found, writes new file if not
-    #[macro_export]
-    macro_rules! get_or_create_client_config_json_path {
-        ($path: expr) => {
-            if $path.exists() {
-                log::info!(
-                    "[ConfigLoader - load_config] Found config.json in current directory: {:?}",
-                    $path
-                );
-                Some($path)
-            } else {
-                match fs::write($path, DEFAULT_CLIENT_CONFIG_JSON) {
-                    Ok(_) => {
-                        log::info!(
-                            "[ConfigLoader - load_config] Created new config at: {:?}",
-                            $path
-                        );
-                        Some($path)
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "[ConfigLoader - load_config] Failed to create config file: {}",
-                            e
-                        );
-                        None
-                    }
-                }
-            }
-        };
-    }
-}
-
-/// The default configuration file path, loaded lazily at runtime.
-/// If not overridden, the configuration will be retrieved or created in the cwd.
-pub static DEFAULT_CLIENT_CONFIG_PATH: Lazy<Option<PathBuf>> =
-    Lazy::new(|| get_or_create_client_config_json_path!(PathBuf::from("client_config.json")));
-
-#[macro_use]
-pub mod server_config_macros {
-    /// Resolves config json file between argument and default value.
-    #[macro_export]
-    macro_rules! resolve_training_server_config_json_path {
-        ($path: expr) => {
-            match $path {
-                Some(p) => get_or_create_training_server_config_json_path!(p.clone()),
-                None => DEFAULT_TRAINING_SERVER_CONFIG_PATH.clone(),
-            }
-        };
-        ($path: literal) => {
-            get_or_create_training_server_config_json_path!(std::path::PathBuf::from($path))
-        };
-    }
-
-    /// Will write config file if not found in provided path.
-    /// Reads file if found, writes new file if not
-    #[macro_export]
-    macro_rules! get_or_create_training_server_config_json_path {
-        ($path: expr) => {
-            if $path.exists() {
-                log::info!(
-                    "[ConfigLoader - load_config] Found config.json in current directory: {:?}",
-                    $path
-                );
-                Some($path)
-            } else {
-                match fs::write($path, DEFAULT_TRAINING_SERVER_CONFIG_JSON) {
-                    Ok(_) => {
-                        log::info!(
-                            "[ConfigLoader - load_config] Created new config at: {:?}",
-                            $path
-                        );
-                        Some($path)
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "[ConfigLoader - load_config] Failed to create config file: {}",
-                            e
-                        );
-                        None
-                    }
-                }
-            }
-        };
-    }
-
-    #[macro_export]
-    macro_rules! resolve_inference_server_config_json_path {
-        ($path: expr) => {
-            match $path {
-                Some(p) => get_or_create_inference_server_config_json_path!(p.clone()),
-                None => DEFAULT_INFERENCE_SERVER_CONFIG_PATH.clone(),
-            }
-        };
-        ($path: literal) => {
-            get_or_create_inference_server_config_json_path!(std::path::PathBuf::from($path))
-        };
-    }
-
-    #[macro_export]
-    macro_rules! get_or_create_inference_server_config_json_path {
-        ($path: expr) => {
-            if $path.exists() {
-                log::info!(
-                    "[ConfigLoader - load_config] Found config.json in current directory: {:?}",
-                    $path
-                );
-                Some($path)
-            } else {
-                match fs::write($path, DEFAULT_INFERENCE_SERVER_CONFIG_JSON) {
-                    Ok(_) => {
-                        log::info!(
-                            "[ConfigLoader - load_config] Created new config at: {:?}",
-                            $path
-                        );
-                        Some($path)
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "[ConfigLoader - load_config] Failed to create config file: {}",
-                            e
-                        );
-                        None
-                    }
-                }
-            }
-        };
-    }
-}
-
-pub static DEFAULT_TRAINING_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
-    get_or_create_training_server_config_json_path!(PathBuf::from("training_server_config.json"))
-});
-
-pub static DEFAULT_INFERENCE_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
-    get_or_create_inference_server_config_json_path!(PathBuf::from("inference_server_config.json"))
-});
-
-pub(crate) const DEFAULT_CLIENT_CONFIG_JSON: &str = r#"{
-    "client_config": {
-        "algorithm_name": "REINFORCE",
-        "config_update_polling_seconds": 10.0,
-        "init_hyperparameters": {
-            "DDPG": {
-                "seed": 1,
-                "gamma": 0.99,
-                "tau": 1e-2,
-                "learning_rate": 3e-3,
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "learning_starts": 128,
-                "policy_frequency": 1,  
-                "noise_scale": 0.1,
-                "train_iters": 50
-            },
-            "PPO": {
-                "discrete": true,
-                "seed": 0,
-                "traj_per_epoch": 1,
-                "clip_ratio": 0.1,
-                "gamma": 0.99,
-                "lam": 0.97,
-                "pi_lr": 3e-4,
-                "vf_lr": 3e-4,
-                "train_pi_iters": 40,
-                "train_v_iters": 40,
-                "target_kl": 0.01
-            },
-            "REINFORCE": {
-                "discrete": true,
-                "with_vf_baseline": true,
-                "seed": 1,
-                "traj_per_epoch": 8,
-                "gamma": 0.98,
-                "lam": 0.97,
-                "pi_lr": 3e-4,
-                "vf_lr": 1e-3,
-                "train_vf_iters": 80
-            },
-            "TD3": {
-                "seed": 1,
-                "gamma": 0.99,
-                "tau": 0.005,
-                "learning_rate": 3e-4,
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "exploration_noise": 0.1,
-                "policy_noise": 0.2,
-                "noise_clip": 0.5,
-                "learning_starts": 25000,
-                "policy_frequency": 2
-            },
-            "CUSTOM": {
-                "_comment": "Add custom algorithm hyperparams here formatted just like the other algorithms. i.e. \"MAPPO\": {...}",
-                "_comment2": "Make sure to add the algorithm name to the algorithm_name field",
-                "_comment3": "These key-values will be sent to the server for initialization"
-            }
-        },
-        "trajectory_file_output": {
-            "directory": "experiment_data",
-            "_comment": "use `Csv` or `Arrow`",
-            "file_type": "Csv"
-        },
-        "metrics_meter_name": "relayrl-client",
-        "metrics_otlp_endpoint": {
-            "prefix": "http://",
-            "host": "127.0.0.1",
-            "port": "4317"
-        }
-    },
-    "transport_config": {
-        "nats_addresses": {
-            "inference_server_address": {
-                "host": "127.0.0.1",
-                "port": "50050"
-            },
-            "training_server_address": {
-                "host": "127.0.0.1",
-                "port": "50051"
-            }
-        },
-        "zmq_addresses": {
-            "inference_addresses": {
-                "inference_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7800"
-                },
-                "inference_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7801"
-                }
-            },
-            "training_addresses": {
-                "model_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50051"
-                },
-                "trajectory_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7776"
-                },
-                "agent_listener_address": {
-                    "host": "127.0.0.1",
-                    "port": "7777"
-                },
-                "training_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7778"
-                }
-            }
-        },
-        "local_model_module": {
-            "directory": "model_module",
-            "model_name": "client_model",
-            "format": "pt"
-        },
-        "max_traj_length": 1000
-    }
-}"#;
-
-pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_JSON: &str = r#"{
-    "training_server_config": {
-        "config_update_polling_seconds": 10.0,
-        "default_hyperparameters": {
-            "DDPG": {
-                "seed": 1,
-                "gamma": 0.99,
-                "tau": 1e-2,
-                "learning_rate": 3e-3,
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "learning_starts": 128,
-                "policy_frequency": 1,  
-                "noise_scale": 0.1,
-                "train_iters": 50
-            },
-            "PPO": {
-                "discrete": true,
-                "seed": 0,
-                "traj_per_epoch": 1,
-                "clip_ratio": 0.1,
-                "gamma": 0.99,
-                "lam": 0.97,
-                "pi_lr": 3e-4,
-                "vf_lr": 3e-4,
-                "train_pi_iters": 40,
-                "train_v_iters": 40,
-                "target_kl": 0.01
-            },
-            "REINFORCE": {
-                "discrete": true,
-                "with_vf_baseline": true,
-                "seed": 1,
-                "traj_per_epoch": 8,
-                "gamma": 0.98,
-                "lam": 0.97,
-                "pi_lr": 3e-4,
-                "vf_lr": 1e-3,
-                "train_vf_iters": 80
-            },
-            "TD3": {
-                "seed": 1,
-                "gamma": 0.99,
-                "tau": 0.005,
-                "learning_rate": 3e-4,
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "exploration_noise": 0.1,
-                "policy_noise": 0.2,
-                "noise_clip": 0.5,
-                "learning_starts": 25000,
-                "policy_frequency": 2
-            }
-        },
-        "training_tensorboard": {
-            "_comment1": "Runs `tensorboard --logdir /logs` in cwd on start up of server.",
-            "launch_tb_on_startup": true,
-            "_comment2": "scalar tags can be any column header from `progress.txt` files.",
-            "_comment3": "For more than one tag, separate by semi-colon (;)",
-            "scalar_tags": "AverageEpRet;LossQ",
-            "global_step_tag": "Epoch"
-        }
-    },
-    "transport_config": {
-        "nats_addresses": {
-            "inference_server_address": {
-                "host": "127.0.0.1",
-                "port": "50050"
-            },
-            "training_server_address": {
-                "host": "127.0.0.1",
-                "port": "50051"
-            }
-        },
-        "zmq_addresses": {
-            "inference_addresses": {
-                "inference_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7800"
-                },
-                "inference_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7801"
-                }
-            },
-            "training_addresses": {
-                "model_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50051"
-                },
-                "trajectory_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7776"
-                },
-                "agent_listener_address": {
-                    "host": "127.0.0.1",
-                    "port": "7777"
-                },
-                "training_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7778"
-                }
-            }
-        },
-        "local_model_module": {
-            "directory": "model_module",
-            "model_name": "training_server_model",
-            "format": "pt"
-        },
-        "max_traj_length": 1000
-    }
-}"#;
-
-/// TODO: Implement infernece server configuration file and builder components.
-pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_JSON: &str = r#"{
-    "inference_server_config": {
-        "config_update_polling_seconds": 10.0,
-        "transport_config": {
-            "nats_addresses": {
-                "inference_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50050"
-                },
-                "training_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50051"
-                }
-            },
-            "zmq_addresses": {
-                "inference_addresses": {
-                    "inference_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7800"
-                    },
-                    "inference_scaling_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7801"
-                    }
-                },
-                "training_addresses": {
-                    "model_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "50051"
-                    },
-                    "trajectory_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7776"
-                    },
-                    "agent_listener_address": {
-                        "host": "127.0.0.1",
-                        "port": "7777"
-                    },
-                    "training_scaling_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7778"
-                    }
-                }
-            },
-            "local_model_module": {
-                "directory": "model_module",
-                "model_name": "inference_server_model",
-                "format": "pt"
-            },
-            "max_traj_length": 1000
-        }
-    }
-}"#;
+use std::{fs::File, io::Read, path::PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub enum Algorithm {
-    DDPG,
     PPO,
+    IPPO,
+    MAPPO,
     REINFORCE,
+    IREINFORCE,
+    MAREINFORCE,
+    DDPG,
+    IDDPG,
+    MADDPG,
     TD3,
-    CUSTOM(String),
+    ITD3,
+    MATD3,
+    // CUSTOM(String),
     ConfigInit,
 }
 
@@ -466,21 +34,38 @@ impl Algorithm {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "DDPG" => Some(Algorithm::DDPG),
+            "IDDPG" => Some(Algorithm::IDDPG),
+            "MADDPG" => Some(Algorithm::MADDPG),
             "PPO" => Some(Algorithm::PPO),
+            "IPPO" => Some(Algorithm::IPPO),
+            "MAPPO" => Some(Algorithm::MAPPO),
             "REINFORCE" => Some(Algorithm::REINFORCE),
+            "IREINFORCE" => Some(Algorithm::IREINFORCE),
+            "MAREINFORCE" => Some(Algorithm::MAREINFORCE),
             "TD3" => Some(Algorithm::TD3),
+            "ITD3" => Some(Algorithm::ITD3),
+            "MATD3" => Some(Algorithm::MATD3),
             "CONFIG_INIT" => Some(Algorithm::ConfigInit),
-            _ => Some(Algorithm::CUSTOM(s.to_string())),
+            // _ => Some(Algorithm::CUSTOM(s.to_string())),
+            _ => None,
         }
     }
 
     pub fn as_str(&self) -> &str {
         match self {
             Algorithm::DDPG => "DDPG",
+            Algorithm::IDDPG => "IDDPG",
+            Algorithm::MADDPG => "MADDPG",
             Algorithm::PPO => "PPO",
+            Algorithm::IPPO => "IPPO",
+            Algorithm::MAPPO => "MAPPO",
             Algorithm::REINFORCE => "REINFORCE",
+            Algorithm::IREINFORCE => "IREINFORCE",
+            Algorithm::MAREINFORCE => "MAREINFORCE",
             Algorithm::TD3 => "TD3",
-            Algorithm::CUSTOM(custom) => custom,
+            Algorithm::ITD3 => "ITD3",
+            Algorithm::MATD3 => "MATD3",
+            // Algorithm::CUSTOM(custom) => custom,
             Algorithm::ConfigInit => "CONFIG_INIT",
         }
     }
@@ -494,22 +79,39 @@ impl Algorithm {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HyperparameterConfig {
     #[serde(rename = "DDPG")]
-    pub ddpg: Option<DDPGParams>,
+    pub ddpg: Option<relayrl_algorithms::DDPGParams>,
+    #[serde(rename = "IDDPG")]
+    pub iddpg: Option<relayrl_algorithms::IDDPGParams>,
+    #[serde(rename = "MADDPG")]
+    pub maddpg: Option<relayrl_algorithms::MADDPGParams>,
     #[serde(rename = "PPO")]
-    pub ppo: Option<PPOParams>,
+    pub ppo: Option<relayrl_algorithms::PPOParams>,
+    #[serde(rename = "IPPO")]
+    pub ippo: Option<relayrl_algorithms::IPPOParams>,
+    #[serde(rename = "MAPPO")]
+    pub mappo: Option<relayrl_algorithms::MAPPOParams>,
     #[serde(rename = "REINFORCE")]
-    pub reinforce: Option<REINFORCEParams>,
+    pub reinforce: Option<relayrl_algorithms::REINFORCEParams>,
+    #[serde(rename = "IREINFORCE")]
+    pub ireinforce: Option<relayrl_algorithms::IREINFORCEParams>,
+    #[serde(rename = "MAREINFORCE")]
+    pub mareinforce: Option<relayrl_algorithms::MAREINFORCEParams>,
     #[serde(rename = "TD3")]
-    pub td3: Option<TD3Params>,
+    pub td3: Option<relayrl_algorithms::TD3Params>,
+    #[serde(rename = "ITD3")]
+    pub itd3: Option<relayrl_algorithms::ITD3Params>,
+    #[serde(rename = "MATD3")]
+    pub matd3: Option<relayrl_algorithms::MATD3Params>,
     // Add other fields later for in-house algorithms
-    #[serde(rename = "custom")]
-    pub custom: Option<CustomAlgorithmParams>,
+    // #[serde(rename = "custom")]
+    // pub custom: Option<CustomAlgorithmParams>,
 }
 
+// TODO: desperate need for refactor to align with AlgorithmCfg and proper Custom setup instructions"
 impl HyperparameterConfig {
     /// Converts the hyperparameter config to a map of algorithm names to hyperparameter arguments.
     ///
-    /// If an a specific algorithm is provided, only the hyperparameters for that algorithm are returned.
+    /// If a specific algorithm is provided, only the hyperparameters for that algorithm are returned.
     ///
     /// Otherwise, all hyperparameters for all loaded algorithms are returned.
     pub fn to_args(&self, algorithm: Option<&Algorithm>) -> HashMap<Algorithm, HyperparameterArgs> {
@@ -519,10 +121,10 @@ impl HyperparameterConfig {
                     let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
                     if let Some(ddpg) = &self.ddpg {
                         let mut map = HashMap::new();
-                        map.insert("seed".to_string(), ddpg.seed.to_string());
                         map.insert("gamma".to_string(), ddpg.gamma.to_string());
                         map.insert("tau".to_string(), ddpg.tau.to_string());
-                        map.insert("learning_rate".to_string(), ddpg.learning_rate.to_string());
+                        map.insert("actor_lr".to_string(), ddpg.actor_lr.to_string());
+                        map.insert("critic_lr".to_string(), ddpg.critic_lr.to_string());
                         map.insert("batch_size".to_string(), ddpg.batch_size.to_string());
                         map.insert("buffer_size".to_string(), ddpg.buffer_size.to_string());
                         map.insert(
@@ -544,7 +146,6 @@ impl HyperparameterConfig {
                     if let Some(ppo) = &self.ppo {
                         let mut map = HashMap::new();
                         map.insert("discrete".to_string(), ppo.discrete.to_string());
-                        map.insert("seed".to_string(), ppo.seed.to_string());
                         map.insert("traj_per_epoch".to_string(), ppo.traj_per_epoch.to_string());
                         map.insert("clip_ratio".to_string(), ppo.clip_ratio.to_string());
                         map.insert("gamma".to_string(), ppo.gamma.to_string());
@@ -552,7 +153,7 @@ impl HyperparameterConfig {
                         map.insert("pi_lr".to_string(), ppo.pi_lr.to_string());
                         map.insert("vf_lr".to_string(), ppo.vf_lr.to_string());
                         map.insert("train_pi_iters".to_string(), ppo.train_pi_iters.to_string());
-                        map.insert("train_v_iters".to_string(), ppo.train_v_iters.to_string());
+                        map.insert("train_vf_iters".to_string(), ppo.train_vf_iters.to_string());
                         map.insert("target_kl".to_string(), ppo.target_kl.to_string());
                         args.insert(Algorithm::PPO, HyperparameterArgs::Map(map));
                     }
@@ -573,7 +174,7 @@ impl HyperparameterConfig {
                             reinforce.traj_per_epoch.to_string(),
                         );
                         map.insert("gamma".to_string(), reinforce.gamma.to_string());
-                        map.insert("lam".to_string(), reinforce.lam.to_string());
+                        map.insert("lambda".to_string(), reinforce.lambda.to_string());
                         map.insert("pi_lr".to_string(), reinforce.pi_lr.to_string());
                         map.insert("vf_lr".to_string(), reinforce.vf_lr.to_string());
                         map.insert(
@@ -588,10 +189,10 @@ impl HyperparameterConfig {
                     let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
                     if let Some(td3) = &self.td3 {
                         let mut map = HashMap::new();
-                        map.insert("seed".to_string(), td3.seed.to_string());
                         map.insert("gamma".to_string(), td3.gamma.to_string());
                         map.insert("tau".to_string(), td3.tau.to_string());
-                        map.insert("learning_rate".to_string(), td3.learning_rate.to_string());
+                        map.insert("actor_lr".to_string(), td3.actor_lr.to_string());
+                        map.insert("critic_lr".to_string(), td3.critic_lr.to_string());
                         map.insert("batch_size".to_string(), td3.batch_size.to_string());
                         map.insert("buffer_size".to_string(), td3.buffer_size.to_string());
                         map.insert(
@@ -608,38 +209,186 @@ impl HyperparameterConfig {
                             "policy_frequency".to_string(),
                             td3.policy_frequency.to_string(),
                         );
+                        map.insert("train_iters".to_string(), td3.train_iters.to_string());
                         args.insert(Algorithm::TD3, HyperparameterArgs::Map(map));
                     }
                     args
                 }
-                Algorithm::CUSTOM(custom_name) => {
+                Algorithm::IPPO => {
                     let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
-                    if let Some(custom) = &self.custom {
+                    if let Some(ippo) = &self.ippo {
                         let mut map = HashMap::new();
-                        map.insert(
-                            "custom_algorithm_name".to_string(),
-                            custom.algorithm_name.as_str().to_string(),
-                        );
-                        for (key, value) in custom.hyperparams.iter() {
-                            map.insert(key.to_string(), value.to_string());
-                        }
-                        args.insert(
-                            Algorithm::CUSTOM(custom_name.clone()),
-                            HyperparameterArgs::Map(map),
-                        );
+                        map.insert("discrete".to_string(), ippo.discrete.to_string());
+                        map.insert("gamma".to_string(), ippo.gamma.to_string());
+                        map.insert("lam".to_string(), ippo.lam.to_string());
+                        map.insert("clip_ratio".to_string(), ippo.clip_ratio.to_string());
+                        map.insert("pi_lr".to_string(), ippo.pi_lr.to_string());
+                        map.insert("vf_lr".to_string(), ippo.vf_lr.to_string());
+                        map.insert("train_pi_iters".to_string(), ippo.train_pi_iters.to_string());
+                        map.insert("train_vf_iters".to_string(), ippo.train_vf_iters.to_string());
+                        map.insert("target_kl".to_string(), ippo.target_kl.to_string());
+                        map.insert("traj_per_epoch".to_string(), ippo.traj_per_epoch.to_string());
+                        args.insert(Algorithm::IPPO, HyperparameterArgs::Map(map));
                     }
                     args
                 }
+                Algorithm::MAPPO => {
+                    let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                    if let Some(mappo) = &self.mappo {
+                        let mut map = HashMap::new();
+                        map.insert("discrete".to_string(), mappo.discrete.to_string());
+                        map.insert("gamma".to_string(), mappo.gamma.to_string());
+                        map.insert("lam".to_string(), mappo.lam.to_string());
+                        map.insert("clip_ratio".to_string(), mappo.clip_ratio.to_string());
+                        map.insert("pi_lr".to_string(), mappo.pi_lr.to_string());
+                        map.insert("vf_lr".to_string(), mappo.vf_lr.to_string());
+                        map.insert("train_pi_iters".to_string(), mappo.train_pi_iters.to_string());
+                        map.insert("train_vf_iters".to_string(), mappo.train_vf_iters.to_string());
+                        map.insert("target_kl".to_string(), mappo.target_kl.to_string());
+                        map.insert("traj_per_epoch".to_string(), mappo.traj_per_epoch.to_string());
+                        args.insert(Algorithm::MAPPO, HyperparameterArgs::Map(map));
+                    }
+                    args
+                }
+                Algorithm::IREINFORCE => {
+                    let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                    if let Some(ireinforce) = &self.ireinforce {
+                        let mut map = HashMap::new();
+                        map.insert("discrete".to_string(), ireinforce.discrete.to_string());
+                        map.insert(
+                            "with_vf_baseline".to_string(),
+                            ireinforce.with_vf_baseline.to_string(),
+                        );
+                        map.insert("gamma".to_string(), ireinforce.gamma.to_string());
+                        map.insert("lambda".to_string(), ireinforce.lambda.to_string());
+                        map.insert("traj_per_epoch".to_string(), ireinforce.traj_per_epoch.to_string());
+                        map.insert("seed".to_string(), ireinforce.seed.to_string());
+                        map.insert("pi_lr".to_string(), ireinforce.pi_lr.to_string());
+                        map.insert("vf_lr".to_string(), ireinforce.vf_lr.to_string());
+                        map.insert("train_vf_iters".to_string(), ireinforce.train_vf_iters.to_string());
+                        args.insert(Algorithm::IREINFORCE, HyperparameterArgs::Map(map));
+                    }
+                    args
+                }
+                Algorithm::MAREINFORCE => {
+                    let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                    if let Some(mareinforce) = &self.mareinforce {
+                        let mut map = HashMap::new();
+                        map.insert("discrete".to_string(), mareinforce.discrete.to_string());
+                        map.insert("gamma".to_string(), mareinforce.gamma.to_string());
+                        map.insert("lambda".to_string(), mareinforce.lambda.to_string());
+                        map.insert("traj_per_epoch".to_string(), mareinforce.traj_per_epoch.to_string());
+                        map.insert("seed".to_string(), mareinforce.seed.to_string());
+                        map.insert("pi_lr".to_string(), mareinforce.pi_lr.to_string());
+                        map.insert("vf_lr".to_string(), mareinforce.vf_lr.to_string());
+                        args.insert(Algorithm::MAREINFORCE, HyperparameterArgs::Map(map));
+                    }
+                    args
+                }
+                Algorithm::IDDPG => {
+                    let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                    if let Some(iddpg) = &self.iddpg {
+                        let mut map = HashMap::new();
+                        map.insert("gamma".to_string(), iddpg.gamma.to_string());
+                        map.insert("tau".to_string(), iddpg.tau.to_string());
+                        map.insert("actor_lr".to_string(), iddpg.actor_lr.to_string());
+                        map.insert("critic_lr".to_string(), iddpg.critic_lr.to_string());
+                        map.insert("batch_size".to_string(), iddpg.batch_size.to_string());
+                        map.insert("buffer_size".to_string(), iddpg.buffer_size.to_string());
+                        map.insert("learning_starts".to_string(), iddpg.learning_starts.to_string());
+                        map.insert("policy_frequency".to_string(), iddpg.policy_frequency.to_string());
+                        map.insert("noise_scale".to_string(), iddpg.noise_scale.to_string());
+                        map.insert("train_iters".to_string(), iddpg.train_iters.to_string());
+                        args.insert(Algorithm::IDDPG, HyperparameterArgs::Map(map));
+                    }
+                    args
+                }
+                Algorithm::MADDPG => {
+                    let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                    if let Some(maddpg) = &self.maddpg {
+                        let mut map = HashMap::new();
+                        map.insert("gamma".to_string(), maddpg.gamma.to_string());
+                        map.insert("tau".to_string(), maddpg.tau.to_string());
+                        map.insert("actor_lr".to_string(), maddpg.actor_lr.to_string());
+                        map.insert("critic_lr".to_string(), maddpg.critic_lr.to_string());
+                        map.insert("batch_size".to_string(), maddpg.batch_size.to_string());
+                        map.insert("buffer_size".to_string(), maddpg.buffer_size.to_string());
+                        map.insert("policy_frequency".to_string(), maddpg.policy_frequency.to_string());
+                        map.insert("traj_per_epoch".to_string(), maddpg.traj_per_epoch.to_string());
+                        map.insert("train_iters".to_string(), maddpg.train_iters.to_string());
+                        map.insert("noise_scale".to_string(), maddpg.noise_scale.to_string());
+                        args.insert(Algorithm::MADDPG, HyperparameterArgs::Map(map));
+                    }
+                    args
+                }
+                Algorithm::ITD3 => {
+                    let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                    if let Some(itd3) = &self.itd3 {
+                        let mut map = HashMap::new();
+                        map.insert("gamma".to_string(), itd3.gamma.to_string());
+                        map.insert("tau".to_string(), itd3.tau.to_string());
+                        map.insert("actor_lr".to_string(), itd3.actor_lr.to_string());
+                        map.insert("critic_lr".to_string(), itd3.critic_lr.to_string());
+                        map.insert("batch_size".to_string(), itd3.batch_size.to_string());
+                        map.insert("buffer_size".to_string(), itd3.buffer_size.to_string());
+                        map.insert("exploration_noise".to_string(), itd3.exploration_noise.to_string());
+                        map.insert("policy_noise".to_string(), itd3.policy_noise.to_string());
+                        map.insert("noise_clip".to_string(), itd3.noise_clip.to_string());
+                        map.insert("learning_starts".to_string(), itd3.learning_starts.to_string());
+                        map.insert("policy_frequency".to_string(), itd3.policy_frequency.to_string());
+                        map.insert("train_iters".to_string(), itd3.train_iters.to_string());
+                        args.insert(Algorithm::ITD3, HyperparameterArgs::Map(map));
+                    }
+                    args
+                }
+                Algorithm::MATD3 => {
+                    let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                    if let Some(matd3) = &self.matd3 {
+                        let mut map = HashMap::new();
+                        map.insert("gamma".to_string(), matd3.gamma.to_string());
+                        map.insert("tau".to_string(), matd3.tau.to_string());
+                        map.insert("actor_lr".to_string(), matd3.actor_lr.to_string());
+                        map.insert("critic_lr".to_string(), matd3.critic_lr.to_string());
+                        map.insert("batch_size".to_string(), matd3.batch_size.to_string());
+                        map.insert("buffer_size".to_string(), matd3.buffer_size.to_string());
+                        map.insert("policy_frequency".to_string(), matd3.policy_frequency.to_string());
+                        map.insert("policy_noise".to_string(), matd3.policy_noise.to_string());
+                        map.insert("noise_clip".to_string(), matd3.noise_clip.to_string());
+                        map.insert("exploration_noise".to_string(), matd3.exploration_noise.to_string());
+                        map.insert("traj_per_epoch".to_string(), matd3.traj_per_epoch.to_string());
+                        map.insert("train_iters".to_string(), matd3.train_iters.to_string());
+                        args.insert(Algorithm::MATD3, HyperparameterArgs::Map(map));
+                    }
+                    args
+                }
+                // Algorithm::CUSTOM(custom_name) => {
+                //     let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
+                //     if let Some(custom) = &self.custom {
+                //         let mut map = HashMap::new();
+                //         map.insert(
+                //             "custom_algorithm_name".to_string(),
+                //             custom.algorithm_name.as_str().to_string(),
+                //         );
+                //         for (key, value) in custom.hyperparams.iter() {
+                //             map.insert(key.to_string(), value.to_string());
+                //         }
+                //         args.insert(
+                //             Algorithm::CUSTOM(custom_name.clone()),
+                //             HyperparameterArgs::Map(map),
+                //         );
+                //     }
+                //     args
+                // }
                 Algorithm::ConfigInit => HashMap::new(),
             },
             None => {
                 let mut args = HashMap::<Algorithm, HyperparameterArgs>::new();
                 if let Some(ddpg) = &self.ddpg {
                     let mut map = HashMap::new();
-                    map.insert("seed".to_string(), ddpg.seed.to_string());
                     map.insert("gamma".to_string(), ddpg.gamma.to_string());
                     map.insert("tau".to_string(), ddpg.tau.to_string());
-                    map.insert("learning_rate".to_string(), ddpg.learning_rate.to_string());
+                    map.insert("actor_lr".to_string(), ddpg.actor_lr.to_string());
+                    map.insert("critic_lr".to_string(), ddpg.critic_lr.to_string());
                     map.insert("batch_size".to_string(), ddpg.batch_size.to_string());
                     map.insert("buffer_size".to_string(), ddpg.buffer_size.to_string());
                     map.insert(
@@ -658,7 +407,6 @@ impl HyperparameterConfig {
                 if let Some(ppo) = &self.ppo {
                     let mut map = HashMap::new();
                     map.insert("discrete".to_string(), ppo.discrete.to_string());
-                    map.insert("seed".to_string(), ppo.seed.to_string());
                     map.insert("traj_per_epoch".to_string(), ppo.traj_per_epoch.to_string());
                     map.insert("clip_ratio".to_string(), ppo.clip_ratio.to_string());
                     map.insert("gamma".to_string(), ppo.gamma.to_string());
@@ -666,7 +414,7 @@ impl HyperparameterConfig {
                     map.insert("pi_lr".to_string(), ppo.pi_lr.to_string());
                     map.insert("vf_lr".to_string(), ppo.vf_lr.to_string());
                     map.insert("train_pi_iters".to_string(), ppo.train_pi_iters.to_string());
-                    map.insert("train_v_iters".to_string(), ppo.train_v_iters.to_string());
+                    map.insert("train_vf_iters".to_string(), ppo.train_vf_iters.to_string());
                     map.insert("target_kl".to_string(), ppo.target_kl.to_string());
                     args.insert(Algorithm::PPO, HyperparameterArgs::Map(map));
                 }
@@ -684,7 +432,7 @@ impl HyperparameterConfig {
                         reinforce.traj_per_epoch.to_string(),
                     );
                     map.insert("gamma".to_string(), reinforce.gamma.to_string());
-                    map.insert("lam".to_string(), reinforce.lam.to_string());
+                    map.insert("lambda".to_string(), reinforce.lambda.to_string());
                     map.insert("pi_lr".to_string(), reinforce.pi_lr.to_string());
                     map.insert("vf_lr".to_string(), reinforce.vf_lr.to_string());
                     map.insert(
@@ -696,10 +444,10 @@ impl HyperparameterConfig {
 
                 if let Some(td3) = &self.td3 {
                     let mut map = HashMap::new();
-                    map.insert("seed".to_string(), td3.seed.to_string());
                     map.insert("gamma".to_string(), td3.gamma.to_string());
                     map.insert("tau".to_string(), td3.tau.to_string());
-                    map.insert("learning_rate".to_string(), td3.learning_rate.to_string());
+                    map.insert("actor_lr".to_string(), td3.actor_lr.to_string());
+                    map.insert("critic_lr".to_string(), td3.critic_lr.to_string());
                     map.insert("batch_size".to_string(), td3.batch_size.to_string());
                     map.insert("buffer_size".to_string(), td3.buffer_size.to_string());
                     map.insert(
@@ -716,23 +464,147 @@ impl HyperparameterConfig {
                         "policy_frequency".to_string(),
                         td3.policy_frequency.to_string(),
                     );
+                    map.insert("train_iters".to_string(), td3.train_iters.to_string());
                     args.insert(Algorithm::TD3, HyperparameterArgs::Map(map));
                 }
 
-                if let Some(custom) = &self.custom {
+                if let Some(ippo) = &self.ippo {
                     let mut map = HashMap::new();
-                    map.insert(
-                        "custom_algorithm_name".to_string(),
-                        custom.algorithm_name.as_str().to_string(),
-                    );
-                    for (key, value) in custom.hyperparams.iter() {
-                        map.insert(key.to_string(), value.to_string());
-                    }
-                    args.insert(
-                        Algorithm::CUSTOM(custom.algorithm_name.as_str().to_string()),
-                        HyperparameterArgs::Map(map),
-                    );
+                    map.insert("discrete".to_string(), ippo.discrete.to_string());
+                    map.insert("gamma".to_string(), ippo.gamma.to_string());
+                    map.insert("lam".to_string(), ippo.lam.to_string());
+                    map.insert("clip_ratio".to_string(), ippo.clip_ratio.to_string());
+                    map.insert("pi_lr".to_string(), ippo.pi_lr.to_string());
+                    map.insert("vf_lr".to_string(), ippo.vf_lr.to_string());
+                    map.insert("train_pi_iters".to_string(), ippo.train_pi_iters.to_string());
+                    map.insert("train_vf_iters".to_string(), ippo.train_vf_iters.to_string());
+                    map.insert("target_kl".to_string(), ippo.target_kl.to_string());
+                    map.insert("traj_per_epoch".to_string(), ippo.traj_per_epoch.to_string());
+                    args.insert(Algorithm::IPPO, HyperparameterArgs::Map(map));
                 }
+
+                if let Some(mappo) = &self.mappo {
+                    let mut map = HashMap::new();
+                    map.insert("discrete".to_string(), mappo.discrete.to_string());
+                    map.insert("gamma".to_string(), mappo.gamma.to_string());
+                    map.insert("lam".to_string(), mappo.lam.to_string());
+                    map.insert("clip_ratio".to_string(), mappo.clip_ratio.to_string());
+                    map.insert("pi_lr".to_string(), mappo.pi_lr.to_string());
+                    map.insert("vf_lr".to_string(), mappo.vf_lr.to_string());
+                    map.insert("train_pi_iters".to_string(), mappo.train_pi_iters.to_string());
+                    map.insert("train_vf_iters".to_string(), mappo.train_vf_iters.to_string());
+                    map.insert("target_kl".to_string(), mappo.target_kl.to_string());
+                    map.insert("traj_per_epoch".to_string(), mappo.traj_per_epoch.to_string());
+                    args.insert(Algorithm::MAPPO, HyperparameterArgs::Map(map));
+                }
+
+                if let Some(ireinforce) = &self.ireinforce {
+                    let mut map = HashMap::new();
+                    map.insert("discrete".to_string(), ireinforce.discrete.to_string());
+                    map.insert(
+                        "with_vf_baseline".to_string(),
+                        ireinforce.with_vf_baseline.to_string(),
+                    );
+                    map.insert("gamma".to_string(), ireinforce.gamma.to_string());
+                    map.insert("lambda".to_string(), ireinforce.lambda.to_string());
+                    map.insert("traj_per_epoch".to_string(), ireinforce.traj_per_epoch.to_string());
+                    map.insert("seed".to_string(), ireinforce.seed.to_string());
+                    map.insert("pi_lr".to_string(), ireinforce.pi_lr.to_string());
+                    map.insert("vf_lr".to_string(), ireinforce.vf_lr.to_string());
+                    map.insert("train_vf_iters".to_string(), ireinforce.train_vf_iters.to_string());
+                    args.insert(Algorithm::IREINFORCE, HyperparameterArgs::Map(map));
+                }
+
+                if let Some(mareinforce) = &self.mareinforce {
+                    let mut map = HashMap::new();
+                    map.insert("discrete".to_string(), mareinforce.discrete.to_string());
+                    map.insert("gamma".to_string(), mareinforce.gamma.to_string());
+                    map.insert("lambda".to_string(), mareinforce.lambda.to_string());
+                    map.insert("traj_per_epoch".to_string(), mareinforce.traj_per_epoch.to_string());
+                    map.insert("seed".to_string(), mareinforce.seed.to_string());
+                    map.insert("pi_lr".to_string(), mareinforce.pi_lr.to_string());
+                    map.insert("vf_lr".to_string(), mareinforce.vf_lr.to_string());
+                    args.insert(Algorithm::MAREINFORCE, HyperparameterArgs::Map(map));
+                }
+
+                if let Some(iddpg) = &self.iddpg {
+                    let mut map = HashMap::new();
+                    map.insert("gamma".to_string(), iddpg.gamma.to_string());
+                    map.insert("tau".to_string(), iddpg.tau.to_string());
+                    map.insert("actor_lr".to_string(), iddpg.actor_lr.to_string());
+                    map.insert("critic_lr".to_string(), iddpg.critic_lr.to_string());
+                    map.insert("batch_size".to_string(), iddpg.batch_size.to_string());
+                    map.insert("buffer_size".to_string(), iddpg.buffer_size.to_string());
+                    map.insert("learning_starts".to_string(), iddpg.learning_starts.to_string());
+                    map.insert("policy_frequency".to_string(), iddpg.policy_frequency.to_string());
+                    map.insert("noise_scale".to_string(), iddpg.noise_scale.to_string());
+                    map.insert("train_iters".to_string(), iddpg.train_iters.to_string());
+                    args.insert(Algorithm::IDDPG, HyperparameterArgs::Map(map));
+                }
+
+                if let Some(maddpg) = &self.maddpg {
+                    let mut map = HashMap::new();
+                    map.insert("gamma".to_string(), maddpg.gamma.to_string());
+                    map.insert("tau".to_string(), maddpg.tau.to_string());
+                    map.insert("actor_lr".to_string(), maddpg.actor_lr.to_string());
+                    map.insert("critic_lr".to_string(), maddpg.critic_lr.to_string());
+                    map.insert("batch_size".to_string(), maddpg.batch_size.to_string());
+                    map.insert("buffer_size".to_string(), maddpg.buffer_size.to_string());
+                    map.insert("policy_frequency".to_string(), maddpg.policy_frequency.to_string());
+                    map.insert("traj_per_epoch".to_string(), maddpg.traj_per_epoch.to_string());
+                    map.insert("train_iters".to_string(), maddpg.train_iters.to_string());
+                    map.insert("noise_scale".to_string(), maddpg.noise_scale.to_string());
+                    args.insert(Algorithm::MADDPG, HyperparameterArgs::Map(map));
+                }
+
+                if let Some(itd3) = &self.itd3 {
+                    let mut map = HashMap::new();
+                    map.insert("gamma".to_string(), itd3.gamma.to_string());
+                    map.insert("tau".to_string(), itd3.tau.to_string());
+                    map.insert("actor_lr".to_string(), itd3.actor_lr.to_string());
+                    map.insert("critic_lr".to_string(), itd3.critic_lr.to_string());
+                    map.insert("batch_size".to_string(), itd3.batch_size.to_string());
+                    map.insert("buffer_size".to_string(), itd3.buffer_size.to_string());
+                    map.insert("exploration_noise".to_string(), itd3.exploration_noise.to_string());
+                    map.insert("policy_noise".to_string(), itd3.policy_noise.to_string());
+                    map.insert("noise_clip".to_string(), itd3.noise_clip.to_string());
+                    map.insert("learning_starts".to_string(), itd3.learning_starts.to_string());
+                    map.insert("policy_frequency".to_string(), itd3.policy_frequency.to_string());
+                    map.insert("train_iters".to_string(), itd3.train_iters.to_string());
+                    args.insert(Algorithm::ITD3, HyperparameterArgs::Map(map));
+                }
+
+                if let Some(matd3) = &self.matd3 {
+                    let mut map = HashMap::new();
+                    map.insert("gamma".to_string(), matd3.gamma.to_string());
+                    map.insert("tau".to_string(), matd3.tau.to_string());
+                    map.insert("actor_lr".to_string(), matd3.actor_lr.to_string());
+                    map.insert("critic_lr".to_string(), matd3.critic_lr.to_string());
+                    map.insert("batch_size".to_string(), matd3.batch_size.to_string());
+                    map.insert("buffer_size".to_string(), matd3.buffer_size.to_string());
+                    map.insert("policy_frequency".to_string(), matd3.policy_frequency.to_string());
+                    map.insert("policy_noise".to_string(), matd3.policy_noise.to_string());
+                    map.insert("noise_clip".to_string(), matd3.noise_clip.to_string());
+                    map.insert("exploration_noise".to_string(), matd3.exploration_noise.to_string());
+                    map.insert("traj_per_epoch".to_string(), matd3.traj_per_epoch.to_string());
+                    map.insert("train_iters".to_string(), matd3.train_iters.to_string());
+                    args.insert(Algorithm::MATD3, HyperparameterArgs::Map(map));
+                }
+
+                // if let Some(custom) = &self.custom {
+                //     let mut map = HashMap::new();
+                //     map.insert(
+                //         "custom_algorithm_name".to_string(),
+                //         custom.algorithm_name.as_str().to_string(),
+                //     );
+                //     for (key, value) in custom.hyperparams.iter() {
+                //         map.insert(key.to_string(), value.to_string());
+                //     }
+                //     args.insert(
+                //         Algorithm::CUSTOM(custom.algorithm_name.as_str().to_string()),
+                //         HyperparameterArgs::Map(map),
+                //     );
+                // }
 
                 args
             }
@@ -744,140 +616,18 @@ impl Default for HyperparameterConfig {
     fn default() -> Self {
         Self {
             ddpg: None,
+            iddpg: None,
+            maddpg: None,
             ppo: None,
+            ippo: None,
+            mappo: None,
             reinforce: Some(REINFORCEParams::default()),
+            ireinforce: None,
+            mareinforce: None,
             td3: None,
-            custom: None,
-        }
-    }
-}
-
-/// Parameters for the DDPG algorithm.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DDPGParams {
-    pub seed: u32,
-    pub gamma: f32,
-    pub tau: f32,
-    pub learning_rate: f32,
-    pub batch_size: u32,
-    pub buffer_size: u32,
-    pub learning_starts: u32,
-    pub policy_frequency: u32,
-    pub noise_scale: f32,
-    pub train_iters: u32,
-}
-
-impl Default for DDPGParams {
-    fn default() -> Self {
-        Self {
-            seed: 1,
-            gamma: 0.99,
-            tau: 1e-2,
-            learning_rate: 3e-3,
-            batch_size: 128,
-            buffer_size: 50000,
-            learning_starts: 128,
-            policy_frequency: 1,
-            noise_scale: 0.1,
-            train_iters: 50,
-        }
-    }
-}
-
-/// Parameters for the PPO algorithm.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PPOParams {
-    pub discrete: bool,
-    pub seed: u32,
-    pub traj_per_epoch: u32,
-    pub clip_ratio: f32,
-    pub gamma: f32,
-    pub lam: f32,
-    pub pi_lr: f32,
-    pub vf_lr: f32,
-    pub train_pi_iters: u32,
-    pub train_v_iters: u32,
-    pub target_kl: f32,
-}
-
-impl Default for PPOParams {
-    fn default() -> Self {
-        Self {
-            discrete: true,
-            seed: 0,
-            traj_per_epoch: 1,
-            clip_ratio: 0.1,
-            gamma: 0.99,
-            lam: 0.97,
-            pi_lr: 3e-4,
-            vf_lr: 3e-4,
-            train_pi_iters: 40,
-            train_v_iters: 40,
-            target_kl: 0.01,
-        }
-    }
-}
-
-/// Parameters for the REINFORCE algorithm.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct REINFORCEParams {
-    pub discrete: bool,
-    pub with_vf_baseline: bool,
-    pub seed: u32,
-    pub traj_per_epoch: u32,
-    pub gamma: f32,
-    pub lam: f32,
-    pub pi_lr: f32,
-    pub vf_lr: f32,
-    pub train_vf_iters: u32,
-}
-
-impl Default for REINFORCEParams {
-    fn default() -> Self {
-        Self {
-            discrete: true,
-            with_vf_baseline: false,
-            seed: 1,
-            traj_per_epoch: 8,
-            gamma: 0.98,
-            lam: 0.97,
-            pi_lr: 3e-4,
-            vf_lr: 1e-3,
-            train_vf_iters: 80,
-        }
-    }
-}
-
-/// Parameters for the TD3 algorithm.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TD3Params {
-    pub seed: u32,
-    pub gamma: f32,
-    pub tau: f32,
-    pub learning_rate: f32,
-    pub batch_size: u32,
-    pub buffer_size: u32,
-    pub exploration_noise: f32,
-    pub policy_noise: f32,
-    pub noise_clip: f32,
-    pub learning_starts: u32,
-    pub policy_frequency: u32,
-}
-
-impl Default for TD3Params {
-    fn default() -> Self {
-        Self {
-            seed: 1,
-            gamma: 0.99,
-            tau: 0.005,
-            learning_rate: 3e-4,
-            batch_size: 128,
-            buffer_size: 50000,
-            exploration_noise: 0.1,
-            policy_noise: 0.2,
-            noise_clip: 0.5,
-            learning_starts: 25000,
-            policy_frequency: 2,
+            itd3: None,
+            matd3: None,
+            // custom: None,
         }
     }
 }
@@ -891,7 +641,7 @@ pub struct CustomAlgorithmParams {
 impl Default for CustomAlgorithmParams {
     fn default() -> Self {
         Self {
-            algorithm_name: Algorithm::CUSTOM("".to_string()),
+            algorithm_name: Algorithm::ConfigInit,
             hyperparams: HashMap::new(),
         }
     }
@@ -987,7 +737,7 @@ impl ClientConfigLoader {
         let client_config: ClientConfigParams = config.client_config;
         let transport_config: TransportConfigParams = config.transport_config;
 
-        let _algorithm_name: String = match algorithm_name {
+        let algorithm_name_: String = match algorithm_name {
             Some(algorithm_name) => algorithm_name,
             None => client_config.algorithm_name,
         };
@@ -995,7 +745,7 @@ impl ClientConfigLoader {
         Self {
             config_path: _config_path,
             client_config: ClientConfigParams {
-                algorithm_name: _algorithm_name,
+                algorithm_name: algorithm_name_,
                 config_update_polling_seconds: client_config.config_update_polling_seconds,
                 init_hyperparameters: client_config.init_hyperparameters,
                 trajectory_file_output: client_config.trajectory_file_output,
@@ -1360,10 +1110,18 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
         // Start from defaults for all supported algorithms.
         let mut all_cfg = HyperparameterConfig {
             ddpg: Some(DDPGParams::default()),
+            iddpg: Some(IDDPGParams::default()),
+            maddpg: Some(MADDPGParams::default()),
             ppo: Some(PPOParams::default()),
+            ippo: Some(IPPOParams::default()),
+            mappo: Some(MAPPOParams::default()),
             reinforce: Some(REINFORCEParams::default()),
+            ireinforce: Some(IREINFORCEParams::default()),
+            mareinforce: Some(MAREINFORCEParams::default()),
             td3: Some(TD3Params::default()),
-            custom: None,
+            itd3: Some(ITD3Params::default()),
+            matd3: Some(MATD3Params::default()),
+            // custom: None,
         };
 
         let algo_upper = algorithm_name.to_uppercase();
@@ -1372,20 +1130,23 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
         match algorithm {
             Algorithm::DDPG => {
                 if let Some(params) = &mut all_cfg.ddpg {
-                    if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u32>().ok()) {
-                        params.seed = v;
-                    }
                     if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
                         params.gamma = v;
                     }
                     if let Some(v) = hp_map.get("tau").and_then(|s| s.parse::<f32>().ok()) {
                         params.tau = v;
                     }
-                    if let Some(v) = hp_map
+                    if let Some(v) = hp_map.get("actor_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.actor_lr = v;
+                    } else if let Some(v) = hp_map
                         .get("learning_rate")
                         .and_then(|s| s.parse::<f32>().ok())
                     {
-                        params.learning_rate = v;
+                        params.actor_lr = v;
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.critic_lr = v;
                     }
                     if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<u32>().ok()) {
                         params.batch_size = v;
@@ -1428,12 +1189,9 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                         let vv = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
                         params.discrete = vv;
                     }
-                    if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u32>().ok()) {
-                        params.seed = v;
-                    }
                     if let Some(v) = hp_map
                         .get("traj_per_epoch")
-                        .and_then(|s| s.parse::<u32>().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
                     {
                         params.traj_per_epoch = v;
                     }
@@ -1454,15 +1212,16 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     }
                     if let Some(v) = hp_map
                         .get("train_pi_iters")
-                        .and_then(|s| s.parse::<u32>().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
                     {
                         params.train_pi_iters = v;
                     }
                     if let Some(v) = hp_map
-                        .get("train_v_iters")
-                        .and_then(|s| s.parse::<u32>().ok())
+                        .get("train_vf_iters")
+                        .or_else(|| hp_map.get("train_v_iters"))
+                        .and_then(|s| s.parse::<u64>().ok())
                     {
-                        params.train_v_iters = v;
+                        params.train_vf_iters = v;
                     }
                     if let Some(v) = hp_map.get("target_kl").and_then(|s| s.parse::<f32>().ok()) {
                         params.target_kl = v;
@@ -1479,20 +1238,23 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                         let vv = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
                         params.with_vf_baseline = vv;
                     }
-                    if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u64>().ok()) {
                         params.seed = v;
                     }
                     if let Some(v) = hp_map
                         .get("traj_per_epoch")
-                        .and_then(|s| s.parse::<u32>().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
                     {
                         params.traj_per_epoch = v;
                     }
                     if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
                         params.gamma = v;
                     }
-                    if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
-                        params.lam = v;
+                    if let Some(v) = hp_map.get("lambda").and_then(|s| s.parse::<f32>().ok()) {
+                        params.lambda = v;
+                    } else if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok())
+                    {
+                        params.lambda = v;
                     }
                     if let Some(v) = hp_map.get("pi_lr").and_then(|s| s.parse::<f32>().ok()) {
                         params.pi_lr = v;
@@ -1502,7 +1264,7 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     }
                     if let Some(v) = hp_map
                         .get("train_vf_iters")
-                        .and_then(|s| s.parse::<u32>().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
                     {
                         params.train_vf_iters = v;
                     }
@@ -1510,20 +1272,23 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
             }
             Algorithm::TD3 => {
                 if let Some(params) = &mut all_cfg.td3 {
-                    if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u32>().ok()) {
-                        params.seed = v;
-                    }
                     if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
                         params.gamma = v;
                     }
                     if let Some(v) = hp_map.get("tau").and_then(|s| s.parse::<f32>().ok()) {
                         params.tau = v;
                     }
-                    if let Some(v) = hp_map
+                    if let Some(v) = hp_map.get("actor_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.actor_lr = v;
+                    } else if let Some(v) = hp_map
                         .get("learning_rate")
                         .and_then(|s| s.parse::<f32>().ok())
                     {
-                        params.learning_rate = v;
+                        params.actor_lr = v;
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.critic_lr = v;
                     }
                     if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<u32>().ok()) {
                         params.batch_size = v;
@@ -1561,14 +1326,321 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     {
                         params.policy_frequency = v;
                     }
+                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<u32>().ok())
+                    {
+                        params.train_iters = v;
+                    }
                 }
             }
-            Algorithm::CUSTOM(custom_algorithm) => {
-                let mut custom = all_cfg.custom.take().unwrap_or_default();
-                custom.algorithm_name = Algorithm::CUSTOM(custom_algorithm.clone());
-                custom.hyperparams = hp_map.clone();
-                all_cfg.custom = Some(custom);
+            Algorithm::IPPO => {
+                if let Some(params) = &mut all_cfg.ippo {
+                    if let Some(v) = hp_map.get("discrete") {
+                        let vv = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+                        params.discrete = vv;
+                    }
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
+                        params.lam = v;
+                    }
+                    if let Some(v) = hp_map.get("clip_ratio").and_then(|s| s.parse::<f32>().ok()) {
+                        params.clip_ratio = v;
+                    }
+                    if let Some(v) = hp_map.get("pi_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.pi_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("vf_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.vf_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("train_pi_iters").and_then(|s| s.parse::<u64>().ok()) {
+                        params.train_pi_iters = v;
+                    }
+                    if let Some(v) = hp_map
+                        .get("train_vf_iters")
+                        .or_else(|| hp_map.get("train_v_iters"))
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        params.train_vf_iters = v;
+                    }
+                    if let Some(v) = hp_map.get("target_kl").and_then(|s| s.parse::<f32>().ok()) {
+                        params.target_kl = v;
+                    }
+                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                        params.traj_per_epoch = v;
+                    }
+                }
             }
+            Algorithm::MAPPO => {
+                if let Some(params) = &mut all_cfg.mappo {
+                    if let Some(v) = hp_map.get("discrete") {
+                        let vv = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+                        params.discrete = vv;
+                    }
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
+                        params.lam = v;
+                    }
+                    if let Some(v) = hp_map.get("clip_ratio").and_then(|s| s.parse::<f32>().ok()) {
+                        params.clip_ratio = v;
+                    }
+                    if let Some(v) = hp_map.get("pi_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.pi_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("vf_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.vf_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("train_pi_iters").and_then(|s| s.parse::<u64>().ok()) {
+                        params.train_pi_iters = v;
+                    }
+                    if let Some(v) = hp_map
+                        .get("train_vf_iters")
+                        .or_else(|| hp_map.get("train_v_iters"))
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        params.train_vf_iters = v;
+                    }
+                    if let Some(v) = hp_map.get("target_kl").and_then(|s| s.parse::<f32>().ok()) {
+                        params.target_kl = v;
+                    }
+                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                        params.traj_per_epoch = v;
+                    }
+                }
+            }
+            Algorithm::IREINFORCE => {
+                if let Some(params) = &mut all_cfg.ireinforce {
+                    if let Some(v) = hp_map.get("discrete") {
+                        let vv = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+                        params.discrete = vv;
+                    }
+                    if let Some(v) = hp_map.get("with_vf_baseline") {
+                        let vv = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+                        params.with_vf_baseline = vv;
+                    }
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("lambda").and_then(|s| s.parse::<f32>().ok()) {
+                        params.lambda = v;
+                    }
+                    if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
+                        params.lambda = v;
+                    }
+                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                        params.traj_per_epoch = v;
+                    }
+                    if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u64>().ok()) {
+                        params.seed = v;
+                    }
+                    if let Some(v) = hp_map.get("pi_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.pi_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("vf_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.vf_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("train_vf_iters").and_then(|s| s.parse::<u64>().ok()) {
+                        params.train_vf_iters = v;
+                    }
+                }
+            }
+            Algorithm::MAREINFORCE => {
+                if let Some(params) = &mut all_cfg.mareinforce {
+                    if let Some(v) = hp_map.get("discrete") {
+                        let vv = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+                        params.discrete = vv;
+                    }
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("lambda").and_then(|s| s.parse::<f32>().ok()) {
+                        params.lambda = v;
+                    }
+                    if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
+                        params.lambda = v;
+                    }
+                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                        params.traj_per_epoch = v;
+                    }
+                    if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u64>().ok()) {
+                        params.seed = v;
+                    }
+                    if let Some(v) = hp_map.get("pi_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.pi_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("vf_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.vf_lr = v;
+                    }
+                }
+            }
+            Algorithm::IDDPG => {
+                if let Some(params) = &mut all_cfg.iddpg {
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("tau").and_then(|s| s.parse::<f32>().ok()) {
+                        params.tau = v;
+                    }
+                    if let Some(v) = hp_map.get("actor_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.actor_lr = v;
+                    } else if let Some(v) = hp_map
+                        .get("learning_rate")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
+                        params.actor_lr = v;
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<u32>().ok()) {
+                        params.batch_size = v;
+                    }
+                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<u32>().ok()) {
+                        params.buffer_size = v;
+                    }
+                    if let Some(v) = hp_map.get("learning_starts").and_then(|s| s.parse::<u32>().ok()) {
+                        params.learning_starts = v;
+                    }
+                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<u32>().ok()) {
+                        params.policy_frequency = v;
+                    }
+                    if let Some(v) = hp_map.get("noise_scale").and_then(|s| s.parse::<f32>().ok()) {
+                        params.noise_scale = v;
+                    }
+                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<u32>().ok()) {
+                        params.train_iters = v;
+                    }
+                }
+            }
+            Algorithm::MADDPG => {
+                if let Some(params) = &mut all_cfg.maddpg {
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("tau").and_then(|s| s.parse::<f32>().ok()) {
+                        params.tau = v;
+                    }
+                    if let Some(v) = hp_map.get("actor_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.actor_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<usize>().ok()) {
+                        params.batch_size = v;
+                    }
+                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<usize>().ok()) {
+                        params.buffer_size = v;
+                    }
+                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<usize>().ok()) {
+                        params.policy_frequency = v;
+                    }
+                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                        params.traj_per_epoch = v;
+                    }
+                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<usize>().ok()) {
+                        params.train_iters = v;
+                    }
+                    if let Some(v) = hp_map.get("noise_scale").and_then(|s| s.parse::<f32>().ok()) {
+                        params.noise_scale = v;
+                    }
+                }
+            }
+            Algorithm::ITD3 => {
+                if let Some(params) = &mut all_cfg.itd3 {
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("tau").and_then(|s| s.parse::<f32>().ok()) {
+                        params.tau = v;
+                    }
+                    if let Some(v) = hp_map.get("actor_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.actor_lr = v;
+                    } else if let Some(v) = hp_map
+                        .get("learning_rate")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
+                        params.actor_lr = v;
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<u32>().ok()) {
+                        params.batch_size = v;
+                    }
+                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<u32>().ok()) {
+                        params.buffer_size = v;
+                    }
+                    if let Some(v) = hp_map.get("exploration_noise").and_then(|s| s.parse::<f32>().ok()) {
+                        params.exploration_noise = v;
+                    }
+                    if let Some(v) = hp_map.get("policy_noise").and_then(|s| s.parse::<f32>().ok()) {
+                        params.policy_noise = v;
+                    }
+                    if let Some(v) = hp_map.get("noise_clip").and_then(|s| s.parse::<f32>().ok()) {
+                        params.noise_clip = v;
+                    }
+                    if let Some(v) = hp_map.get("learning_starts").and_then(|s| s.parse::<u32>().ok()) {
+                        params.learning_starts = v;
+                    }
+                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<u32>().ok()) {
+                        params.policy_frequency = v;
+                    }
+                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<u32>().ok()) {
+                        params.train_iters = v;
+                    }
+                }
+            }
+            Algorithm::MATD3 => {
+                if let Some(params) = &mut all_cfg.matd3 {
+                    if let Some(v) = hp_map.get("gamma").and_then(|s| s.parse::<f32>().ok()) {
+                        params.gamma = v;
+                    }
+                    if let Some(v) = hp_map.get("tau").and_then(|s| s.parse::<f32>().ok()) {
+                        params.tau = v;
+                    }
+                    if let Some(v) = hp_map.get("actor_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.actor_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
+                        params.critic_lr = v;
+                    }
+                    if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<usize>().ok()) {
+                        params.batch_size = v;
+                    }
+                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<usize>().ok()) {
+                        params.buffer_size = v;
+                    }
+                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<usize>().ok()) {
+                        params.policy_frequency = v;
+                    }
+                    if let Some(v) = hp_map.get("policy_noise").and_then(|s| s.parse::<f32>().ok()) {
+                        params.policy_noise = v;
+                    }
+                    if let Some(v) = hp_map.get("noise_clip").and_then(|s| s.parse::<f32>().ok()) {
+                        params.noise_clip = v;
+                    }
+                    if let Some(v) = hp_map.get("exploration_noise").and_then(|s| s.parse::<f32>().ok()) {
+                        params.exploration_noise = v;
+                    }
+                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                        params.traj_per_epoch = v;
+                    }
+                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<usize>().ok()) {
+                        params.train_iters = v;
+                    }
+                }
+            }
+            // Algorithm::CUSTOM(custom_algorithm) => {
+            //     let mut custom = all_cfg.custom.take().unwrap_or_default();
+            //     custom.algorithm_name = Algorithm::CUSTOM(custom_algorithm.clone());
+            //     custom.hyperparams = hp_map.clone();
+            //     all_cfg.custom = Some(custom);
+            // }
             Algorithm::ConfigInit => {
                 log::error!(
                     "[ServerConfigBuilder] ConfigInit is not a valid algorithm for hyperparameters"
@@ -2259,11 +2331,13 @@ mod unit_tests {
     }
 
     #[test]
-    fn algorithm_from_str_unknown_becomes_custom() {
-        assert_eq!(
-            Algorithm::from_str("MAPPO"),
-            Some(Algorithm::CUSTOM("MAPPO".to_string()))
-        );
+    fn algorithm_from_str_unknown_returns_none() {
+        assert_eq!(Algorithm::from_str("NOT_A_REAL_ALGORITHM"), None);
+    }
+
+    #[test]
+    fn algorithm_from_str_mappo() {
+        assert_eq!(Algorithm::from_str("MAPPO"), Some(Algorithm::MAPPO));
     }
 
     #[test]
@@ -2276,18 +2350,12 @@ mod unit_tests {
     }
 
     #[test]
-    fn algorithm_custom_as_str() {
-        assert_eq!(Algorithm::CUSTOM("MY_ALGO".to_string()).as_str(), "MY_ALGO");
-    }
-
-    #[test]
     fn hyperparameter_default_reinforce_only() {
         let hp = HyperparameterConfig::default();
         assert!(hp.ddpg.is_none());
         assert!(hp.ppo.is_none());
         assert!(hp.reinforce.is_some());
         assert!(hp.td3.is_none());
-        assert!(hp.custom.is_none());
     }
 
     #[test]
@@ -2301,7 +2369,7 @@ mod unit_tests {
         if let HyperparameterArgs::Map(map) = entry {
             assert!(map.contains_key("seed"));
             assert!(map.contains_key("gamma"));
-            assert!(map.contains_key("lam"));
+            assert!(map.contains_key("lambda"));
             assert!(map.contains_key("pi_lr"));
             assert!(map.contains_key("vf_lr"));
         } else {
@@ -2429,7 +2497,6 @@ mod unit_tests {
         assert!(hp.ppo.is_none());
         assert!(hp.reinforce.is_some());
         assert!(hp.td3.is_none());
-        assert!(hp.custom.is_none());
     }
 
     #[test]
