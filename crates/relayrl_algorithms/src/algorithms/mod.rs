@@ -1,27 +1,39 @@
-// #[allow(non_snake_case)]
-// pub mod DDPG;
+#[allow(non_snake_case)]
+pub mod DDPG;
 #[allow(non_snake_case)]
 pub mod PPO;
 #[allow(non_snake_case)]
 pub mod REINFORCE;
 pub mod onnx_builder;
-// #[allow(non_snake_case)]
-// pub mod TD3;
+#[allow(non_snake_case)]
+pub mod TD3;
 
 // pub use DDPG::DDPGAlgorithm;
 // pub use TD3::TD3Algorithm;
 
+pub use DDPG::DDPGAlgorithm;
+pub use DDPG::IDDPGAlgorithm;
+pub use DDPG::IndependentDDPGAlgorithm;
+pub use DDPG::MADDPGAlgorithm;
+pub use DDPG::MultiagentDDPGAlgorithm;
+
+pub use PPO::PPOAlgorithm;
 pub use PPO::IPPOAlgorithm;
 pub use PPO::IndependentPPOAlgorithm;
 pub use PPO::MAPPOAlgorithm;
 pub use PPO::MultiagentPPOAlgorithm;
-pub use PPO::PPOAlgorithm;
 
+pub use REINFORCE::ReinforceAlgorithm;
 pub use REINFORCE::IREINFORCEAlgorithm;
 pub use REINFORCE::IndependentReinforceAlgorithm;
 pub use REINFORCE::MAREINFORCEAlgorithm;
 pub use REINFORCE::MultiagentReinforceAlgorithm;
-pub use REINFORCE::ReinforceAlgorithm;
+
+pub use TD3::TD3Algorithm;
+pub use TD3::ITD3Algorithm;
+pub use TD3::IndependentTD3Algorithm;
+pub use TD3::MATD3Algorithm;
+pub use TD3::MultiagentTD3Algorithm;
 
 pub(crate) fn discounted_cumsum(x: &[f32], discount: f32) -> Vec<f32> {
     let n = x.len();
