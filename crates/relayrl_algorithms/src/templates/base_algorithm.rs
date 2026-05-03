@@ -150,6 +150,24 @@ pub trait WeightProvider {
     fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>>;
 }
 
+/// Base trait for kernels used in **multi-agent** algorithms.
+///
+/// Inherits [`StepKernelTrait`] so multi-agent kernels can be used for inference
+/// during the environment step loop, just like independent-algorithm kernels.
+/// Algorithm-specific training methods (e.g. `train_epoch`) are defined on
+/// per-algorithm sub-traits (`MultiagentPPOKernelTrait`, etc.).
+pub trait MultiagentKernelTrait<
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+>: StepKernelTrait<B, InK, OutK>
+{
+    /// Notify the kernel that a new agent slot has been registered.
+    ///
+    /// Called once per distinct agent key encountered during training.
+    fn register_agent(&mut self);
+}
+
 /// Trait for kernels that support gradient-based training.
 ///
 /// The backend type used for autodiff is encapsulated inside the implementation —
