@@ -166,6 +166,7 @@ pub mod network;
 /// - `observability`: Logging (log4rs) and metrics (Prometheus/OpenTelemetry) systems
 /// - `tokio`: Tokio runtime utilities
 pub mod utilities {
+    pub(crate) mod config_json;
     pub mod configuration;
     pub(crate) mod observability;
 }
