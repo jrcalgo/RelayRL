@@ -927,7 +927,8 @@ impl<
             env_label,
         }) = msg.protocol
         {
-            self.runtime
+            let _ = self
+                .runtime
                 .flag_last_action(reward, env_id, env_label, false)
                 .await;
         }
