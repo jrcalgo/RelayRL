@@ -101,6 +101,22 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     ///
     /// This method can be used to print or store metrics such as loss, accuracy, rewards, etc.
     fn log_epoch(&mut self);
+
+    /// Acquires the trained model as a ModelModule for inference or export.
+    ///
+    /// Returns `None` if no model has been trained yet, if weight export is not supported,
+    /// or if the required feature flags are not enabled.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `B` - The Burn backend type (e.g., NdArray or LibTorch)
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B: Backend + BackendMatcher<Backend = B>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B>>;
 }
 
 pub enum ForwardOutput<B: Backend + BackendMatcher, const OUT_D: usize> {

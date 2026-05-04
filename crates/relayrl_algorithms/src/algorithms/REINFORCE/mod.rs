@@ -4,13 +4,13 @@ mod replay_buffer;
 pub mod independent;
 pub mod multiagent;
 
-pub use kernel::REINFORCEKernelTrait;
 pub use independent::kernel::*;
 pub use independent::replay_buffer::*;
 pub use independent::{
     IREINFORCEAlgorithm, IREINFORCEParams, IndependentReinforceAlgorithm, REINFORCEParams,
     ReinforceAlgorithm,
 };
+pub use kernel::REINFORCEKernelTrait;
 pub use multiagent::kernel::MultiagentReinforceKernel;
 pub use multiagent::replay_buffer::MultiagentReinforceReplayBuffer;
 pub use multiagent::{

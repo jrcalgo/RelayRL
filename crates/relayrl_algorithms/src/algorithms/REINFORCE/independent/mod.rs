@@ -4,8 +4,8 @@ pub mod replay_buffer;
 pub use kernel::*;
 pub use replay_buffer::*;
 
-use crate::logging::{EpochLogger, SessionLogger};
 use crate::algorithms::REINFORCE::REINFORCEKernelTrait;
+use crate::logging::{EpochLogger, SessionLogger};
 use crate::templates::base_algorithm::{
     AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData,
 };
@@ -326,12 +326,57 @@ where
     }
 }
 
-impl<B, InK, OutK, KN, T> AlgorithmTrait<T> for IndependentReinforceAlgorithm<B, InK, OutK, KN>
+#[cfg(all(
+    any(feature = "tch-model", feature = "onnx-model"),
+    any(feature = "ndarray-backend", feature = "tch-backend")
+))]
+impl<B, InK, OutK, KN> IndependentReinforceAlgorithm<B, InK, OutK, KN>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    KN: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
+    KN: StepKernelTrait<B, InK, OutK>
+        + REINFORCEKernelTrait<B, InK, OutK>
+        + crate::templates::base_algorithm::WeightProvider
+        + Default,
+{
+    /// Export the trained policy as an in-memory ONNX model.
+    ///
+    /// Returns `None` before the first training epoch or when no actors have been
+    /// registered.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        use relayrl_types::data::tensor::{DType, NdArrayDType};
+
+        // Attempt to retrieve layer specs from the first agent's kernel
+        if self.runtime.components.agent_slots.is_empty() {
+            return None;
+        }
+
+        let layer_specs = self.runtime.components.agent_slots[0]
+            .kernel
+            .get_pi_layer_specs()?;
+
+        crate::acquire_model_module::<B>(
+            "policy",
+            layer_specs,
+            DType::NdArray(NdArrayDType::F32),
+            DType::NdArray(NdArrayDType::F32),
+            vec![1, self.runtime.args.obs_dim],
+            vec![1, self.runtime.args.act_dim],
+            None,
+        )
+    }
+}
+
+impl<B, InK, OutK, KN, T> AlgorithmTrait<T> for IndependentReinforceAlgorithm<B, InK, OutK, KN>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    KN: StepKernelTrait<B, InK, OutK>
+        + REINFORCEKernelTrait<B, InK, OutK>
+        + crate::templates::base_algorithm::WeightProvider
+        + Default,
     T: TrajectoryData,
 {
     fn save(&self, _filename: &str) {}
@@ -473,6 +518,32 @@ where
                 .log_tabular("LossV", None);
         }
         self.runtime.components.epoch_logger.dump_tabular();
+    }
+
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B2>>
+    where
+        B: 'static,
+        B2: 'static,
+    {
+        // Call the existing acquire_model_module which returns ModelModule<B>
+        let module_b = self.acquire_model_module()?;
+
+        // Type-check and transmute to ModelModule<B2> if backends match
+        if std::any::TypeId::of::<B>() == std::any::TypeId::of::<B2>() {
+            unsafe {
+                let model_b2 = std::mem::transmute_copy(&module_b);
+                std::mem::forget(module_b);
+                Some(model_b2)
+            }
+        } else {
+            None
+        }
     }
 }
 

@@ -90,8 +90,8 @@ pub use algorithms::TD3::{
     TD3KernelTrait, TD3Params,
 };
 pub use templates::base_algorithm::{
-    AlgorithmError, AlgorithmTrait, MultiagentKernelTrait, StepKernelTrait,
-    TrajectoryData, WeightProvider,
+    AlgorithmError, AlgorithmTrait, MultiagentKernelTrait, StepKernelTrait, TrajectoryData,
+    WeightProvider,
 };
 
 /// Shared filesystem and shape arguments for every trainer constructor in this module.
@@ -135,6 +135,131 @@ pub struct TrainerArgs {
     pub act_dim: usize,
     /// Experience buffer capacity in transitions or slots, depending on the algorithm.
     pub buffer_size: usize,
+}
+
+/// Acquire a trained model as a `ModelModule<B>` from layer specifications.
+///
+/// This function centralizes model acquisition logic for all RL algorithms (DDPG, PPO, TD3, REINFORCE).
+/// It supports both ONNX (NdArray backend) and LibTorch (Tch backend) model formats, automatically
+/// selecting the appropriate format based on the backend type `B` and enabled feature flags.
+///
+/// # Arguments
+///
+/// - `layer_specs`: Layer specifications in the format `(in_dim, out_dim, weights, biases)` per layer,
+///   as produced by `WeightProvider::get_pi_layer_specs()`.
+/// - `input_dtype`: Data type for model inputs (e.g., `DType::NdArray(NdArrayDType::F32)`).
+/// - `output_dtype`: Data type for model outputs.
+/// - `input_shape`: Shape of input tensor (e.g., `[1, obs_dim]`).
+/// - `output_shape`: Shape of output tensor (e.g., `[1, act_dim]`).
+/// - `device`: Optional device specification (e.g., CPU, CUDA). If `None`, uses default device.
+///
+/// # Backend Dispatch
+///
+/// The function uses `BackendMatcher::get_supported_backend()` to determine the backend at compile time:
+/// - **NdArray backend** (with `onnx-model` feature): Builds an ONNX model via `build_onnx_mlp_bytes`
+///   and loads it with `ModelModule::from_onnx_bytes`.
+/// - **Tch backend** (with `tch-model` feature): Builds a TorchScript model via `build_pt_mlp_temp`
+///   and loads it with `ModelModule::from_pt_bytes`.
+///
+/// # Returns
+///
+/// - `Some(ModelModule<B>)` if the model was successfully built and loaded.
+/// - `None` if:
+///   - `layer_specs` is empty
+///   - Required feature flags are not enabled for the backend
+///   - Model building or loading fails
+///
+/// # Examples
+///
+/// ```ignore
+/// use relayrl_algorithms::acquire_model_module;
+/// use relayrl_types::data::tensor::{DType, NdArrayDType, DeviceType};
+/// use burn_ndarray::NdArray;
+///
+/// let layer_specs = vec![
+///     (64, 128, vec![0.1; 64 * 128], vec![0.0; 128]),
+///     (128, 8, vec![0.1; 128 * 8], vec![0.0; 8]),
+/// ];
+///
+/// let model = acquire_model_module::<NdArray>(
+///     "policy",
+///     layer_specs,
+///     DType::NdArray(NdArrayDType::F32),
+///     DType::NdArray(NdArrayDType::F32),
+///     vec![1, 64],
+///     vec![1, 8],
+///     None,
+/// );
+/// ```
+#[cfg(all(
+    any(feature = "tch-model", feature = "onnx-model"),
+    any(feature = "ndarray-backend", feature = "tch-backend")
+))]
+pub fn acquire_model_module<B: Backend + BackendMatcher<Backend = B>>(
+    model_name: &str,
+    layer_specs: Vec<(usize, usize, Vec<f32>, Vec<f32>)>,
+    input_dtype: relayrl_types::data::tensor::DType,
+    output_dtype: relayrl_types::data::tensor::DType,
+    input_shape: Vec<usize>,
+    output_shape: Vec<usize>,
+    device: Option<relayrl_types::data::tensor::DeviceType>,
+) -> Option<relayrl_types::model::ModelModule<B>> {
+    use relayrl_types::data::tensor::SupportedTensorBackend;
+    use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
+
+    if layer_specs.is_empty() {
+        return None;
+    }
+
+    match B::get_supported_backend() {
+        #[cfg(all(feature = "ndarray-backend", feature = "onnx-model"))]
+        SupportedTensorBackend::NdArray => {
+            use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
+
+            let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
+            if onnx_bytes.is_empty() {
+                return None;
+            }
+
+            let model_file = format!("{}.onnx", model_name);
+
+            let metadata = ModelMetadata {
+                model_file,
+                model_type: ModelFileType::Onnx,
+                input_dtype,
+                output_dtype,
+                input_shape,
+                output_shape,
+                default_device: device,
+            };
+
+            ModelModule::from_onnx_bytes(onnx_bytes, metadata).ok()
+        }
+        #[cfg(all(feature = "tch-backend", feature = "tch-model"))]
+        SupportedTensorBackend::Tch => {
+            use crate::algorithms::pt_builder::build_pt_mlp_temp;
+
+            let (pt_bytes, _temp_path) = build_pt_mlp_temp(&layer_specs).ok()?;
+            if pt_bytes.is_empty() {
+                return None;
+            }
+
+            let model_file = format!("{}.pt", model_name);
+
+            let metadata = ModelMetadata {
+                model_file,
+                model_type: ModelFileType::Pt,
+                input_dtype,
+                output_dtype,
+                input_shape,
+                output_shape,
+                default_device: device,
+            };
+
+            ModelModule::from_pt_bytes(pt_bytes, metadata).ok()
+        }
+        _ => None,
+    }
 }
 
 /// Describes **which** independent PPO trainer to build, before you supply a kernel `K`.
@@ -468,10 +593,13 @@ pub enum ReinforceTrainer<
 
 impl<B, InK, OutK, K> ReinforceTrainer<B, InK, OutK, K>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
+    K: StepKernelTrait<B, InK, OutK>
+        + REINFORCEKernelTrait<B, InK, OutK>
+        + WeightProvider
+        + Default,
 {
     /// Constructs a trainer from a [`ReinforceTrainerSpec`] and a kernel instance.
     pub fn new(spec: ReinforceTrainerSpec, kernel: K) -> Result<Self, AlgorithmError> {
@@ -524,12 +652,15 @@ where
     /// No-op for REINFORCE trainers; trajectory counts are managed internally.
     pub fn reset_epoch(&mut self) {}
 
-    /// REINFORCE does not support in-memory ONNX export; always returns `None`.
-    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>>
-    where
-        B: BackendMatcher<Backend = B>,
-    {
-        None
+    /// Export the trained policy as an in-memory ONNX model.
+    ///
+    /// Returns `None` before the first training epoch or when no actors have been
+    /// registered.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::REINFORCE(algorithm) => algorithm.acquire_model_module(),
+            Self::IREINFORCE(algorithm) => algorithm.acquire_model_module(),
+        }
     }
 }
 
@@ -799,10 +930,13 @@ impl RelayRLTrainer {
         kernel: K,
     ) -> Result<ReinforceTrainer<B, InK, OutK, K>, AlgorithmError>
     where
-        B: Backend + BackendMatcher,
+        B: Backend + BackendMatcher<Backend = B>,
         InK: TensorKind<B>,
         OutK: TensorKind<B>,
-        K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
+        K: StepKernelTrait<B, InK, OutK>
+            + REINFORCEKernelTrait<B, InK, OutK>
+            + WeightProvider
+            + Default,
     {
         ReinforceTrainer::<B, InK, OutK, K>::reinforce(args, hyperparams, kernel)
     }
@@ -814,10 +948,13 @@ impl RelayRLTrainer {
         kernel: K,
     ) -> Result<ReinforceTrainer<B, InK, OutK, K>, AlgorithmError>
     where
-        B: Backend + BackendMatcher,
+        B: Backend + BackendMatcher<Backend = B>,
         InK: TensorKind<B>,
         OutK: TensorKind<B>,
-        K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
+        K: StepKernelTrait<B, InK, OutK>
+            + REINFORCEKernelTrait<B, InK, OutK>
+            + WeightProvider
+            + Default,
     {
         ReinforceTrainer::<B, InK, OutK, K>::ireinforce(args, hyperparams, kernel)
     }
@@ -863,10 +1000,10 @@ impl RelayRLTrainer {
 
 impl<B, InK, OutK, K, T> AlgorithmTrait<T> for PpoTrainer<B, InK, OutK, K>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: PPOKernelTrait<B, InK, OutK> + Default,
+    K: PPOKernelTrait<B, InK, OutK> + WeightProvider + Default,
     T: TrajectoryData,
 {
     fn save(&self, filename: &str) {
@@ -900,14 +1037,34 @@ where
             Self::IPPO(algorithm) => AlgorithmTrait::<T>::log_epoch(algorithm),
         }
     }
+
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B2>>
+    where
+        B: 'static,
+        B2: 'static,
+    {
+        match self {
+            Self::PPO(algorithm) => AlgorithmTrait::<T>::acquire_model::<B2>(algorithm),
+            Self::IPPO(algorithm) => AlgorithmTrait::<T>::acquire_model::<B2>(algorithm),
+        }
+    }
 }
 
 impl<B, InK, OutK, K, T> AlgorithmTrait<T> for ReinforceTrainer<B, InK, OutK, K>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: StepKernelTrait<B, InK, OutK> + REINFORCEKernelTrait<B, InK, OutK> + Default,
+    K: StepKernelTrait<B, InK, OutK>
+        + REINFORCEKernelTrait<B, InK, OutK>
+        + WeightProvider
+        + Default,
     T: TrajectoryData,
 {
     fn save(&self, filename: &str) {
@@ -941,17 +1098,35 @@ where
             Self::IREINFORCE(algorithm) => AlgorithmTrait::<T>::log_epoch(algorithm),
         }
     }
+
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B2>>
+    where
+        B: 'static,
+        B2: 'static,
+    {
+        match self {
+            Self::REINFORCE(algorithm) => AlgorithmTrait::<T>::acquire_model::<B2>(algorithm),
+            Self::IREINFORCE(algorithm) => AlgorithmTrait::<T>::acquire_model::<B2>(algorithm),
+        }
+    }
 }
 
 impl<B, InK, OutK, K, T> AlgorithmTrait<T> for MultiagentTrainer<B, InK, OutK, K>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
     K: MultiagentPPOKernelTrait<B, InK, OutK>
         + MultiagentReinforceKernelTrait<B, InK, OutK>
         + MultiagentDDPGKernelTrait<B, InK, OutK>
         + MultiagentTD3KernelTrait<B, InK, OutK>
+        + WeightProvider
         + Default,
     T: TrajectoryData,
 {
@@ -998,11 +1173,26 @@ where
             Self::MATD3 { trainer } => AlgorithmTrait::<T>::log_epoch(trainer),
         }
     }
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DdpgTrainer
-// ─────────────────────────────────────────────────────────────────────────────
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B2>>
+    where
+        B: 'static,
+        B2: 'static,
+    {
+        match self {
+            Self::MADDPG { trainer } => AlgorithmTrait::<T>::acquire_model::<B2>(trainer),
+            Self::MAPPO { trainer } => AlgorithmTrait::<T>::acquire_model::<B2>(trainer),
+            Self::MAREINFORCE { trainer } => AlgorithmTrait::<T>::acquire_model::<B2>(trainer),
+            Self::MATD3 { trainer } => AlgorithmTrait::<T>::acquire_model::<B2>(trainer),
+        }
+    }
+}
 
 /// Which independent DDPG trainer to build.
 pub enum DdpgTrainerSpec {
@@ -1101,10 +1291,10 @@ where
 
 impl<B, InK, OutK, K, T> AlgorithmTrait<T> for DdpgTrainer<B, InK, OutK, K>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: DDPGKernelTrait<B, InK, OutK> + Default,
+    K: DDPGKernelTrait<B, InK, OutK> + WeightProvider + Default,
     T: TrajectoryData,
 {
     fn save(&self, filename: &str) {
@@ -1132,6 +1322,23 @@ where
         match self {
             Self::DDPG(a) => AlgorithmTrait::<T>::log_epoch(a),
             Self::IDDPG(a) => AlgorithmTrait::<T>::log_epoch(a),
+        }
+    }
+
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B2>>
+    where
+        B: 'static,
+        B2: 'static,
+    {
+        match self {
+            Self::DDPG(a) => AlgorithmTrait::<T>::acquire_model::<B2>(a),
+            Self::IDDPG(a) => AlgorithmTrait::<T>::acquire_model::<B2>(a),
         }
     }
 }
@@ -1235,10 +1442,10 @@ where
 
 impl<B, InK, OutK, K, T> AlgorithmTrait<T> for Td3Trainer<B, InK, OutK, K>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: TD3KernelTrait<B, InK, OutK> + Default,
+    K: TD3KernelTrait<B, InK, OutK> + WeightProvider + Default,
     T: TrajectoryData,
 {
     fn save(&self, filename: &str) {
@@ -1266,6 +1473,23 @@ where
         match self {
             Self::TD3(a) => AlgorithmTrait::<T>::log_epoch(a),
             Self::ITD3(a) => AlgorithmTrait::<T>::log_epoch(a),
+        }
+    }
+
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B2>>
+    where
+        B: 'static,
+        B2: 'static,
+    {
+        match self {
+            Self::TD3(a) => AlgorithmTrait::<T>::acquire_model::<B2>(a),
+            Self::ITD3(a) => AlgorithmTrait::<T>::acquire_model::<B2>(a),
         }
     }
 }

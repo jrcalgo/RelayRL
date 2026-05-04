@@ -7,6 +7,8 @@ pub mod REINFORCE;
 #[allow(non_snake_case)]
 pub mod TD3;
 pub mod onnx_builder;
+#[cfg(feature = "tch-model")]
+pub mod pt_builder;
 
 // pub use DDPG::DDPGAlgorithm;
 // pub use TD3::TD3Algorithm;

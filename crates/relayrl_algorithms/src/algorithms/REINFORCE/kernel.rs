@@ -823,8 +823,8 @@ where
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> REINFORCEKernelTrait<B, InK, OutK>
-    for PolicyWithBaseline<B, InK, OutK>
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    REINFORCEKernelTrait<B, InK, OutK> for PolicyWithBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
@@ -980,8 +980,8 @@ where
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> REINFORCEKernelTrait<B, InK, OutK>
-    for PolicyWithoutBaseline<B, InK, OutK>
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    REINFORCEKernelTrait<B, InK, OutK> for PolicyWithoutBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
@@ -1006,5 +1006,103 @@ where
 
     fn train_vf_step(&mut self, _obs: &[TensorData], _mask: &[TensorData], _ret: &[f32]) -> f32 {
         0.0 // no value function
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    PolicyWithBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
+    /// Extract per-layer weight specs from the discrete policy trainer network.
+    ///
+    /// Returns `None` if no training has happened yet (the trainer or its network is
+    /// absent) or if this kernel uses a continuous policy (not yet supported).
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        let trainer = self.pi_trainer.as_ref()?;
+        let network = trainer.network.as_ref()?;
+
+        let mut specs = Vec::new();
+        for layer in &network.layers {
+            let w = layer.weight.val();
+            let dims = w.dims();
+            let in_dim = dims[0];
+            let out_dim = dims[1];
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param
+                    .val()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap_or_default()
+            } else {
+                vec![0.0; out_dim]
+            };
+            specs.push((in_dim, out_dim, weights, biases));
+        }
+        Some(specs)
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    crate::templates::base_algorithm::WeightProvider for PolicyWithBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        PolicyWithBaseline::get_pi_layer_specs(self)
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    PolicyWithoutBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
+    /// Extract per-layer weight specs from the discrete policy trainer network.
+    ///
+    /// Returns `None` if no training has happened yet (the trainer or its network is
+    /// absent) or if this kernel uses a continuous policy (not yet supported).
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        let trainer = self.pi_trainer.as_ref()?;
+        let network = trainer.network.as_ref()?;
+
+        let mut specs = Vec::new();
+        for layer in &network.layers {
+            let w = layer.weight.val();
+            let dims = w.dims();
+            let in_dim = dims[0];
+            let out_dim = dims[1];
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param
+                    .val()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap_or_default()
+            } else {
+                vec![0.0; out_dim]
+            };
+            specs.push((in_dim, out_dim, weights, biases));
+        }
+        Some(specs)
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    crate::templates::base_algorithm::WeightProvider for PolicyWithoutBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        PolicyWithoutBaseline::get_pi_layer_specs(self)
     }
 }

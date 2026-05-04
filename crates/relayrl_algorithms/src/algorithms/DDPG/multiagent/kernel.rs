@@ -151,6 +151,13 @@ impl MultiagentDDPGKernel {
     }
 }
 
+#[cfg(feature = "ndarray-backend")]
+impl crate::templates::base_algorithm::WeightProvider for MultiagentDDPGKernel {
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        self.get_actor_layer_specs()
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Kernel traits
 // ─────────────────────────────────────────────────────────────────────────────

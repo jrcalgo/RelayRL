@@ -329,40 +329,34 @@ where
         + crate::templates::base_algorithm::WeightProvider
         + Default,
 {
-    /// Export the trained actor as an in-memory ONNX model.
+    /// Export the trained actor as an in-memory model (ONNX or TorchScript).
     pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
-        use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
         use relayrl_types::data::tensor::{DType, NdArrayDType};
-        use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
 
         let slot = self.runtime.components.agent_slots.first()?;
         let layer_specs = slot.kernel.get_pi_layer_specs()?;
-        if layer_specs.is_empty() {
-            return None;
-        }
 
-        let obs_dim = self.runtime.args.obs_dim;
-        let act_dim = self.runtime.args.act_dim;
-        let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
-        let metadata = ModelMetadata {
-            model_file: "model.onnx".to_string(),
-            model_type: ModelFileType::Onnx,
-            input_dtype: DType::NdArray(NdArrayDType::F32),
-            output_dtype: DType::NdArray(NdArrayDType::F32),
-            input_shape: vec![1, obs_dim],
-            output_shape: vec![1, act_dim],
-            default_device: None,
-        };
-        ModelModule::from_onnx_bytes(onnx_bytes, metadata).ok()
+        crate::acquire_model_module::<B>(
+            "policy",
+            layer_specs,
+            DType::NdArray(NdArrayDType::F32),
+            DType::NdArray(NdArrayDType::F32),
+            vec![1, self.runtime.args.obs_dim],
+            vec![1, self.runtime.args.act_dim],
+            None,
+        )
     }
 }
 
 impl<B, InK, OutK, KN, T> AlgorithmTrait<T> for IndependentTD3Algorithm<B, InK, OutK, KN>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    KN: StepKernelTrait<B, InK, OutK> + TD3KernelTrait<B, InK, OutK> + Default,
+    KN: StepKernelTrait<B, InK, OutK>
+        + TD3KernelTrait<B, InK, OutK>
+        + crate::templates::base_algorithm::WeightProvider
+        + Default,
     T: TrajectoryData,
 {
     fn save(&self, _filename: &str) {}
@@ -499,6 +493,37 @@ where
             .epoch_logger
             .log_tabular("CriticLoss", None);
         self.runtime.components.epoch_logger.dump_tabular();
+    }
+
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B2>>
+    where
+        B: 'static,
+        B2: 'static,
+    {
+        use std::any::TypeId;
+
+        // Return None if B and B2 don't match
+        if TypeId::of::<B>() != TypeId::of::<B2>() {
+            return None;
+        }
+
+        // Call the existing acquire_model_module which returns ModelModule<B>
+        let module_b = self.acquire_model_module()?;
+
+        // SAFETY: TypeId check ensures B == B2
+        // transmute from ModelModule<B> to ModelModule<B2>
+        unsafe {
+            let module_b2: relayrl_types::model::ModelModule<B2> =
+                std::mem::transmute_copy(&module_b);
+            std::mem::forget(module_b);
+            Some(module_b2)
+        }
     }
 }
 

@@ -163,6 +163,13 @@ impl MultiagentReinforceKernel {
     }
 }
 
+#[cfg(feature = "ndarray-backend")]
+impl crate::templates::base_algorithm::WeightProvider for MultiagentReinforceKernel {
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        MultiagentReinforceKernel::get_pi_layer_specs(self)
+    }
+}
+
 use crate::templates::base_algorithm::{MultiagentKernelTrait, StepAction, StepKernelTrait};
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
