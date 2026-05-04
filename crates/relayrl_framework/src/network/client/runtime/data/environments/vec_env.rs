@@ -57,11 +57,14 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     fn resize(&mut self, count: usize) -> Result<(), VecEnvError>;
     fn reset_all(&mut self) -> Result<(), VecEnvError>;
     fn reset_where(&mut self, env_ids: &[EnvironmentUuid]) -> Result<(), VecEnvError>;
+    fn obs_dim(&self) -> usize;
+    fn act_dim(&self) -> usize;
 
     /// Returns `(n_envs, obs_dim, act_dim)` if the underlying env supports the flat path.
     fn n_envs_dims(&self) -> Option<(usize, usize, usize)> {
         None
     }
+
     /// Current observations as raw bytes (`[n_envs × obs_bytes_per_env]`).
     fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
         None
@@ -78,12 +81,14 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     fn action_is_discrete(&self) -> Option<bool> {
         None
     }
+
+    fn get_env_context(&self) -> ContextString;
 }
 
 pub(crate) struct ScalarVecEnv {
     client_namespace: Arc<str>,
     env_context: ContextString,
-    prototype: Box<dyn DynScalarEnvironment>,
+    pub(crate) prototype: Box<dyn DynScalarEnvironment>,
     envs: Vec<Box<dyn DynScalarEnvironment>>,
     ordered_ids: Vec<EnvironmentUuid>,
     uuid_to_idx: HashMap<EnvironmentUuid, usize>,
@@ -174,6 +179,14 @@ impl ScalarVecEnv {
 }
 
 impl VecEnvTrait for ScalarVecEnv {
+    fn obs_dim(&self) -> usize {
+        self.obs_dim
+    }
+
+    fn act_dim(&self) -> usize {
+        self.act_dim
+    }
+
     fn get_env_count(&self) -> Result<usize, VecEnvError> {
         Ok(self.envs.len())
     }
@@ -372,12 +385,16 @@ impl VecEnvTrait for ScalarVecEnv {
                 .unwrap_or(true),
         )
     }
+
+    fn get_env_context(&self) -> ContextString {
+        self.env_context.clone()
+    }
 }
 
 pub(crate) struct BatchVecEnv {
     client_namespace: Arc<str>,
     env_context: ContextString,
-    env: Box<DynVectorEnv>,
+    pub(crate) env: Box<DynVectorEnv>,
     env_ids: Vec<EnvironmentUuid>,
     #[allow(dead_code)]
     device: DeviceType,
@@ -421,6 +438,14 @@ impl BatchVecEnv {
 }
 
 impl VecEnvTrait for BatchVecEnv {
+    fn obs_dim(&self) -> usize {
+        self.env.observation_dim()
+    }
+
+    fn act_dim(&self) -> usize {
+        self.env.action_dim()
+    }
+
     fn get_env_count(&self) -> Result<usize, VecEnvError> {
         Ok(self.env_ids.len())
     }
@@ -494,5 +519,9 @@ impl VecEnvTrait for BatchVecEnv {
 
     fn action_is_discrete(&self) -> Option<bool> {
         Some(self.env.action_is_discrete())
+    }
+
+    fn get_env_context(&self) -> ContextString {
+        self.env_context.clone()
     }
 }

@@ -113,8 +113,9 @@ impl EnvironmentInterface {
                     EnvDType::Tch(_) => None,
                 };
 
-                let obs_dtype = map_env_dtype(env.observation_dtype())?;
-                let act_dtype = map_env_dtype(env.action_dtype())?;
+                let obs_dtype: DType = map_env_dtype(env.observation_dtype())?;
+                let act_dtype: DType = map_env_dtype(env.action_dtype())?;
+
                 let boxed_env = match env.into_handle() {
                     EnvironmentHandle::Scalar(s) => Box::new(ScalarVecEnv::init_boxed(
                         self.client_namespace.clone(),
@@ -230,7 +231,21 @@ impl EnvironmentInterface {
         self.act_dtype.clone()
     }
 
+    pub(crate) fn obs_dim(&self) -> Option<usize> {
+        self.env.as_ref().map(|env| env.obs_dim())
+    }
+
+    pub(crate) fn act_dim(&self) -> Option<usize> {
+        self.env.as_ref().map(|env| env.act_dim())
+    }
+
     pub(crate) fn action_is_discrete(&self) -> Option<bool> {
         self.env.as_ref().and_then(|env| env.action_is_discrete())
+    }
+
+    pub(crate) fn get_env_context(&self) -> Option<String> {
+        self.env
+            .as_ref()
+            .map(|env| env.get_env_context().to_string())
     }
 }
