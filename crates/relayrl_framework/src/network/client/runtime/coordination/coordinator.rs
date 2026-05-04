@@ -166,11 +166,7 @@ pub(crate) trait ClientInterface<
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
-            ModelModule<B>,
-        >,
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        default_model: ModelModule<B>,
+        default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
@@ -185,11 +181,7 @@ pub(crate) trait ClientInterface<
         actor_count: u32,
         scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
-            ModelModule<B>,
-        >,
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        default_model: ModelModule<B>,
+        default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
@@ -256,7 +248,13 @@ pub(crate) trait ClientEnvironments<
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_gradient: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+        algorithm_gradient: Option<(
+            AlgorithmCfg,
+            SaveModelPath,
+            ReplayBufferSize,
+            DeviceType,
+            KN,
+        )>,
     ) -> Result<(), CoordinatorError>
     where
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
@@ -268,6 +266,7 @@ pub(crate) trait ClientEnvironments<
             + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::WeightProvider
             + Default
             + Send
             + 'static;
@@ -527,11 +526,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
-            ModelModule<B>,
-        >,
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        default_model: ModelModule<B>,
+        default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
@@ -834,10 +829,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let (state, global_dispatcher_rx) = {
                 let shared_local_model_path = lifecycle.get_local_model_path();
 
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 let state_default_model = default_model.clone();
-                #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                let state_default_model: Option<ModelModule<B>> = Some(default_model.clone());
 
                 StateManager::new(
                     client_namespace.clone(),
@@ -908,10 +900,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
         }
 
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let actor_default_model: Option<ModelModule<B>> = default_model.clone();
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        let actor_default_model: Option<ModelModule<B>> = Some(default_model.clone());
         if actor_count > 0 {
             for _ in 1..=actor_count {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -1016,11 +1005,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         actor_count: u32,
         router_scale: u32,
         default_device: DeviceType,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] default_model: Option<
-            ModelModule<B>,
-        >,
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        default_model: ModelModule<B>,
+        default_model: Option<ModelModule<B>>,
         config_path: Option<PathBuf>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
             CodecConfig,
@@ -1701,7 +1686,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+        algorithm_cfg: Option<(
+            AlgorithmCfg,
+            SaveModelPath,
+            ReplayBufferSize,
+            DeviceType,
+            KN,
+        )>,
     ) -> Result<(), CoordinatorError>
     where
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
@@ -1713,6 +1704,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::WeightProvider
             + Default
             + Send
             + 'static,
@@ -1725,40 +1717,45 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         let (runtime, env_map) = shared_state_guard
                             .get_run_env_handles(actor_id)
                             .map_err(CoordinatorError::from)?;
-                        let algorithm_config_init = match algorithm_cfg {
-                            Some(_) => {
-                                Some(shared_state_guard.shared_algorithm_config_init.clone())
-                            }
-                            None => None,
-                        };
+                        let algorithm_config_init = algorithm_cfg
+                            .as_ref()
+                            .map(|_| shared_state_guard.shared_algorithm_config_init.clone());
 
                         (runtime, env_map, algorithm_config_init)
                     };
 
-                    let algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)> =
-                        if let Some((config, model_path, buffer_size, kernel)) = algorithm_cfg {
-                            if config == AlgorithmCfg::ConfigInit {
-                                match algorithm_config_init {
-                                    Some(init_config) => Some((
-                                        init_config.read().await.clone(),
-                                        model_path,
-                                        buffer_size,
-                                        kernel,
-                                    )),
-                                    None => {
-                                        return Err(CoordinatorError::StateManagerError(
-                                            StateManagerError::AlgorithmConfigInitError(
-                                                "Algorithm config init not found".to_string(),
-                                            ),
-                                        ));
-                                    }
+                    let algorithm_cfg: Option<(
+                        AlgorithmCfg,
+                        SaveModelPath,
+                        ReplayBufferSize,
+                        DeviceType,
+                        KN,
+                    )> = if let Some((config, model_path, buffer_size, device, kernel)) =
+                        algorithm_cfg
+                    {
+                        if config == AlgorithmCfg::ConfigInit {
+                            match algorithm_config_init {
+                                Some(init_config) => Some((
+                                    init_config.read().await.clone(),
+                                    model_path,
+                                    buffer_size,
+                                    device,
+                                    kernel,
+                                )),
+                                None => {
+                                    return Err(CoordinatorError::StateManagerError(
+                                        StateManagerError::AlgorithmConfigInitError(
+                                            "Algorithm config init not found".to_string(),
+                                        ),
+                                    ));
                                 }
-                            } else {
-                                Some((config, model_path, buffer_size, kernel))
                             }
                         } else {
-                            None
-                        };
+                            Some((config, model_path, buffer_size, device, kernel))
+                        }
+                    } else {
+                        None
+                    };
 
                     StateManager::<B, D_IN, D_OUT>::run_env_step_loop::<KindIn, KindOut, KN>(
                         actor_id,
