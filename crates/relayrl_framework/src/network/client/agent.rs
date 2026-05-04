@@ -1352,19 +1352,19 @@ mod unit_tests {
 
     #[test]
     fn actor_count_setter_sets_field() {
-        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().actor_count(5);
+        let b = AgentBuilder::<TestBackend, 4, 1>::builder().actor_count(5);
         assert_eq!(b.actor_count, Some(5));
     }
 
     #[test]
     fn router_scale_setter_sets_field() {
-        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().router_scale(2);
+        let b = AgentBuilder::<TestBackend, 4, 1>::builder().router_scale(2);
         assert_eq!(b.router_scale, Some(2));
     }
 
     #[test]
     fn actor_count_does_not_change_router_scale() {
-        let b = AgentBuilder::<TestBackend, 4, 1, Float, Float>::builder().actor_count(3);
+        let b = AgentBuilder::<TestBackend, 4, 1>::builder().actor_count(3);
         assert!(b.router_scale.is_none());
     }
 
@@ -1388,7 +1388,7 @@ mod unit_tests {
         let config_path = config_dir.path().join("client_config.json");
         let (_model_dir, default_model) = load_test_model_module();
 
-        let (_agent, params) = AgentBuilder::<TestBackend, 1, 1, Float, Float>::builder()
+        let (_agent, params) = AgentBuilder::<TestBackend, 1, 1>::builder()
             .default_model(default_model.clone())
             .config_path(config_path.clone())
             .build()
@@ -1411,12 +1411,22 @@ mod unit_tests {
         );
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         assert_eq!(
-            params.default_model.metadata.output_dtype,
+            params
+                .default_model
+                .as_ref()
+                .expect("builder should preserve the provided default model")
+                .metadata
+                .output_dtype,
             default_model.metadata.output_dtype
         );
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         assert_eq!(
-            params.default_model.metadata.input_dtype,
+            params
+                .default_model
+                .as_ref()
+                .expect("builder should preserve the provided default model")
+                .metadata
+                .input_dtype,
             default_model.metadata.input_dtype
         );
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -1433,7 +1443,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn scale_throughput_zero_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1>::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
             ClientModes::default(),
@@ -1444,7 +1454,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn new_actors_zero_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1>::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
             ClientModes::default(),
@@ -1455,7 +1465,7 @@ mod unit_tests {
 
     #[tokio::test]
     async fn remove_actors_empty_vec_returns_noop_error() {
-        let mut agent = RelayRLAgent::<TestBackend, 4, 1, Float, Float>::new(
+        let mut agent = RelayRLAgent::<TestBackend, 4, 1>::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
             ClientModes::default(),

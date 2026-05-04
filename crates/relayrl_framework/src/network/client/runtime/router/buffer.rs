@@ -734,7 +734,7 @@ mod unit_tests {
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
     use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-    use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+    use crate::network::client::runtime::router::{DataPayload, RoutedMessage, RoutingProtocol};
     use active_uuid_registry::registry_uuid::Uuid;
 
     use relayrl_types::data::trajectory::RelayRLTrajectory;

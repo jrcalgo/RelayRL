@@ -425,7 +425,7 @@ impl LifecycleManager {
         let mut transport_addresses_guard = self.transport_addresses.write().await;
         *transport_addresses_guard =
             construct_transport_addresses(transport_params, transport_type);
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "metrics")]

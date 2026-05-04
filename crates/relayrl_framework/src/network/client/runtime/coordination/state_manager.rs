@@ -18,7 +18,9 @@ use crate::network::client::runtime::data::environments::EnvironmentInterfaceErr
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
+use crate::network::client::runtime::router::{
+    ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
+};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 use crossbeam_utils::CachePadded;
@@ -900,6 +902,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             + Send
             + 'static,
     {
+        // bro fuck the formatting here, rustfmt is dumb. please spare me
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
@@ -941,6 +944,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 };
                 use relayrl_types::prelude::tensor::burn::TensorKind;
 
+                #[allow(clippy::upper_case_acronyms)]
                 enum AlgorithmTrainer<
                     B: Backend + BackendMatcher<Backend = B>,
                     KindIn: TensorKind<B>,
@@ -1044,7 +1048,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     };
                     _temp_env_dir = Some(temp_env_dir);
 
-                    if let None = runtime.reloadable_model.load_full() {
+                    if runtime.reloadable_model.load_full().is_none() {
                         let initial_model = match &trainer {
                             Some(AlgorithmTrainer::DDPG(ddpg)) => Some(<DdpgTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
                                                 RelayRLTrajectory,
@@ -1052,20 +1056,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             Some(AlgorithmTrainer::PPO(ppo)) => Some(<PpoTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
                                                 RelayRLTrajectory,
                                             >>::acquire_model::<B>(ppo)).flatten(),
-                            Some(AlgorithmTrainer::REINFORCE(reinforce)) => Some(<ReinforceTrainer<
-                                B,
-                                KindIn,
-                                KindOut,
-                                KN,
-                            > as AlgorithmTrait<RelayRLTrajectory>>::acquire_model::<
-                                B,
-                            >(reinforce)).flatten(),
+                            Some(AlgorithmTrainer::REINFORCE(reinforce)) => Some(<ReinforceTrainer<B, KindIn, KindOut,KN> as AlgorithmTrait<
+                                                RelayRLTrajectory>>::acquire_model::<B>(reinforce)).flatten(),
                             Some(AlgorithmTrainer::TD3(td3)) => Some(<Td3Trainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                RelayRLTrajectory,
-                            >>::acquire_model::<B>(td3)).flatten(),
+                                                RelayRLTrajectory,
+                                            >>::acquire_model::<B>(td3)).flatten(),
                             Some(AlgorithmTrainer::MULTIAGENT(multiagent)   ) => Some(<MultiagentTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                RelayRLTrajectory,
-                            >>::acquire_model::<B>(multiagent)).flatten(),
+                                                RelayRLTrajectory,
+                                            >>::acquire_model::<B>(multiagent)).flatten(),
                             _ => None,
                         };
 
@@ -1213,7 +1211,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 if let Some(device) = device.clone() &&
                                     let Some(model_module) = maybe_trained_model {
                                         runtime.perform_refresh_model(model_module, device).await.map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
-                                }
+                                    }
+
 
                                 // TODO: this should be updated so that it saves when the model has reached convergence ( this will require math :^) )
                                 if step == step_count {
@@ -1248,7 +1247,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorTrainingDataMode, AlgorithmCfg, ClientModes, ModelMode,
     };
     use active_uuid_registry::interface::{reserve_id_with, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
@@ -1260,7 +1259,7 @@ mod unit_tests {
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::{RwLock, mpsc};
 
-    use relayrl_types::data::tensor::{DType, DeviceType, NdArrayDType};
+    use relayrl_types::data::tensor::{AnyBurnTensor, DType, DeviceType, NdArrayDType};
     use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
     type TestBackend = NdArray<f32>;
@@ -1296,6 +1295,7 @@ mod unit_tests {
             None,
             modes,
             Arc::new(RwLock::new(100)),
+            Arc::new(RwLock::new(AlgorithmCfg::default())),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -1867,8 +1867,8 @@ mod unit_tests {
             .recv()
             .await
             .expect("expected trajectory flush");
-        match msg.payload {
-            RoutedPayload::SendTrajectory { trajectory, .. } => {
+        match msg.protocol {
+            RoutingProtocol::Data(DataPayload::SendTrajectory { trajectory, .. }) => {
                 assert_eq!(trajectory.get_env_id(), Some(&env_id));
                 assert_eq!(trajectory.get_env_label(), Some("env-1"));
             }

@@ -1494,8 +1494,8 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(matches!(
-            traj_msg.payload,
-            RoutedPayload::SendTrajectory { .. }
+            traj_msg.protocol,
+            RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
         ));
 
         // Now send Shutdown
@@ -1553,7 +1553,10 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(
-            matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
+            matches!(
+                msg.protocol,
+                RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
+            ),
             "FlagLastInference should produce a SendTrajectory message"
         );
     }
@@ -1606,8 +1609,8 @@ mod unit_tests {
             .unwrap();
 
         let msg = rx_buf.recv().await.expect("expected env trajectory flush");
-        match msg.payload {
-            RoutedPayload::SendTrajectory { trajectory, .. } => {
+        match msg.protocol {
+            RoutingProtocol::Data(DataPayload::SendTrajectory { trajectory, .. }) => {
                 assert_eq!(trajectory.get_env_id(), Some(&env_id_1));
                 assert_eq!(trajectory.get_env_label(), Some("env-1"));
             }

@@ -55,7 +55,7 @@ async fn local_client_smoke_covers_build_start_request_and_shutdown()
     fs::write(&config_path, "{}")?;
     let (_model_dir, default_model) = load_test_model_module();
 
-    let (mut agent, params) = AgentBuilder::<TestBackend, 1, 1, Float, Float>::builder()
+    let (mut agent, params) = AgentBuilder::<TestBackend, 1, 1>::builder()
         .default_device(DeviceType::Cpu)
         .default_model(default_model)
         .config_path(config_path.clone())
@@ -77,7 +77,12 @@ async fn local_client_smoke_covers_build_start_request_and_shutdown()
         &NdArrayDevice::default(),
     );
     let actions = agent
-        .request_action(ids.clone(), observation, None, 1.25)
+        .request_action::<Float, Float>(
+            ids.clone(),
+            observation,
+            None::<Tensor<TestBackend, 1, Float>>,
+            1.25,
+        )
         .await?;
 
     assert_eq!(actions.len(), 1);

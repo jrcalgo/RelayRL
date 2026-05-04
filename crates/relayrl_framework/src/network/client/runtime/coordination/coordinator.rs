@@ -1885,7 +1885,7 @@ mod unit_tests {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     use crate::network::client::agent::InferenceParams;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorTrainingDataMode, AlgorithmCfg, ClientModes, ModelMode,
     };
     use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManager;
     use crate::network::client::runtime::coordination::state_manager::ActorRoute;
@@ -1903,8 +1903,8 @@ mod unit_tests {
     type TestBackend = NdArray<f32>;
     type TestKind = Float;
 
-    fn make_coordinator() -> ClientCoordinator<TestBackend, 4, 1, TestKind, TestKind> {
-        ClientCoordinator::<TestBackend, 4, 1, TestKind, TestKind>::new(
+    fn make_coordinator() -> ClientCoordinator<TestBackend, 4, 1> {
+        ClientCoordinator::<TestBackend, 4, 1>::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
             ClientModes::default(),
@@ -1954,7 +1954,7 @@ mod unit_tests {
     async fn make_runtime_coordinator(
         client_modes: ClientModes,
     ) -> (
-        ClientCoordinator<TestBackend, 4, 1, TestKind, TestKind>,
+        ClientCoordinator<TestBackend, 4, 1>,
         Arc<RwLock<StateManager<TestBackend, 4, 1>>>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
@@ -1973,6 +1973,7 @@ mod unit_tests {
             None,
             shared_client_modes.clone(),
             lifecycle.get_max_traj_length(),
+            lifecycle.get_algorithm_config_init(),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             lifecycle.get_local_model_path(),
@@ -2005,7 +2006,7 @@ mod unit_tests {
         .unwrap();
         drop(dummy_tx);
 
-        let mut coordinator = ClientCoordinator::<TestBackend, 4, 1, TestKind, TestKind>::new(
+        let mut coordinator = ClientCoordinator::<TestBackend, 4, 1>::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
             client_modes,
@@ -2096,8 +2097,8 @@ mod unit_tests {
                 .await
                 .expect("expected routed message");
             assert_eq!(message.actor_id, actor_id);
-            match message.payload {
-                RoutedPayload::RequestInference(req) => {
+            match message.protocol {
+                RoutingProtocol::Data(DataPayload::RequestInference(req)) => {
                     assert_eq!(req.reward, 0.75);
                     req.reply_to
                         .send(Arc::new(RelayRLAction::minimal(0.25, false)))
@@ -2150,18 +2151,18 @@ mod unit_tests {
             .await
             .expect("expected routed flag-last-action message");
         assert_eq!(message.actor_id, actor_id);
-        match message.payload {
-            RoutedPayload::FlagLastInference {
+        match message.protocol {
+            RoutingProtocol::Data(DataPayload::FlagLastAction {
                 reward,
                 env_id,
                 env_label,
-            } => {
+            }) => {
                 assert_eq!(reward, 1.5);
                 assert_eq!(env_id, None);
                 assert_eq!(env_label, None);
             }
             other => panic!(
-                "expected FlagLastInference payload, got {:?}",
+                "expected FlagLastAction payload, got {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -2284,8 +2285,8 @@ mod unit_tests {
             let mut captured_updates = Vec::new();
 
             while let Some(message) = global_dispatcher_rx.recv().await {
-                match message.payload {
-                    RoutedPayload::ModelVersion { reply_to } => {
+                match message.protocol {
+                    RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to }) => {
                         let current_version = current_versions
                             .iter()
                             .find(|(actor_id, _)| *actor_id == message.actor_id)
@@ -2293,10 +2294,10 @@ mod unit_tests {
                             .unwrap();
                         let _ = reply_to.send(current_version);
                     }
-                    RoutedPayload::ModelUpdate {
+                    RoutingProtocol::Control(ControlPayload::ModelUpdate {
                         model_bytes,
                         version,
-                    } => {
+                    }) => {
                         captured_updates.push((message.actor_id, version, model_bytes.len()));
                         if captured_updates.len() == expected_update_count {
                             let _ = captured_updates_tx.send(captured_updates);
@@ -2313,7 +2314,7 @@ mod unit_tests {
             .await
             .unwrap()
             .unwrap();
-        ClientCoordinator::<TestBackend, 4, 1, TestKind, TestKind>::dispatch_model_updates(
+        ClientCoordinator::<TestBackend, 4, 1>::dispatch_model_updates(
             global_dispatcher_tx,
             target_actor_ids,
             vec![1, 2, 3],

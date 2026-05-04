@@ -141,10 +141,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorTrainingDataMode, AlgorithmCfg, ClientModes, ModelMode,
     };
     use crate::network::client::runtime::coordination::state_manager::StateManager;
-    use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+    use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
     #[cfg(feature = "metrics")]
     use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::registry_uuid::Uuid;
@@ -177,6 +177,7 @@ mod unit_tests {
             None,
             disabled_modes(),
             Arc::new(RwLock::new(100)),
+            Arc::new(RwLock::new(AlgorithmCfg::default())),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -255,7 +256,10 @@ mod unit_tests {
             .expect("timeout waiting for actor message")
             .expect("actor rx closed");
 
-        assert!(matches!(received.protocol, RoutingProtocol::ModelHandshake));
+        assert!(matches!(
+            received.protocol,
+            RoutingProtocol::Control(ControlPayload::ModelHandshake)
+        ));
     }
 
     #[tokio::test]
@@ -372,7 +376,10 @@ mod unit_tests {
             .expect("timeout waiting for shutdown msg")
             .expect("actor rx closed");
 
-        assert!(matches!(msg.protocol, RoutingProtocol::Shutdown));
+        assert!(matches!(
+            msg.protocol,
+            RoutingProtocol::Control(ControlPayload::Shutdown)
+        ));
 
         let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
             .await

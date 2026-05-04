@@ -49,7 +49,9 @@ pub(crate) enum ControlPayload {
 }
 
 pub(crate) enum DataPayload {
+    // online inference only
     RequestInference(Box<InferenceRequest>),
+    // online inference only
     FlagLastAction {
         reward: f32,
         env_id: Option<Uuid>,
