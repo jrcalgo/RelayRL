@@ -403,18 +403,7 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub actor_count: u32,
     pub router_scale: u32,
     pub default_device: DeviceType,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
-    )]
     pub default_model: Option<ModelModule<B>>,
-    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(any(feature = "nats-transport", feature = "zmq-transport"))))
-    )]
-    pub default_model: ModelModule<B>,
     pub config_path: Option<PathBuf>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub codec: CodecConfig,
@@ -428,25 +417,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for AgentStartPar
 
 impl<B: Backend + BackendMatcher<Backend = B>> AgentStartParameters<B> {
     fn infer_dtypes(&self) -> (Option<DType>, Option<DType>) {
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        {
-            if let Some(model_module) = &self.default_model {
-                return (
-                    Some(model_module.metadata.input_dtype.clone()),
-                    Some(model_module.metadata.output_dtype.clone()),
-                );
-            }
-
-            (None, None)
+        if let Some(model_module) = &self.default_model {
+            return (
+                Some(model_module.metadata.input_dtype.clone()),
+                Some(model_module.metadata.output_dtype.clone()),
+            );
         }
 
-        #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        {
-            (
-                Some(self.default_model.metadata.input_dtype.clone()),
-                Some(self.default_model.metadata.output_dtype.clone()),
-            )
-        }
+        (None, None)
     }
 }
 
@@ -601,12 +579,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             actor_count: self.actor_count.unwrap_or(1),
             router_scale: self.router_scale.unwrap_or(1),
             default_device: self.default_device.unwrap_or_default(),
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             default_model: self.default_model,
-            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-            default_model: self.default_model.expect(
-                "AgentBuilder::build requires `default_model` for the local/default runtime",
-            ),
             config_path: self.config_path,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             codec: self.codec.unwrap_or_default(),
@@ -1195,7 +1168,13 @@ pub trait RelayRLActorEnv<
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+        algorithm_cfg: Option<(
+            AlgorithmCfg,
+            SaveModelPath,
+            ReplayBufferSize,
+            DeviceType,
+            KN,
+        )>,
     ) -> Result<(), ClientError>
     where
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
@@ -1207,6 +1186,7 @@ pub trait RelayRLActorEnv<
             + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::WeightProvider
             + Default
             + Send
             + 'static;
@@ -1228,7 +1208,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_cfg: Option<(AlgorithmCfg, SaveModelPath, ReplayBufferSize, KN)>,
+        algorithm_cfg: Option<(
+            AlgorithmCfg,
+            SaveModelPath,
+            ReplayBufferSize,
+            DeviceType,
+            KN,
+        )>,
     ) -> Result<(), ClientError>
     where
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
@@ -1240,6 +1226,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
+            + relayrl_algorithms::WeightProvider
             + Default
             + Send
             + 'static,
