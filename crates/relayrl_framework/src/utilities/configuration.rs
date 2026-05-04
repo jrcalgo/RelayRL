@@ -224,10 +224,19 @@ impl HyperparameterConfig {
                         map.insert("clip_ratio".to_string(), ippo.clip_ratio.to_string());
                         map.insert("pi_lr".to_string(), ippo.pi_lr.to_string());
                         map.insert("vf_lr".to_string(), ippo.vf_lr.to_string());
-                        map.insert("train_pi_iters".to_string(), ippo.train_pi_iters.to_string());
-                        map.insert("train_vf_iters".to_string(), ippo.train_vf_iters.to_string());
+                        map.insert(
+                            "train_pi_iters".to_string(),
+                            ippo.train_pi_iters.to_string(),
+                        );
+                        map.insert(
+                            "train_vf_iters".to_string(),
+                            ippo.train_vf_iters.to_string(),
+                        );
                         map.insert("target_kl".to_string(), ippo.target_kl.to_string());
-                        map.insert("traj_per_epoch".to_string(), ippo.traj_per_epoch.to_string());
+                        map.insert(
+                            "traj_per_epoch".to_string(),
+                            ippo.traj_per_epoch.to_string(),
+                        );
                         args.insert(Algorithm::IPPO, HyperparameterArgs::Map(map));
                     }
                     args
@@ -242,10 +251,19 @@ impl HyperparameterConfig {
                         map.insert("clip_ratio".to_string(), mappo.clip_ratio.to_string());
                         map.insert("pi_lr".to_string(), mappo.pi_lr.to_string());
                         map.insert("vf_lr".to_string(), mappo.vf_lr.to_string());
-                        map.insert("train_pi_iters".to_string(), mappo.train_pi_iters.to_string());
-                        map.insert("train_vf_iters".to_string(), mappo.train_vf_iters.to_string());
+                        map.insert(
+                            "train_pi_iters".to_string(),
+                            mappo.train_pi_iters.to_string(),
+                        );
+                        map.insert(
+                            "train_vf_iters".to_string(),
+                            mappo.train_vf_iters.to_string(),
+                        );
                         map.insert("target_kl".to_string(), mappo.target_kl.to_string());
-                        map.insert("traj_per_epoch".to_string(), mappo.traj_per_epoch.to_string());
+                        map.insert(
+                            "traj_per_epoch".to_string(),
+                            mappo.traj_per_epoch.to_string(),
+                        );
                         args.insert(Algorithm::MAPPO, HyperparameterArgs::Map(map));
                     }
                     args
@@ -261,11 +279,17 @@ impl HyperparameterConfig {
                         );
                         map.insert("gamma".to_string(), ireinforce.gamma.to_string());
                         map.insert("lambda".to_string(), ireinforce.lambda.to_string());
-                        map.insert("traj_per_epoch".to_string(), ireinforce.traj_per_epoch.to_string());
+                        map.insert(
+                            "traj_per_epoch".to_string(),
+                            ireinforce.traj_per_epoch.to_string(),
+                        );
                         map.insert("seed".to_string(), ireinforce.seed.to_string());
                         map.insert("pi_lr".to_string(), ireinforce.pi_lr.to_string());
                         map.insert("vf_lr".to_string(), ireinforce.vf_lr.to_string());
-                        map.insert("train_vf_iters".to_string(), ireinforce.train_vf_iters.to_string());
+                        map.insert(
+                            "train_vf_iters".to_string(),
+                            ireinforce.train_vf_iters.to_string(),
+                        );
                         args.insert(Algorithm::IREINFORCE, HyperparameterArgs::Map(map));
                     }
                     args
@@ -277,7 +301,10 @@ impl HyperparameterConfig {
                         map.insert("discrete".to_string(), mareinforce.discrete.to_string());
                         map.insert("gamma".to_string(), mareinforce.gamma.to_string());
                         map.insert("lambda".to_string(), mareinforce.lambda.to_string());
-                        map.insert("traj_per_epoch".to_string(), mareinforce.traj_per_epoch.to_string());
+                        map.insert(
+                            "traj_per_epoch".to_string(),
+                            mareinforce.traj_per_epoch.to_string(),
+                        );
                         map.insert("seed".to_string(), mareinforce.seed.to_string());
                         map.insert("pi_lr".to_string(), mareinforce.pi_lr.to_string());
                         map.insert("vf_lr".to_string(), mareinforce.vf_lr.to_string());
@@ -295,8 +322,14 @@ impl HyperparameterConfig {
                         map.insert("critic_lr".to_string(), iddpg.critic_lr.to_string());
                         map.insert("batch_size".to_string(), iddpg.batch_size.to_string());
                         map.insert("buffer_size".to_string(), iddpg.buffer_size.to_string());
-                        map.insert("learning_starts".to_string(), iddpg.learning_starts.to_string());
-                        map.insert("policy_frequency".to_string(), iddpg.policy_frequency.to_string());
+                        map.insert(
+                            "learning_starts".to_string(),
+                            iddpg.learning_starts.to_string(),
+                        );
+                        map.insert(
+                            "policy_frequency".to_string(),
+                            iddpg.policy_frequency.to_string(),
+                        );
                         map.insert("noise_scale".to_string(), iddpg.noise_scale.to_string());
                         map.insert("train_iters".to_string(), iddpg.train_iters.to_string());
                         args.insert(Algorithm::IDDPG, HyperparameterArgs::Map(map));
@@ -313,8 +346,14 @@ impl HyperparameterConfig {
                         map.insert("critic_lr".to_string(), maddpg.critic_lr.to_string());
                         map.insert("batch_size".to_string(), maddpg.batch_size.to_string());
                         map.insert("buffer_size".to_string(), maddpg.buffer_size.to_string());
-                        map.insert("policy_frequency".to_string(), maddpg.policy_frequency.to_string());
-                        map.insert("traj_per_epoch".to_string(), maddpg.traj_per_epoch.to_string());
+                        map.insert(
+                            "policy_frequency".to_string(),
+                            maddpg.policy_frequency.to_string(),
+                        );
+                        map.insert(
+                            "traj_per_epoch".to_string(),
+                            maddpg.traj_per_epoch.to_string(),
+                        );
                         map.insert("train_iters".to_string(), maddpg.train_iters.to_string());
                         map.insert("noise_scale".to_string(), maddpg.noise_scale.to_string());
                         args.insert(Algorithm::MADDPG, HyperparameterArgs::Map(map));
@@ -331,11 +370,20 @@ impl HyperparameterConfig {
                         map.insert("critic_lr".to_string(), itd3.critic_lr.to_string());
                         map.insert("batch_size".to_string(), itd3.batch_size.to_string());
                         map.insert("buffer_size".to_string(), itd3.buffer_size.to_string());
-                        map.insert("exploration_noise".to_string(), itd3.exploration_noise.to_string());
+                        map.insert(
+                            "exploration_noise".to_string(),
+                            itd3.exploration_noise.to_string(),
+                        );
                         map.insert("policy_noise".to_string(), itd3.policy_noise.to_string());
                         map.insert("noise_clip".to_string(), itd3.noise_clip.to_string());
-                        map.insert("learning_starts".to_string(), itd3.learning_starts.to_string());
-                        map.insert("policy_frequency".to_string(), itd3.policy_frequency.to_string());
+                        map.insert(
+                            "learning_starts".to_string(),
+                            itd3.learning_starts.to_string(),
+                        );
+                        map.insert(
+                            "policy_frequency".to_string(),
+                            itd3.policy_frequency.to_string(),
+                        );
                         map.insert("train_iters".to_string(), itd3.train_iters.to_string());
                         args.insert(Algorithm::ITD3, HyperparameterArgs::Map(map));
                     }
@@ -351,11 +399,20 @@ impl HyperparameterConfig {
                         map.insert("critic_lr".to_string(), matd3.critic_lr.to_string());
                         map.insert("batch_size".to_string(), matd3.batch_size.to_string());
                         map.insert("buffer_size".to_string(), matd3.buffer_size.to_string());
-                        map.insert("policy_frequency".to_string(), matd3.policy_frequency.to_string());
+                        map.insert(
+                            "policy_frequency".to_string(),
+                            matd3.policy_frequency.to_string(),
+                        );
                         map.insert("policy_noise".to_string(), matd3.policy_noise.to_string());
                         map.insert("noise_clip".to_string(), matd3.noise_clip.to_string());
-                        map.insert("exploration_noise".to_string(), matd3.exploration_noise.to_string());
-                        map.insert("traj_per_epoch".to_string(), matd3.traj_per_epoch.to_string());
+                        map.insert(
+                            "exploration_noise".to_string(),
+                            matd3.exploration_noise.to_string(),
+                        );
+                        map.insert(
+                            "traj_per_epoch".to_string(),
+                            matd3.traj_per_epoch.to_string(),
+                        );
                         map.insert("train_iters".to_string(), matd3.train_iters.to_string());
                         args.insert(Algorithm::MATD3, HyperparameterArgs::Map(map));
                     }
@@ -476,10 +533,19 @@ impl HyperparameterConfig {
                     map.insert("clip_ratio".to_string(), ippo.clip_ratio.to_string());
                     map.insert("pi_lr".to_string(), ippo.pi_lr.to_string());
                     map.insert("vf_lr".to_string(), ippo.vf_lr.to_string());
-                    map.insert("train_pi_iters".to_string(), ippo.train_pi_iters.to_string());
-                    map.insert("train_vf_iters".to_string(), ippo.train_vf_iters.to_string());
+                    map.insert(
+                        "train_pi_iters".to_string(),
+                        ippo.train_pi_iters.to_string(),
+                    );
+                    map.insert(
+                        "train_vf_iters".to_string(),
+                        ippo.train_vf_iters.to_string(),
+                    );
                     map.insert("target_kl".to_string(), ippo.target_kl.to_string());
-                    map.insert("traj_per_epoch".to_string(), ippo.traj_per_epoch.to_string());
+                    map.insert(
+                        "traj_per_epoch".to_string(),
+                        ippo.traj_per_epoch.to_string(),
+                    );
                     args.insert(Algorithm::IPPO, HyperparameterArgs::Map(map));
                 }
 
@@ -491,10 +557,19 @@ impl HyperparameterConfig {
                     map.insert("clip_ratio".to_string(), mappo.clip_ratio.to_string());
                     map.insert("pi_lr".to_string(), mappo.pi_lr.to_string());
                     map.insert("vf_lr".to_string(), mappo.vf_lr.to_string());
-                    map.insert("train_pi_iters".to_string(), mappo.train_pi_iters.to_string());
-                    map.insert("train_vf_iters".to_string(), mappo.train_vf_iters.to_string());
+                    map.insert(
+                        "train_pi_iters".to_string(),
+                        mappo.train_pi_iters.to_string(),
+                    );
+                    map.insert(
+                        "train_vf_iters".to_string(),
+                        mappo.train_vf_iters.to_string(),
+                    );
                     map.insert("target_kl".to_string(), mappo.target_kl.to_string());
-                    map.insert("traj_per_epoch".to_string(), mappo.traj_per_epoch.to_string());
+                    map.insert(
+                        "traj_per_epoch".to_string(),
+                        mappo.traj_per_epoch.to_string(),
+                    );
                     args.insert(Algorithm::MAPPO, HyperparameterArgs::Map(map));
                 }
 
@@ -507,11 +582,17 @@ impl HyperparameterConfig {
                     );
                     map.insert("gamma".to_string(), ireinforce.gamma.to_string());
                     map.insert("lambda".to_string(), ireinforce.lambda.to_string());
-                    map.insert("traj_per_epoch".to_string(), ireinforce.traj_per_epoch.to_string());
+                    map.insert(
+                        "traj_per_epoch".to_string(),
+                        ireinforce.traj_per_epoch.to_string(),
+                    );
                     map.insert("seed".to_string(), ireinforce.seed.to_string());
                     map.insert("pi_lr".to_string(), ireinforce.pi_lr.to_string());
                     map.insert("vf_lr".to_string(), ireinforce.vf_lr.to_string());
-                    map.insert("train_vf_iters".to_string(), ireinforce.train_vf_iters.to_string());
+                    map.insert(
+                        "train_vf_iters".to_string(),
+                        ireinforce.train_vf_iters.to_string(),
+                    );
                     args.insert(Algorithm::IREINFORCE, HyperparameterArgs::Map(map));
                 }
 
@@ -520,7 +601,10 @@ impl HyperparameterConfig {
                     map.insert("discrete".to_string(), mareinforce.discrete.to_string());
                     map.insert("gamma".to_string(), mareinforce.gamma.to_string());
                     map.insert("lambda".to_string(), mareinforce.lambda.to_string());
-                    map.insert("traj_per_epoch".to_string(), mareinforce.traj_per_epoch.to_string());
+                    map.insert(
+                        "traj_per_epoch".to_string(),
+                        mareinforce.traj_per_epoch.to_string(),
+                    );
                     map.insert("seed".to_string(), mareinforce.seed.to_string());
                     map.insert("pi_lr".to_string(), mareinforce.pi_lr.to_string());
                     map.insert("vf_lr".to_string(), mareinforce.vf_lr.to_string());
@@ -535,8 +619,14 @@ impl HyperparameterConfig {
                     map.insert("critic_lr".to_string(), iddpg.critic_lr.to_string());
                     map.insert("batch_size".to_string(), iddpg.batch_size.to_string());
                     map.insert("buffer_size".to_string(), iddpg.buffer_size.to_string());
-                    map.insert("learning_starts".to_string(), iddpg.learning_starts.to_string());
-                    map.insert("policy_frequency".to_string(), iddpg.policy_frequency.to_string());
+                    map.insert(
+                        "learning_starts".to_string(),
+                        iddpg.learning_starts.to_string(),
+                    );
+                    map.insert(
+                        "policy_frequency".to_string(),
+                        iddpg.policy_frequency.to_string(),
+                    );
                     map.insert("noise_scale".to_string(), iddpg.noise_scale.to_string());
                     map.insert("train_iters".to_string(), iddpg.train_iters.to_string());
                     args.insert(Algorithm::IDDPG, HyperparameterArgs::Map(map));
@@ -550,8 +640,14 @@ impl HyperparameterConfig {
                     map.insert("critic_lr".to_string(), maddpg.critic_lr.to_string());
                     map.insert("batch_size".to_string(), maddpg.batch_size.to_string());
                     map.insert("buffer_size".to_string(), maddpg.buffer_size.to_string());
-                    map.insert("policy_frequency".to_string(), maddpg.policy_frequency.to_string());
-                    map.insert("traj_per_epoch".to_string(), maddpg.traj_per_epoch.to_string());
+                    map.insert(
+                        "policy_frequency".to_string(),
+                        maddpg.policy_frequency.to_string(),
+                    );
+                    map.insert(
+                        "traj_per_epoch".to_string(),
+                        maddpg.traj_per_epoch.to_string(),
+                    );
                     map.insert("train_iters".to_string(), maddpg.train_iters.to_string());
                     map.insert("noise_scale".to_string(), maddpg.noise_scale.to_string());
                     args.insert(Algorithm::MADDPG, HyperparameterArgs::Map(map));
@@ -565,11 +661,20 @@ impl HyperparameterConfig {
                     map.insert("critic_lr".to_string(), itd3.critic_lr.to_string());
                     map.insert("batch_size".to_string(), itd3.batch_size.to_string());
                     map.insert("buffer_size".to_string(), itd3.buffer_size.to_string());
-                    map.insert("exploration_noise".to_string(), itd3.exploration_noise.to_string());
+                    map.insert(
+                        "exploration_noise".to_string(),
+                        itd3.exploration_noise.to_string(),
+                    );
                     map.insert("policy_noise".to_string(), itd3.policy_noise.to_string());
                     map.insert("noise_clip".to_string(), itd3.noise_clip.to_string());
-                    map.insert("learning_starts".to_string(), itd3.learning_starts.to_string());
-                    map.insert("policy_frequency".to_string(), itd3.policy_frequency.to_string());
+                    map.insert(
+                        "learning_starts".to_string(),
+                        itd3.learning_starts.to_string(),
+                    );
+                    map.insert(
+                        "policy_frequency".to_string(),
+                        itd3.policy_frequency.to_string(),
+                    );
                     map.insert("train_iters".to_string(), itd3.train_iters.to_string());
                     args.insert(Algorithm::ITD3, HyperparameterArgs::Map(map));
                 }
@@ -582,11 +687,20 @@ impl HyperparameterConfig {
                     map.insert("critic_lr".to_string(), matd3.critic_lr.to_string());
                     map.insert("batch_size".to_string(), matd3.batch_size.to_string());
                     map.insert("buffer_size".to_string(), matd3.buffer_size.to_string());
-                    map.insert("policy_frequency".to_string(), matd3.policy_frequency.to_string());
+                    map.insert(
+                        "policy_frequency".to_string(),
+                        matd3.policy_frequency.to_string(),
+                    );
                     map.insert("policy_noise".to_string(), matd3.policy_noise.to_string());
                     map.insert("noise_clip".to_string(), matd3.noise_clip.to_string());
-                    map.insert("exploration_noise".to_string(), matd3.exploration_noise.to_string());
-                    map.insert("traj_per_epoch".to_string(), matd3.traj_per_epoch.to_string());
+                    map.insert(
+                        "exploration_noise".to_string(),
+                        matd3.exploration_noise.to_string(),
+                    );
+                    map.insert(
+                        "traj_per_epoch".to_string(),
+                        matd3.traj_per_epoch.to_string(),
+                    );
                     map.insert("train_iters".to_string(), matd3.train_iters.to_string());
                     args.insert(Algorithm::MATD3, HyperparameterArgs::Map(map));
                 }
@@ -1252,8 +1366,7 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     }
                     if let Some(v) = hp_map.get("lambda").and_then(|s| s.parse::<f32>().ok()) {
                         params.lambda = v;
-                    } else if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok())
-                    {
+                    } else if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
                         params.lambda = v;
                     }
                     if let Some(v) = hp_map.get("pi_lr").and_then(|s| s.parse::<f32>().ok()) {
@@ -1326,7 +1439,9 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     {
                         params.policy_frequency = v;
                     }
-                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<u32>().ok())
+                    if let Some(v) = hp_map
+                        .get("train_iters")
+                        .and_then(|s| s.parse::<u32>().ok())
                     {
                         params.train_iters = v;
                     }
@@ -1353,7 +1468,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("vf_lr").and_then(|s| s.parse::<f32>().ok()) {
                         params.vf_lr = v;
                     }
-                    if let Some(v) = hp_map.get("train_pi_iters").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("train_pi_iters")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.train_pi_iters = v;
                     }
                     if let Some(v) = hp_map
@@ -1366,7 +1484,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("target_kl").and_then(|s| s.parse::<f32>().ok()) {
                         params.target_kl = v;
                     }
-                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("traj_per_epoch")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.traj_per_epoch = v;
                     }
                 }
@@ -1392,7 +1513,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("vf_lr").and_then(|s| s.parse::<f32>().ok()) {
                         params.vf_lr = v;
                     }
-                    if let Some(v) = hp_map.get("train_pi_iters").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("train_pi_iters")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.train_pi_iters = v;
                     }
                     if let Some(v) = hp_map
@@ -1405,7 +1529,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("target_kl").and_then(|s| s.parse::<f32>().ok()) {
                         params.target_kl = v;
                     }
-                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("traj_per_epoch")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.traj_per_epoch = v;
                     }
                 }
@@ -1429,7 +1556,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
                         params.lambda = v;
                     }
-                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("traj_per_epoch")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.traj_per_epoch = v;
                     }
                     if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u64>().ok()) {
@@ -1441,7 +1571,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("vf_lr").and_then(|s| s.parse::<f32>().ok()) {
                         params.vf_lr = v;
                     }
-                    if let Some(v) = hp_map.get("train_vf_iters").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("train_vf_iters")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.train_vf_iters = v;
                     }
                 }
@@ -1461,7 +1594,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("lam").and_then(|s| s.parse::<f32>().ok()) {
                         params.lambda = v;
                     }
-                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("traj_per_epoch")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.traj_per_epoch = v;
                     }
                     if let Some(v) = hp_map.get("seed").and_then(|s| s.parse::<u64>().ok()) {
@@ -1498,19 +1634,34 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<u32>().ok()) {
                         params.batch_size = v;
                     }
-                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("buffer_size")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.buffer_size = v;
                     }
-                    if let Some(v) = hp_map.get("learning_starts").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("learning_starts")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.learning_starts = v;
                     }
-                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("policy_frequency")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.policy_frequency = v;
                     }
-                    if let Some(v) = hp_map.get("noise_scale").and_then(|s| s.parse::<f32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("noise_scale")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
                         params.noise_scale = v;
                     }
-                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("train_iters")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.train_iters = v;
                     }
                 }
@@ -1529,22 +1680,40 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
                         params.critic_lr = v;
                     }
-                    if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("batch_size")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.batch_size = v;
                     }
-                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("buffer_size")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.buffer_size = v;
                     }
-                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("policy_frequency")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.policy_frequency = v;
                     }
-                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("traj_per_epoch")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.traj_per_epoch = v;
                     }
-                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("train_iters")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.train_iters = v;
                     }
-                    if let Some(v) = hp_map.get("noise_scale").and_then(|s| s.parse::<f32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("noise_scale")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
                         params.noise_scale = v;
                     }
                 }
@@ -1572,25 +1741,43 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<u32>().ok()) {
                         params.batch_size = v;
                     }
-                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("buffer_size")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.buffer_size = v;
                     }
-                    if let Some(v) = hp_map.get("exploration_noise").and_then(|s| s.parse::<f32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("exploration_noise")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
                         params.exploration_noise = v;
                     }
-                    if let Some(v) = hp_map.get("policy_noise").and_then(|s| s.parse::<f32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("policy_noise")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
                         params.policy_noise = v;
                     }
                     if let Some(v) = hp_map.get("noise_clip").and_then(|s| s.parse::<f32>().ok()) {
                         params.noise_clip = v;
                     }
-                    if let Some(v) = hp_map.get("learning_starts").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("learning_starts")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.learning_starts = v;
                     }
-                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("policy_frequency")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.policy_frequency = v;
                     }
-                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("train_iters")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
                         params.train_iters = v;
                     }
                 }
@@ -1609,28 +1796,49 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     if let Some(v) = hp_map.get("critic_lr").and_then(|s| s.parse::<f32>().ok()) {
                         params.critic_lr = v;
                     }
-                    if let Some(v) = hp_map.get("batch_size").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("batch_size")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.batch_size = v;
                     }
-                    if let Some(v) = hp_map.get("buffer_size").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("buffer_size")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.buffer_size = v;
                     }
-                    if let Some(v) = hp_map.get("policy_frequency").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("policy_frequency")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.policy_frequency = v;
                     }
-                    if let Some(v) = hp_map.get("policy_noise").and_then(|s| s.parse::<f32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("policy_noise")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
                         params.policy_noise = v;
                     }
                     if let Some(v) = hp_map.get("noise_clip").and_then(|s| s.parse::<f32>().ok()) {
                         params.noise_clip = v;
                     }
-                    if let Some(v) = hp_map.get("exploration_noise").and_then(|s| s.parse::<f32>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("exploration_noise")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
                         params.exploration_noise = v;
                     }
-                    if let Some(v) = hp_map.get("traj_per_epoch").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("traj_per_epoch")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         params.traj_per_epoch = v;
                     }
-                    if let Some(v) = hp_map.get("train_iters").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(v) = hp_map
+                        .get("train_iters")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         params.train_iters = v;
                     }
                 }
