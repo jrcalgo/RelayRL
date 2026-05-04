@@ -458,7 +458,7 @@ pub(crate) struct ActorRuntime<
     const D_OUT: usize,
 > {
     actor_id: ActorUuid,
-    reloadable_model: LocalModelHandle<B>,
+    pub(crate) reloadable_model: LocalModelHandle<B>,
     shared_max_traj_length: Arc<RwLock<usize>>,
     shared_tx_to_buffer: Sender<RoutedMessage>,
     trajectories: Mutex<ActorTrajectoryState>,
@@ -623,7 +623,8 @@ impl<
         reward: f32,
         env_id: Option<Uuid>,
         env_label: Option<String>,
-    ) -> Result<(), ActorError> {
+        return_traj_override: bool,
+    ) -> Result<Option<RelayRLTrajectory>, ActorError> {
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
@@ -648,16 +649,20 @@ impl<
             };
 
             if let Some(trajectory) = maybe_trajectory {
-                self.send_trajectory(trajectory).await?;
+                if return_traj_override {
+                    return Ok(Some(trajectory));
+                } else {
+                    self.send_trajectory(trajectory).await?;
+                }
             }
 
-            Ok(())
+            Ok(None)
         }
         .await;
 
         #[cfg(feature = "metrics")]
         match &result {
-            Ok(()) => {
+            Ok(_) => {
                 let duration = start_time.elapsed().as_secs_f64();
                 self.metrics
                     .record_histogram("actor_flag_last_action_latency", duration, &[])
@@ -674,6 +679,28 @@ impl<
         }
 
         result
+    }
+
+    pub(crate) async fn perform_refresh_model(
+        &self,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Result<(), ActorError> {
+        match self.reloadable_model.load_full() {
+            Some(model) => {
+                model
+                    .reload_from_module(model_module, model.version())
+                    .await
+                    .map_err(ActorError::from)?;
+                Ok(())
+            }
+            None => {
+                let reloadable_model =
+                    Arc::new(HotReloadableModel::<B>::new_from_module(model_module, device).await?);
+                self.reloadable_model.store(Some(reloadable_model));
+                Ok(())
+            }
+        }
     }
 
     pub(crate) async fn flush_shutdown_trajectories(&self) -> Result<(), ActorError> {
@@ -900,9 +927,8 @@ impl<
             env_label,
         }) = msg.protocol
         {
-            return self
-                .runtime
-                .flag_last_action(reward, env_id, env_label)
+            self.runtime
+                .flag_last_action(reward, env_id, env_label, false)
                 .await;
         }
         Ok(())
