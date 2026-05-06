@@ -11,6 +11,7 @@ use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, C
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{InferenceAddressesArgs, TrainingAddressesArgs};
 use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
+use crate::network::client::runtime::actor::ActorRuntime;
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifecycleManager, LifecycleManagerError,
 };
@@ -21,6 +22,7 @@ use crate::network::client::runtime::coordination::scale_manager::{
     ScaleManager, ScaleManagerError,
 };
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+use crate::network::client::runtime::coordination::state_manager::SharedRouterState;
 use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
@@ -292,6 +294,21 @@ pub(crate) trait ClientEnvironments<
 
 // ===== Coordinator state =====
 
+pub(crate) enum HotPathParams<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
+    Local {
+        local_runtimes: Arc<DashMap<ActorUuid, Arc<ActorRuntime<B, D_IN, D_OUT>>>>,
+    },
+    Network {
+        filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
+        shared_router_state: Arc<SharedRouterState>,
+        global_dispatcher_tx: Sender<RoutedMessage>,
+    },
+}
+
 pub struct CoordinatorParams<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
@@ -314,6 +331,7 @@ pub struct ClientCoordinator<
     transport_type: TransportType,
     pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
+    hot_path_params: Option<HotPathParams<B, D_IN, D_OUT>>,
 }
 
 // ===== Internal helpers =====
@@ -516,6 +534,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             transport_type,
             client_modes: Arc::new(client_modes),
             runtime_params: None,
+            hot_path_params: None,
         }
     }
 
@@ -889,6 +908,37 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             });
         }
 
+        if let Some(params) = self.runtime_params.as_ref() {
+            let is_local_inference = matches!(
+                self.client_modes.actor_inference_mode,
+                ActorInferenceMode::Local(_)
+            );
+
+            self.hot_path_params = Some(if is_local_inference {
+                HotPathParams::Local {
+                    local_runtimes: {
+                        let state_guard = params.shared_state.read().await;
+                        state_guard.actor_runtime_handles.clone()
+                    },
+                }
+            } else {
+                // this path only executes if zmq or nats transport feature flags are enabled
+                let (filter_channels, shared_router_state, global_dispatcher_tx) = {
+                    let state_guard = params.shared_state.read().await;
+                    (
+                        params.scaling.router_filter_channels.clone(),
+                        state_guard.shared_router_state.clone(),
+                        state_guard.global_dispatcher_tx.clone(),
+                    )
+                };
+                HotPathParams::Network {
+                    filter_channels,
+                    shared_router_state,
+                    global_dispatcher_tx,
+                }
+            });
+        }
+
         if let Some(params) = self.runtime_params.as_mut() {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             if let Err(e) = params.scaling.scale_out(router_scale, false).await {
@@ -1034,60 +1084,53 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError> {
-        match &self.runtime_params {
-            Some(params) => {
-                #[cfg(feature = "metrics")]
-                let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
+        let hp = self.hot_path_params.as_ref().ok_or_else(|| {
+            CoordinatorError::ScaleManagerError(ScaleManagerError::GetRouterRuntimeParamsError(
+                "[Coordinator] No runtime instance to request_action...".to_string(),
+            ))
+        })?;
 
-                // Extract router runtime params with clear error messages
-                let _router_runtime_params: &dashmap::DashMap<
-                    RouterNamespace,
-                    super::scale_manager::RouterRuntimeParams,
-                > = {
-                    let runtime_params = self.runtime_params.as_ref().ok_or_else(|| {
-                        CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::GetRouterRuntimeParamsError(
-                                "[Coordinator] No runtime params".to_string(),
-                            ),
-                        )
-                    })?;
+        #[cfg(feature = "metrics")]
+        let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
-                    runtime_params
-                        .scaling
-                        .runtime_params
-                        .as_ref()
-                        .ok_or_else(|| {
-                            CoordinatorError::ScaleManagerError(
-                                ScaleManagerError::GetRouterRuntimeParamsError(
-                                    "[Coordinator] No scaling runtime params".to_string(),
-                                ),
+        let actions = match hp {
+            HotPathParams::Local { local_runtimes } => {
+                // Zero async task boundaries — call ActorRuntime directly.
+                let mut results = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let Some(runtime) = local_runtimes.get(&id).map(|r| Arc::clone(r.value()))
+                    else {
+                        continue;
+                    };
+                    let action = runtime
+                        .perform_local_inference(observation.clone(), mask.clone(), reward)
+                        .await
+                        .map_err(|e| {
+                            CoordinatorError::StateManagerError(
+                                StateManagerError::InferenceRequestError(e.to_string()),
                             )
-                        })?
-                };
+                        })?;
+                    results.push((id, Arc::new(action)));
+                }
+                results
+            }
+            HotPathParams::Network {
+                filter_channels,
+                shared_router_state,
+                global_dispatcher_tx,
+            } => {
+                let mut pending = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let Some(ns) = shared_router_state
+                        .actor_routes
+                        .get(&id)
+                        .and_then(|r| r.router_namespace.clone())
+                    else {
+                        continue;
+                    };
 
-                let (global_dispatcher_tx, valid_ids) = {
-                    let state = params.shared_state.read().await;
-                    let tx = state.global_dispatcher_tx.clone();
-                    let valid = ids
-                        .iter()
-                        .filter(|id| {
-                            state
-                                .shared_router_state
-                                .actor_routes
-                                .get(id)
-                                .and_then(|route| route.router_namespace.clone())
-                                .is_some()
-                        })
-                        .copied()
-                        .collect::<Vec<_>>();
-                    (tx, valid)
-                };
-
-                let mut pending = Vec::with_capacity(valid_ids.len());
-
-                for id in valid_ids {
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
-                    let action_request_message = RoutedMessage {
+                    let msg = RoutedMessage {
                         actor_id: id,
                         protocol: RoutingProtocol::Data(DataPayload::RequestInference(Box::new(
                             InferenceRequest {
@@ -1099,24 +1142,31 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         ))),
                     };
 
-                    if let Err(e) = global_dispatcher_tx
-                        .send(action_request_message)
-                        .await
-                        .map_err(|e| e.to_string())
-                    {
-                        return Err(CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::SendActionRequestError(e),
-                        ));
+                    if let Some(filter_tx) = filter_channels.get(&ns) {
+                        match filter_tx.send(msg).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                global_dispatcher_tx.send(e.0).await.map_err(|e| {
+                                    CoordinatorError::ScaleManagerError(
+                                        ScaleManagerError::SendActionRequestError(e.to_string()),
+                                    )
+                                })?;
+                            }
+                        }
+                    } else {
+                        global_dispatcher_tx.send(msg).await.map_err(|e| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::SendActionRequestError(e.to_string()),
+                            )
+                        })?;
                     }
-
                     pending.push((id, resp_rx));
                 }
 
+                let pending_len = pending.len();
                 let mut join_set = tokio::task::JoinSet::<
                     Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>,
                 >::new();
-                let pending_len = pending.len();
-
                 for (id, rx) in pending {
                     join_set.spawn(async move {
                         let action = rx.await.map_err(|e| {
@@ -1128,37 +1178,33 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     });
                 }
 
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(pending_len);
+                let mut results: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(pending_len);
                 while let Some(join_result) = join_set.join_next().await {
                     let pair = join_result.map_err(|e| {
                         CoordinatorError::ScaleManagerError(
                             ScaleManagerError::ReceiveActionResponseError(e.to_string()),
                         )
                     })??;
-                    actions.push(pair);
+                    results.push(pair);
                 }
-
-                #[cfg(feature = "metrics")]
-                {
-                    let duration: f64 = start_time.elapsed().as_secs_f64();
-                    params
-                        .metrics
-                        .record_histogram("action_request_latency", duration, &[])
-                        .await;
-                    params
-                        .metrics
-                        .record_counter("action_requests", num_ids, &[])
-                        .await;
-                }
-
-                Ok(actions)
+                results
             }
-            None => Err(CoordinatorError::ScaleManagerError(
-                ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] No runtime instance to request_action...".to_string(),
-                ),
-            )),
+        };
+
+        #[cfg(feature = "metrics")]
+        if let Some(params) = &self.runtime_params {
+            let duration: f64 = start_time.elapsed().as_secs_f64();
+            params
+                .metrics
+                .record_histogram("action_request_latency", duration, &[])
+                .await;
+            params
+                .metrics
+                .record_counter("action_requests", num_ids, &[])
+                .await;
         }
+
+        Ok(actions)
     }
 
     async fn flag_last_action(
@@ -1166,61 +1212,96 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError> {
-        match &self.runtime_params {
-            Some(params) => {
-                #[cfg(feature = "metrics")]
-                let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
+        let hp = self.hot_path_params.as_ref().ok_or_else(|| {
+            CoordinatorError::ScaleManagerError(ScaleManagerError::GetRouterRuntimeParamsError(
+                "[Coordinator] No runtime instance to flag_last_action...".to_string(),
+            ))
+        })?;
 
-                let global_dispatcher_tx = params
-                    .shared_state
-                    .read()
-                    .await
-                    .global_dispatcher_tx
-                    .clone();
+        #[cfg(feature = "metrics")]
+        let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
+        let reward_val: f32 = reward.unwrap_or(0.0);
+        match hp {
+            HotPathParams::Local { local_runtimes } => {
                 for id in ids {
-                    let reward: f32 = reward.unwrap_or(0.0);
-                    let flag_last_action_message = RoutedMessage {
+                    let Some(runtime) = local_runtimes.get(&id).map(|r| Arc::clone(r.value()))
+                    else {
+                        continue;
+                    };
+                    runtime
+                        .flag_last_action(reward_val, None, None, false)
+                        .await
+                        .map_err(|e| {
+                            CoordinatorError::StateManagerError(
+                                StateManagerError::InferenceRequestError(e.to_string()),
+                            )
+                        })?;
+                }
+            }
+            HotPathParams::Network {
+                filter_channels,
+                shared_router_state,
+                global_dispatcher_tx,
+            } => {
+                for id in ids {
+                    let Some(ns) = shared_router_state
+                        .actor_routes
+                        .get(&id)
+                        .and_then(|r| r.router_namespace.clone())
+                    else {
+                        continue;
+                    };
+
+                    let msg = RoutedMessage {
                         actor_id: id,
                         protocol: RoutingProtocol::Data(DataPayload::FlagLastAction {
-                            reward,
+                            reward: reward_val,
                             env_id: None,
                             env_label: None,
                         }),
                     };
 
-                    if let Err(e) = global_dispatcher_tx
-                        .send(flag_last_action_message)
-                        .await
-                        .map_err(|e| e.to_string())
-                    {
-                        return Err(CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::SendFlagLastActionMessageError(e),
-                        ));
+                    if let Some(filter_tx) = filter_channels.get(&ns) {
+                        match filter_tx.send(msg).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                global_dispatcher_tx.send(e.0).await.map_err(|_| {
+                                    CoordinatorError::ScaleManagerError(
+                                        ScaleManagerError::SendFlagLastActionMessageError(format!(
+                                            "Hot dispatch failed for actor {id}"
+                                        )),
+                                    )
+                                })?;
+                            }
+                        }
+                    } else {
+                        global_dispatcher_tx.send(msg).await.map_err(|_| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::SendFlagLastActionMessageError(format!(
+                                    "Hot dispatch failed for actor {id}"
+                                )),
+                            )
+                        })?;
                     }
                 }
-
-                #[cfg(feature = "metrics")]
-                {
-                    let duration: f64 = start_time.elapsed().as_secs_f64();
-                    params
-                        .metrics
-                        .record_histogram("flag_last_action_latency", duration, &[])
-                        .await;
-                    params
-                        .metrics
-                        .record_counter("flag_last_action_calls", num_ids, &[])
-                        .await;
-                }
-
-                Ok(())
             }
-            None => Err(CoordinatorError::ScaleManagerError(
-                ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] No runtime instance to flag_last_action...".to_string(),
-                ),
-            )),
         }
+
+        #[cfg(feature = "metrics")]
+        if let Some(params) = &self.runtime_params {
+            let duration: f64 = start_time.elapsed().as_secs_f64();
+            params
+                .metrics
+                .record_histogram("flag_last_action_latency", duration, &[])
+                .await;
+            params
+                .metrics
+                .record_counter("flag_last_action_calls", num_ids, &[])
+                .await;
+        }
+
+        Ok(())
     }
 
     async fn update_model(

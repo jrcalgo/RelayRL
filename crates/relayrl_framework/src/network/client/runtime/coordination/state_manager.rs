@@ -149,7 +149,7 @@ pub(crate) struct StateManager<
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
-    actor_runtime_handles: DashMap<ActorUuid, Arc<ActorRuntime<B, D_IN, D_OUT>>>,
+    pub(crate) actor_runtime_handles: Arc<DashMap<ActorUuid, Arc<ActorRuntime<B, D_IN, D_OUT>>>>,
     pub(crate) shared_actor_count: Arc<CachePadded<AtomicUsize>>,
 }
 
@@ -201,7 +201,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 actor_handles: DashMap::new(),
                 actor_devices: DashMap::new(),
                 actor_model_handles: DashMap::new(),
-                actor_runtime_handles: DashMap::new(),
+                actor_runtime_handles: Arc::new(DashMap::new()),
                 shared_actor_count: Arc::new(CachePadded::new(AtomicUsize::new(0))),
             },
             global_dispatcher_rx,
