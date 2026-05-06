@@ -323,6 +323,57 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         Ok(Self { model, metadata })
     }
 
+    /// Build a `ModelModule` from TorchScript bytes via a temporary file.
+    /// Since `CModule::load` requires a filesystem path, this method writes the bytes
+    /// to a temporary file, loads the model, then cleans up the temp file.
+    /// The caller supplies the `metadata` describing input/output shapes and dtypes.
+    #[cfg(feature = "tch-model")]
+    pub fn from_pt_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+        use std::io::Write;
+
+        // Write bytes to a temporary file
+        let mut temp_file = tempfile::NamedTempFile::new()
+            .map_err(|e| ModelError::BackendError(format!("Failed to create temp file: {}", e)))?;
+
+        temp_file
+            .write_all(&bytes)
+            .map_err(|e| ModelError::BackendError(format!("Failed to write temp file: {}", e)))?;
+
+        let temp_path = temp_file.path();
+
+        // Load the model from the temp file
+        let module = CModule::load(temp_path)
+            .map_err(|e| ModelError::BackendError(format!("Failed to load CModule: {}", e)))?;
+
+        let raw_bytes: Arc<[u8]> = bytes.into();
+        let model = Self {
+            model: Model {
+                file_type: ModelFileType::Pt,
+                raw_bytes,
+                inference: InferenceModel::Pt(Arc::new(module)),
+                _phantom: PhantomData,
+            },
+            metadata,
+        };
+
+        // Temp file is automatically cleaned up when dropped
+        Ok(model)
+    }
+
+    #[cfg(not(feature = "tch-model"))]
+    pub fn from_pt_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+        let raw_bytes: Arc<[u8]> = bytes.into();
+        Ok(Self {
+            model: Model {
+                file_type: ModelFileType::Pt,
+                raw_bytes,
+                inference: InferenceModel::Unsupported,
+                _phantom: PhantomData,
+            },
+            metadata,
+        })
+    }
+
     /// Generic forward; dispatches to ONNX or LibTorch paths based on metadata.
     #[cfg(all(
         any(feature = "tch-model", feature = "onnx-model"),
