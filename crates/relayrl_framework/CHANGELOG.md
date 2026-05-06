@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta.4] - 2026-05-06
+
+### Added
+- **Config-driven algorithm selection** - Client configuration now carries `algorithm_name` plus structured initial hyperparameters for PPO, REINFORCE, DDPG, TD3, and their independent / multi-agent variants.
+  - Added `Algorithm` / `AlgorithmCfg` coverage for `DDPG`, `IDDPG`, `MADDPG`, `TD3`, `ITD3`, and `MATD3`
+  - Default config JSON generation moved into `utilities::config_json` and now includes per-algorithm defaults for the expanded algorithm set
+- **Optional training during local environment runs** - `run_env()` can now accept an algorithm configuration, save path, replay-buffer size, device, and kernel so local environment stepping can feed trajectories into `relayrl_algorithms` trainers.
+  - Trained model modules are acquired from the selected trainer and refreshed back into the actor runtime for subsequent local inference
+- **Actor runtime model refresh helper** - Added `ActorRuntime::perform_refresh_model()` to initialize or reload the hot-reloadable local model from a `ModelModule` and `DeviceType`.
+
+### Changed
+- **Local action hot paths** - `request_action()` and `flag_last_action()` now use cached hot-path state for local runtimes, reducing router/task boundaries for local inference and terminal-action handling.
+  - `flag_last_action()` can return completed trajectories internally for training while still preserving the public send-to-buffer behavior
+- **Vector environment execution** - `ScalarVecEnv` now uses Rayon-backed parallel reset and `step_bytes()` paths for larger environment batches.
+- **Router message model** - Routed messages now carry only `actor_id` and a nested `RoutingProtocol`, with control and data payloads split into `ControlPayload` and `DataPayload`.
+  - Router timeouts and actor dispatch now match against the nested protocol variants instead of a separate routed payload field
+- **Package metadata and dependencies** - `relayrl_framework` crate version is now `0.5.0-beta.4`, `rayon` is a direct dependency, and the direct `half` dependency no longer enables a misspelled `feature = ["bytemuck"]` entry.
+
+### Fixed
+- **Config hyperparameter field mapping** - Generated and loaded algorithm hyperparameters now align with the current `relayrl_algorithms` parameter structs, including actor/critic learning-rate names and TD3/DDPG training fields.
+- **Local terminal-action handling** - Actor `perform_flag_last_action()` now discards the optional returned trajectory for message-driven calls and still reports success after processing the terminal action.
+
+### Breaking
+- **`run_env()` algorithm-training signature** - `RelayRLActorEnv::run_env()` and coordinator/state-manager environment execution now take an optional algorithm-training tuple when callers want integrated training.
+  - Callers using the trait directly may need to update method signatures and generic kernel bounds to include the expanded algorithm kernel traits and `WeightProvider`
+- **Internal router protocol API** - Crate-internal users of `RoutedMessage`, `RoutingProtocol`, or `RoutedPayload` must migrate to the new `ControlPayload` / `DataPayload` protocol shape.
+
 ## [0.5.0-beta.3] - 2026-04-26
 
 ### Added

@@ -3,7 +3,7 @@
 **Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
-**Version:** 0.5.0-beta.3
+**Version:** 0.5.0-beta.4
 
 **Status:** Under active development, expect breaking changes.
 
@@ -15,7 +15,7 @@ With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `rel
 
 As of now, the supported beta path is the local/default client runtime. Provide your own
 `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface.
-Transport-backed and server-backed workflows remain experimental in `0.5.0-beta.3`.
+Transport-backed and server-backed workflows remain experimental in `0.5.0-beta.4`.
 
 All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
 
@@ -48,7 +48,7 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 
 ### 0.5.0-beta Scope
 
-Supported in `0.5.0-beta.3`:
+Supported in `0.5.0-beta.4`:
 
 - local inference
 - actor lifecycle management
@@ -57,7 +57,7 @@ Supported in `0.5.0-beta.3`:
 - in-memory trajectory retrieval
 - internal environment batching
 
-Experimental in `0.5.0-beta.3`:
+Experimental in `0.5.0-beta.4`:
 
 - `zmq-transport`
 - `nats-transport`
