@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-05-06
+
+### Added
+- **DDPG and TD3 algorithm families** - Added independent and multi-agent DDPG/TD3 implementations with public aliases, params, kernels, replay buffers, and trainer facades.
+  - New exports include `DDPGAlgorithm`, `IDDPGAlgorithm`, `MADDPGAlgorithm`, `TD3Algorithm`, `ITD3Algorithm`, and `MATD3Algorithm`
+  - `RelayRLTrainer` now exposes `ddpg()`, `iddpg()`, `td3()`, and `itd3()` constructors alongside the existing PPO and REINFORCE helpers
+- **Custom multi-agent kernels** - Multi-agent PPO and REINFORCE now accept user-supplied kernels through `MultiagentTrainerSpec<K>` and the shared `MultiagentKernelTrait` interface.
+  - Added algorithm-specific multi-agent kernel traits for PPO, REINFORCE, DDPG, and TD3 so framework callers can plug in training kernels consistently
+- **Cross-backend model acquisition** - Added centralized `acquire_model_module()` support for exporting trained policies as `relayrl_types::model::ModelModule` values.
+  - ONNX export is enabled by default for ndarray builds through the new `onnx-model` feature
+  - Optional TorchScript export is available through the new `tch-model` feature using LibTorch-backed model bytes
+- **Model byte builders** - Added ONNX and TorchScript MLP builders that serialize `WeightProvider` layer specs into loadable model artifacts.
+  - The ONNX builder preserves Burn's `[in, out]` linear weight layout for `Gemm` nodes
+- **Serializable hyperparameters** - Added `Debug`, `Clone`, `PartialEq`, `Serialize`, and `Deserialize` derives to algorithm parameter structs for configuration loading and persistence.
+
+### Changed
+- **Trainer model export API** - `AlgorithmTrait` now exposes `acquire_model()` for feature-gated in-memory policy export.
+  - PPO, REINFORCE, DDPG, TD3, and their multi-agent variants delegate export through the shared model acquisition path when their kernels implement `WeightProvider`
+
+### Breaking
+- **Multi-agent trainer construction** - `MultiagentTrainerSpec` and the `mappo()` / `mareinforce()` constructors now require an explicit kernel argument.
+  - Existing callers using the old built-in multi-agent PPO or REINFORCE kernel construction must pass an appropriate kernel value instead
+- **Kernel trait bounds** - Trainer and algorithm implementations now require `WeightProvider` for model-export-capable kernels, and multi-agent algorithms are generic over their kernel type.
+  - Custom kernels may need to implement the new export and multi-agent base traits to compile against 0.3.0
+
 ## [0.2.0] - 2026-04-13
 
 ### Added
