@@ -49,12 +49,16 @@ pub mod traits {
         TrainingPerformanceReturnError(String),
     }
 
+    pub type Observation = Vec<u8>;
+    pub type Mask = Option<Vec<u8>>;
+    pub type Done = bool;
+    pub type Truncated = bool;
+    pub type Reward = f32;
+
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum EnvironmentKind {
         Scalar,
         Vector,
-        Other(String),
-        Unknown,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -149,17 +153,21 @@ pub mod traits {
         pub info: Option<EnvInfo>,
     }
 
-    pub type DynVectorEnv =
-        dyn VectorEnvironment;
-    pub trait DynScalarEnvironment<
-    >: ScalarEnvironment + Send + Sync
-    {
+    pub type DynVectorEnv = dyn VectorEnvironment;
+    pub trait DynScalarEnvironment: ScalarEnvironment + Send + Sync {
         fn clone_box(&self) -> Box<dyn DynScalarEnvironment>;
-        fn dyn_flat_obs(&self) -> Vec<u8> { self.flat_observation_bytes() }
-        fn dyn_step(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
+        fn dyn_flat_obs(&self) -> Observation {
+            self.flat_observation_bytes()
+        }
+        fn dyn_flat_mask(&self) -> Mask {
+            self.flat_mask_bytes()
+        }
+        fn dyn_step(&self, action: &[u8]) -> Option<(Observation, Mask, Reward, Done, Truncated)> {
             self.step_bytes(action)
         }
-        fn dyn_act_dim(&self) -> usize { self.action_dim() }
+        fn dyn_act_dim(&self) -> usize {
+            self.action_dim()
+        }
     }
     impl<T> DynScalarEnvironment for T
     where
@@ -169,9 +177,7 @@ pub mod traits {
             Box::new(self.clone())
         }
     }
-    impl Clone
-        for Box<dyn DynScalarEnvironment>
-    {
+    impl Clone for Box<dyn DynScalarEnvironment> {
         fn clone(&self) -> Self {
             self.clone_box()
         }
@@ -181,39 +187,36 @@ pub mod traits {
         Vector(Box<DynVectorEnv>),
     }
 
-    pub trait ScalarEnvironment
-    : Environment + Send + Sync
-    {
+    pub trait ScalarEnvironment: Environment + Send + Sync {
         fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError>;
-        fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)>;
+        fn step_bytes(&self, action: &[u8]) -> Option<(Observation, Mask, Reward, Done, Truncated)>;
     }
 
-    pub trait VectorEnvironment
-    : Environment + Send + Sync
-    {
+    pub trait VectorEnvironment: Environment + Send + Sync {
         fn init_num_envs(&self, num_envs: usize) -> Result<Vec<EnvironmentUuid>, EnvironmentError>;
         fn reset(
             &self,
             env_ids: &[EnvironmentUuid],
         ) -> Result<Vec<VectorEnvReset>, EnvironmentError>;
         fn n_envs(&self) -> usize;
-        fn step_bytes(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)>;
+        #[allow(clippy::type_complexity)]
+        fn step_bytes(&self, actions: &[u8]) -> Option<(Observation, Mask, Vec<Reward>, Vec<Done>, Vec<Truncated>)>;
     }
 
     /// Interface for environments where a model can be trained or evaluated.
     ///
     /// Methods are intentionally parameterless: configuration and mutable state live on the
     /// implementing type (often with interior mutability when shared across threads).
-    pub trait Environment
-    : Send + Sync
-    {
+    pub trait Environment: Send + Sync {
         fn run_environment(&self) -> Result<(), EnvironmentError>;
         fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError>;
+        fn build_mask(&self) -> Result<Box<dyn Any>, EnvironmentError>;
         fn observation_dtype(&self) -> EnvDType;
         fn action_dtype(&self) -> EnvDType;
         fn observation_dim(&self) -> usize;
         fn action_dim(&self) -> usize;
-        fn flat_observation_bytes(&self) -> Vec<u8>;
+        fn flat_observation_bytes(&self) -> Observation;
+        fn flat_mask_bytes(&self) -> Mask;
         fn action_is_discrete(&self) -> bool;
         fn kind(&self) -> EnvironmentKind;
         fn into_handle(self: Box<Self>) -> EnvironmentHandle;

@@ -215,7 +215,11 @@ impl EnvironmentInterface {
             .and_then(|env| env.flat_observation_bytes())
     }
 
-    pub(crate) fn step_bytes(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+    pub(crate) fn flat_mask_bytes(&self) -> Option<Vec<u8>> {
+        self.env.as_ref().and_then(|env| env.flat_mask_bytes())
+    }
+
+    pub(crate) fn step_bytes(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
         self.env.as_mut().and_then(|env| env.step_bytes(actions))
     }
 
