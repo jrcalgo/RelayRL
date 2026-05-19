@@ -69,14 +69,22 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
         None
     }
-    /// Returns `(new_obs_bytes, rewards, dones)`.
-    fn step_bytes(&mut self, _actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+
+    /// Current masks as raw bytes (`[n_envs × action_bytes_per_env]`).
+    fn flat_mask_bytes(&self) -> Option<Vec<u8>> {
         None
     }
+
+    /// Returns `(new_obs_bytes, new_mask_bytes, rewards, dones, truncateds)`.
+    fn step_bytes(&mut self, _actions: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
+        None
+    }
+
     /// Stable env UUIDs in flat-path order, or None if fast path unsupported.
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         None
     }
+
     /// `true` if the action space is discrete, `false` if continuous.
     fn action_is_discrete(&self) -> Option<bool> {
         None
@@ -97,6 +105,7 @@ pub(crate) struct ScalarVecEnv {
     obs_bytes_per_env: usize, // obs_flat stride per env
     act_dim: usize,           // action elements per env
     act_bytes_per_env: usize, // action bytes per env (1 for discrete, dtype-sized for continuous)
+    mask_flat: Option<Vec<u8>>, // raw bytes; element dtype = action_dtype
     #[allow(dead_code)]
     device: DeviceType,
     #[allow(dead_code)]
@@ -159,6 +168,18 @@ impl ScalarVecEnv {
             Vec::new()
         };
 
+        let mask_flat = if act_bytes_per_env > 0 && act_dim > 0 {
+            let mut buf = Vec::<u8>::with_capacity(count * act_bytes_per_env);
+            for e in &envs {
+                if let Some(mask) = &e.dyn_flat_mask() {
+                    buf.extend_from_slice(mask);
+                }
+            }
+            Some(buf)
+        } else {
+            None
+        };
+
         Ok(Self {
             client_namespace,
             env_context,
@@ -171,6 +192,7 @@ impl ScalarVecEnv {
             obs_bytes_per_env,
             act_dim,
             act_bytes_per_env,
+            mask_flat,
             device,
             observation_dtype,
             action_dtype,
@@ -339,7 +361,7 @@ impl VecEnvTrait for ScalarVecEnv {
                 .zip(rewards.par_iter_mut())
                 .zip(dones.par_iter_mut())
                 .map(|((((env, obs_chunk), env_act), reward), done)| {
-                    let (obs, r, d) = env.dyn_step(env_act)?;
+                    let (obs, mask, reward, done, truncated) = env.dyn_step(env_act)?;
                     obs_chunk.copy_from_slice(&obs);
                     *reward = r;
                     *done = d;
@@ -358,7 +380,7 @@ impl VecEnvTrait for ScalarVecEnv {
 
             for (i, env) in self.envs.iter().enumerate() {
                 let env_act = &actions[i * act_bpe..(i + 1) * act_bpe];
-                let (obs, reward, done) = env.dyn_step(env_act)?;
+                let (obs, mask, reward, done, truncated) = env.dyn_step(env_act)?;
                 self.obs_flat[i * obs_bpe..(i + 1) * obs_bpe].copy_from_slice(&obs);
                 rewards.push(reward);
                 dones.push(done);
@@ -504,7 +526,11 @@ impl VecEnvTrait for BatchVecEnv {
         Some(self.env.flat_observation_bytes())
     }
 
-    fn step_bytes(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+    fn flat_mask_bytes(&self) -> Option<Vec<u8>> {
+        self.env.flat_mask_bytes()
+    }
+
+    fn step_bytes(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
         self.env.step_bytes(actions)
     }
 
