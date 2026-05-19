@@ -19,10 +19,20 @@ tch-model = ["relayrl_types/tch-model", "tch"]
 [dependencies]
 relayrl_types = { workspace = true }
 
+burn-core = { workspace = true }
+burn-tensor = { workspace = true }
+burn-optim = { workspace = true }
+burn-nn = { workspace = true }
+burn-autodiff = { workspace = true }
+burn-ndarray = { workspace = true, optional = true }
+burn-tch = { workspace = true, optional = true }
+
 bytemuck = { workspace = true }
 dashmap = { workspace = true }
 ndarray = { workspace = true }
 rand = { workspace = true }
+rand_distr = "0.6.0"
+half = { workspace = true }
 tokio = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }

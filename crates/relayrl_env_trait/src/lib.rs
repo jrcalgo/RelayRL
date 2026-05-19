@@ -156,6 +156,7 @@ pub mod traits {
     pub type DynVectorEnv = dyn VectorEnvironment;
     pub trait DynScalarEnvironment: ScalarEnvironment + Send + Sync {
         fn clone_box(&self) -> Box<dyn DynScalarEnvironment>;
+
         fn dyn_flat_obs(&self) -> Observation {
             self.flat_observation_bytes()
         }
