@@ -10,14 +10,11 @@ categories = ['science', 'algorithms', 'artificial-intelligence', 'concurrency',
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend", "onnx-model"]
-ndarray-backend = ["burn-ndarray", "relayrl_types/ndarray-backend"]
 tch-backend = ["burn-tch", "relayrl_types/tch-backend"]
-onnx-model = ["relayrl_types/onnx-model"]
 tch-model = ["relayrl_types/tch-model", "tch"]
 
 [dependencies]
-relayrl_types = { workspace = true }
+relayrl_types = { workspace = true, features = ["ndarray-backend", "onnx-model"] }
 
 burn-core = { workspace = true }
 burn-tensor = { workspace = true }
@@ -31,7 +28,7 @@ bytemuck = { workspace = true }
 dashmap = { workspace = true }
 ndarray = { workspace = true }
 rand = { workspace = true }
-rand_distr = "0.6.0"
+rand_distr = { workspace = true }
 half = { workspace = true }
 tokio = { workspace = true }
 rayon = { workspace = true }
@@ -39,8 +36,7 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 log = { workspace = true }
 async-trait = { workspace = true }
-
-tempfile = "3.20.0"
+tempfile = { workspace = true }
 
 tch = { version = "=0.22.0", features = ["download-libtorch"], default-features = false, optional = true }
 
