@@ -20,6 +20,12 @@ pub enum AlgorithmError {
     TrajectoryInsertionError(String),
     #[error("Buffer sampling failed: {0}")]
     BufferSamplingError(String),
+    #[error("Kernel registration failed: {0}")]
+    KernelRegistrationError(String),
+    #[error("Invalid specification: {0}")]
+    InvalidSpec(String),
+    #[error(transparent)]
+    NeuralNetworkError(#[from] crate::algorithms::NeuralNetworkError),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -77,13 +83,6 @@ impl TrajectoryData for ArrowTrajectory {
 ///   Log the training status or results for the current epoch. This may include metrics such as loss,
 ///   reward averages, etc.
 pub trait AlgorithmTrait<T: TrajectoryData> {
-    /// Saves the current model to a file specified by `filename`.
-    ///
-    /// # Arguments
-    ///
-    /// * `filename` - The path where the model should be saved.
-    fn save(&self, filename: &str);
-
     /// Receives a trajectory of actions and incorporates it into the training process.
     ///
     /// # Arguments
@@ -102,6 +101,13 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     /// This method can be used to print or store metrics such as loss, accuracy, rewards, etc.
     fn log_epoch(&mut self);
 
+    /// Saves the current model to a file specified by `filename`.
+    ///
+    /// # Arguments
+    ///
+    /// * `filename` - The path where the model should be saved.
+    fn save_model(&self, filename: &str);
+
     /// Acquires the trained model as a ModelModule for inference or export.
     ///
     /// Returns `None` if no model has been trained yet, if weight export is not supported,
@@ -110,67 +116,7 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     /// # Type Parameters
     ///
     /// * `B` - The Burn backend type (e.g., NdArray or LibTorch)
-    #[cfg(all(
-        any(feature = "tch-model", feature = "onnx-model"),
-        any(feature = "ndarray-backend", feature = "tch-backend")
-    ))]
     fn acquire_model<B: Backend + BackendMatcher<Backend = B>>(
         &self,
     ) -> Option<relayrl_types::model::ModelModule<B>>;
-}
-
-pub enum ForwardOutput<B: Backend + BackendMatcher, const OUT_D: usize> {
-    Discrete {
-        probs: Tensor<B, OUT_D, Float>,
-        logits: Tensor<B, OUT_D, Float>,
-        logp_a: Option<Tensor<B, OUT_D, Float>>,
-    },
-    Continuous {
-        mean: Tensor<B, OUT_D, Float>,
-        std: Tensor<B, 2, Float>,
-        logp_a: Option<Tensor<B, OUT_D, Float>>,
-    },
-}
-
-pub trait StepKernelTrait<
-    B: Backend + BackendMatcher,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
->
-{
-    fn step<const IN_D: usize, const OUT_D: usize>(
-        &self,
-        obs: Tensor<B, IN_D, KindIn>,
-        mask: Tensor<B, OUT_D, KindOut>,
-    ) -> Result<(Tensor<B, OUT_D, KindOut>, HashMap<String, TensorData>), TensorError>;
-
-    fn get_input_dim(&self) -> usize;
-    fn get_output_dim(&self) -> usize;
-}
-
-/// Trait for extracting per-layer weight specs from a trained policy network.
-///
-/// Each tuple is `(in_dim, out_dim, flat_weights, flat_biases)` in Burn's row-major
-/// `[in, out]` layout, layers ordered input→output. This lets the training side hand
-/// weights to the ONNX builder without any filesystem I/O.
-pub trait WeightProvider {
-    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>>;
-}
-
-/// Base trait for kernels used in **multi-agent** algorithms.
-///
-/// Inherits [`StepKernelTrait`] so multi-agent kernels can be used for inference
-/// during the environment step loop, just like independent-algorithm kernels.
-/// Algorithm-specific training methods (e.g. `train_epoch`) are defined on
-/// per-algorithm sub-traits (`MultiagentPPOKernelTrait`, etc.).
-pub trait MultiagentKernelTrait<
-    B: Backend + BackendMatcher,
-    InK: TensorKind<B>,
-    OutK: TensorKind<B>,
->: StepKernelTrait<B, InK, OutK>
-{
-    /// Notify the kernel that a new agent slot has been registered.
-    ///
-    /// Called once per distinct agent key encountered during training.
-    fn register_agent(&mut self);
 }

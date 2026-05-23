@@ -1,5 +1,3 @@
-use crate::WeightProvider;
-
 use burn_nn::{Linear, LinearConfig};
 use burn_tensor::backend::Backend;
 use burn_tensor::{BasicOps, Float, Tensor, TensorKind};
@@ -76,6 +74,11 @@ pub trait NeuralNetworkForward<
         &self,
         input: Tensor<B, IN_D, KindIn>,
     ) -> Tensor<B, OUT_D, KindOut>;
+}
+
+/// Trait for extracting per-layer weight specs from a network.
+pub trait WeightProvider {
+    fn get_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>>;
 }
 
 // ---- generic MLP for easy usage ----
