@@ -1,7 +1,9 @@
+use crate::WeightProvider;
+
+use burn_nn::{Linear, LinearConfig};
 use burn_tensor::backend::Backend;
-use burn_tensor::{BasicOps, Tensor, TensorKind, Float};
+use burn_tensor::{BasicOps, Float, Tensor, TensorKind};
 use relayrl_types::data::tensor::DType;
-#[cfg(feature = "ndarray-backend")]
 use relayrl_types::data::tensor::NdArrayDType;
 #[cfg(feature = "tch-backend")]
 use relayrl_types::data::tensor::TchDType;
@@ -15,18 +17,345 @@ pub mod PPO;
 pub mod onnx_builder;
 pub mod torch_builder;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum NeuralNetworkError {
     #[error("Unsupported DType: {0}")]
     UnsupportedDType(String),
     #[error("Unsupported output params: {0}")]
     UnsupportedOutputParams(String, String),
+    #[error("Backend unavailable: {0}")]
+    BackendUnavailable(String),
+    #[error("Input dimension mismatch: {0} != {1}")]
+    InputDimMismatch(usize, usize),
+    #[error("Invalid distribution")]
+    InvalidDistribution,
 }
 
-#[cfg(all(
-    any(feature = "tch-model", feature = "onnx-model"),
-    any(feature = "ndarray-backend", feature = "tch-backend")
-))]
+#[derive(Clone, Debug)]
+pub enum ActivationKind<B: Backend + BackendMatcher<Backend = B>> {
+    ReLU(burn_nn::activation::Relu),
+    LeakyReLU(burn_nn::activation::LeakyRelu),
+    Tanh(burn_nn::activation::Tanh),
+    Sigmoid(burn_nn::activation::Sigmoid),
+    HardSigmoid(burn_nn::activation::HardSigmoid),
+    HardSwish(burn_nn::activation::HardSwish),
+    PReLU(burn_nn::activation::PRelu<B>),
+    Gelu(burn_nn::activation::Gelu),
+    SoftPlus(burn_nn::activation::Softplus),
+    None,
+}
+
+pub trait NeuralNetwork<B, KindIn, KindOut>:
+    NeuralNetworkSpec<B, KindIn, KindOut> + NeuralNetworkForward<B, KindIn, KindOut> + WeightProvider
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+{
+}
+
+pub trait NeuralNetworkSpec<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+>
+{
+    fn input_dim(&self) -> &usize;
+    fn input_dtype(&self) -> &DType;
+    fn output_dim(&self) -> &usize;
+    fn output_dtype(&self) -> &DType;
+}
+
+pub trait NeuralNetworkForward<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+>
+{
+    fn forward<const IN_D: usize, const OUT_D: usize>(
+        &self,
+        input: Tensor<B, IN_D, KindIn>,
+    ) -> Tensor<B, OUT_D, KindOut>;
+}
+
+// ---- generic MLP for easy usage ----
+// implements NeuralNetworkSpec and NeuralNetworkForward, is compatible with all algorithms
+
+#[derive(Clone, Debug)]
+pub struct GenericMlp<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+> {
+    input_dim: usize,
+    input_dtype: DType,
+    output_dim: usize,
+    output_dtype: DType,
+    layers: Vec<Linear<B>>,
+    activation: ActivationKind<B>,
+    _in_k: std::marker::PhantomData<KindIn>,
+    _out_k: std::marker::PhantomData<KindOut>,
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+> GenericMlp<B, KindIn, KindOut>
+{
+    pub fn new(
+        input_dim: usize,
+        input_dtype: DType,
+        hidden_sizes: &[usize],
+        output_dim: usize,
+        output_dtype: DType,
+        activation: ActivationKind<B>,
+        device: &B::Device,
+    ) -> Self {
+        let mut dims = Vec::with_capacity(hidden_sizes.len() + 2);
+        dims.push(input_dim);
+        dims.extend_from_slice(hidden_sizes);
+        dims.push(output_dim);
+
+        let layers = dims
+            .windows(2)
+            .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+            .collect();
+
+        Self {
+            input_dim,
+            input_dtype,
+            output_dim,
+            output_dtype,
+            layers,
+            activation,
+            _in_k: std::marker::PhantomData,
+            _out_k: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+> NeuralNetwork<B, KindIn, KindOut> for GenericMlp<B, KindIn, KindOut>
+{
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+> NeuralNetworkSpec<B, KindIn, KindOut> for GenericMlp<B, KindIn, KindOut>
+{
+    fn input_dim(&self) -> &usize {
+        &self.input_dim
+    }
+
+    fn input_dtype(&self) -> &DType {
+        &self.input_dtype
+    }
+
+    fn output_dim(&self) -> &usize {
+        &self.output_dim
+    }
+
+    fn output_dtype(&self) -> &DType {
+        &self.output_dtype
+    }
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>>
+    NeuralNetworkForward<B, KindIn, KindOut> for GenericMlp<B, KindIn, KindOut>
+where
+    KindIn: BasicOps<B>,
+    KindOut: BasicOps<B>,
+{
+    fn forward<const IN_D: usize, const OUT_D: usize>(
+        &self,
+        input: Tensor<B, IN_D, KindIn>,
+    ) -> Tensor<B, OUT_D, KindOut>
+    where
+        KindIn: BasicOps<B>,
+        KindOut: BasicOps<B>,
+    {
+        let device = input.device();
+        let mut x_float: Tensor<B, IN_D, Float> =
+            Tensor::from_data(input.into_data().convert::<f32>(), &device);
+        for (i, layer) in self.layers.iter().enumerate() {
+            x_float = layer.forward(x_float);
+            if i < self.layers.len() - 1 {
+                x_float = match &self.activation {
+                    ActivationKind::ReLU(relu) => relu.forward(x_float),
+                    ActivationKind::LeakyReLU(leaky_relu) => leaky_relu.forward(x_float),
+                    ActivationKind::Tanh(tanh) => tanh.forward(x_float),
+                    ActivationKind::Sigmoid(sigmoid) => sigmoid.forward(x_float),
+                    ActivationKind::HardSigmoid(hard_sigmoid) => hard_sigmoid.forward(x_float),
+                    ActivationKind::HardSwish(hard_swish) => hard_swish.forward(x_float),
+                    ActivationKind::PReLU(prelu) => prelu.forward(x_float),
+                    ActivationKind::Gelu(gelu) => gelu.forward(x_float),
+                    ActivationKind::SoftPlus(softplus) => softplus.forward(x_float),
+                    ActivationKind::None => x_float,
+                }
+            }
+        }
+
+        Tensor::<B, OUT_D, KindOut>::from_data(
+            x_float.into_data().convert::<KindOut::Elem>(),
+            &device,
+        )
+    }
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>>
+    WeightProvider for GenericMlp<B, KindIn, KindOut>
+where
+    KindIn: BasicOps<B>,
+    KindOut: BasicOps<B>,
+{
+    fn get_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        let specs = self
+            .layers
+            .iter()
+            .map(|layer| -> (usize, usize, Vec<f32>, Vec<f32>) {
+                let w = layer.weight.val();
+                let dims = w.dims();
+                let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+                let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                    bias_param
+                        .val()
+                        .into_data()
+                        .to_vec::<f32>()
+                        .unwrap_or_default()
+                } else {
+                    vec![0.0; dims[1]]
+                };
+                (dims[0], dims[1], weights, biases)
+            })
+            .collect();
+
+        Some(specs)
+    }
+}
+
+// ---- value function ----
+// wraps GenericMlp and ensures output is Float
+// implements NeuralNetworkSpec and NeuralNetworkForward, is compatible with all algorithms
+
+#[derive(Clone, Debug)]
+pub struct ValueFunction<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+>(GenericMlp<B, KindIn, Float>);
+
+impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B> + BasicOps<B>>
+    ValueFunction<B, KindIn>
+{
+    pub fn new(vf_mlp: GenericMlp<B, KindIn, Float>) -> Result<Self, NeuralNetworkError> {
+        match (vf_mlp.output_dtype(), vf_mlp.output_dim()) {
+            (DType::NdArray(NdArrayDType::F32), 1) => Ok(Self(vf_mlp)),
+            #[cfg(feature = "tch-backend")]
+            (DType::Tch(TchDType::F32), 1) => Ok(Self(vf_mlp)),
+            _ => Err(NeuralNetworkError::UnsupportedOutputParams(
+                vf_mlp.output_dtype().to_string(),
+                vf_mlp.output_dim().to_string(),
+            )),
+        }
+    }
+
+    pub fn new_generic_mlp(
+        input_dim: usize,
+        input_dtype: DType,
+        hidden_sizes: &[usize],
+        activation: ActivationKind<B>,
+        device: &B::Device,
+    ) -> Result<Self, NeuralNetworkError> {
+        let output_dype: DType = match B::get_supported_backend() {
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
+            _ => {
+                return Err(NeuralNetworkError::BackendUnavailable(
+                    match B::get_supported_backend() {
+                        SupportedTensorBackend::NdArray => "NdArray",
+                        #[cfg(feature = "tch-backend")]
+                        SupportedTensorBackend::Tch => "Tch",
+                        _ => "None",
+                    }
+                    .to_string(),
+                ));
+            }
+        };
+        Self::new(GenericMlp::new(
+            input_dim,
+            input_dtype,
+            hidden_sizes,
+            1,
+            output_dype,
+            activation,
+            device,
+        ))
+    }
+
+    pub fn new_default_mlp(
+        input_dim: usize,
+        input_dtype: DType,
+        device: &B::Device,
+    ) -> Result<Self, NeuralNetworkError> {
+        Self::new_generic_mlp(
+            input_dim,
+            input_dtype,
+            &[512, 512],
+            ActivationKind::<B>::ReLU(burn_nn::activation::Relu::new()),
+            device,
+        )
+    }
+
+    pub fn get_vf_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        self.0.get_layer_specs()
+    }
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+> NeuralNetworkSpec<B, KindIn, KindOut> for ValueFunction<B, KindIn>
+{
+    fn input_dim(&self) -> &usize {
+        self.0.input_dim()
+    }
+
+    fn input_dtype(&self) -> &DType {
+        self.0.input_dtype()
+    }
+
+    fn output_dim(&self) -> &usize {
+        self.0.output_dim()
+    }
+
+    fn output_dtype(&self) -> &DType {
+        self.0.output_dtype()
+    }
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B> + BasicOps<B>>
+    NeuralNetworkForward<B, KindIn, Float> for ValueFunction<B, KindIn>
+where
+    KindIn: BasicOps<B>,
+{
+    fn forward<const IN_D: usize, const OUT_D: usize>(
+        &self,
+        input: Tensor<B, IN_D, KindIn>,
+    ) -> Tensor<B, OUT_D, Float>
+    where
+        KindIn: BasicOps<B>,
+    {
+        self.0.forward(input)
+    }
+}
+
 pub fn acquire_model_module<B: Backend + BackendMatcher<Backend = B>>(
     model_name: &str,
     layer_specs: Vec<(usize, usize, Vec<f32>, Vec<f32>)>,
@@ -44,9 +373,8 @@ pub fn acquire_model_module<B: Backend + BackendMatcher<Backend = B>>(
     }
 
     match B::get_supported_backend() {
-        #[cfg(all(feature = "ndarray-backend", feature = "onnx-model"))]
         SupportedTensorBackend::NdArray => {
-            use build_onnx_mlp_bytes;
+            use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
 
             let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
             if onnx_bytes.is_empty() {
@@ -122,7 +450,6 @@ pub(crate) fn compute_normed_advantages(advantages: &[f32], mean: f32, std: f32)
 #[inline(always)]
 pub fn dtype_to_byte_count(dtype: DType) -> usize {
     match dtype {
-        #[cfg(feature = "ndarray-backend")]
         DType::NdArray(nd) => match nd {
             NdArrayDType::F16 => 2 as usize,
             NdArrayDType::F32 => 4 as usize,
@@ -154,320 +481,82 @@ pub fn dtype_to_byte_count(dtype: DType) -> usize {
 pub fn convert_byte_dtype_to_f32(
     bytes: Vec<u8>,
     byte_dtype: DType,
-) -> Result<f32, NeuralNetworkError> {
-    match byte_dtype {
-        #[cfg(feature = "ndarray-backend")]
+) -> Result<Vec<f32>, NeuralNetworkError> {
+    Ok(match byte_dtype {
         DType::NdArray(nd) => match nd {
             NdArrayDType::F16 => bytemuck::cast_slice::<u8, half::f16>(&bytes)
                 .iter()
                 .map(|&x| f32::from(x))
-                .collect(),
-            NdArrayDType::F32 => bytemuck::cast_slice::<u8, f32>(&bytes).iter().map(|&x| x).collect(),
+                .collect::<Vec<f32>>(),
+            NdArrayDType::F32 => bytemuck::cast_slice::<u8, f32>(&bytes)
+                .iter()
+                .map(|&x| x)
+                .collect::<Vec<f32>>(),
             NdArrayDType::F64 => bytemuck::cast_slice::<u8, f64>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             NdArrayDType::I8 => bytemuck::cast_slice::<u8, i8>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             NdArrayDType::I16 => bytemuck::cast_slice::<u8, i16>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             NdArrayDType::I32 => bytemuck::cast_slice::<u8, i32>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             NdArrayDType::I64 => bytemuck::cast_slice::<u8, i64>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             NdArrayDType::Bool => bytes
                 .iter()
                 .map(|&x| if x != 0 { 1.0f32 } else { 0.0f32 })
-                .collect(),
+                .collect::<Vec<f32>>(),
         },
         #[cfg(feature = "tch-backend")]
         DType::Tch(tch) => match tch {
             TchDType::F16 => bytemuck::cast_slice::<u8, half::f16>(&bytes)
                 .iter()
                 .map(|&x| f32::from(x))
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::Bf16 => bytemuck::cast_slice::<u8, half::bf16>(&bytes)
                 .iter()
                 .map(|&x| f32::from(x))
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::F32 => bytemuck::cast_slice::<u8, f32>(&bytes).to_vec(),
             TchDType::F64 => bytemuck::cast_slice::<u8, f64>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::I8 => bytemuck::cast_slice::<u8, i8>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::I16 => bytemuck::cast_slice::<u8, i16>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::I32 => bytemuck::cast_slice::<u8, i32>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::I64 => bytemuck::cast_slice::<u8, i64>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::U8 => bytemuck::cast_slice::<u8, u8>(&bytes)
                 .iter()
                 .map(|&x| x as f32)
-                .collect(),
+                .collect::<Vec<f32>>(),
             TchDType::Bool => bytes
                 .iter()
                 .map(|&x| if x != 0 { 1.0f32 } else { 0.0f32 })
-                .collect(),
+                .collect::<Vec<f32>>(),
         },
-        _ => Err(NeuralNetworkError::UnsupportedDType(byte_dtype.to_string())),
-    }
-}
-
-pub enum ActivationKind<B: Backend + BackendMatcher<Backend = B>> {
-    ReLU(burn_nn::activation::Relu),
-    LeakyReLU(burn_nn::activation::LeakyRelu),
-    Tanh(burn_nn::activation::Tanh),
-    Sigmoid(burn_nn::activation::Sigmoid),
-    HardSigmoid(burn_nn::activation::HardSigmoid),
-    HardSwish(burn_nn::activation::HardSwish),
-    PReLU(burn_nn::activation::PRelu<B>),
-    Gelu(burn_nn::activation::Gelu),
-    SoftPlus(burn_nn::activation::Softplus),
-    None,
-}
-
-pub trait NeuralNetworkSpec<
-    B: Backend + BackendMatcher<Backend = B>,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
->
-{
-    fn input_dim(&self) -> Result<usize, NeuralNetworkError>;
-    fn input_dtype(&self) -> Result<DType, NeuralNetworkError>;
-    fn output_dim(&self) -> Result<usize, NeuralNetworkError>;
-    fn output_dtype(&self) -> Result<DType, NeuralNetworkError>;
-}
-
-pub trait NeuralNetworkForward<
-    B: Backend + BackendMatcher<Backend = B>,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
->
-{
-    fn forward<const IN_D: usize, const OUT_D: usize>(
-        &self,
-        input: Tensor<B, IN_D, KindIn>,
-    ) -> Tensor<B, OUT_D, KindOut>;
-}
-
-// ---- generic MLP for easy usage ----
-// implements NeuralNetworkSpec, is compatible with all algorithms
-
-pub struct GenericMlp<
-    B: Backend + BackendMatcher<Backend = B>,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
-> {
-    input_dim: usize,
-    input_dtype: DType,
-    output_dim: usize,
-    output_dtype: DType,
-    layers: Vec<Linear<B>>,
-    activation: ActivationKind<B>,
-    _in_k: std::marker::PhantomData<KindIn>,
-    _out_k: std::marker::PhantomData<KindOut>,
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>>
-    GenericMlp<B, KindIn, KindOut>
-{
-    pub fn new(
-        input_dim: usize,
-        input_dtype: DType,
-        hidden_sizes: &[usize],
-        output_dim: usize,
-        output_dtype: DType,
-        activation: ActivationKind<B>,
-        device: &B::Device,
-    ) -> Self {
-        let mut dims = Vec::with_capacity(hidden_sizes.len() + 2);
-        dims.push(input_dim);
-        dims.extend_from_slice(hidden_sizes);
-        dims.push(output_dim);
-
-        let layers = dims
-            .windows(2)
-            .map(|w| LinearConfig::new(w[0], w[1]).init(device))
-            .collect();
-
-        Self {
-            input_dim,
-            input_dtype,
-            output_dim,
-            output_dtype,
-            layers,
-            activation,
-            _in_k: std::marker::PhantomData,
-            _out_k: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>>
-    NeuralNetworkSpec<B, KindIn, KindOut> for GenericMlp<B, KindIn, KindOut>
-{
-    fn input_dim(&self) -> Result<usize, NeuralNetworkError> {
-        Ok(self.input_dim.clone())
-    }
-
-    fn input_dtype(&self) -> Result<DType, NeuralNetworkError> {
-        Ok(self.input_dtype.clone())
-    }
-
-    fn output_dim(&self) -> Result<usize, NeuralNetworkError> {
-        Ok(self.output_dim.clone())
-    }
-
-    fn output_dtype(&self) -> Result<DType, NeuralNetworkError> {
-        Ok(self.output_dtype.clone())
-    }
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>>
-    NeuralNetworkForward<B, KindIn, KindOut> for GenericMlp<B, KindIn, KindOut>
-where
-    KindIn: BasicOps<B>,
-    KindOut: BasicOps<B>,
-{
-    fn forward<const IN_D: usize, const OUT_D: usize>(
-        &self,
-        input: Tensor<B, IN_D, KindIn>,
-    ) -> Tensor<B, OUT_D, KindOut>
-    where
-        KindIn: BasicOps<B>,
-        KindOut: BasicOps<B>,
-    {
-        let device = input.device();
-        let mut x = input.to_owned();
-        for (i, layer) in self.layers.iter().enumerate() {
-            x = layer.forward(x);
-            if i < self.layers.len() - 1 {
-                x = match self.activation {
-                    ActivationKind::ReLU(relu) => relu.forward(x),
-                    ActivationKind::LeakyReLU(leaky_relu) => leaky_relu.forward(x),
-                    ActivationKind::Tanh(tanh) => tanh.forward(x),
-                    ActivationKind::Sigmoid(sigmoid) => sigmoid.forward(x),
-                    ActivationKind::HardSigmoid(hard_sigmoid) => hard_sigmoid.forward(x),
-                    ActivationKind::HardSwish(hard_swish) => hard_swish.forward(x),
-                    ActivationKind::PReLU(prelu) => prelu.forward(x),
-                    ActivationKind::Gelu(gelu) => gelu.forward(x),
-                    ActivationKind::SoftPlus(softplus) => softplus.forward(x),
-                    ActivationKind::None => x,
-                }
-            }
-        }
-
-        x
-    }
-}
-
-pub struct ValueFunction<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>>(
-    GenericMlp<B, KindIn, Float>,
-);
-
-impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>> ValueFunction<B, KindIn> {
-    pub fn new(
-        vf_mlp: GenericMlp<B, KindIn, Float>,
-    ) -> Result<Self, NeuralNetworkError> {
-        match (vf_mlp.output_dtype()?, vf_mlp.output_dim()?) {
-            #[cfg(feature = "ndarray-backend")]
-            (DType::NdArray(NdArrayDType::F32), 1) => Ok(Self(vf_mlp)),
-            #[cfg(feature = "tch-backend")]
-            (DType::Tch(TchDType::F32), 1) => Ok(Self(vf_mlp)),
-            _ => Err(NeuralNetworkError::UnsupportedOutputParams(
-                vf_mlp.output_dtype()?.to_string(),
-                vf_mlp.output_dim()?.to_string(),
-            )),
-        }
-    }
-
-    pub fn new_generic_mlp(
-        input_dim: usize,
-        input_dtype: DType,
-        hidden_sizes: &[usize],
-        activation: ActivationKind<B>,
-        device: &B::Device,
-    ) -> Result<Self, NeuralNetworkError> {
-        let output_dype: DType = match B::get_supported_backend() {
-            #[cfg(feature = "ndarray-backend")]
-            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
-            #[cfg(feature = "tch-backend")]
-            SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
-            _ => {
-                return Err(NeuralNetworkError::BackendUnavailable(
-                    match B::get_supported_backend() {
-                        #[cfg(feature = "ndarray-backend")]
-                        SupportedTensorBackend::NdArray => "NdArray",
-                        #[cfg(feature = "tch-backend")]
-                        SupportedTensorBackend::Tch => "Tch",
-                        _ => "None",
-                    }.to_string(),
-                ));
-            }
-        };
-        Self::new(GenericMlp::new(
-            input_dim,
-            input_dtype,
-            hidden_sizes,
-            1,
-            output_dype,
-            activation,
-            device,
-        ))
-    }
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>>
-    NeuralNetworkSpec<B, KindIn, KindOut> for ValueFunction<B, KindIn>
-{
-    fn input_dim(&self) -> Result<usize, NeuralNetworkError> {
-        self.0.input_dim()
-    }
-
-    fn input_dtype(&self) -> Result<DType, NeuralNetworkError> {
-        self.0.input_dtype()
-    }
-
-    fn output_dim(&self) -> Result<usize, NeuralNetworkError> {
-        self.0.output_dim()
-    }
-
-    fn output_dtype(&self) -> Result<DType, NeuralNetworkError> {
-        self.0.output_dtype()
-    }
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>>
-    NeuralNetworkForward<B, KindIn, Float> for ValueFunction<B, KindIn>
-where
-    KindIn: BasicOps<B>,
-{
-    fn forward<const IN_D: usize, const OUT_D: usize>(
-        &self,
-        input: Tensor<B, IN_D, KindIn>,
-    ) -> Tensor<B, OUT_D, Float>
-    where
-        KindIn: BasicOps<B>,
-    {
-        self.0.forward(input)
-    }
+        _ => return Err(NeuralNetworkError::UnsupportedDType(byte_dtype.to_string())),
+    })
 }
