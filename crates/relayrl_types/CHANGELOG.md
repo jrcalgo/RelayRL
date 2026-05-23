@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-05-24
+
+### Breaking
+- **New RelayRLTrajectory fields** - Added `is_truncated` and `policy_version` metadata fields to RelayRLTrajectory struct.
+  - `is_truncated` symbolizes a series of episodes that terminated without reaching the `done` state.
+  - `policy_version` is a metadata tag that reflects the model version used for acquiring `act` tensors.
+
 ## [0.7.2] - 2026-05-06
 
 ### Added

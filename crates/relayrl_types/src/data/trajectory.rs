@@ -46,6 +46,8 @@ pub struct RelayRLTrajectory {
     pub timestamp: u64,
     pub episode: Option<u64>,
     pub training_step: Option<u64>,
+    pub is_truncated: bool,
+    pub policy_version: i64,
 }
 
 impl Default for RelayRLTrajectory {
@@ -60,6 +62,8 @@ impl Default for RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
+            is_truncated: false,
+            policy_version: 0,
         }
     }
 }
@@ -75,6 +79,8 @@ impl RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
+            is_truncated: false,
+            policy_version: 0,
         }
     }
 
@@ -88,6 +94,8 @@ impl RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
+            is_truncated: false,
+            policy_version: 0,
         }
     }
 
@@ -108,6 +116,8 @@ impl RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode,
             training_step,
+            is_truncated: false,
+            policy_version: 0,
         }
     }
 
@@ -205,6 +215,10 @@ impl RelayRLTrajectory {
 
     pub fn set_training_step(&mut self, step: u64) {
         self.training_step = Some(step);
+    }
+
+    pub fn set_truncated(&mut self) {
+        self.is_truncated = true;
     }
 }
 
