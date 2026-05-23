@@ -246,32 +246,25 @@ pub(crate) trait ClientEnvironments<
     const D_OUT: usize,
 >
 {
-    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_eval(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_gradient: Option<(
-            AlgorithmCfg,
-            SaveModelPath,
-            ReplayBufferSize,
-            DeviceType,
-            KN,
-        )>,
-    ) -> Result<(), CoordinatorError>
-    where
-        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::WeightProvider
-            + Default
-            + Send
-            + 'static;
+    ) -> Result<(), CoordinatorError>;
+    async fn run_env_with_ppo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), CoordinatorError>;
+    async fn run_env_with_mappo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: MAPPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), CoordinatorError>;
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
@@ -294,7 +287,7 @@ pub(crate) trait ClientEnvironments<
 
 // ===== Coordinator state =====
 
-pub(crate) enum HotPathParams<
+pub(crate) enum InferencePathParams<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
@@ -331,7 +324,7 @@ pub struct ClientCoordinator<
     transport_type: TransportType,
     pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
-    hot_path_params: Option<HotPathParams<B, D_IN, D_OUT>>,
+    inference_path_params: Option<InferencePathParams<B, D_IN, D_OUT>>,
 }
 
 // ===== Internal helpers =====
@@ -534,7 +527,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             transport_type,
             client_modes: Arc::new(client_modes),
             runtime_params: None,
-            hot_path_params: None,
+            inference_path_params: None,
         }
     }
 
@@ -914,8 +907,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ActorInferenceMode::Local(_)
             );
 
-            self.hot_path_params = Some(if is_local_inference {
-                HotPathParams::Local {
+            self.inference_path_params = Some(if is_local_inference {
+                InferencePathParams::Local {
                     local_runtimes: {
                         let state_guard = params.shared_state.read().await;
                         state_guard.actor_runtime_handles.clone()
@@ -931,7 +924,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         state_guard.global_dispatcher_tx.clone(),
                     )
                 };
-                HotPathParams::Network {
+                InferencePathParams::Network {
                     filter_channels,
                     shared_router_state,
                     global_dispatcher_tx,
@@ -1084,7 +1077,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError> {
-        let hp = self.hot_path_params.as_ref().ok_or_else(|| {
+        let inference_path = self.inference_path_params.as_ref().ok_or_else(|| {
             CoordinatorError::ScaleManagerError(ScaleManagerError::GetRouterRuntimeParamsError(
                 "[Coordinator] No runtime instance to request_action...".to_string(),
             ))
@@ -1093,8 +1086,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(feature = "metrics")]
         let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
-        let actions = match hp {
-            HotPathParams::Local { local_runtimes } => {
+        let actions = match inference_path {
+            InferencePathParams::Local { local_runtimes } => {
                 // Zero async task boundaries — call ActorRuntime directly.
                 let mut results = Vec::with_capacity(ids.len());
                 for id in ids {
@@ -1114,7 +1107,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
                 results
             }
-            HotPathParams::Network {
+            InferencePathParams::Network {
                 filter_channels,
                 shared_router_state,
                 global_dispatcher_tx,
@@ -1212,7 +1205,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError> {
-        let hp = self.hot_path_params.as_ref().ok_or_else(|| {
+        let inference_path = self.inference_path_params.as_ref().ok_or_else(|| {
             CoordinatorError::ScaleManagerError(ScaleManagerError::GetRouterRuntimeParamsError(
                 "[Coordinator] No runtime instance to flag_last_action...".to_string(),
             ))
@@ -1222,8 +1215,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
         let reward_val: f32 = reward.unwrap_or(0.0);
-        match hp {
-            HotPathParams::Local { local_runtimes } => {
+        match inference_path {
+            InferencePathParams::Local { local_runtimes } => {
                 for id in ids {
                     let Some(runtime) = local_runtimes.get(&id).map(|r| Arc::clone(r.value()))
                     else {
@@ -1239,7 +1232,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         })?;
                 }
             }
-            HotPathParams::Network {
+            InferencePathParams::Network {
                 filter_channels,
                 shared_router_state,
                 global_dispatcher_tx,
@@ -1763,95 +1756,131 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     ClientEnvironments<B, D_IN, D_OUT> for ClientCoordinator<B, D_IN, D_OUT>
 {
-    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_eval(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_cfg: Option<(
-            AlgorithmCfg,
-            SaveModelPath,
-            ReplayBufferSize,
-            DeviceType,
-            KN,
-        )>,
-    ) -> Result<(), CoordinatorError>
-    where
-        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::WeightProvider
-            + Default
-            + Send
-            + 'static,
-    {
+    ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => match self.client_modes.actor_inference_mode {
                 ActorInferenceMode::Local(_) => {
-                    let (runtime, env_map, algorithm_config_init) = {
+                    let (runtime, env_map) = {
                         let shared_state_guard = params.shared_state.read().await;
-                        let (runtime, env_map) = shared_state_guard
+                        shared_state_guard
                             .get_run_env_handles(actor_id)
-                            .map_err(CoordinatorError::from)?;
-                        let algorithm_config_init = algorithm_cfg
-                            .as_ref()
-                            .map(|_| shared_state_guard.shared_algorithm_config_init.clone());
-
-                        (runtime, env_map, algorithm_config_init)
+                            .map_err(CoordinatorError::from)?
                     };
-
-                    let algorithm_cfg: Option<(
-                        AlgorithmCfg,
-                        SaveModelPath,
-                        ReplayBufferSize,
-                        DeviceType,
-                        KN,
-                    )> = if let Some((config, model_path, buffer_size, device, kernel)) =
-                        algorithm_cfg
-                    {
-                        if config == AlgorithmCfg::ConfigInit {
-                            match algorithm_config_init {
-                                Some(init_config) => Some((
-                                    init_config.read().await.clone(),
-                                    model_path,
-                                    buffer_size,
-                                    device,
-                                    kernel,
-                                )),
-                                None => {
-                                    return Err(CoordinatorError::StateManagerError(
-                                        StateManagerError::AlgorithmConfigInitError(
-                                            "Algorithm config init not found".to_string(),
-                                        ),
-                                    ));
-                                }
-                            }
-                        } else {
-                            Some((config, model_path, buffer_size, device, kernel))
-                        }
-                    } else {
-                        None
-                    };
-
-                    StateManager::<B, D_IN, D_OUT>::run_env_step_loop::<KindIn, KindOut, KN>(
-                        actor_id,
-                        runtime,
-                        env_map,
-                        step_count,
-                        algorithm_cfg,
+                    StateManager::<B, D_IN, D_OUT>::run_env_eval_step_loop(
+                        actor_id, runtime, env_map, step_count,
                     )
                     .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
-                    unimplemented!(
-                        "Not supported yet; this will request that the inference server handle the environment step"
+                    unimplemented!("Not supported yet")
+                }
+            },
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::StepEnvError(
+                    "[Coordinator] No runtime instance to step_env...".to_string(),
+                ),
+            )),
+        }
+    }
+
+    async fn run_env_with_ppo<KindIn, KindOut, Pi>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), CoordinatorError>
+    where
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut>
+    {
+        match &self.runtime_params {
+            Some(params) => match self.client_modes.actor_inference_mode {
+                ActorInferenceMode::Local(_) => {
+                    let (runtime, env_map, shutdown_rx) = {
+                        let shared_state_guard = params.shared_state.read().await;
+                        let (runtime, env_map) = shared_state_guard
+                            .get_run_env_handles(actor_id)
+                            .map_err(CoordinatorError::from)?;
+                        let shutdown_rx = params.lifecycle.subscribe_shutdown().map_err(CoordinatorError::from)?;
+                        (runtime, env_map, shutdown_rx)
+                    };
+
+                    let result = StateManager::<B, D_IN, D_OUT>::run_env_step_loop_with_ppo::<
+                        KindIn,
+                        KindOut,
+                        Pi,
+                    >(
+                        actor_id,
+                        Some(shutdown_rx),
+                        Arc::clone(&runtime),
+                        env_map,
+                        step_count,
+                        max_traj_length,
+                        training_spec,
                     )
+                    .map_err(CoordinatorError::from);
+                    result
+                }
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
+                    unimplemented!("Not supported yet")
+                }
+            },
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::StepEnvError(
+                    "[Coordinator] No runtime instance to step_env...".to_string(),
+                ),
+            )),
+        }
+    }
+
+    async fn run_env_with_mappo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: MAPPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), CoordinatorError>
+    {
+        match &self.runtime_params {
+            Some(params) => match self.client_modes.actor_inference_mode {
+                ActorInferenceMode::Local(_) => {
+                    let (runtime, env_map, shutdown_rx) = {
+                        let shared_state_guard = params.shared_state.read().await;
+                        let (runtime, env_map) = shared_state_guard
+                            .get_run_env_handles(actor_id)
+                            .map_err(CoordinatorError::from)?;
+                        let shutdown_rx = params.lifecycle.subscribe_shutdown().map_err(CoordinatorError::from)?;
+                        (runtime, env_map, shutdown_rx)
+                    };
+
+                    let result = StateManager::<B, D_IN, D_OUT>::run_env_step_loop_with_mappo::<
+                        KindIn,
+                        KindOut,
+                        Pi,
+                    >(
+                        actor_id,
+                        Some(shutdown_rx),
+                        Arc::clone(&runtime),
+                        env_map,
+                        step_count,
+                        max_traj_length,
+                        training_spec,
+                    )
+                    .map_err(CoordinatorError::from);
+
+                    result
+                }
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
+                    unimplemented!("Not supported yet")
                 }
             },
             None => Err(CoordinatorError::StateManagerError(

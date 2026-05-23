@@ -30,5 +30,6 @@ pub(crate) mod runtime {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             pub(crate) mod transport_sink;
         }
+        pub(crate) mod training;
     }
 }

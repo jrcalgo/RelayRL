@@ -18,6 +18,7 @@ use crate::network::client::runtime::data::environments::EnvironmentInterfaceErr
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
+use crate::network::client::runtime::data::training::{TrainingError, TrainingInterface};
 use crate::network::client::runtime::router::{
     ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
 };
@@ -108,6 +109,8 @@ pub enum StateManagerError {
     AlgorithmError(#[from] relayrl_algorithms::AlgorithmError),
     #[error("Algorithm config init failed: {0}")]
     AlgorithmConfigInitError(String),
+    #[error(transparent)]
+    TrainingError(#[from] TrainingError),
 }
 
 pub type ActorUuid = Uuid;
@@ -874,35 +877,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok((runtime, self.actor_envs.clone()))
     }
 
-    pub(crate) fn run_env_step_loop<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    pub(crate) fn run_env_eval_step_loop(
         actor_id: ActorUuid,
         runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
         step_count: usize,
-        algorithm_cfg: Option<(
-            AlgorithmCfg,
-            SaveModelPath,
-            ReplayBufferSize,
-            DeviceType,
-            KN,
-        )>,
-    ) -> Result<(), StateManagerError>
-    where
-        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::WeightProvider
-            + Default
-            + Send
-            + 'static,
-    {
-        // bro fuck the formatting here, rustfmt is dumb. please spare me
+    ) -> Result<(), StateManagerError> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
@@ -921,12 +901,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ))
                 })?;
 
-                let flat_ids = env_interface.flat_env_ids().ok_or_else(|| {
-                    StateManagerError::StepEnvError(
-                        "[StateManager] flat_env_ids returned None".to_string(),
-                    )
-                })?;
-
                 let obs_dtype = env_interface
                     .obs_dtype()
                     .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
@@ -935,311 +909,342 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
                 let discrete = env_interface.action_is_discrete().unwrap_or(true);
 
-                let env_context = env_interface.get_env_context().unwrap_or(format!("env-{}", actor_id));
-
-                use relayrl_algorithms::{
-                    DdpgTrainer, MultiagentTrainer, PpoTrainer, ReinforceTrainer,
-                    REINFORCEKernelTrait, StepKernelTrait, Td3Trainer,
-                    MADDPGAlgorithm, MAPPOAlgorithm, MAREINFORCEAlgorithm, MATD3Algorithm,
-                };
-                use relayrl_types::prelude::tensor::burn::TensorKind;
-
-                #[allow(clippy::upper_case_acronyms)]
-                enum AlgorithmTrainer<
-                    B: Backend + BackendMatcher<Backend = B>,
-                    KindIn: TensorKind<B>,
-                    KindOut: TensorKind<B>,
-                    K: StepKernelTrait<B, KindIn, KindOut>
-                        + REINFORCEKernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
-                        + relayrl_algorithms::WeightProvider
-                        + Default,
-                > {
-                    DDPG(DdpgTrainer<B, KindIn, KindOut, K>),
-                    PPO(PpoTrainer<B, KindIn, KindOut, K>),
-                    REINFORCE(ReinforceTrainer<B, KindIn, KindOut, K>),
-                    TD3(Td3Trainer<B, KindIn, KindOut, K>),
-                    MULTIAGENT(MultiagentTrainer<B, KindIn, KindOut, K>),
-                    // CUSTOM(CustomTrainer<B, KindIn, KindOut, K>),
-                }
-
-                let mut _temp_env_dir: Option<tempfile::TempDir> = None;
-
-                let (mut algorithm_trainer, device) = if let Some((algorithm_cfg, save_model_path, replay_buffer_size, device, kernel)) = algorithm_cfg {
-                    let obs_dim = env_interface.obs_dim().unwrap_or(0);
-                    let act_dim = env_interface.act_dim().unwrap_or(0);
-
-                    let temp_env_dir = tempfile::tempdir().map_err(|e| StateManagerError::StepEnvError(e.to_string()))?;
-
-                    let trainer_args = relayrl_algorithms::TrainerArgs {
-                        env_dir: temp_env_dir.path().to_path_buf(),
-                        save_model_path,
-                        obs_dim,
-                        act_dim,
-                        buffer_size: replay_buffer_size,
-                    };
-
-                    use relayrl_algorithms::{DdpgTrainerSpec, PpoTrainerSpec, ReinforceTrainerSpec, Td3TrainerSpec, MultiagentTrainerSpec};
-
-                    let trainer: Option<AlgorithmTrainer<B, KindIn, KindOut, KN>> = match algorithm_cfg {
-                        AlgorithmCfg::DDPG(params) => {
-                            let spec = DdpgTrainerSpec::ddpg(trainer_args, params);
-                            Some(AlgorithmTrainer::DDPG(DdpgTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::IDDPG(params) => {
-                            let spec = DdpgTrainerSpec::iddpg(trainer_args, params);
-                            Some(AlgorithmTrainer::DDPG(DdpgTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::MADDPG(params) => {
-                            let spec = MultiagentTrainerSpec::maddpg(trainer_args, params, kernel);
-                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::PPO(params) => {
-                            let spec = PpoTrainerSpec::ppo(trainer_args, params);
-                            Some(AlgorithmTrainer::PPO(PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::IPPO(params) => {
-                            let spec = PpoTrainerSpec::ippo(trainer_args, params);
-                            Some(AlgorithmTrainer::PPO(PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::MAPPO(params) => {
-                            let spec = MultiagentTrainerSpec::mappo(trainer_args, params, kernel);
-                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::REINFORCE(params) => {
-                            let spec = ReinforceTrainerSpec::reinforce(trainer_args, params);
-                            Some(AlgorithmTrainer::REINFORCE(ReinforceTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::IREINFORCE(params) => {
-                            let spec = ReinforceTrainerSpec::ireinforce(trainer_args, params);
-                            Some(AlgorithmTrainer::REINFORCE(ReinforceTrainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::MAREINFORCE(params) => {
-                            let spec = MultiagentTrainerSpec::mareinforce(trainer_args, params, kernel);
-                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::TD3(params) => {
-                            let spec = Td3TrainerSpec::td3(trainer_args, params);
-                            Some(AlgorithmTrainer::TD3(Td3Trainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::ITD3(params) => {
-                            let spec = Td3TrainerSpec::itd3(trainer_args, params);
-                            Some(AlgorithmTrainer::TD3(Td3Trainer::new(spec, kernel).map_err(StateManagerError::from)?))
-                        }
-                        AlgorithmCfg::MATD3(params) => {
-                            let spec = MultiagentTrainerSpec::matd3(trainer_args, params, kernel);
-                            Some(AlgorithmTrainer::MULTIAGENT(MultiagentTrainer::new(spec).map_err(StateManagerError::from)?))
-                        }
-                        // AlgorithmCfg::CUSTOM { name, params } => {
-                        //     let spec = CustomTrainerSpec::custom(trainer_args, name, params);
-                        //     Some(AlgorithmTrainer::CUSTOM(CustomTrainer::new(spec, kernel)?))
-                        // }
-                        _ => {
-                            // covers the ConfigInit case, which is handled by the caller in the coordinator
-                            log::error!("[StateManager] Unsupported algorithm configuration: {:?}; algorithm not initialized!", algorithm_cfg);
-                            None
-                        }
-                    };
-                    _temp_env_dir = Some(temp_env_dir);
-
-                    if runtime.reloadable_model.load_full().is_none() {
-                        let initial_model = match &trainer {
-                            Some(AlgorithmTrainer::DDPG(ddpg)) => Some(<DdpgTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                                RelayRLTrajectory,
-                                            >>::acquire_model::<B>(ddpg)).flatten(),
-                            Some(AlgorithmTrainer::PPO(ppo)) => Some(<PpoTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                                RelayRLTrajectory,
-                                            >>::acquire_model::<B>(ppo)).flatten(),
-                            Some(AlgorithmTrainer::REINFORCE(reinforce)) => Some(<ReinforceTrainer<B, KindIn, KindOut,KN> as AlgorithmTrait<
-                                                RelayRLTrajectory>>::acquire_model::<B>(reinforce)).flatten(),
-                            Some(AlgorithmTrainer::TD3(td3)) => Some(<Td3Trainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                                RelayRLTrajectory,
-                                            >>::acquire_model::<B>(td3)).flatten(),
-                            Some(AlgorithmTrainer::MULTIAGENT(multiagent)   ) => Some(<MultiagentTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                                RelayRLTrajectory,
-                                            >>::acquire_model::<B>(multiagent)).flatten(),
-                            _ => None,
-                        };
-
-                        if let Some(initial_model) = initial_model {
-                            runtime.perform_refresh_model(initial_model, device.clone()).await.map_err(|_| StateManagerError::TrainerError("Failed to refresh model".to_string()))?;
-                        }
-                    }
-
-                    (trainer, Some(device))
-                } else {
-                    (None, None)
-                };
-
-                let env_labels: Vec<String> =
-                    (0..n_envs).map(|i| format!("env-{}", i + 1)).collect();
-                let mut step_rewards = vec![0.0f32; n_envs];
-
-                for step in 0..step_count {
+                for _ in 0..step_count {
                     let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
                         StateManagerError::StepEnvError(
                             "[StateManager] flat_observation_bytes returned None".to_string(),
                         )
                     })?;
-
-                    let actions = runtime
-                        .perform_local_byte_inference(
-                            &obs_bytes, n_envs, obs_dim, act_dim, &obs_dtype, &act_dtype, discrete,
-                        )
+                    let raw_output = runtime
+                        .perform_local_byte_inference(&obs_bytes, n_envs, obs_dim, &obs_dtype)
                         .await
                         .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
 
-                    let (_, rewards, _) =
-                        env_interface.step_bytes(&actions).ok_or_else(|| {
-                            StateManagerError::GetEnvInfoError(
-                                "[StateManager] step_bytes returned None".to_string(),
-                            )
-                        })?;
+                    let action_bytes = if discrete {
+                        decode_argmax(
+                            &raw_output.data,
+                            &env_dtype_to_dtype(&act_dtype)?,
+                            n_envs,
+                            act_dim,
+                        )
+                    } else {
+                        decode_continuous_bytes(
+                            &raw_output.data,
+                            &raw_output.dtype,
+                            n_envs * act_dim,
+                            &env_dtype_to_dtype(&act_dtype)?,
+                        )
+                    };
 
-                    if let Some(ref mut trainer) = algorithm_trainer {
-                        for i in 0..n_envs {
-                            step_rewards[i] = rewards[i];
-                            let maybe_trajectory = Self::flag_last_action_direct(
-                                &runtime,
-                                step_rewards[i],
-                                Some(flat_ids[i]),
-                                Some(env_labels[i].clone()),
-                                true,
-                            ).await?;
-
-                            step_rewards[i] = 0.0;
-
-                            if let Some(trajectory) = maybe_trajectory {
-                                // upon reaching required number of trajectories, algorithm trains and exposes epoch metrics
-                                let maybe_trained_model = match trainer {
-                                    AlgorithmTrainer::DDPG(ddpg) => {
-                                        AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
-                                            ddpg, trajectory,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            StateManagerError::TrainerError(e.to_string())
-                                        })
-                                        .is_ok_and(|trained| trained)
-                                        .then(|| {
-                                            <DdpgTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                                RelayRLTrajectory,
-                                            >>::acquire_model::<B>(ddpg)
-                                        })
-                                        .flatten()
-                                    }
-                                    AlgorithmTrainer::PPO(ppo) => {
-                                        AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
-                                            ppo, trajectory,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            StateManagerError::TrainerError(e.to_string())
-                                        })
-                                        .is_ok_and(|trained| trained)
-                                        .then(|| {
-                                            <PpoTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                                RelayRLTrajectory,
-                                            >>::acquire_model::<B>(ppo)
-                                        })
-                                        .flatten()
-                                    }
-                                    AlgorithmTrainer::REINFORCE(reinforce) => {
-                                        AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
-                                            reinforce, trajectory,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            StateManagerError::TrainerError(e.to_string())
-                                        })
-                                        .is_ok_and(|trained| trained)
-                                        .then(|| {
-                                            <ReinforceTrainer<B, KindIn, KindOut, KN,
-                                            > as AlgorithmTrait<RelayRLTrajectory>>::acquire_model::<
-                                                B,
-                                            >(reinforce)
-                                        })
-                                        .flatten()
-                                    }
-                                    AlgorithmTrainer::TD3(td3) => {
-                                        AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
-                                            td3, trajectory,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            StateManagerError::TrainerError(e.to_string())
-                                        })
-                                        .is_ok_and(|trained| trained)
-                                        .then(|| {
-                                            <Td3Trainer<B, KindIn, KindOut, KN> as AlgorithmTrait<
-                                                RelayRLTrajectory,
-                                            >>::acquire_model::<B>(td3)
-                                        })
-                                        .flatten()
-                                    }
-                                    AlgorithmTrainer::MULTIAGENT(multiagent) => {
-                                        AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
-                                            multiagent, trajectory,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            StateManagerError::TrainerError(e.to_string())
-                                        })
-                                        .is_ok_and(|trained| trained)
-                                        .then(|| {
-                                            <MultiagentTrainer<
-                                                B,
-                                                KindIn,
-                                                KindOut,
-                                                KN,
-                                            > as AlgorithmTrait<RelayRLTrajectory>>::acquire_model::<
-                                                B,
-                                            >(multiagent)
-                                        })
-                                        .flatten()
-                                    }
-                                    // AlgorithmTrainer::CUSTOM(custom_args) => AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory().await.map(|_| ()).map_err(|e| StateManagerError::TrainerError(e.to_string()))?,
-                                };
-
-                                // update model in actor runtime for inference
-                                if let Some(device) = device.clone() &&
-                                    let Some(model_module) = maybe_trained_model {
-                                        runtime.perform_refresh_model(model_module, device).await.map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
-                                    }
-
-
-                                // TODO: this should be updated so that it saves when the model has reached convergence ( this will require math :^) )
-                                if step == step_count {
-                                    match &trainer {
-                                        AlgorithmTrainer::DDPG(ddpg) => <DdpgTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(ddpg, &format!("{}-{}-{}", env_context, "ddpg", step)),
-                                        AlgorithmTrainer::PPO(ppo) => <PpoTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(ppo, &format!("{}-{}-{}", env_context, "ppo", step)),
-                                        AlgorithmTrainer::REINFORCE(reinforce) => <ReinforceTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(reinforce, &format!("{}-{}-{}", env_context, "reinforce", step)),
-                                        AlgorithmTrainer::TD3(td3) => <Td3Trainer<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(td3, &format!("{}-{}-{}", env_context, "td3", step)),
-                                        AlgorithmTrainer::MULTIAGENT(multiagent) => {
-                                            match multiagent {
-                                                MultiagentTrainer::MADDPG { trainer: maddpg } => <MADDPGAlgorithm<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(maddpg, &format!("{}-{}-{}", env_context, "maddpg", step)),
-                                                MultiagentTrainer::MAPPO { trainer: mappo } => <MAPPOAlgorithm<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(mappo, &format!("{}-{}-{}", env_context, "mappo", step)),
-                                                MultiagentTrainer::MAREINFORCE { trainer: mareinforce } => <MAREINFORCEAlgorithm<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(mareinforce, &format!("{}-{}-{}", env_context, "mareinforce", step)),
-                                                MultiagentTrainer::MATD3 { trainer: matd3 } => <MATD3Algorithm<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(matd3, &format!("{}-{}-{}", env_context, "matd3", step)),
-                                            }
-                                        },
-                                        _ => (),
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let _ = env_interface.step_bytes(&action_bytes).ok_or_else(|| {
+                        StateManagerError::GetEnvInfoError(
+                            "[StateManager] step_bytes returned None".to_string(),
+                        )
+                    })?;
                 }
-
                 Ok(())
             })
         })
+    }
+
+    pub(crate) fn run_env_step_loop_with_ppo<KindIn, KindOut, Pi>(
+        actor_id: ActorUuid,
+        shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
+        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), StateManagerError> where KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static, KindOut: TensorKind<B> + burn_tensor::Numeric<B> + Send + 'static, Pi: NeuralNetworkSpec<B, KindIn, KindOut> + NeuralNetworkForward<B, KindIn, KindOut>
+    {
+        TrainingInterface::train_ppo(
+            actor_id,
+            shutdown_rx,
+            runtime,
+            env_map,
+            step_count,
+            max_traj_length,
+            training_spec,
+        )
+        .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn run_env_step_loop_with_mappo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+        actor_id: ActorUuid,
+        shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
+        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: MAPPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), StateManagerError>
+    {
+        TrainingInterface::train_mappo(
+            actor_id,
+            shutdown_rx,
+            runtime,
+            env_map,
+            step_count,
+            max_traj_length,
+            training_spec,
+        )
+        .map_err(StateManagerError::from)
+    }
+}
+
+pub(crate) fn env_dtype_to_dtype(dtype: &EnvDType) -> Result<DType, ActorError> {
+    match dtype {
+        EnvDType::NdArray(nd_type) => Ok(DType::NdArray(match nd_type {
+            EnvNdArrayDType::F16 => NdArrayDType::F16,
+            EnvNdArrayDType::F32 => NdArrayDType::F32,
+            EnvNdArrayDType::F64 => NdArrayDType::F64,
+            EnvNdArrayDType::I8 => NdArrayDType::I8,
+            EnvNdArrayDType::I16 => NdArrayDType::I16,
+            EnvNdArrayDType::I32 => NdArrayDType::I32,
+            EnvNdArrayDType::I64 => NdArrayDType::I64,
+            EnvNdArrayDType::Bool => NdArrayDType::Bool,
+        })),
+        #[cfg(feature = "tch-backend")]
+        EnvDType::Tch(tch_type) => Ok(DType::Tch(match tch_type {
+            EnvTchDType::F16 => TchDType::F16,
+            EnvTchDType::Bf16 => TchDType::Bf16,
+            EnvTchDType::F32 => TchDType::F32,
+            EnvTchDType::F64 => TchDType::F64,
+            EnvTchDType::I8 => TchDType::I8,
+            EnvTchDType::I16 => TchDType::I16,
+            EnvTchDType::I32 => TchDType::I32,
+            EnvTchDType::I64 => TchDType::I64,
+            EnvTchDType::U8 => TchDType::U8,
+            EnvTchDType::Bool => TchDType::Bool,
+        })),
+        #[cfg(not(feature = "tch-backend"))]
+        EnvDType::Tch(_) => Err(ActorError::TypeConversionError(format!(
+            "Unsupported environment dtype: {dtype:?}"
+        ))),
+    }
+}
+
+/// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
+fn decode_argmax(
+    data: &[u8],
+    dtype: &relayrl_types::data::tensor::DType,
+    n_envs: usize,
+    act_dim: usize,
+) -> Vec<u8> {
+    macro_rules! argmax_float {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs)
+                .map(|i| {
+                    vals[i * act_dim..(i + 1) * act_dim]
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(j, _)| j as u8)
+                        .unwrap_or(0)
+                })
+                .collect()
+        }};
+    }
+
+    macro_rules! argmax_int {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs)
+                .map(|i| {
+                    vals[i * act_dim..(i + 1) * act_dim]
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.cmp(b))
+                        .map(|(j, _)| j as u8)
+                        .unwrap_or(0)
+                })
+                .collect()
+        }};
+    }
+
+    match dtype {
+        DType::NdArray(NdArrayDType::F16) => argmax_float!(half::f16),
+        DType::NdArray(NdArrayDType::F32) => argmax_float!(f32),
+        DType::NdArray(NdArrayDType::F64) => argmax_float!(f64),
+        DType::NdArray(NdArrayDType::I8) => argmax_int!(i8),
+        DType::NdArray(NdArrayDType::I16) => argmax_int!(i16),
+        DType::NdArray(NdArrayDType::I32) => argmax_int!(i32),
+        DType::NdArray(NdArrayDType::I64) => argmax_int!(i64),
+        DType::NdArray(NdArrayDType::Bool) => argmax_int!(u8),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch_type) => match tch_type {
+            TchDType::F16 => argmax_float!(half::f16),
+            TchDType::Bf16 => argmax_float!(half::bf16),
+            TchDType::F32 => argmax_float!(f32),
+            TchDType::F64 => argmax_float!(f64),
+            TchDType::I8 => argmax_int!(i8),
+            TchDType::I16 => argmax_int!(i16),
+            TchDType::I32 => argmax_int!(i32),
+            TchDType::I64 => argmax_int!(i64),
+            TchDType::Bool => argmax_int!(u8),
+            TchDType::U8 => argmax_int!(u8),
+        },
+    }
+}
+
+fn decode_continuous_bytes(
+    data: &[u8],
+    src_dtype: &DType,
+    count: usize,
+    tgt_dtype: &DType,
+) -> Vec<u8> {
+    let as_f64: Vec<f64> = match src_dtype {
+        DType::NdArray(NdArrayDType::F16) => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
+            .iter()
+            .map(|&x| f64::from(x))
+            .collect(),
+        DType::NdArray(NdArrayDType::F32) => bytemuck::cast_slice::<u8, f32>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::F64) => {
+            bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec()
+        }
+        DType::NdArray(NdArrayDType::I8) => bytemuck::cast_slice::<u8, i8>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I16) => bytemuck::cast_slice::<u8, i16>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I32) => bytemuck::cast_slice::<u8, i32>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I64) => bytemuck::cast_slice::<u8, i64>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::Bool) => data[..count]
+            .iter()
+            .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
+            .collect(),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tc) => {
+            use relayrl_types::data::tensor::TchDType;
+            match tc {
+                TchDType::F16 => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect(),
+                TchDType::Bf16 => bytemuck::cast_slice::<u8, half::bf16>(data)[..count]
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect(),
+                TchDType::F32 => bytemuck::cast_slice::<u8, f32>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::F64 => bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec(),
+                TchDType::I8 => bytemuck::cast_slice::<u8, i8>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I16 => bytemuck::cast_slice::<u8, i16>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I32 => bytemuck::cast_slice::<u8, i32>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I64 => bytemuck::cast_slice::<u8, i64>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::U8 => data[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::Bool => data[..count]
+                    .iter()
+                    .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
+                    .collect(),
+            }
+        }
+    };
+
+    match tgt_dtype {
+        DType::NdArray(NdArrayDType::F16) => {
+            let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
+            bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::F32) => {
+            let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
+            bytemuck::cast_slice::<f32, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::F64) => bytemuck::cast_slice::<f64, u8>(&as_f64).to_vec(),
+        DType::NdArray(NdArrayDType::I8) => {
+            let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
+            bytemuck::cast_slice::<i8, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I16) => {
+            let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
+            bytemuck::cast_slice::<i16, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I32) => {
+            let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
+            bytemuck::cast_slice::<i32, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I64) => {
+            let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
+            bytemuck::cast_slice::<i64, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::Bool) => as_f64
+            .iter()
+            .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
+            .collect(),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch_type) => match tch_type {
+            TchDType::F16 => {
+                let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
+                bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
+            }
+            TchDType::Bf16 => {
+                let v: Vec<half::bf16> = as_f64.iter().map(|&x| half::bf16::from_f64(x)).collect();
+                bytemuck::cast_slice::<half::bf16, u8>(&v).to_vec()
+            }
+            TchDType::F32 => {
+                let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
+                bytemuck::cast_slice::<f32, u8>(&v).to_vec()
+            }
+            TchDType::F64 => {
+                let v: Vec<f64> = as_f64.iter().map(|&x| x as f64).collect();
+                bytemuck::cast_slice::<f64, u8>(&v).to_vec()
+            }
+            TchDType::I8 => {
+                let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
+                bytemuck::cast_slice::<i8, u8>(&v).to_vec()
+            }
+            TchDType::I16 => {
+                let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
+                bytemuck::cast_slice::<i16, u8>(&v).to_vec()
+            }
+            TchDType::I32 => {
+                let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
+                bytemuck::cast_slice::<i32, u8>(&v).to_vec()
+            }
+            TchDType::I64 => {
+                let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
+                bytemuck::cast_slice::<i64, u8>(&v).to_vec()
+            }
+            TchDType::U8 => {
+                let v: Vec<u8> = as_f64.iter().map(|&x| x as u8).collect();
+                bytemuck::cast_slice::<u8, u8>(&v).to_vec()
+            }
+            TchDType::Bool => as_f64
+                .iter()
+                .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
+                .collect(),
+        },
     }
 }
 

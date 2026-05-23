@@ -37,11 +37,12 @@ use relayrl_types::data::tensor::{
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::validate_module;
+use relayrl_algorithms::prelude::ppo::trainer::PPOTrainerSpec;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
 use burn_tensor::{BasicOps, Bool, Float, Int, Tensor, TensorKind, backend::Backend};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
 use std::collections::HashMap;
@@ -81,6 +82,8 @@ pub enum ClientError {
     ModelValidationFailed(String),
     #[error("Update model is not supported: {0}")]
     ModelUpdateNotSupported(String),
+    #[error("Run env is already active for actor {0}")]
+    RunEnvActive(String),
 }
 
 /// Output target for runtime statistics collection.
@@ -120,7 +123,19 @@ pub enum AlgorithmCfg {
 
 impl Default for AlgorithmCfg {
     fn default() -> Self {
-        Self::ConfigInit
+        Self::PPO(Some(relayrl_algorithms::PPOParams::default()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PPONetworkArgs<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>> {
+    pub policy: Option<PPOKernel<B, KindIn, KindOut, Pi>>,
+    pub value: Option<ValueFunction<B, KindIn>>,
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B>, KindOut: TensorKind<B>> Default for PPONetworkArgs<B, KindIn, KindOut> {
+    fn default() -> Self {
+        Self { policy: None, value: None }
     }
 }
 
@@ -642,6 +657,7 @@ pub struct RelayRLAgent<
     supported_backend: SupportedTensorBackend,
     input_dtype: Option<DType>,
     output_dtype: Option<DType>,
+    run_env_active_flags: DashSet<Uuid>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -676,6 +692,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             supported_backend: B::get_supported_backend(),
             input_dtype: None,
             output_dtype: None,
+            run_env_active_flags: DashSet::new(),
         }
     }
 
@@ -1164,32 +1181,22 @@ pub trait RelayRLActorEnv<
     const D_OUT: usize,
 >
 {
-    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_eval(&self, actor_id: ActorUuid, step_count: usize)
+    -> Result<(), ClientError>;
+    async fn run_env_with_ppo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_cfg: Option<(
-            AlgorithmCfg,
-            SaveModelPath,
-            ReplayBufferSize,
-            DeviceType,
-            KN,
-        )>,
-    ) -> Result<(), ClientError>
-    where
-        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::WeightProvider
-            + Default
-            + Send
-            + 'static;
+        max_traj_length: usize,
+        training_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), ClientError>;
+    async fn run_env_with_mappo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: MAPPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), ClientError>;
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
@@ -1204,37 +1211,79 @@ pub trait RelayRLActorEnv<
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     RelayRLActorEnv<B, D_IN, D_OUT> for RelayRLAgent<B, D_IN, D_OUT>
 {
-    async fn run_env<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_eval(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
-        algorithm_cfg: Option<(
-            AlgorithmCfg,
-            SaveModelPath,
-            ReplayBufferSize,
-            DeviceType,
-            KN,
-        )>,
-    ) -> Result<(), ClientError>
-    where
-        KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::REINFORCEKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::DDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::TD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentPPOKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentReinforceKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentDDPGKernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::MultiagentTD3KernelTrait<B, KindIn, KindOut>
-            + relayrl_algorithms::WeightProvider
-            + Default
-            + Send
-            + 'static,
-    {
-        Ok(self
+    ) -> Result<(), ClientError> {
+        if !self.run_env_active_flags.insert(actor_id) {
+            return Err(ClientError::RunEnvActive(format!(
+                "run_env is already active for actor {}",
+                actor_id
+            )));
+        }
+        let result = self
             .coordinator
-            .run_env::<KindIn, KindOut, KN>(actor_id, step_count, algorithm_cfg)
-            .await?)
+            .run_env_eval(actor_id, step_count)
+            .await
+            .map_err(ClientError::from);
+        self.run_env_active_flags.remove(&actor_id);
+        result
+    }
+
+    async fn run_env_with_ppo<KindIn: TensorKind<B>, KindOut: TensorKind<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), ClientError>
+    {
+        if !self.run_env_active_flags.insert(actor_id) {
+            return Err(ClientError::RunEnvActive(format!(
+                "run_env is already active for actor {}",
+                actor_id
+            )));
+        }
+        let result = self
+            .coordinator
+            .run_env_with_ppo::<KindIn, KindOut, Pi>(
+                actor_id,
+                step_count,
+                max_traj_length,
+                training_spec,
+            )
+            .await
+            .map_err(ClientError::from);
+        self.run_env_active_flags.remove(&actor_id);
+        result
+    }
+    async fn run_env_with_mappo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+        &self,
+        actor_id: ActorUuid,
+        step_count: usize,
+        max_traj_length: usize,
+        training_spec: MAPPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), ClientError>
+    {
+        if !self.run_env_active_flags.insert(actor_id) {
+            return Err(ClientError::RunEnvActive(format!(
+                "run_env is already active for actor {}",
+                actor_id
+            )));
+        }
+        let result = self
+            .coordinator
+            .run_env_with_mappo::<KindIn, KindOut, Pi>(
+                actor_id,
+                step_count,
+                max_traj_length,
+                training_spec,
+            )
+            .await
+            .map_err(ClientError::from);
+        self.run_env_active_flags.remove(&actor_id);
+        result
     }
 
     async fn set_env(

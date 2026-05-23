@@ -6,7 +6,7 @@
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -47,262 +47,6 @@ use tokio::sync::{Mutex, RwLock};
 
 use burn_tensor::backend::Backend;
 use thiserror::Error;
-
-fn env_dtype_to_dtype(dtype: &EnvDType) -> Result<DType, ActorError> {
-    match dtype {
-        EnvDType::NdArray(nd_type) => Ok(DType::NdArray(match nd_type {
-            EnvNdArrayDType::F16 => NdArrayDType::F16,
-            EnvNdArrayDType::F32 => NdArrayDType::F32,
-            EnvNdArrayDType::F64 => NdArrayDType::F64,
-            EnvNdArrayDType::I8 => NdArrayDType::I8,
-            EnvNdArrayDType::I16 => NdArrayDType::I16,
-            EnvNdArrayDType::I32 => NdArrayDType::I32,
-            EnvNdArrayDType::I64 => NdArrayDType::I64,
-            EnvNdArrayDType::Bool => NdArrayDType::Bool,
-        })),
-        #[cfg(feature = "tch-backend")]
-        EnvDType::Tch(tch_type) => Ok(DType::Tch(match tch_type {
-            EnvTchDType::F16 => TchDType::F16,
-            EnvTchDType::Bf16 => TchDType::Bf16,
-            EnvTchDType::F32 => TchDType::F32,
-            EnvTchDType::F64 => TchDType::F64,
-            EnvTchDType::I8 => TchDType::I8,
-            EnvTchDType::I16 => TchDType::I16,
-            EnvTchDType::I32 => TchDType::I32,
-            EnvTchDType::I64 => TchDType::I64,
-            EnvTchDType::U8 => TchDType::U8,
-            EnvTchDType::Bool => TchDType::Bool,
-        })),
-        #[cfg(not(feature = "tch-backend"))]
-        EnvDType::Tch(_) => Err(ActorError::TypeConversionError(format!(
-            "Unsupported environment dtype: {dtype:?}"
-        ))),
-    }
-}
-
-/// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
-fn decode_argmax(
-    data: &[u8],
-    dtype: &relayrl_types::data::tensor::DType,
-    n_envs: usize,
-    act_dim: usize,
-) -> Vec<u8> {
-    macro_rules! argmax_float {
-        ($T:ty) => {{
-            let vals: &[$T] = bytemuck::cast_slice(data);
-            (0..n_envs)
-                .map(|i| {
-                    vals[i * act_dim..(i + 1) * act_dim]
-                        .iter()
-                        .copied()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| {
-                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(j, _)| j as u8)
-                        .unwrap_or(0)
-                })
-                .collect()
-        }};
-    }
-
-    macro_rules! argmax_int {
-        ($T:ty) => {{
-            let vals: &[$T] = bytemuck::cast_slice(data);
-            (0..n_envs)
-                .map(|i| {
-                    vals[i * act_dim..(i + 1) * act_dim]
-                        .iter()
-                        .copied()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| a.cmp(b))
-                        .map(|(j, _)| j as u8)
-                        .unwrap_or(0)
-                })
-                .collect()
-        }};
-    }
-
-    match dtype {
-        DType::NdArray(NdArrayDType::F16) => argmax_float!(half::f16),
-        DType::NdArray(NdArrayDType::F32) => argmax_float!(f32),
-        DType::NdArray(NdArrayDType::F64) => argmax_float!(f64),
-        DType::NdArray(NdArrayDType::I8) => argmax_int!(i8),
-        DType::NdArray(NdArrayDType::I16) => argmax_int!(i16),
-        DType::NdArray(NdArrayDType::I32) => argmax_int!(i32),
-        DType::NdArray(NdArrayDType::I64) => argmax_int!(i64),
-        DType::NdArray(NdArrayDType::Bool) => argmax_int!(u8),
-        #[cfg(feature = "tch-backend")]
-        DType::Tch(tch_type) => match tch_type {
-            TchDType::F16 => argmax_float!(half::f16),
-            TchDType::Bf16 => argmax_float!(half::bf16),
-            TchDType::F32 => argmax_float!(f32),
-            TchDType::F64 => argmax_float!(f64),
-            TchDType::I8 => argmax_int!(i8),
-            TchDType::I16 => argmax_int!(i16),
-            TchDType::I32 => argmax_int!(i32),
-            TchDType::I64 => argmax_int!(i64),
-            TchDType::Bool => argmax_int!(u8),
-            TchDType::U8 => argmax_int!(u8),
-        },
-    }
-}
-
-fn decode_continuous_bytes(
-    data: &[u8],
-    src_dtype: &DType,
-    count: usize,
-    tgt_dtype: &DType,
-) -> Vec<u8> {
-    let as_f64: Vec<f64> = match src_dtype {
-        DType::NdArray(NdArrayDType::F16) => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
-            .iter()
-            .map(|&x| f64::from(x))
-            .collect(),
-        DType::NdArray(NdArrayDType::F32) => bytemuck::cast_slice::<u8, f32>(data)[..count]
-            .iter()
-            .map(|&x| x as f64)
-            .collect(),
-        DType::NdArray(NdArrayDType::F64) => {
-            bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec()
-        }
-        DType::NdArray(NdArrayDType::I8) => bytemuck::cast_slice::<u8, i8>(data)[..count]
-            .iter()
-            .map(|&x| x as f64)
-            .collect(),
-        DType::NdArray(NdArrayDType::I16) => bytemuck::cast_slice::<u8, i16>(data)[..count]
-            .iter()
-            .map(|&x| x as f64)
-            .collect(),
-        DType::NdArray(NdArrayDType::I32) => bytemuck::cast_slice::<u8, i32>(data)[..count]
-            .iter()
-            .map(|&x| x as f64)
-            .collect(),
-        DType::NdArray(NdArrayDType::I64) => bytemuck::cast_slice::<u8, i64>(data)[..count]
-            .iter()
-            .map(|&x| x as f64)
-            .collect(),
-        DType::NdArray(NdArrayDType::Bool) => data[..count]
-            .iter()
-            .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
-            .collect(),
-        #[cfg(feature = "tch-backend")]
-        DType::Tch(tc) => {
-            use relayrl_types::data::tensor::TchDType;
-            match tc {
-                TchDType::F16 => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
-                    .iter()
-                    .map(|&x| f64::from(x))
-                    .collect(),
-                TchDType::Bf16 => bytemuck::cast_slice::<u8, half::bf16>(data)[..count]
-                    .iter()
-                    .map(|&x| f64::from(x))
-                    .collect(),
-                TchDType::F32 => bytemuck::cast_slice::<u8, f32>(data)[..count]
-                    .iter()
-                    .map(|&x| x as f64)
-                    .collect(),
-                TchDType::F64 => bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec(),
-                TchDType::I8 => bytemuck::cast_slice::<u8, i8>(data)[..count]
-                    .iter()
-                    .map(|&x| x as f64)
-                    .collect(),
-                TchDType::I16 => bytemuck::cast_slice::<u8, i16>(data)[..count]
-                    .iter()
-                    .map(|&x| x as f64)
-                    .collect(),
-                TchDType::I32 => bytemuck::cast_slice::<u8, i32>(data)[..count]
-                    .iter()
-                    .map(|&x| x as f64)
-                    .collect(),
-                TchDType::I64 => bytemuck::cast_slice::<u8, i64>(data)[..count]
-                    .iter()
-                    .map(|&x| x as f64)
-                    .collect(),
-                TchDType::U8 => data[..count].iter().map(|&x| x as f64).collect(),
-                TchDType::Bool => data[..count]
-                    .iter()
-                    .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
-                    .collect(),
-            }
-        }
-    };
-
-    match tgt_dtype {
-        DType::NdArray(NdArrayDType::F16) => {
-            let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
-            bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
-        }
-        DType::NdArray(NdArrayDType::F32) => {
-            let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
-            bytemuck::cast_slice::<f32, u8>(&v).to_vec()
-        }
-        DType::NdArray(NdArrayDType::F64) => bytemuck::cast_slice::<f64, u8>(&as_f64).to_vec(),
-        DType::NdArray(NdArrayDType::I8) => {
-            let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
-            bytemuck::cast_slice::<i8, u8>(&v).to_vec()
-        }
-        DType::NdArray(NdArrayDType::I16) => {
-            let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
-            bytemuck::cast_slice::<i16, u8>(&v).to_vec()
-        }
-        DType::NdArray(NdArrayDType::I32) => {
-            let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
-            bytemuck::cast_slice::<i32, u8>(&v).to_vec()
-        }
-        DType::NdArray(NdArrayDType::I64) => {
-            let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
-            bytemuck::cast_slice::<i64, u8>(&v).to_vec()
-        }
-        DType::NdArray(NdArrayDType::Bool) => as_f64
-            .iter()
-            .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
-            .collect(),
-        #[cfg(feature = "tch-backend")]
-        DType::Tch(tch_type) => match tch_type {
-            TchDType::F16 => {
-                let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
-                bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
-            }
-            TchDType::Bf16 => {
-                let v: Vec<half::bf16> = as_f64.iter().map(|&x| half::bf16::from_f64(x)).collect();
-                bytemuck::cast_slice::<half::bf16, u8>(&v).to_vec()
-            }
-            TchDType::F32 => {
-                let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
-                bytemuck::cast_slice::<f32, u8>(&v).to_vec()
-            }
-            TchDType::F64 => {
-                let v: Vec<f64> = as_f64.iter().map(|&x| x as f64).collect();
-                bytemuck::cast_slice::<f64, u8>(&v).to_vec()
-            }
-            TchDType::I8 => {
-                let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
-                bytemuck::cast_slice::<i8, u8>(&v).to_vec()
-            }
-            TchDType::I16 => {
-                let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
-                bytemuck::cast_slice::<i16, u8>(&v).to_vec()
-            }
-            TchDType::I32 => {
-                let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
-                bytemuck::cast_slice::<i32, u8>(&v).to_vec()
-            }
-            TchDType::I64 => {
-                let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
-                bytemuck::cast_slice::<i64, u8>(&v).to_vec()
-            }
-            TchDType::U8 => {
-                let v: Vec<u8> = as_f64.iter().map(|&x| x as u8).collect();
-                bytemuck::cast_slice::<u8, u8>(&v).to_vec()
-            }
-            TchDType::Bool => as_f64
-                .iter()
-                .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
-                .collect(),
-        },
-    }
-}
 
 /// Shared handle to a hot-reloadable model.
 ///
@@ -459,6 +203,7 @@ pub(crate) struct ActorRuntime<
 > {
     actor_id: ActorUuid,
     pub(crate) reloadable_model: LocalModelHandle<B>,
+    temp_env_models: DashMap<Uuid, LocalModelHandle<B>>,
     shared_max_traj_length: Arc<RwLock<usize>>,
     shared_tx_to_buffer: Sender<RoutedMessage>,
     trajectories: Mutex<ActorTrajectoryState>,
@@ -483,6 +228,7 @@ impl<
         Self {
             actor_id,
             reloadable_model,
+            temp_env_models: DashMap::new(),
             shared_max_traj_length,
             shared_tx_to_buffer,
             trajectories: Mutex::new(ActorTrajectoryState::new(max_traj_length)),
@@ -572,18 +318,17 @@ impl<
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn perform_local_byte_inference(
+    pub(crate) async fn perform_env_byte_inference(
         &self,
+        model_name: &str,
         obs_bytes: &[u8],
         n_envs: usize,
         obs_dim: usize,
-        act_dim: usize,
-        obs_dtype: &EnvDType,
-        act_dtype: &EnvDType,
-        discrete: bool,
-    ) -> Result<Vec<u8>, ActorError> {
-        let loaded_model = self.reloadable_model.load();
+        obs_dtype: &DType,
+    ) -> Result<TensorData, ActorError> {
+        let loaded_model = match self.temp_env_models.get(model_name) {
+            
+        }
         let reloadable_model_ref = loaded_model.as_ref().ok_or_else(|| {
             ActorError::SystemError("Model not loaded/available for actor inference".to_string())
         })?;
@@ -591,31 +336,14 @@ impl<
 
         let input = TensorData::new(
             vec![n_envs, obs_dim],
-            env_dtype_to_dtype(obs_dtype)?,
+            obs_dtype.clone(),
             obs_bytes.to_vec(),
-            SupportedTensorBackend::NdArray,
+            B::get_supported_backend(),
         );
-        let output = module
+
+        Ok(module
             .flat_batch_inference(input)
-            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
-
-        let action_bytes = if discrete {
-            decode_argmax(
-                &output.data,
-                &env_dtype_to_dtype(act_dtype)?,
-                n_envs,
-                act_dim,
-            )
-        } else {
-            decode_continuous_bytes(
-                &output.data,
-                &output.dtype,
-                n_envs * act_dim,
-                &env_dtype_to_dtype(act_dtype)?,
-            )
-        };
-
-        Ok(action_bytes)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs)))
     }
 
     pub(crate) async fn flag_last_action(
@@ -1494,8 +1222,8 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(matches!(
-            traj_msg.protocol,
-            RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
+            traj_msg.payload,
+            RoutedPayload::SendTrajectory { .. }
         ));
 
         // Now send Shutdown
@@ -1553,10 +1281,7 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(
-            matches!(
-                msg.protocol,
-                RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
-            ),
+            matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
             "FlagLastInference should produce a SendTrajectory message"
         );
     }
@@ -1609,8 +1334,8 @@ mod unit_tests {
             .unwrap();
 
         let msg = rx_buf.recv().await.expect("expected env trajectory flush");
-        match msg.protocol {
-            RoutingProtocol::Data(DataPayload::SendTrajectory { trajectory, .. }) => {
+        match msg.payload {
+            RoutedPayload::SendTrajectory { trajectory, .. } => {
                 assert_eq!(trajectory.get_env_id(), Some(&env_id_1));
                 assert_eq!(trajectory.get_env_label(), Some("env-1"));
             }
