@@ -46,7 +46,7 @@ pub fn build_onnx_mlp_bytes(layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)]) 
         initializers.push(build_tensor_proto(&b_name, &[*layer_out as i64], biases));
 
         let gemm_input = if idx == 0 {
-            "obs".to_string()
+            "input".to_string()
         } else {
             format!("relu{}", idx - 1)
         };
@@ -70,7 +70,7 @@ pub fn build_onnx_mlp_bytes(layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)]) 
     }
 
     let final_output = format!("gemm{}", n - 1);
-    let input_info = build_value_info("obs", in_dim);
+    let input_info = build_value_info("input", in_dim);
     let output_info = build_value_info(&final_output, out_dim);
 
     let graph = build_graph_proto("mlp", &nodes, &initializers, &[input_info], &[output_info]);
