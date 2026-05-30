@@ -4,7 +4,7 @@ use crate::network::client::runtime::coordination::state_manager::{ActorUuid, St
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::TrainingDispatcher;
 use crate::network::client::runtime::router::{
-    RoutedMessage, RoutedPayload, RouterError, RoutingProtocol,
+    ControlPayload, RoutedMessage, RouterError, RoutingProtocol,
 };
 
 use relayrl_types::prelude::tensor::burn::backend::Backend;
@@ -30,17 +30,13 @@ pub enum TransportReceiverError {
     NoEntriesFound,
 }
 
-fn prepare_transport_model_update_for_dispatch<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
->(
-    shared_state: &StateManager<B, D_IN, D_OUT>,
+fn prepare_transport_model_update_for_dispatch<B: Backend + BackendMatcher<Backend = B>>(
+    shared_state: &StateManager<B>,
     mut msg: RoutedMessage,
     last_forwarded_model_versions: &mut HashMap<ActorUuid, i64>,
 ) -> Option<RoutedMessage> {
-    let model_version = match (&msg.protocol, &msg.payload) {
-        (RoutingProtocol::ModelUpdate, RoutedPayload::ModelUpdate { version, .. }) => *version,
+    let model_version = match &msg.protocol {
+        RoutingProtocol::Control(ControlPayload::ModelUpdate { version, .. }) => *version,
         _ => return Some(msg),
     };
 
@@ -56,26 +52,20 @@ fn prepare_transport_model_update_for_dispatch<
 }
 
 /// Listens & receives model bytes from a training server. Created once per client runtime.
-pub(crate) struct ClientTransportModelReceiver<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
+pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backend = B>> {
     client_namespace: Arc<str>,
     global_dispatcher_tx: Sender<RoutedMessage>,
     training_dispatcher: Arc<TrainingDispatcher<B>>,
-    shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+    shared_state: Arc<RwLock<StateManager<B>>>,
     shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    ClientTransportModelReceiver<B, D_IN, D_OUT>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
     pub fn new(
         client_namespace: Arc<str>,
         global_dispatcher_tx: Sender<RoutedMessage>,
-        shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+        shared_state: Arc<RwLock<StateManager<B>>>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
         training_dispatcher: Arc<TrainingDispatcher<B>>,
     ) -> Self {
@@ -234,11 +224,11 @@ mod unit_tests {
     fn make_state_manager(
         modes: Arc<ClientModes>,
     ) -> (
-        StateManager<TestBackend, D_IN, D_OUT>,
+        StateManager<TestBackend>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
         let namespace: Arc<str> = Arc::from(format!("test-receiver-{}", Uuid::new_v4()));
-        StateManager::<TestBackend, D_IN, D_OUT>::new(
+        StateManager::<TestBackend>::new(
             namespace,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
@@ -268,11 +258,10 @@ mod unit_tests {
     fn make_model_update(actor_id: Uuid, version: i64) -> RoutedMessage {
         RoutedMessage {
             actor_id,
-            protocol: RoutingProtocol::ModelUpdate,
-            payload: RoutedPayload::ModelUpdate {
+            protocol: RoutingProtocol::Data(DataPayload::ModelUpdate {
                 model_bytes: vec![1, 2, 3],
                 version,
-            },
+            }),
         }
     }
 
@@ -286,7 +275,7 @@ mod unit_tests {
     #[test]
     fn uuid_pool_error_wraps_source() {
         let source = UuidPoolError::FailedToFindUuidInPoolError("test-uuid".to_string());
-        let err = TransportReceiverError::from(source.clone());
+        let err = TransportReceiverError::UuidPoolError(source.clone());
         assert!(matches!(err, TransportReceiverError::UuidPoolError(_)));
         let display = format!("{}", err);
         assert!(!display.is_empty());
@@ -295,7 +284,7 @@ mod unit_tests {
     #[test]
     fn uuid_pool_error_display_contains_source_message() {
         let source = UuidPoolError::FailedToFindUuidInPoolError("my-id".to_string());
-        let err = TransportReceiverError::from(source);
+        let err = TransportReceiverError::UuidPoolError(source);
         let display = format!("{}", err);
         assert!(display.contains("my-id"));
     }

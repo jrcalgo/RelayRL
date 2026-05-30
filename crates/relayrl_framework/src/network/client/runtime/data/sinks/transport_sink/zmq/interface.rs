@@ -1,5 +1,7 @@
 use crate::network::client::agent::ClientModes;
-use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ModelMode};
+use crate::network::client::agent::{
+    ActorInferenceMode, ActorTrainingDataMode, ModelMode, AlgorithmInitArgs,
+};
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::sinks::transport_sink::combine_scaling_results;
 use crate::network::client::runtime::data::sinks::transport_sink::{
@@ -10,7 +12,6 @@ use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
 
 use active_uuid_registry::interface::reserve_id_with;
-use relayrl_types::HyperparameterArgs;
 use relayrl_types::prelude::action::RelayRLAction;
 use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
@@ -1071,8 +1072,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
         scaling_entry: (NamespaceString, ContextString, Uuid),
         actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: AlgorithmInitArgs,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         if let Some(protocol) = self.training_protocol.as_ref() {
@@ -1096,8 +1096,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTrainingTransportOps<B>
                     &scaling_entry,
                     &actor_entries,
                     &model_mode,
-                    &algorithm,
-                    &hyperparams,
+                    &algorithm_args,
                     agent_listener_address,
                 );
 
@@ -1317,8 +1316,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         actor_entries: &[(NamespaceString, ContextString, Uuid)],
         model_mode: &ModelMode,
-        algorithm: &Algorithm,
-        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: &AlgorithmInitArgs,
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         <ZmqTrainingOps as ZmqTrainingExecution<B>>::execute_send_algorithm_init_request(
@@ -1326,8 +1324,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqIn
             scaling_entry,
             actor_entries,
             model_mode,
-            algorithm,
-            hyperparams,
+            algorithm_args,
             agent_listener_address,
         )
     }

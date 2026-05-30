@@ -2,14 +2,12 @@ pub(crate) mod interface;
 pub(super) mod ops;
 pub(super) mod policies;
 
-use crate::network::client::agent::ModelMode;
+use crate::network::client::agent::{ModelMode, AlgorithmInitArgs};
 use crate::network::client::runtime::data::sinks::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::ops::ZmqPoolError;
 use crate::network::client::runtime::router::RoutedMessage;
-use crate::utilities::configuration::Algorithm;
 
-use relayrl_types::HyperparameterArgs;
 use relayrl_types::prelude::action::RelayRLAction;
 use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
@@ -99,8 +97,7 @@ pub(super) trait ZmqTrainingExecution<B: Backend + BackendMatcher<Backend = B>> 
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         actor_entries: &[(NamespaceString, ContextString, Uuid)],
         model_mode: &ModelMode,
-        algorithm: &Algorithm,
-        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: &AlgorithmInitArgs,
         agent_listener_address: &str,
     ) -> Result<(), TransportError>;
     fn execute_initial_model_handshake(

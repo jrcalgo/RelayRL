@@ -197,10 +197,10 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
     shared_traj_memory: Option<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>>,
     shutdown: Option<broadcast::Receiver<()>>,
-    shared_max_traj_length: Option<Arc<RwLock<usize>>>,
+    shared_router_buffer_size_per_actor: Option<Arc<RwLock<usize>>>,
     shared_actor_count: Option<Arc<CachePadded<AtomicUsize>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    codec: CodecConfig,
+    training_codec: CodecConfig,
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     _phantom: PhantomData<B>,
 }
@@ -214,7 +214,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: CodecConfig,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] training_codec: CodecConfig,
     ) -> Self {
         Self {
             associated_router_namespace,
@@ -229,10 +229,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             shared_trajectory_file_output: None,
             shared_traj_memory: None,
             shutdown: None,
-            shared_max_traj_length: None,
+            shared_router_buffer_size_per_actor: None,
             shared_actor_count: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            codec,
+            training_codec,
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
             _phantom: PhantomData,
         }
@@ -272,10 +272,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
     fn with_semaphore_capacity(
         &mut self,
-        shared_max_traj_length: Arc<RwLock<usize>>,
+        shared_router_buffer_size_per_actor: Arc<RwLock<usize>>,
         shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self {
-        self.shared_max_traj_length = Some(shared_max_traj_length);
+        self.shared_router_buffer_size_per_actor = Some(shared_router_buffer_size_per_actor);
         self.shared_actor_count = Some(shared_actor_count);
         self
     }
@@ -291,9 +291,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             tokio::sync::mpsc::unbounded_channel::<SinkQueueEntry>();
 
         let (mut rx_semaphore, initial_semaphore_capacity) =
-            match (&self.shared_max_traj_length, &self.shared_actor_count) {
-                (Some(mtl), Some(ac)) => {
-                    let cap = mtl
+            match (&self.shared_router_buffer_size_per_actor, &self.shared_actor_count) {
+                (Some(rbs), Some(ac)) => {
+                    let cap = rbs
                         .try_read()
                         .map(|g| *g)
                         .unwrap_or(1000)
@@ -302,7 +302,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                 }
                 _ => (None, 0),
             };
-        let recv_max_traj_length = self.shared_max_traj_length.clone();
+        let recv_router_buffer_size_per_actor = self.shared_router_buffer_size_per_actor.clone();
         let recv_actor_count = self.shared_actor_count.clone();
 
         let actor_last_processed = self.actor_last_processed.clone();
@@ -315,7 +315,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_transport_addresses = self.shared_transport_addresses.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let codec = self.codec.clone();
+        let codec = self.training_codec.clone();
 
         let shared_trajectory_file_output = self.shared_trajectory_file_output.clone();
 
@@ -348,10 +348,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             Some(msg) => {
                                 // Only process SendTrajectory payloads
                                 if let RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp, trajectory }) = msg.protocol {
-                                    let permit = match (&mut rx_semaphore, &recv_max_traj_length, &recv_actor_count) {
-                                        (Some(semaphore), Some(traj_length), Some(actor_count)) => {
-                                            let new_capacity = (*traj_length.read().await)
+                                    let permit = match (&mut rx_semaphore, &recv_router_buffer_size_per_actor, &recv_actor_count) {
+                                        (Some(semaphore), Some(rbs), Some(actor_count)) => {
+                                            let new_capacity = (*rbs.read().await)
                                                 .saturating_mul(actor_count.load(Ordering::Acquire).max(1));
+
                                             if new_capacity > current_semaphore_capacity {
                                                 semaphore.add_permits(new_capacity - current_semaphore_capacity);
                                                 current_semaphore_capacity = new_capacity;
@@ -359,6 +360,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                                 *semaphore = Arc::new(Semaphore::new(new_capacity.max(1)));
                                                 current_semaphore_capacity = new_capacity;
                                             }
+
                                             match semaphore.clone().acquire_owned().await {
                                                 Ok(p) => Some(Arc::new(p)),
                                                 Err(_) => break,

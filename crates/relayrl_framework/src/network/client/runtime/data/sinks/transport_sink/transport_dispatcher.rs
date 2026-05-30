@@ -1,4 +1,4 @@
-use crate::network::client::agent::ModelMode;
+use crate::network::client::agent::{ModelMode, AlgorithmInitArgs};
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::sinks::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::sinks::transport_sink::{
@@ -175,7 +175,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
 }
 
 pub(crate) enum ProcessInitRequest<B: Backend + BackendMatcher<Backend = B>> {
-    TrainingAlgorithmInit(ModelMode, Algorithm, HashMap<Algorithm, HyperparameterArgs>),
+    TrainingAlgorithmInit(ModelMode, AlgorithmInitArgs),
     InferenceModelInit(ModelMode, Option<ModelModule<B>>),
 }
 
@@ -198,15 +198,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match process_init_request {
-            ProcessInitRequest::TrainingAlgorithmInit(model_mode, algorithm, hyperparams) => {
+            ProcessInitRequest::TrainingAlgorithmInit(model_mode, algorithm_args) => {
                 match &*self.transport {
                     #[cfg(feature = "zmq-transport")]
                     ClientTransportInterface::Sync(sync_tr) => sync_tr.send_algorithm_init_request(
                         scaling_entry,
                         actor_entries,
                         model_mode,
-                        algorithm,
-                        hyperparams,
+                        algorithm_args,
                         transport_addresses,
                     ),
                     #[cfg(feature = "nats-transport")]
@@ -216,8 +215,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
                                 scaling_entry,
                                 actor_entries,
                                 model_mode,
-                                algorithm,
-                                hyperparams,
+                                algorithm_args,
                                 transport_addresses,
                             )
                             .await
@@ -370,12 +368,11 @@ mod unit_tests {
     fn training_init_request_holds_model_mode_and_algorithm() {
         let req = ProcessInitRequest::<TestBackend>::TrainingAlgorithmInit(
             ModelMode::Independent,
-            Algorithm::PPO,
-            HashMap::new(),
+            AlgorithmInitArgs::default(),
         );
         assert!(matches!(
             req,
-            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Independent, Algorithm::PPO, _)
+            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Independent, _)
         ));
     }
 
@@ -392,12 +389,11 @@ mod unit_tests {
     fn training_init_request_shared_mode() {
         let req = ProcessInitRequest::<TestBackend>::TrainingAlgorithmInit(
             ModelMode::Shared,
-            Algorithm::REINFORCE,
-            HashMap::new(),
+            AlgorithmInitArgs::default(),
         );
         assert!(matches!(
             req,
-            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Shared, Algorithm::REINFORCE, _)
+            ProcessInitRequest::TrainingAlgorithmInit(ModelMode::Shared, _)
         ));
     }
 }

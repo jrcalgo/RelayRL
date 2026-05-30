@@ -8,8 +8,9 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::AlgorithmCfg;
+use crate::network::client::agent::DefaultHyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
+use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::prelude::config::TransportConfigParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -21,6 +22,9 @@ use crate::utilities::configuration::OtlpEndpointParams;
 use crate::utilities::configuration::{
     ClientConfigLoader, HyperparameterConfig, LocalModelModuleParams,
 };
+
+use relayrl_algorithms::prelude::ppo::algorithm::{IPPOParams, MAPPOParams, PPOParams};
+
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use std::collections::HashMap;
 use std::env;
@@ -29,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{Notify, RwLock, broadcast};
+use crossbeam_utils::CachePadded;
 
 use thiserror::Error;
 
@@ -47,6 +52,18 @@ pub(crate) struct SharedZmqTrainingAddresses {
     pub(crate) trajectory_server_address: Arc<str>,
     pub(crate) training_scaling_server_address: Arc<str>,
 }
+
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[derive(Debug, Clone)]
+pub(crate) struct SharedDefaultHyperparameters {
+    ppo: CachePadded<Arc<RwLock<PPOParams>>>,
+    ippo: CachePadded<Arc<RwLock<IPPOParams>>>,
+    mappo: CachePadded<Arc<RwLock<MAPPOParams>>>,
+    ppo_config_init: ConfigInitFlag,
+    ippo_config_init: ConfigInitFlag,
+    mappo_config_init: ConfigInitFlag,
+}
+
 
 /// Shared transport addresses for both NATS and ZMQ transports.
 ///
@@ -222,6 +239,8 @@ pub(crate) fn construct_trajectory_file_output(
     }
 }
 
+type ConfigInitFlag = bool;
+
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
 pub enum LifecycleManagerError {
@@ -237,27 +256,26 @@ pub enum LifecycleManagerError {
     ConfigError(String),
 }
 
+type ActorString = String;
+
 /// Orchestrates startup/shutdown signals (SIGINT, config-changes)
 ///
 /// Spins up and tears down futures cleanly
 #[derive(Debug, Clone)]
 pub(crate) struct LifecycleManager {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    algorithm_cfg: Arc<AlgorithmCfg>,
-    algorithm_config_init: Arc<RwLock<AlgorithmCfg>>,
-    max_traj_length: Arc<RwLock<usize>>,
+    default_hyperparameters: SharedDefaultHyperparameters,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     #[cfg(feature = "metrics")]
     metrics_args: Arc<RwLock<(String, String)>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
     local_model_path: Arc<RwLock<PathBuf>>,
     trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_type: Arc<TransportType>,
     config_path: Arc<PathBuf>,
     config_update_polling_seconds: Arc<RwLock<f32>>,
+    router_buffer_size_per_actor: Arc<RwLock<usize>>,
     last_modified: Arc<RwLock<SystemTime>>,
     shutdown_tx: broadcast::Sender<()>,
     shutdown_notifier: Arc<Notify>,
@@ -266,9 +284,10 @@ pub(crate) struct LifecycleManager {
 impl LifecycleManager {
     pub(crate) fn new(
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_cfg: AlgorithmCfg,
+        default_hyperparameters: DefaultHyperparameterArgs,
         config: &ClientConfigLoader,
         config_path: PathBuf,
+        router_buffer_size_per_actor: Option<usize>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         transport_type: TransportType,
     ) -> Self {
@@ -287,14 +306,68 @@ impl LifecycleManager {
 
         let config_update_polling = config.client_config.config_update_polling_seconds;
 
+        let router_buffer_size = match router_buffer_size_per_actor {
+            Some(size) => size,
+            None => config.client_config.router_buffer_size_per_actor,
+        };
+
         let transport_config = config.get_transport_config();
-        let max_traj_length = transport_config.max_traj_length;
+
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        let resolved_default_hyperparameters: SharedDefaultHyperparameters = {
+            let ppo = match default_hyperparameters.ppo {
+                Some(ppo) => (ppo, false),
+                None if default_hyperparameters.config_default_init => (
+                    config
+                        .client_config
+                        .init_hyperparameters
+                        .ppo
+                        .clone()
+                        .unwrap_or_default(),
+                    true,
+                ),
+                None => (PPOParams::default(), false),
+            };
+            let ippo = match default_hyperparameters.ippo {
+                Some(ippo) => (ippo, false),
+                None if default_hyperparameters.config_default_init => (
+                    config
+                        .client_config
+                        .init_hyperparameters
+                        .ippo
+                        .clone()
+                        .unwrap_or_default(),
+                    true,
+                ),
+                None => (IPPOParams::default(), false),
+            };
+            let mappo = match default_hyperparameters.mappo {
+                Some(mappo) => (mappo, false),
+                None if default_hyperparameters.config_default_init => (
+                    config
+                        .client_config
+                        .init_hyperparameters
+                        .mappo
+                        .clone()
+                        .unwrap_or_default(),
+                    true,
+                ),
+                None => (MAPPOParams::default(), false),
+            };
+
+            SharedDefaultHyperparameters {
+                ppo: CachePadded::new(Arc::new(RwLock::new(ppo.0))),
+                ippo: CachePadded::new(Arc::new(RwLock::new(ippo.0))),
+                mappo: CachePadded::new(Arc::new(RwLock::new(mappo.0))),
+                ppo_config_init: ppo.1,
+                ippo_config_init: ippo.1,
+                mappo_config_init: mappo.1,
+            }
+        };
 
         Self {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_cfg: Arc::new(algorithm_cfg),
-            algorithm_config_init: Arc::new(RwLock::new(AlgorithmCfg::ConfigInit)),
-            max_traj_length: Arc::new(RwLock::new(max_traj_length)),
+            default_hyperparameters: resolved_default_hyperparameters,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_addresses: Arc::new(RwLock::new(construct_transport_addresses(
                 transport_config,
@@ -305,10 +378,6 @@ impl LifecycleManager {
                 config.client_config.metrics_meter_name.clone(),
                 construct_metrics_otlp_endpoint(&config.client_config.metrics_otlp_endpoint),
             ))),
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            init_hyperparameters: Arc::new(RwLock::new(
-                config.client_config.init_hyperparameters.to_args(None),
-            )),
             local_model_path: Arc::new(RwLock::new(construct_local_model_path(
                 &transport_config.local_model_module,
             ))),
@@ -318,6 +387,7 @@ impl LifecycleManager {
             config_path: Arc::new(config_path),
             last_modified: Arc::new(RwLock::new(last_modified)),
             config_update_polling_seconds: Arc::new(RwLock::new(config_update_polling)),
+            router_buffer_size_per_actor: Arc::new(RwLock::new(router_buffer_size)),
             shutdown_tx,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_type: Arc::new(transport_type),
@@ -339,10 +409,6 @@ impl LifecycleManager {
         self.config_path.clone()
     }
 
-    pub fn get_max_traj_length(&self) -> Arc<RwLock<usize>> {
-        self.max_traj_length.clone()
-    }
-
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn get_transport_addresses(&self) -> Arc<RwLock<SharedTransportAddresses>> {
         self.transport_addresses.clone()
@@ -361,58 +427,23 @@ impl LifecycleManager {
         self.trajectory_file_output.clone()
     }
 
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub fn get_init_hyperparameters(&self) -> Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>> {
-        self.init_hyperparameters.clone()
+    pub fn get_router_buffer_size_per_actor(&self) -> Arc<RwLock<usize>> {
+        self.router_buffer_size_per_actor.clone()
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub fn get_algorithm_cfg_args(&self) -> Arc<AlgorithmCfg> {
-        self.algorithm_cfg_args.clone()
+    pub fn get_ppo_hyperparameters(&self) -> Arc<RwLock<PPOParams>> {
+        self.default_hyperparameters.ppo.clone().into_inner().clone()
     }
 
-    pub(crate) fn get_algorithm_config_init(&self) -> Arc<RwLock<AlgorithmCfg>> {
-        self.algorithm_config_init.clone()
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub fn get_ippo_hyperparameters(&self) -> Arc<RwLock<IPPOParams>> {
+        self.default_hyperparameters.ippo.clone().into_inner().clone()
     }
 
-    pub(crate) async fn set_algorithm_config_init(
-        &self,
-        algorithm_name: &str,
-        init_hyperparameters: &HyperparameterConfig,
-    ) -> Result<(), LifecycleManagerError> {
-        let config = match algorithm_name {
-            "PPO" => AlgorithmCfg::PPO(init_hyperparameters.ppo.clone()),
-            "IPPO" => AlgorithmCfg::IPPO(init_hyperparameters.ippo.clone()),
-            "MAPPO" => AlgorithmCfg::MAPPO(init_hyperparameters.mappo.clone()),
-            "REINFORCE" => AlgorithmCfg::REINFORCE(init_hyperparameters.reinforce.clone()),
-            "IREINFORCE" => AlgorithmCfg::IREINFORCE(init_hyperparameters.ireinforce.clone()),
-            "MAREINFORCE" => AlgorithmCfg::MAREINFORCE(init_hyperparameters.mareinforce.clone()),
-            "DDPG" => AlgorithmCfg::DDPG(init_hyperparameters.ddpg.clone()),
-            "IDDPG" => AlgorithmCfg::IDDPG(init_hyperparameters.iddpg.clone()),
-            "MADDPG" => AlgorithmCfg::MADDPG(init_hyperparameters.maddpg.clone()),
-            "TD3" => AlgorithmCfg::TD3(init_hyperparameters.td3.clone()),
-            "ITD3" => AlgorithmCfg::ITD3(init_hyperparameters.itd3.clone()),
-            "MATD3" => AlgorithmCfg::MATD3(init_hyperparameters.matd3.clone()),
-            other => {
-                return Err(LifecycleManagerError::ConfigError(format!(
-                    "Unknown algorithm: {other}"
-                )));
-            }
-        };
-        let mut algorithm_config_init_guard: tokio::sync::RwLockWriteGuard<'_, AlgorithmCfg> =
-            self.algorithm_config_init.write().await;
-
-        *algorithm_config_init_guard = config;
-        Ok(())
-    }
-
-    pub(crate) async fn set_max_traj_length(
-        &self,
-        max_traj_length: &usize,
-    ) -> Result<(), LifecycleManagerError> {
-        let mut max_traj_length_guard = self.max_traj_length.write().await;
-        *max_traj_length_guard = *max_traj_length;
-        Ok(())
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub fn get_mappo_hyperparameters(&self) -> Arc<RwLock<MAPPOParams>> {
+        self.default_hyperparameters.mappo.clone().into_inner().clone()
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -442,14 +473,30 @@ impl LifecycleManager {
         Ok(())
     }
 
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) async fn set_init_hyperparameters(
+    pub(crate) async fn set_router_buffer_size_per_actor(
         &self,
-        init_hyperaparameters: &HyperparameterConfig,
+        router_buffer_size_per_actor: usize,
     ) -> Result<(), LifecycleManagerError> {
-        let mut init_hyperparameters_guard = self.init_hyperparameters.write().await;
-        *init_hyperparameters_guard =
-            init_hyperaparameters.to_args(Some(&self.algorithm_args.algorithm));
+        let mut router_buffer_size_per_actor_guard = self.router_buffer_size_per_actor.write().await;
+        *router_buffer_size_per_actor_guard = router_buffer_size_per_actor;
+        Ok(())
+    }
+    
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub(crate) async fn set_default_hyperparameters(
+        &self,
+        init_hyperparameters: &HyperparameterConfig,
+    ) -> Result<(), LifecycleManagerError> {
+        if self.default_hyperparameters.ppo_config_init {
+            *self.default_hyperparameters.ppo.write().await = init_hyperparameters.ppo.clone().unwrap_or_default();
+        }
+        if self.default_hyperparameters.ippo_config_init {
+            *self.default_hyperparameters.ippo.write().await = init_hyperparameters.ippo.clone().unwrap_or_default();
+        }
+        if self.default_hyperparameters.mappo_config_init {
+            *self.default_hyperparameters.mappo.write().await = init_hyperparameters.mappo.clone().unwrap_or_default();
+        }
+
         Ok(())
     }
 
@@ -538,15 +585,11 @@ impl LifecycleManager {
             not(feature = "metrics")
         ))]
         tokio::try_join!(
-            self.set_algorithm_config_init(
-                &new_config.client_config.algorithm_name,
-                &new_config.client_config.init_hyperparameters
-            ),
-            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),
+            self.set_default_hyperparameters(&new_config.client_config.init_hyperparameters),
+            self.set_router_buffer_size_per_actor(new_config.client_config.router_buffer_size_per_actor),
         )
         .map_err(|e| {
             LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
@@ -557,15 +600,11 @@ impl LifecycleManager {
             feature = "metrics"
         ))]
         tokio::try_join!(
-            self.set_algorithm_config_init(
-                &new_config.client_config.algorithm_name,
-                &new_config.client_config.init_hyperparameters
-            ),
-            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_init_hyperparameters(&new_config.client_config.init_hyperparameters),
+            self.set_default_hyperparameters(&new_config.client_config.init_hyperparameters),
+            self.set_router_buffer_size_per_actor(new_config.client_config.router_buffer_size_per_actor),
             self.set_metrics_args(
                 &new_config.client_config.metrics_meter_name,
                 &new_config.client_config.metrics_otlp_endpoint
@@ -580,13 +619,9 @@ impl LifecycleManager {
             not(feature = "metrics")
         ))]
         tokio::try_join!(
-            self.set_algorithm_config_init(
-                &new_config.client_config.algorithm_name,
-                &new_config.client_config.init_hyperparameters
-            ),
-            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
+            self.set_router_buffer_size_per_actor(new_config.client_config.router_buffer_size_per_actor),
         )
         .map_err(|e| {
             LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
@@ -597,13 +632,9 @@ impl LifecycleManager {
             feature = "metrics"
         ))]
         tokio::try_join!(
-            self.set_algorithm_config_init(
-                &new_config.client_config.algorithm_name,
-                &new_config.client_config.init_hyperparameters
-            ),
-            self.set_max_traj_length(&new_config.transport_config.max_traj_length),
             self.set_local_model_path(&new_config.transport_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
+            self.set_router_buffer_size_per_actor(new_config.client_config.router_buffer_size_per_actor),
             self.set_metrics_args(
                 &new_config.client_config.metrics_meter_name,
                 &new_config.client_config.metrics_otlp_endpoint
@@ -737,6 +768,7 @@ mod unit_tests {
             tmp.path().to_path_buf(),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             TransportType::default(),
+            Some(1000),
         );
         // Keep the temp file alive until LifecycleManager has loaded the config.
         drop(tmp);
@@ -744,19 +776,19 @@ mod unit_tests {
     }
 
     #[tokio::test]
-    async fn set_max_traj_length_round_trip() {
+    async fn set_router_buffer_size_per_actor_round_trip() {
         let lm = make_lifecycle_manager();
-        lm.set_max_traj_length(&99).await.unwrap();
-        let val = *lm.get_max_traj_length().read().await;
+        lm.set_router_buffer_size_per_actor(99).await.unwrap();
+        let val = *lm.get_router_buffer_size_per_actor().read().await;
         assert_eq!(val, 99);
     }
 
     #[tokio::test]
-    async fn set_max_traj_length_overwrites_previous_value() {
+    async fn set_router_buffer_size_per_actor_overwrites_previous_value() {
         let lm = make_lifecycle_manager();
-        lm.set_max_traj_length(&10).await.unwrap();
-        lm.set_max_traj_length(&200).await.unwrap();
-        let val = *lm.get_max_traj_length().read().await;
+        lm.set_router_buffer_size_per_actor(10).await.unwrap();
+        lm.set_router_buffer_size_per_actor(200).await.unwrap();
+        let val = *lm.get_router_buffer_size_per_actor().read().await;
         assert_eq!(val, 200);
     }
 

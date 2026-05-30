@@ -5,6 +5,7 @@
 
 use crate::network::TransportType;
 use crate::network::client::agent::ModelMode;
+use crate::network::client::agent::AlgorithmInitArgs;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 #[cfg(feature = "nats-transport")]
@@ -15,9 +16,7 @@ use crate::network::client::runtime::data::sinks::transport_sink::zmq::ZmqClient
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::interface::ZmqInterface;
 use crate::network::client::runtime::router::RoutedMessage;
 use crate::prelude::network::ClientModes;
-use crate::utilities::configuration::Algorithm;
 
-use relayrl_types::HyperparameterArgs;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::data::trajectory::EncodedTrajectory;
@@ -197,8 +196,7 @@ pub(crate) trait AsyncClientTrainingTransportOps<B: Backend + BackendMatcher<Bac
         scaling_entry: (NamespaceString, ContextString, Uuid),
         actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: AlgorithmInitArgs,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     async fn initial_model_handshake(
@@ -233,8 +231,7 @@ pub(crate) trait SyncClientTrainingTransportOps<B: Backend + BackendMatcher<Back
         scaling_entry: (NamespaceString, ContextString, Uuid),
         actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: AlgorithmInitArgs,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError>;
     fn initial_model_handshake(

@@ -3,11 +3,11 @@
 //! The local/default client runtime is the supported `0.5.0-beta` path. NATS-backed workflows in
 //! this module remain experimental.
 
-use crate::network::client::agent::ModelMode;
+use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
 use crate::network::client::runtime::data::sinks::transport_sink::{
     ScalingOperation, TransportError,
 };
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol, ControlPayload};
 use crate::utilities::configuration::Algorithm;
 
 use super::inference_subjects::{
@@ -49,7 +49,7 @@ use tokio_stream::{Stream, StreamExt};
 // Every payload struct is serialized to `bytes::Bytes` via bincode v2 and sent
 // as the body of a NATS/JetStream message.
 mod payloads {
-    use crate::utilities::configuration::Algorithm;
+    use crate::network::client::agent::AlgorithmInitArgs;
     use relayrl_types::HyperparameterArgs;
     use relayrl_types::prelude::trajectory::EncodedTrajectory;
     use serde::{Deserialize, Serialize};
@@ -145,8 +145,7 @@ mod payloads {
         pub(super) scaling_id: String,
         pub(super) actor_entries_string: String,
         pub(super) model_mode_string: String,
-        pub(super) algorithm: Algorithm,
-        pub(super) hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        pub(super) algorithm_args: AlgorithmInitArgs,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -373,11 +372,10 @@ fn build_routed_model_update_message(
 
     Ok(RoutedMessage {
         actor_id: Uuid::from_bytes(actor_id_byte_array),
-        protocol: RoutingProtocol::ModelUpdate,
-        payload: RoutedPayload::ModelUpdate {
+        protocol: RoutingProtocol::Control(ControlPayload::ModelUpdate {
             model_bytes: model_bytes_vector,
             version: model_version,
-        },
+        }),
     })
 }
 
@@ -1210,8 +1208,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         actor_entries: &[(NamespaceString, ContextString, Uuid)],
         model_mode: &ModelMode,
-        algorithm: &Algorithm,
-        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: &AlgorithmInitArgs,
         nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         let (scaling_namespace, scaling_context, scaling_id) = scaling_entry;
@@ -1245,8 +1242,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             scaling_id: scaling_id.to_string(),
             actor_entries_string,
             model_mode_string,
-            algorithm: algorithm.clone(),
-            hyperparams: hyperparams.clone(),
+            algorithm_args: algorithm_args.clone(),
         };
 
         let serialized_algorithm_init_request_payload = serialize_payload_to_nats_bytes(

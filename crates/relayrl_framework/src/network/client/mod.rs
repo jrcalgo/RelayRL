@@ -13,6 +13,7 @@
 //! The local/default runtime follows this flow:
 //! `AgentBuilder` -> `RelayRLAgent` -> coordinator -> router/actors -> local file sink.
 pub mod agent;
+mod builder;
 pub(crate) mod runtime {
     pub(crate) mod actor;
     pub(crate) mod coordination {

@@ -4,7 +4,7 @@
 //! this module remain experimental.
 
 use crate::network::HyperparameterArgs;
-use crate::network::client::agent::ModelMode;
+use crate::network::client::agent::{ModelMode, AlgorithmInitArgs};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
@@ -13,7 +13,7 @@ use crate::network::client::runtime::data::sinks::transport_sink::TransportError
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::{
     ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
 };
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
 use crossbeam_utils::CachePadded;
 
@@ -616,11 +616,10 @@ fn build_routed_model_update_message(
 
     Ok(Some(RoutedMessage {
         actor_id,
-        protocol: RoutingProtocol::ModelUpdate,
-        payload: RoutedPayload::ModelUpdate {
+        protocol: RoutingProtocol::Control(ControlPayload::ModelUpdate {
             model_bytes,
             version: model_version,
-        },
+        }),
     }))
 }
 
@@ -1041,8 +1040,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         actor_entries: &[(NamespaceString, ContextString, Uuid)],
         model_mode: &ModelMode,
-        algorithm: &Algorithm,
-        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: &AlgorithmInitArgs,
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         // Experimental transport path: shared vs independent server-side algorithm
@@ -1086,13 +1084,28 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
             .collect::<Vec<String>>()
             .join(",");
 
-        let algorithm_name_string = algorithm.as_str().to_string();
-        let hyperparams_string = serde_json::to_string(&hyperparams).map_err(|e| {
-            TransportError::SendAlgorithmInitRequestError(format!(
-                "Failed to serialize hyperparams: {}",
-                e
-            ))
-        })?;
+        let algorithm_name_string = algorithm_args.as_str().to_string();
+
+        let hyperparams_string = match algorithm_args {
+            AlgorithmInitArgs::PPO(params) => serde_json::to_string(params).map_err(|e| {
+                TransportError::SendAlgorithmInitRequestError(format!(
+                    "Failed to serialize hyperparams: {}",
+                    e
+                ))
+            })?,
+            AlgorithmInitArgs::IPPO(params) => serde_json::to_string(params).map_err(|e| {
+                TransportError::SendAlgorithmInitRequestError(format!(
+                    "Failed to serialize hyperparams: {}",
+                    e
+                ))
+            })?,
+            AlgorithmInitArgs::MAPPO(params) => serde_json::to_string(params).map_err(|e| {
+                TransportError::SendAlgorithmInitRequestError(format!(
+                    "Failed to serialize hyperparams: {}",
+                    e
+                ))
+            })?
+        };
 
         let empty_frame: Vec<u8> = vec![];
         let transport_entry_frame: Vec<u8> = transport_entry_string.as_bytes().to_vec();

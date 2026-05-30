@@ -413,7 +413,7 @@ impl RouterDispatcher {
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, AlgorithmCfg, ClientModes, ModelMode,
+        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
     use crate::network::client::runtime::coordination::state_manager::{ActorRoute, StateManager};
     use crate::network::client::runtime::router::{ControlPayload, DataPayload, RoutingProtocol};
@@ -437,18 +437,16 @@ mod unit_tests {
     }
 
     fn make_state_manager() -> (
-        StateManager<TestBackend, D_IN, D_OUT>,
+        StateManager<TestBackend>,
         mpsc::Receiver<RoutedMessage>,
     ) {
-        StateManager::<TestBackend, D_IN, D_OUT>::new(
+        StateManager::<TestBackend>::new(
             Arc::from("test-dispatcher"),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             disabled_modes(),
-            Arc::new(RwLock::new(100)),
-            Arc::new(RwLock::new(AlgorithmCfg::default())),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),

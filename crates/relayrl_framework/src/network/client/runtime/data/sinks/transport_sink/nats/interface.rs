@@ -1,5 +1,5 @@
 use crate::network::client::agent::ClientModes;
-use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ModelMode};
+use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, AlgorithmInitArgs, ModelMode};
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::sinks::transport_sink::{
     AsyncClientInferenceTransportOps, AsyncClientScalingTransportOps,
@@ -1124,8 +1124,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
         scaling_entry: (NamespaceString, ContextString, Uuid),
         actor_entries: Vec<(NamespaceString, ContextString, Uuid)>,
         model_mode: ModelMode,
-        algorithm: Algorithm,
-        hyperparams: HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: AlgorithmInitArgs,
         transport_addresses: SharedTransportAddresses,
     ) -> Result<(), TransportError> {
         let protocol = self.training_protocol.as_ref().ok_or_else(|| {
@@ -1150,8 +1149,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTrainingTransportOps<B
                     &scaling_entry,
                     &actor_entries,
                     &model_mode,
-                    &algorithm,
-                    &hyperparams,
+                    &algorithm_args,
                     nats_training_server_address,
                 ),
             )
@@ -1539,8 +1537,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
         scaling_entry: &(NamespaceString, ContextString, Uuid),
         actor_entries: &[(NamespaceString, ContextString, Uuid)],
         model_mode: &ModelMode,
-        algorithm: &Algorithm,
-        hyperparams: &HashMap<Algorithm, HyperparameterArgs>,
+        algorithm_args: &AlgorithmInitArgs,
         nats_training_server_address: &str,
     ) -> Result<(), TransportError> {
         <NatsTrainingOps as NatsTrainingExecution<B>>::execute_send_algorithm_init_request(
@@ -1548,8 +1545,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
             scaling_entry,
             actor_entries,
             model_mode,
-            algorithm,
-            hyperparams,
+            algorithm_args,
             nats_training_server_address,
         )
         .await

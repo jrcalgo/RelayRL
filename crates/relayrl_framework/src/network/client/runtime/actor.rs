@@ -18,9 +18,12 @@ use crate::network::client::runtime::router::{
 };
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::AlgorithmInitArgs;
 
 use active_uuid_registry::registry_uuid::Uuid;
 use arc_swap::ArcSwapOption;
+use dashmap::DashMap;
 #[cfg(feature = "tch-backend")]
 use relayrl_env_trait::EnvTchDType;
 use relayrl_env_trait::{EnvDType, EnvNdArrayDType};
@@ -35,8 +38,11 @@ use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
 use std::time::Instant;
@@ -57,6 +63,60 @@ use thiserror::Error;
 ///   to every other actor that shares it.
 pub(crate) type LocalModelHandle<B> = Arc<ArcSwapOption<HotReloadableModel<B>>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ActorShape {
+    pub(crate) d_in: usize,
+    pub(crate) d_out: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActorDTypes {
+    pub(crate) dtype_in: DType,
+    pub(crate) dtype_out: DType,
+}
+
+pub(crate) trait ErasedActorRuntime<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync
+{
+    fn actor_shape(&self) -> ActorShape;
+
+    fn current_model_dtypes(&self) -> Result<ActorDTypes, ActorError>;
+
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    fn current_algorithm_args(&self) -> Result<AlgorithmInitArgs, ActorError>;
+
+    fn request_inference_erased(
+        &self,
+        observation: Box<dyn Any + Send + Sync>,
+        mask: Box<dyn Any + Send + Sync>,
+        reward: f32,
+    ) -> Pin<Box<dyn Future<Output = Result<RelayRLAction, ActorError>> + Send + '_>>;
+
+    fn flag_last_action_erased(
+        &self,
+        reward: f32,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
+        return_traj_override: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RelayRLTrajectory>, ActorError>> + Send + '_>>;
+
+    fn perform_env_byte_inference_erased<'a>(
+        &'a self,
+        model_name: &'a str,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        obs_dtype: &'a DType,
+    ) -> Pin<Box<dyn Future<Output = Result<TensorData, ActorError>> + Send + 'a>>;
+
+    fn perform_env_refresh_model_erased<'a>(
+        &'a self,
+        name: &'a str,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send + 'a>>;
+}
+
 struct ActorTrajectoryState {
     current_traj: RelayRLTrajectory,
     current_episode: u64,
@@ -66,9 +126,9 @@ struct ActorTrajectoryState {
 }
 
 impl ActorTrajectoryState {
-    fn new(max_traj_length: usize) -> Self {
+    fn new(max_traj_length: Arc<usize>) -> Self {
         Self {
-            current_traj: RelayRLTrajectory::new(max_traj_length),
+            current_traj: RelayRLTrajectory::new(*max_traj_length),
             current_episode: 0,
             per_env_trajs: HashMap::new(),
             per_env_episodes: HashMap::new(),
@@ -81,7 +141,7 @@ impl ActorTrajectoryState {
         actor_id: ActorUuid,
         env_id: Uuid,
         env_label: impl Into<String>,
-        max_traj_length: usize,
+        max_traj_length: Arc<usize>,
     ) -> &mut RelayRLTrajectory {
         let label = env_label.into();
         self.per_env_labels
@@ -89,7 +149,7 @@ impl ActorTrajectoryState {
             .or_insert_with(|| label.clone());
         self.per_env_trajs.entry(env_id).or_insert_with(|| {
             RelayRLTrajectory::with_metadata(
-                max_traj_length,
+                *max_traj_length,
                 Some(actor_id),
                 Some(env_id),
                 Some(label),
@@ -105,7 +165,7 @@ impl ActorTrajectoryState {
         env_id: Uuid,
         env_label: Option<String>,
         reward: f32,
-        max_traj_length: usize,
+        max_traj_length: Arc<usize>,
     ) -> RelayRLTrajectory {
         let label = env_label.unwrap_or_else(|| {
             self.per_env_labels
@@ -113,7 +173,7 @@ impl ActorTrajectoryState {
                 .cloned()
                 .unwrap_or_else(|| env_id.to_string())
         });
-        let traj = self.ensure_env_trajectory(actor_id, env_id, label.clone(), max_traj_length);
+        let traj = self.ensure_env_trajectory(actor_id, env_id, label.clone(), max_traj_length.clone());
         traj.add_action(RelayRLAction::new(
             None,
             None,
@@ -129,7 +189,7 @@ impl ActorTrajectoryState {
             .insert(
                 env_id,
                 RelayRLTrajectory::with_metadata(
-                    max_traj_length,
+                    *max_traj_length,
                     Some(actor_id),
                     Some(env_id),
                     Some(label),
@@ -148,14 +208,14 @@ impl ActorTrajectoryState {
         &mut self,
         actor_id: ActorUuid,
         reward: f32,
-        max_traj_length: usize,
+        max_traj_length: Arc<usize>,
     ) -> RelayRLTrajectory {
         let last_action = RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
         self.current_traj.add_action(last_action);
 
         let mut traj_to_send = std::mem::replace(
             &mut self.current_traj,
-            RelayRLTrajectory::new(max_traj_length),
+            RelayRLTrajectory::new(*max_traj_length),
         );
         traj_to_send.set_episode(self.current_episode);
         self.current_episode += 1;
@@ -165,14 +225,14 @@ impl ActorTrajectoryState {
     fn take_shutdown_trajectories(
         &mut self,
         actor_id: ActorUuid,
-        max_traj_length: usize,
+        max_traj_length: Arc<usize>,
     ) -> Vec<RelayRLTrajectory> {
         let mut trajectories = Vec::new();
 
         if !self.current_traj.actions.is_empty() {
             trajectories.push(std::mem::replace(
                 &mut self.current_traj,
-                RelayRLTrajectory::new(max_traj_length),
+                RelayRLTrajectory::new(*max_traj_length),
             ));
         }
 
@@ -188,7 +248,7 @@ impl ActorTrajectoryState {
                 env_id,
                 env_label,
                 0.0,
-                max_traj_length,
+                max_traj_length.clone(),
             ));
         }
 
@@ -203,10 +263,12 @@ pub(crate) struct ActorRuntime<
 > {
     actor_id: ActorUuid,
     pub(crate) reloadable_model: LocalModelHandle<B>,
-    temp_env_models: DashMap<Uuid, LocalModelHandle<B>>,
-    shared_max_traj_length: Arc<RwLock<usize>>,
+    temp_env_models: DashMap<String, LocalModelHandle<B>>,
+    max_traj_length: Arc<usize>,
     shared_tx_to_buffer: Sender<RoutedMessage>,
     trajectories: Mutex<ActorTrajectoryState>,
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    algorithm_args: AlgorithmInitArgs,
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
 }
@@ -220,18 +282,22 @@ impl<
     pub(crate) async fn new(
         actor_id: ActorUuid,
         reloadable_model: LocalModelHandle<B>,
-        shared_max_traj_length: Arc<RwLock<usize>>,
+        max_traj_length: usize,
         shared_tx_to_buffer: Sender<RoutedMessage>,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        algorithm_args: AlgorithmInitArgs,
     ) -> Self {
-        let max_traj_length = *shared_max_traj_length.read().await;
+        let max_traj_length = Arc::new(max_traj_length);
         Self {
             actor_id,
             reloadable_model,
             temp_env_models: DashMap::new(),
-            shared_max_traj_length,
+            max_traj_length: max_traj_length.clone(),
             shared_tx_to_buffer,
-            trajectories: Mutex::new(ActorTrajectoryState::new(max_traj_length)),
+            trajectories: Mutex::new(ActorTrajectoryState::new(max_traj_length.clone())),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            algorithm_args,
             #[cfg(feature = "metrics")]
             metrics,
         }
@@ -326,13 +392,17 @@ impl<
         obs_dim: usize,
         obs_dtype: &DType,
     ) -> Result<TensorData, ActorError> {
-        let loaded_model = match self.temp_env_models.get(model_name) {
-            
-        }
-        let reloadable_model_ref = loaded_model.as_ref().ok_or_else(|| {
-            ActorError::SystemError("Model not loaded/available for actor inference".to_string())
+        let guard = self.temp_env_models.get(model_name);
+        let slot = guard.as_ref().ok_or_else(|| {
+            ActorError::SystemError(format!(
+                "Model slot '{}' not loaded — call perform_env_refresh_model first",
+                model_name
+            ))
         })?;
-        let module = reloadable_model_ref.current_module();
+        let model = slot.load_full().ok_or_else(|| {
+            ActorError::SystemError(format!("Model slot '{}' handle is empty", model_name))
+        })?;
+        let module = model.current_module();
 
         let input = TensorData::new(
             vec![n_envs, obs_dim],
@@ -357,7 +427,6 @@ impl<
         let start_time = Instant::now();
 
         let result = async {
-            let max_traj_length = *self.shared_max_traj_length.read().await;
             let maybe_trajectory = {
                 let mut trajectories = self.trajectories.lock().await;
                 Some(match env_id {
@@ -366,12 +435,12 @@ impl<
                         env_id,
                         env_label,
                         reward,
-                        max_traj_length,
+                        self.max_traj_length.clone(),
                     ),
                     None => trajectories.take_completed_actor_trajectory(
                         self.actor_id,
                         reward,
-                        max_traj_length,
+                        self.max_traj_length.clone(),
                     ),
                 })
             };
@@ -431,11 +500,43 @@ impl<
         }
     }
 
+    /// Load or hot-reload a named model slot used by `perform_env_byte_inference`.
+    pub(crate) async fn perform_env_refresh_model(
+        &self,
+        name: &str,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Result<(), ActorError> {
+        if let Some(slot) = self.temp_env_models.get(name) {
+            match slot.load_full() {
+                Some(model) => {
+                    model
+                        .reload_from_module(model_module, model.version())
+                        .await
+                        .map_err(ActorError::from)?;
+                }
+                None => {
+                    let reloadable = Arc::new(
+                        HotReloadableModel::<B>::new_from_module(model_module, device).await?,
+                    );
+                    slot.store(Some(reloadable));
+                }
+            }
+        } else {
+            let reloadable =
+                Arc::new(HotReloadableModel::<B>::new_from_module(model_module, device).await?);
+            self.temp_env_models.insert(
+                name.to_string(),
+                Arc::new(arc_swap::ArcSwapOption::new(Some(reloadable))),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn flush_shutdown_trajectories(&self) -> Result<(), ActorError> {
-        let max_traj_length = *self.shared_max_traj_length.read().await;
         let trajectories = {
             let mut state = self.trajectories.lock().await;
-            state.take_shutdown_trajectories(self.actor_id, max_traj_length)
+            state.take_shutdown_trajectories(self.actor_id, self.max_traj_length.clone())
         };
 
         for trajectory in trajectories {
@@ -446,11 +547,110 @@ impl<
     }
 }
 
+impl<B, const D_IN: usize, const D_OUT: usize> ErasedActorRuntime<B>
+    for ActorRuntime<B, D_IN, D_OUT>
+where
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+{
+    fn actor_shape(&self) -> ActorShape {
+        ActorShape {
+            d_in: D_IN,
+            d_out: D_OUT,
+        }
+    }
+
+    fn current_model_dtypes(&self) -> Result<ActorDTypes, ActorError> {
+        let model = self
+            .reloadable_model
+            .load().clone()
+            .ok_or_else(|| ActorError::ModelNotLoadedError)?;
+        Ok(ActorDTypes {
+            dtype_in: model.current_module().metadata.input_dtype.clone(),
+            dtype_out: model.current_module().metadata.output_dtype.clone(),
+        })
+    }
+
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    fn current_algorithm_args(&self) -> Result<AlgorithmInitArgs, ActorError> {
+        Ok(self.algorithm_args.clone())
+    }
+
+    fn request_inference_erased(
+        &self,
+        observation: Box<dyn Any + Send + Sync>,
+        mask: Box<dyn Any + Send + Sync>,
+        reward: f32,
+    ) -> Pin<Box<dyn Future<Output = Result<RelayRLAction, ActorError>> + Send + '_>> {
+        Box::pin(async move {
+            let observation = *observation
+                .downcast::<Arc<AnyBurnTensor<B, D_IN>>>()
+                .map_err(|_| {
+                    ActorError::TypeConversionError(
+                        "invalid observation shape for actor runtime".to_string(),
+                    )
+                })?;
+
+            let mask = *mask
+                .downcast::<Option<Arc<AnyBurnTensor<B, D_OUT>>>>()
+                .map_err(|_| {
+                    ActorError::TypeConversionError(
+                        "invalid mask shape for actor runtime".to_string(),
+                    )
+                })?;
+
+            self.perform_local_inference(observation, mask, reward)
+                .await
+        })
+    }
+
+    fn flag_last_action_erased(
+        &self,
+        reward: f32,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
+        return_traj_override: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RelayRLTrajectory>, ActorError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            self.flag_last_action(reward, env_id, env_label, return_traj_override)
+                .await
+        })
+    }
+
+    fn perform_env_byte_inference_erased<'a>(
+        &'a self,
+        model_name: &'a str,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        obs_dtype: &'a DType,
+    ) -> Pin<Box<dyn Future<Output = Result<TensorData, ActorError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.perform_env_byte_inference(model_name, obs_bytes, n_envs, obs_dim, obs_dtype)
+                .await
+        })
+    }
+
+    fn perform_env_refresh_model_erased<'a>(
+        &'a self,
+        name: &'a str,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.perform_env_refresh_model(name, model_module, device)
+                .await
+        })
+    }
+}
+
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
 pub enum ActorError {
     #[error(transparent)]
     ModelError(#[from] ModelError),
+    #[error("Model not loaded")]
+    ModelNotLoadedError,
     #[error("Trajectory send failed: {0}")]
     TrajectorySendError(String),
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -828,7 +1028,7 @@ impl<
                                                     actor_id,
                                                     e
                                                 );
-                                                ActorError::from(e)
+                                                ActorError::ModelError(e)
                                             })?;
                                     }
                                     None => {
@@ -1075,10 +1275,12 @@ mod unit_tests {
             ActorRuntime::new(
                 actor_id,
                 model_handle,
-                Arc::new(RwLock::new(max_traj_length)),
+                max_traj_length,
                 tx_to_buffer.clone(),
                 #[cfg(feature = "metrics")]
                 test_metrics(),
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                AlgorithmInitArgs::default(),
             )
             .await,
         );
@@ -1222,8 +1424,8 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(matches!(
-            traj_msg.payload,
-            RoutedPayload::SendTrajectory { .. }
+            traj_msg.protocol,
+            RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
         ));
 
         // Now send Shutdown
@@ -1281,7 +1483,7 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(
-            matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
+            matches!(msg.protocol, RoutingProtocol::Data(DataPayload::SendTrajectory { .. })),
             "FlagLastInference should produce a SendTrajectory message"
         );
     }
@@ -1334,8 +1536,8 @@ mod unit_tests {
             .unwrap();
 
         let msg = rx_buf.recv().await.expect("expected env trajectory flush");
-        match msg.payload {
-            RoutedPayload::SendTrajectory { trajectory, .. } => {
+        match msg.protocol {
+            RoutingProtocol::Data(DataPayload::SendTrajectory { trajectory, .. }) => {
                 assert_eq!(trajectory.get_env_id(), Some(&env_id_1));
                 assert_eq!(trajectory.get_env_label(), Some("env-1"));
             }

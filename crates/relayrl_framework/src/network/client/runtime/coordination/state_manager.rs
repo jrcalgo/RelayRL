@@ -3,10 +3,12 @@
 //! This module tracks actor task handles, inboxes, router assignments, and local model handles for
 //! the client runtime.
 
-use crate::network::client::agent::{ActorInferenceMode, AlgorithmCfg, ClientModes, ModelMode};
+use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode, AlgorithmInitArgs};
 use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
 use crate::network::client::runtime::actor::LocalModelHandle;
-use crate::network::client::runtime::actor::{Actor, ActorEntity, ActorRuntime};
+use crate::network::client::runtime::actor::{
+    Actor, ActorEntity, ActorError, ActorRuntime, ErasedActorRuntime,
+};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -31,12 +33,13 @@ use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
-use relayrl_algorithms::templates::base_algorithm::AlgorithmTrait;
+use relayrl_algorithms::prelude::nn::NeuralNetwork;
+use relayrl_algorithms::prelude::ppo::trainer::PPOTrainerSpec;
 use relayrl_env_trait::{EnvDType, EnvNdArrayDType, Environment, EnvironmentUuid};
-use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
+use relayrl_types::data::tensor::{BackendMatcher, DType, DeviceType, NdArrayDType};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::{HotReloadableModel, ModelModule};
-use relayrl_types::prelude::tensor::burn::TensorKind;
+use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
@@ -106,11 +109,13 @@ pub enum StateManagerError {
     #[error("Environment training error: {0}")]
     TrainerError(String),
     #[error(transparent)]
-    AlgorithmError(#[from] relayrl_algorithms::AlgorithmError),
+    AlgorithmError(#[from] relayrl_algorithms::templates::base_algorithm::AlgorithmError),
     #[error("Algorithm config init failed: {0}")]
     AlgorithmConfigInitError(String),
     #[error(transparent)]
     TrainingError(#[from] TrainingError),
+    #[error(transparent)]
+    ActorError(#[from] crate::network::client::runtime::actor::ActorError),
 }
 
 pub type ActorUuid = Uuid;
@@ -126,19 +131,13 @@ pub(crate) struct SharedRouterState {
 }
 
 /// In-memory actor state management and global channel transport
-pub(crate) struct StateManager<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
+pub(crate) struct StateManager<B: Backend + BackendMatcher<Backend = B>> {
     client_namespace: Arc<str>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
     shared_client_modes: Arc<ClientModes>,
-    shared_max_traj_length: Arc<RwLock<usize>>,
-    pub(crate) shared_algorithm_config_init: Arc<RwLock<AlgorithmCfg>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -152,15 +151,13 @@ pub(crate) struct StateManager<
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
-    pub(crate) actor_runtime_handles: Arc<DashMap<ActorUuid, Arc<ActorRuntime<B, D_IN, D_OUT>>>>,
+    pub(crate) actor_runtime_handles: Arc<DashMap<ActorUuid, Arc<dyn ErasedActorRuntime<B>>>>,
     pub(crate) shared_actor_count: Arc<CachePadded<AtomicUsize>>,
 }
 
 // ===== Construction and actor lifecycle =====
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    StateManager<B, D_IN, D_OUT>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client_namespace: Arc<str>,
@@ -169,8 +166,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
         shared_client_modes: Arc<ClientModes>,
-        shared_max_traj_length: Arc<RwLock<usize>>,
-        shared_algorithm_config_init: Arc<RwLock<AlgorithmCfg>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -187,8 +182,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_training_dispatcher,
                 shared_client_modes,
-                shared_max_traj_length,
-                shared_algorithm_config_init,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_transport_addresses,
                 shared_local_model_path,
@@ -320,13 +313,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    pub(crate) async fn new_actor(
+    pub(crate) async fn new_actor<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         actor_id: ActorUuid,
         router_namespace: RouterNamespace,
         device: DeviceType,
+        max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        algorithm_args: AlgorithmInitArgs,
     ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&actor_id) {
             log::warn!(
@@ -347,7 +343,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         );
 
         let shared_local_model_path = self.shared_local_model_path.clone();
-        let shared_max_traj_length = self.shared_max_traj_length.clone();
         let shared_client_modes = self.shared_client_modes.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_inference_dispatcher = self.shared_inference_dispatcher.clone();
@@ -362,7 +357,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let client_namespace = self.client_namespace.clone();
 
-        let (model_handle, model_handshake_flag) = self
+        let (model_handle, _model_handshake_flag) = self
             .get_or_init_model_handle(default_model, device.clone())
             .await?;
         self.actor_devices.insert(actor_id, device.clone());
@@ -373,17 +368,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_model_handles
             .insert(actor_id, model_handle.clone());
         let runtime = Arc::new(
-            ActorRuntime::new(
+            ActorRuntime::<B, D_IN, D_OUT>::new(
                 actor_id,
                 model_handle.clone(),
-                shared_max_traj_length.clone(),
+                max_traj_length,
                 tx_to_buffer.clone(),
                 #[cfg(feature = "metrics")]
                 runtime_metrics,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                algorithm_args,
             )
             .await,
         );
-        self.actor_runtime_handles.insert(actor_id, runtime.clone());
+        let erased_runtime: Arc<dyn ErasedActorRuntime<B>> = runtime.clone();
+        self.actor_runtime_handles.insert(actor_id, erased_runtime);
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let mut actor: Actor<B, D_IN, D_OUT> = Actor::<B, D_IN, D_OUT>::new(
@@ -408,7 +406,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             // Use the flag computed by StateManager so that, in Shared mode, only the first
             // actor per device triggers the network handshake.
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            if model_handshake_flag {
+            if _model_handshake_flag {
                 let model_handshake_ms = RoutedMessage {
                     actor_id,
                     protocol: RoutingProtocol::Control(ControlPayload::ModelHandshake),
@@ -429,21 +427,27 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     #[allow(unused)]
-    pub(crate) async fn restart_actor(
+    pub(crate) async fn restart_actor<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         actor_id: ActorUuid,
         router_namespace: RouterNamespace,
         device: DeviceType,
+        max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        algorithm_args: AlgorithmInitArgs,
     ) -> Result<(), StateManagerError> {
         self.remove_actor(actor_id)?;
-        self.new_actor(
+        self.new_actor::<D_IN, D_OUT>(
             actor_id,
             router_namespace,
             device,
+            max_traj_length,
             default_model,
             tx_to_buffer,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            algorithm_args,
         )
         .await?;
         Ok(())
@@ -539,18 +543,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         current_id: ActorUuid,
         new_id: ActorUuid,
     ) -> Result<(), StateManagerError> {
-        let current_id_handle =
-            match StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, current_id) {
-                Some(handle) => handle.clone(),
-                None => {
-                    return Err(StateManagerError::ActorHandleNotFoundError(format!(
-                        "[StateManager] Actor ID {} not found",
-                        current_id
-                    )));
-                }
-            };
-        let current_route = match StateManager::<B, D_IN, D_OUT>::get_actor_route(self, current_id)
-        {
+        let current_id_handle = match StateManager::<B>::get_actor_handle(self, current_id) {
+            Some(handle) => handle.clone(),
+            None => {
+                return Err(StateManagerError::ActorHandleNotFoundError(format!(
+                    "[StateManager] Actor ID {} not found",
+                    current_id
+                )));
+            }
+        };
+        let current_route = match StateManager::<B>::get_actor_route(self, current_id) {
             Some(route) => route,
             None => {
                 return Err(StateManagerError::ActorInboxNotFoundError(format!(
@@ -559,8 +561,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 )));
             }
         };
-        if StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, new_id).is_some()
-            || StateManager::<B, D_IN, D_OUT>::get_actor_route(self, new_id).is_some()
+        if StateManager::<B>::get_actor_handle(self, new_id).is_some()
+            || StateManager::<B>::get_actor_route(self, new_id).is_some()
         {
             return Err(StateManagerError::ActorAlreadyTakenError(format!(
                 "[StateManager] Actor ID {} already taken",
@@ -600,7 +602,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             return;
         }
 
-        let mut actor_ids: Vec<ActorUuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
+        let mut actor_ids: Vec<ActorUuid> = StateManager::<B>::get_actor_id_list(self);
         actor_ids.sort_by_key(|actor_id| actor_id.to_string());
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
@@ -741,23 +743,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map(|route| route.value().clone())
     }
 
-    fn get_actor_runtime(&self, id: Uuid) -> Option<Arc<ActorRuntime<B, D_IN, D_OUT>>> {
+    fn get_actor_runtime(&self, id: Uuid) -> Option<Arc<dyn ErasedActorRuntime<B>>> {
         self.actor_runtime_handles
             .get(&id)
             .map(|runtime| Arc::clone(runtime.value()))
-    }
-
-    async fn flag_last_action_direct(
-        runtime: &Arc<ActorRuntime<B, D_IN, D_OUT>>,
-        reward: f32,
-        env_id: Option<EnvironmentUuid>,
-        env_label: Option<String>,
-        return_traj_override: bool,
-    ) -> Result<Option<RelayRLTrajectory>, StateManagerError> {
-        runtime
-            .flag_last_action(reward, env_id, env_label, return_traj_override)
-            .await
-            .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))
     }
 
     pub(crate) fn set_env(
@@ -855,7 +844,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         actor_id: ActorUuid,
     ) -> Result<
         (
-            Arc<ActorRuntime<B, D_IN, D_OUT>>,
+            Arc<dyn ErasedActorRuntime<B>>,
             Arc<DashMap<ActorUuid, EnvironmentInterface>>,
         ),
         StateManagerError,
@@ -879,9 +868,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) fn run_env_eval_step_loop(
         actor_id: ActorUuid,
-        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
-        step_count: usize,
+        loop_iters: usize,
     ) -> Result<(), StateManagerError> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -909,14 +898,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
                 let discrete = env_interface.action_is_discrete().unwrap_or(true);
 
-                for _ in 0..step_count {
+                for _ in 0..loop_iters {
                     let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
                         StateManagerError::StepEnvError(
                             "[StateManager] flat_observation_bytes returned None".to_string(),
                         )
                     })?;
+                    let obs_dtype_conv = env_dtype_to_dtype(&obs_dtype)?;
                     let raw_output = runtime
-                        .perform_local_byte_inference(&obs_bytes, n_envs, obs_dim, &obs_dtype)
+                        .perform_env_byte_inference_erased(
+                            "model",
+                            &obs_bytes,
+                            n_envs,
+                            obs_dim,
+                            &obs_dtype_conv,
+                        )
                         .await
                         .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
 
@@ -950,43 +946,80 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) fn run_env_step_loop_with_ppo<KindIn, KindOut, Pi>(
         actor_id: ActorUuid,
         shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
-        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
-        step_count: usize,
+        loop_iters: usize,
         max_traj_length: usize,
-        training_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), StateManagerError> where KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static, KindOut: TensorKind<B> + burn_tensor::Numeric<B> + Send + 'static, Pi: NeuralNetworkSpec<B, KindIn, KindOut> + NeuralNetworkForward<B, KindIn, KindOut>
+        trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), StateManagerError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        B: Default + Send + Sync + 'static,
     {
-        TrainingInterface::train_ppo(
+        TrainingInterface::<B>::train_ppo(
             actor_id,
             shutdown_rx,
             runtime,
             env_map,
-            step_count,
+            loop_iters,
             max_traj_length,
-            training_spec,
+            trainer_spec,
         )
         .map_err(StateManagerError::from)
     }
 
-    pub(crate) fn run_env_step_loop_with_mappo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
+    pub(crate) fn run_env_step_loop_with_ippo<KindIn, KindOut, Pi>(
         actor_id: ActorUuid,
-        shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
-        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
-        step_count: usize,
+        loop_iters: usize,
         max_traj_length: usize,
-        training_spec: MAPPOTrainerSpec<B, KindIn, KindOut, Pi>,
+        trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), StateManagerError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        B: Default + Send + Sync + 'static,
     {
-        TrainingInterface::train_mappo(
+        TrainingInterface::<B>::train_ippo(
             actor_id,
             shutdown_rx,
             runtime,
             env_map,
-            step_count,
+            loop_iters,
             max_traj_length,
-            training_spec,
+            trainer_spec,
+        )
+        .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn run_env_step_loop_with_mappo<KindIn, KindOut, Pi>(
+        actor_id: ActorUuid,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        loop_iters: usize,
+        max_traj_length: usize,
+        trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), StateManagerError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        B: Default + Send + Sync + 'static,
+    {
+        TrainingInterface::<B>::train_mappo(
+            actor_id,
+            shutdown_rx,
+            runtime,
+            env_map,
+            loop_iters,
+            max_traj_length,
+            trainer_spec,
         )
         .map_err(StateManagerError::from)
     }
@@ -1252,7 +1285,7 @@ fn decode_continuous_bytes(
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, AlgorithmCfg, ClientModes, ModelMode,
+        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
     use active_uuid_registry::interface::{reserve_id_with, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
@@ -1288,19 +1321,17 @@ mod unit_tests {
     fn make_state_manager(
         modes: Arc<ClientModes>,
     ) -> (
-        StateManager<TestBackend, D_IN, D_OUT>,
+        StateManager<TestBackend>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
         let namespace: Arc<str> = Arc::from(format!("test-sm-{}", Uuid::new_v4()));
-        StateManager::<TestBackend, D_IN, D_OUT>::new(
+        StateManager::<TestBackend>::new(
             namespace,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             modes,
-            Arc::new(RwLock::new(100)),
-            Arc::new(RwLock::new(AlgorithmCfg::default())),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -1842,10 +1873,12 @@ mod unit_tests {
             ActorRuntime::<TestBackend, D_IN, D_OUT>::new(
                 actor_id,
                 Arc::new(ArcSwapOption::new(None)),
-                Arc::new(RwLock::new(10)),
+                10usize,
                 tx_to_buffer,
                 #[cfg(feature = "metrics")]
                 test_metrics(),
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                AlgorithmInitArgs::default(),
             )
             .await,
         );
@@ -1857,8 +1890,9 @@ mod unit_tests {
             },
         );
 
-        StateManager::<TestBackend, D_IN, D_OUT>::flag_last_action_direct(
-            &runtime,
+        let erased_runtime: Arc<dyn ErasedActorRuntime<TestBackend>> = runtime;
+        StateManager::<TestBackend>::flag_last_action_direct(
+            &erased_runtime,
             1.25,
             Some(env_id),
             Some("env-1".to_string()),

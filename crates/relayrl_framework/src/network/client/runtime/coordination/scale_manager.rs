@@ -3,10 +3,9 @@
 //! This module owns scalable router workers and the supporting runtime components that feed actor
 //! inboxes and trajectory sinks.
 
-use crate::network::HyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::{ActorInferenceMode, AlgorithmArgs, ModelMode};
+use crate::network::client::agent::{ActorInferenceMode, ModelMode, AlgorithmInitArgs};
 use crate::network::client::agent::{
     ActorTrainingDataMode, ClientModes, uses_in_memory_data, uses_local_file_writing,
 };
@@ -32,7 +31,6 @@ use crate::network::client::runtime::router::router_dispatcher::RouterDispatcher
 use crate::network::client::runtime::router::{
     RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
 };
-use crate::utilities::configuration::Algorithm;
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
@@ -49,7 +47,6 @@ use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -106,7 +103,7 @@ pub(crate) enum ScalingOperation {
 #[derive(Clone)]
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) enum ProcessInitFlag<B: Backend + BackendMatcher<Backend = B>> {
-    TrainingAlgorithmInit,
+    TrainingAlgorithmInit(AlgorithmInitArgs),
     InferenceModelInit(Option<ModelModule<B>>),
 }
 
@@ -121,23 +118,15 @@ pub(crate) struct RouterRuntimeParams {
 pub type RouterNamespace = Arc<str>;
 pub type ScaleManagerUuid = Uuid;
 
-pub(crate) struct ScaleManager<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
+pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>> {
     client_namespace: Arc<str>,
     router_namespace_counter: u32,
     #[allow(unused)]
     pub(crate) scaling_id: ScaleManagerUuid,
     shared_client_modes: Arc<ClientModes>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    shared_algorithm_args: Arc<AlgorithmArgs>,
-    shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+    shared_state: Arc<RwLock<StateManager<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    shared_init_hyperparameters: Arc<RwLock<HashMap<Algorithm, HyperparameterArgs>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
     pub(crate) shared_trajectory_memory: Option<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -150,23 +139,18 @@ pub(crate) struct ScaleManager<
     pub(crate) router_filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
     pub(crate) runtime_params: Option<DashMap<RouterNamespace, RouterRuntimeParams>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    codec: CodecConfig,
-    cached_hyperparameters: HashMap<Algorithm, HyperparameterArgs>,
+    training_codec: CodecConfig,
     lifecycle: Option<LifecycleManager>,
 }
 
 // ===== Scale manager construction and teardown =====
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    ScaleManager<B, D_IN, D_OUT>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         client_namespace: Arc<str>,
         shared_client_modes: Arc<ClientModes>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        shared_algorithm_args: Arc<AlgorithmArgs>,
-        shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
+        shared_state: Arc<RwLock<StateManager<B>>>,
         global_dispatcher_rx: Receiver<RoutedMessage>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
@@ -174,7 +158,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: Option<
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] training_codec: Option<
             CodecConfig,
         >,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
@@ -217,9 +201,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             }
         }));
 
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let shared_init_hyperparameters = lifecycle.get_init_hyperparameters();
-
         let shared_trajectory_file_output =
             if uses_local_file_writing(&shared_client_modes.actor_training_data_mode) {
                 Some(lifecycle.get_trajectory_file_output())
@@ -239,8 +220,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             router_namespace_counter: 0,
             scaling_id,
             shared_client_modes,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            shared_algorithm_args,
             shared_state,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             scaling_dispatcher,
@@ -253,13 +232,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             runtime_params: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            shared_init_hyperparameters,
             shared_trajectory_file_output,
             shared_trajectory_memory,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            codec: codec.unwrap_or_default(),
-            cached_hyperparameters: HashMap::new(),
+            training_codec: training_codec.unwrap_or_default(),
             lifecycle: Some(lifecycle),
         })
     }
@@ -286,7 +262,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.router_filter_channels.clear();
         let _ = self.runtime_params.take();
         let _ = self.lifecycle.take();
-        self.cached_hyperparameters.clear();
         Ok(())
     }
 
@@ -358,22 +333,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             );
 
             let built_process_init_request = match process_init_flag {
-                ProcessInitFlag::TrainingAlgorithmInit => {
-                    let algorithm_args = self.shared_algorithm_args.algorithm.clone();
-
-                    let hyperparameter_args =
-                        if let Some(param_args) = &self.shared_algorithm_args.hyperparams {
-                            self.cached_hyperparameters
-                                .insert(algorithm_args.clone(), param_args.clone());
-                            self.cached_hyperparameters.clone()
-                        } else {
-                            let hp_map = self.shared_init_hyperparameters.read().await.clone();
-                            for (k, v) in &hp_map {
-                                self.cached_hyperparameters.insert(k.clone(), v.clone());
-                            }
-                            hp_map
-                        };
-
+                ProcessInitFlag::TrainingAlgorithmInit(algorithm_args) => {
                     let algorithm_model_mode =
                         match self.shared_client_modes.actor_training_data_mode.clone() {
                             ActorTrainingDataMode::Online(params) => params.model_mode,
@@ -385,7 +345,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     ProcessInitRequest::TrainingAlgorithmInit(
                         algorithm_model_mode,
                         algorithm_args,
-                        hyperparameter_args,
                     )
                 }
                 ProcessInitFlag::InferenceModelInit(default_model) => {
@@ -527,9 +486,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
             let filter = {
-                let shared_filter_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>> =
-                    self.shared_state.clone();
-                let filter_init: ClientCentralFilter<B, D_IN, D_OUT> = ClientCentralFilter::new(
+                let shared_filter_state: Arc<RwLock<StateManager<B>>> = self.shared_state.clone();
+                let filter_init: ClientCentralFilter<B> = ClientCentralFilter::new(
                     router_namespace.clone(),
                     filter_rx,
                     shared_filter_state,
@@ -562,7 +520,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         trajectory_buffer_rx,
                         self.shared_client_modes.clone(),
                         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                        self.codec.clone(),
+                        self.training_codec.clone(),
                     );
 
                     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -599,7 +557,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let shared_max_traj_length = self
                         .lifecycle
                         .as_ref()
-                        .map(|lc| lc.get_max_traj_length())
+                        .map(|lc| lc.get_router_buffer_size_per_actor())
                         .unwrap_or_else(|| Arc::new(RwLock::new(1000)));
                     let shared_actor_count =
                         self.shared_state.read().await.shared_actor_count.clone();
@@ -677,12 +635,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let old_actor_mappings: Vec<(Uuid, RouterNamespace)> = {
             let state = self.shared_state.read().await;
-            StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&state)
+            StateManager::<B>::get_actor_router_mappings(&state)
         };
 
         {
             let state = self.shared_state.write().await;
-            StateManager::<B, D_IN, D_OUT>::distribute_actors(&state, router_namespaces.clone());
+            StateManager::<B>::distribute_actors(&state, router_namespaces.clone());
         }
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -697,10 +655,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 {
                     let state = self.shared_state.write().await;
-                    StateManager::<B, D_IN, D_OUT>::restore_actor_router_mappings(
-                        &state,
-                        old_actor_mappings,
-                    );
+                    StateManager::<B>::restore_actor_router_mappings(&state, old_actor_mappings);
                 }
 
                 self.rollback_routers(&new_router_namespaces).await;
@@ -854,7 +809,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let old_actor_mappings: Vec<(Uuid, RouterNamespace)> = {
             let state = self.shared_state.read().await;
-            StateManager::<B, D_IN, D_OUT>::get_actor_router_mappings(&state)
+            StateManager::<B>::get_actor_router_mappings(&state)
         };
 
         {
@@ -1017,7 +972,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn spawn_central_filter(filter: ClientCentralFilter<B, D_IN, D_OUT>) -> JoinHandle<()> {
+    async fn spawn_central_filter(filter: ClientCentralFilter<B>) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = filter.spawn_loop().await {
                 log::error!("[ScaleManager] Central filter error: {}", e);
@@ -1027,7 +982,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn spawn_transport_receiver(
-        mut receiver: ClientTransportModelReceiver<B, D_IN, D_OUT>,
+        mut receiver: ClientTransportModelReceiver<B>,
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             if let Err(e) = receiver.spawn_loop().await {
