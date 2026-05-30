@@ -1,5 +1,5 @@
 use crate::algorithms::PPO::kernel::PPOPolicyHead;
-use crate::algorithms::{GenericMlp, NeuralNetwork, NeuralNetworkError};
+use crate::algorithms::{GenericMlp, NeuralNetwork};
 use crate::templates::base_algorithm::AlgorithmError;
 use burn_tensor::backend::Backend;
 use burn_tensor::{BasicOps, Float, TensorKind};

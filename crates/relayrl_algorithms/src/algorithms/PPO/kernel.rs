@@ -1,13 +1,12 @@
-use crate::algorithms::WeightProvider;
 use crate::algorithms::{
-    GenericMlp, LayerSpecs, NeuralNetwork, NeuralNetworkError, NeuralNetworkForward,
+    GenericMlp, LayerSpecs, NeuralNetwork, NeuralNetworkError, 
     NeuralNetworkSpec, ValueFunction,
 };
-use crate::algorithms::{convert_byte_dtype_to_f32, convert_byte_dtype_to_i64, dtype_to_byte_count};
+use crate::algorithms::{convert_byte_dtype_to_f32, convert_byte_dtype_to_i64};
 
 use burn_tensor::TensorData as BurnTensorData;
 use burn_tensor::backend::Backend;
-use burn_tensor::{BasicOps, Bool, Float, Int, Tensor, TensorKind};
+use burn_tensor::{BasicOps, Float, Int, Tensor, TensorKind};
 use rand::RngExt;
 use rand_distr::Distribution;
 use rayon::prelude::*;
@@ -39,7 +38,9 @@ pub(crate) mod training {
     #[cfg(feature = "tch-backend")]
     pub type TB = Autodiff<LibTorch>;
 
+    #[cfg(not(feature = "tch-backend"))]
     use burn_ndarray::NdArray;
+    #[cfg(not(feature = "tch-backend"))]
     pub type TB = Autodiff<NdArray>;
 
     /// Separate pi and vf layer stacks. Trained with one shared Adam optimizer.
@@ -288,6 +289,7 @@ pub(crate) mod training {
 
         /// Value-only forward (no grad). Used for deferred GAE.
         pub fn value_forward_flat(&self, obs_flat: &[f32], obs_dim: usize) -> Vec<f32> {
+            #[allow(clippy::manual_checked_ops)]
             let n = if obs_dim > 0 {
                 obs_flat.len() / obs_dim
             } else {
@@ -525,6 +527,7 @@ pub trait PPOKernelTraining<
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 >
 {
+    #[allow(clippy::too_many_arguments)]
     fn train_step(
         &mut self,
         obs: &[TensorData],

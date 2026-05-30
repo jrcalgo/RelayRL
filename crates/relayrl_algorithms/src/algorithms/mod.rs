@@ -13,6 +13,7 @@ use half;
 pub mod PPO;
 
 pub mod onnx_builder;
+#[cfg(feature = "tch-model")]
 pub mod torch_builder;
 
 #[derive(thiserror::Error, Debug, Clone)]
@@ -506,7 +507,6 @@ pub fn dtype_to_byte_count(dtype: DType) -> usize {
             TchDType::U8 => 1usize,
             TchDType::Bool => 1usize,
         },
-        _ => 0usize,
     }
 }
 
@@ -586,9 +586,7 @@ pub fn convert_byte_dtype_to_f32(
                 .iter()
                 .map(|&x| if x != 0 { 1.0f32 } else { 0.0f32 })
                 .collect::<Vec<f32>>(),
-        },
-        _ => return Err(NeuralNetworkError::UnsupportedDType(byte_dtype.to_string())),
-    })
+        }    })
 }
 
 #[inline(always)]
@@ -667,11 +665,5 @@ pub fn convert_byte_dtype_to_i64(
                 .iter()
                 .map(|&x| if x != 0 { 1i64 } else { 0i64 })
                 .collect::<Vec<i64>>(),
-        },
-        _ => {
-            return Err(NeuralNetworkError::UnsupportedDType(
-                byte_dtype.to_string(),
-            ))
-        }
-    })
+        }    })
 }

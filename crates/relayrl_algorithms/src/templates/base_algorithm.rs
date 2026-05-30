@@ -4,12 +4,9 @@
 //! training the model, and logging training epochs.
 
 use burn_tensor::backend::Backend;
-use burn_tensor::{Float, Int, TensorKind};
 use relayrl_types::prelude::records::{ArrowTrajectory, CsvTrajectory};
-use relayrl_types::prelude::tensor::burn::Tensor;
-use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, TensorData, TensorError};
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::RelayRLTrajectory;
-use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]

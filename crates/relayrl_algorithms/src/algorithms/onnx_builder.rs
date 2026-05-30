@@ -16,7 +16,7 @@
 /// B shaped `[in, out]`, the result is `[batch, out]` — exactly the right shape when A
 /// is `[batch, in]`.  The old code had `transB=1` (PyTorch convention) which is wrong
 /// for Burn.
-
+/// 
 /// Build a serialized ONNX `ModelProto` for a fully-connected MLP.
 ///
 /// `layer_specs`: `(in_dim, out_dim, flat_weights, flat_biases)` per layer, ordered
@@ -95,7 +95,7 @@ fn varint(mut val: u64) -> Vec<u8> {
 
 /// Encode a field with wire-type 0 (varint).
 fn field_varint(field: u32, val: u64) -> Vec<u8> {
-    let mut out = varint(((field as u64) << 3) | 0);
+    let mut out = varint((field as u64) << 3);
     out.extend(varint(val));
     out
 }

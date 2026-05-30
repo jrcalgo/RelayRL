@@ -105,7 +105,8 @@ where
     KindOut: TensorKind<B> + BasicOps<B> + Default,
     Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
 {
-    fn default(
+    #[allow(clippy::too_many_arguments)]
+    pub fn default(
         env_dir: PathBuf,
         save_model_path: PathBuf,
         obs_dim: usize,
@@ -298,6 +299,7 @@ fn validate_ppo_spec<
                 SupportedTensorBackend::NdArray => {
                     match *pi.pi.input_dtype() {
                         DType::NdArray(_) => {}
+                        #[cfg(feature = "tch-backend")]
                         _ => {
                             return Err(AlgorithmError::InvalidSpec(
                                 "PPO policy head input dtype does not match the trainer arguments"
@@ -307,6 +309,7 @@ fn validate_ppo_spec<
                     }
                     match *pi.pi.output_dtype() {
                         DType::NdArray(_) => {}
+                        #[cfg(feature = "tch-backend")]
                         _ => {
                             return Err(AlgorithmError::InvalidSpec(
                                 "PPO policy head output dtype does not match the trainer arguments"
@@ -365,6 +368,7 @@ fn validate_ppo_spec<
         SupportedTensorBackend::NdArray => {
             match *vf_mlp.input_dtype() {
                 DType::NdArray(_) => {}
+                #[cfg(feature = "tch-backend")]
                 _ => {
                     return Err(AlgorithmError::InvalidSpec(
                         "PPO value function MLP input dtype does not match the trainer arguments"
@@ -421,13 +425,15 @@ where
     KindOut: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
     Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
 {
-    pub fn register_first_slot_with_key(&mut self, agent_key: String) {
+    pub fn register_first_slot_with_key(&mut self, agent_key: String) -> Result<(), AlgorithmError> {
         match self {
             PPOTrainer::PPO(inner) | PPOTrainer::IPPO(inner) => {
-                inner.register_first_slot_with_key(agent_key);
+                inner.register_first_slot_with_key(agent_key).map_err(|e| AlgorithmError::InitializationError(e.to_string()))?;
             }
             PPOTrainer::MAPPO(_) => unimplemented!(),
         }
+
+        Ok(())
     }
 
     pub fn start_epoch_training(

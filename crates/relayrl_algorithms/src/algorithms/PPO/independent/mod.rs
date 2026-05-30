@@ -3,7 +3,7 @@ use crate::algorithms::PPO::kernel::{
     PPOPolicyHead,
 };
 use crate::algorithms::PPO::replay_buffer::PPOReplayBuffer;
-use crate::algorithms::{GenericMlp, NeuralNetwork, ValueFunction};
+use crate::algorithms::{GenericMlp, NeuralNetwork};
 use crate::logging::{EpochLogger, SessionLogger};
 use crate::templates::base_algorithm::{AlgorithmError, AlgorithmTrait, TrajectoryData};
 use crate::templates::base_replay_buffer::GenericReplayBuffer;
@@ -610,7 +610,7 @@ where
     fn backend_f32_dtype() -> relayrl_types::data::tensor::DType {
         match B::get_supported_backend() {
             #[cfg(feature = "tch-backend")]
-            SupportedTensorBackend::Tch => DType::Tch(relayrl_types::data::tensor::TchDType::F32),
+            relayrl_types::data::tensor::SupportedTensorBackend::Tch => relayrl_types::data::tensor::DType::Tch(relayrl_types::data::tensor::TchDType::F32),
             _ => DType::NdArray(relayrl_types::data::tensor::NdArrayDType::F32),
         }
     }
