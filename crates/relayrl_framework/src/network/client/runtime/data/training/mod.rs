@@ -1,26 +1,35 @@
-use crate::network::client::agent::{AlgorithmCfg, ReplayBufferSize, SaveModelPath};
-use crate::network::client::agent::PPONetworks;
-use crate::network::client::runtime::actor::ActorRuntime;
+use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
+use crate::network::client::runtime::actor::ErasedActorRuntime;
 use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
-use crate::network::client::runtime::data::environments::EnvironmentInterface;
+use crate::network::client::runtime::data::environments::{
+    EnvironmentInterface, EnvironmentInterfaceError,
+};
 
+use relayrl_algorithms::algorithms::convert_byte_dtype_to_f32;
+use relayrl_algorithms::prelude::nn::{NeuralNetwork, NeuralNetworkError};
+use relayrl_algorithms::prelude::ppo::algorithm::{EpochTrainOutput, PPOKernelOps, PPOParams};
+use relayrl_algorithms::prelude::ppo::trainer::{PPOTrainer, PPOTrainerSpec};
+use relayrl_algorithms::prelude::templates::{AlgorithmError, AlgorithmTrait};
 use relayrl_env_trait::{EnvDType, EnvNdArrayDType, EnvTchDType};
-use relayrl_types::prelude::tensor::burn::{TensorKind, backend::Backend};
+use relayrl_types::data::action::{RelayRLAction, RelayRLData};
+use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
+use relayrl_types::data::trajectory::RelayRLTrajectory;
+use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind, backend::Backend};
 use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, DeviceType};
 
 use dashmap::DashMap;
 use rayon::prelude::*;
-use std::marker::PhantomData;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(thiserror::Error, Debug)]
 pub enum TrainingError {
     #[error("Distribution error: {0}")]
-    DistributionError(String),
+    Distribution(String),
     #[error("Unsupported environment dtype: {0}")]
     UnsupportedEnvDType(String),
     #[error("Algorithm configuration error: {0}")]
-    AlgorithmConfigError(String),
+    AlgorithmConfig(String),
     #[error("Temporary directory creation failed: {0}")]
     TempDirCreationFailed(std::io::Error),
     #[error("Trainer error: {0}")]
@@ -34,309 +43,118 @@ pub enum TrainingError {
     #[error(transparent)]
     Actor(#[from] crate::network::client::runtime::actor::ActorError),
     #[error(transparent)]
-    Algorithm(#[from] relayrl_algorithms::AlgorithmError),
+    Algorithm(#[from] AlgorithmError),
+    #[error(transparent)]
+    NeuralNetwork(#[from] NeuralNetworkError),
 }
-
-#[derive(thiserror::Error, Debug)]
-pub enum PPOTrainingError {}
-
-#[derive(thiserror::Error, Debug)]
-pub enum REINFORCETrainingError {}
-
-#[derive(thiserror::Error, Debug)]
-pub enum DDPGTrainingError {}
-
-#[derive(thiserror::Error, Debug)]
-pub enum TD3TrainingError {}
-
-#[derive(thiserror::Error, Debug)]
-pub enum MATD3TrainingError {}
-
-#[derive(thiserror::Error, Debug)]
-pub enum MAPPOTrainingError {}
-
-#[derive(thiserror::Error, Debug)]
-pub enum MAREINFORCETrainingError {}
-
-#[derive(thiserror::Error, Debug)]
-pub enum MADDPGTrainingError {}
 
 const PARALLEL_ITER_MIN_ENVS: usize = 8;
 
-pub(crate) struct TrainingInterface<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
-    _phantom: PhantomData<B>,
+pub(crate) struct TrainingInterface<B: Backend + BackendMatcher<Backend = B>> {
+    _phantom: std::marker::PhantomData<B>,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    TrainingInterface<B, D_IN, D_OUT>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
     pub(crate) fn train_ppo<KindIn, KindOut, Pi>(
         actor_id: ActorUuid,
-        shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
-        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
+        mut shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
-        step_count: usize,
+        loop_iters: usize,
         max_traj_length: usize,
-        training_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), TrainingError> where KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static, KindOut: TensorKind<B> + burn_tensor::Numeric<B> + Send + 'static, Pi: NeuralNetworkSpec<B, KindIn, KindOut> + NeuralNetworkForward<B, KindIn, KindOut>
+        trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), TrainingError>
+    where
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + Default + 'static,
+        KindOut: TensorKind<B> + Numeric<B> + Send + Default + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        B: Default + Send + Sync + 'static,
     {
-        use relayrl_algorithms::templates::base_algorithm::AlgorithmTrait;
-        use relayrl_algorithms::prelude::ppo::trainer::{PpoTrainer, PPOTrainerSpec};
-        use relayrl_types::data::trajectory::RelayRLTrajectory;
-        use relayrl_types::data::action::{RelayRLAction, RelayRLData};
-        use relayrl_types::data::tensor::{
-            DType, NdArrayDType, SupportedTensorBackend, TensorData,
-        };
-        use std::collections::HashMap;
-
         #[inline(always)]
-        fn build_ppo_action(
-            raw_model_output: &TensorData,
-            mask_bytes: Option<&[u8]>,
-            n_envs: usize,
-            act_dim: usize,
-            act_dtype: &EnvDType,
-            discrete: bool,
-        ) -> Result<(Vec<u8>, Vec<u8>), TrainingError> {
-            let (logits, act_dtype_byte_count) = match raw_model_output.dtype {
-                DType::NdArray(nd) => match nd {
-                    NdArrayDType::F16 => (
-                        bytemuck::cast_slice::<u8, half::f16>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x.to_f32())
-                            .collect(),
-                        2 as usize,
-                    ),
-                    NdArrayDType::F32 => (
-                        bytemuck::cast_slice::<u8, f32>(&raw_model_output.data).to_vec(),
-                        4 as usize,
-                    ),
-                    NdArrayDType::F64 => (
-                        bytemuck::cast_slice::<u8, f64>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        8 as usize,
-                    ),
-                    NdArrayDType::I8 => (
-                        bytemuck::cast_slice::<u8, i8>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        1 as usize,
-                    ),
-                    NdArrayDType::I16 => (
-                        bytemuck::cast_slice::<u8, i16>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        2 as usize,
-                    ),
-                    NdArrayDType::I32 => (
-                        bytemuck::cast_slice::<u8, i32>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        4 as usize,
-                    ),
-                    NdArrayDType::I64 => (
-                        bytemuck::cast_slice::<u8, i64>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        8 as usize,
-                    ),
-                    NdArrayDType::Bool => (
-                        raw_model_output
-                            .data
-                            .iter()
-                            .map(|&x| if x != 0 { 1.0f32 } else { 0.0f32 })
-                            .collect(),
-                        1 as usize,
-                    ),
-                },
-                #[cfg(feature = "tch-backend")]
-                DType::Tch(tch) => match tch {
-                    TchDType::F16 => (
-                        bytemuck::cast_slice::<u8, half::f16>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x.to_f32())
-                            .collect(),
-                        2 as usize,
-                    ),
-                    TchDType::Bf16 => (
-                        bytemuck::cast_slice::<u8, half::bf16>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x.to_f32())
-                            .collect(),
-                        2 as usize,
-                    ),
-                    TchDType::F32 => (
-                        bytemuck::cast_slice::<u8, f32>(&raw_model_output.data).to_vec(),
-                        4 as usize,
-                    ),
-                    TchDType::F64 => (
-                        bytemuck::cast_slice::<u8, f64>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        8 as usize,
-                    ),
-                    TchDType::I8 => (
-                        bytemuck::cast_slice::<u8, i8>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        1 as usize,
-                    ),
-                    TchDType::I16 => (
-                        bytemuck::cast_slice::<u8, i16>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        2 as usize,
-                    ),
-                    TchDType::I32 => (
-                        bytemuck::cast_slice::<u8, i32>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        4 as usize,
-                    ),
-                    TchDType::I64 => (
-                        bytemuck::cast_slice::<u8, i64>(&raw_model_output.data)
-                            .iter()
-                            .map(|&x| x as f32)
-                            .collect(),
-                        8 as usize,
-                    ),
-                    TchDType::U8 => (
-                        bytemuck::cast_slice::<u8, u8>(&raw_model_output.data).to_vec(),
-                        1 as usize,
-                    ),
-                    TchDType::Bool => (
-                        raw_model_output
-                            .data
-                            .iter()
-                            .map(|&x| if x != 0 { 1.0f32 } else { 0.0f32 })
-                            .collect(),
-                        1 as usize,
-                    ),
-                },
-            };
-
-            let logp_bytes = Vec::<u8>::with_capacity(n_envs * 4); // 4 == f32
-            let mut rng: rand::prelude::ThreadRng = rand::rng();
-
-            let (action_bytes, act_idx, logps) = match discrete {
-                true => {
-                    let action_bytes = Vec::<u8>::with_capacity(n_envs * act_dtype_byte_count);
-
-                    let (act_idx, logps) = match n_envs {
-                        _ if n_envs < PARALLEL_ITER_MIN_ENVS => (0..n_envs)
-                            .into_iter()
-                            .map(|i| discrete_ppo_action(i, &logits, mask_bytes, act_dim, &mut rng))
-                            .unzip(),
-                        _ => (0..n_envs)
-                            .into_par_iter()
-                            .map(|i| discrete_ppo_action(i, &logits, mask_bytes, act_dim, &mut rng))
-                            .unzip(),
-                    };
-
-                    (action_bytes, act_idx, logps)
-                }
-                false => {
-                    let action_bytes =
-                        Vec::<u8>::with_capacity(n_envs * act_dim * act_dtype_byte_count);
-
-                    let stride = act_dim.saturating_mul(2);
-
-                    let (act_idx, logps) = match n_envs {
-                        _ if n_envs < PARALLEL_ITER_MIN_ENVS => (0..n_envs)
-                            .into_iter()
-                            .map(|i| continuous_ppo_action(i, &logits, act_dim, stride, &mut rng))
-                            .unzip(),
-                        _ => (0..n_envs)
-                            .into_par_iter()
-                            .map(|i| continuous_ppo_action(i, &logits, act_dim, stride, &mut rng))
-                            .unzip(),
-                    };
-
-                    (action_bytes, act_idx, logps)
-                }
-            };
-
-            logp_bytes.extend_from_slice(&logp.to_le_bytes());
-
-            match act_dtype {
-                EnvDType::NdArray(nd) => match nd {
-                    EnvNdArrayDType::I8 => {
-                        action_bytes.extend_from_slice(&(act_idx as i8).to_le_bytes())
-                    }
-                    EnvNdArrayDType::I16 => {
-                        action_bytes.extend_from_slice(&(act_idx as i16).to_le_bytes())
-                    }
-                    EnvNdArrayDType::I32 => {
-                        action_bytes.extend_from_slice(&(act_idx as i32).to_le_bytes())
-                    }
-                    EnvNdArrayDType::I64 => action_bytes.extend_from_slice(&act_idx.to_le_bytes()),
-                    EnvNdArrayDType::F16 => action_bytes
-                        .extend_from_slice(&half::f16::from_bits(act_idx as u16).to_le_bytes()),
-                    EnvNdArrayDType::F32 => {
-                        action_bytes.extend_from_slice(&(act_idx as f32).to_le_bytes())
-                    }
-                    EnvNdArrayDType::F64 => {
-                        action_bytes.extend_from_slice(&(act_idx as f64).to_le_bytes())
-                    }
-                    EnvNdArrayDType::Bool => {
-                        action_bytes.extend_from_slice(&if act_idx != 0 { [1u8] } else { [0u8] })
-                    }
-                },
-                #[cfg(feature = "tch-backend")]
-                EnvDType::Tch(tch) => match tch {
-                    EnvTchDType::I8 => {
-                        action_bytes.extend_from_slice(&(act_idx as i8).to_le_bytes())
-                    }
-                    EnvTchDType::I16 => {
-                        action_bytes.extend_from_slice(&(act_idx as i16).to_le_bytes())
-                    }
-                    EnvTchDType::I32 => {
-                        action_bytes.extend_from_slice(&(act_idx as i32).to_le_bytes())
-                    }
-                    EnvTchDType::I64 => action_bytes.extend_from_slice(&act_idx.to_le_bytes()),
-                    EnvTchDType::F16 => action_bytes
-                        .extend_from_slice(&half::f16::from_bits(act_idx as u16).to_le_bytes()),
-                    EnvTchDType::Bf16 => action_bytes
-                        .extend_from_slice(&half::bf16::from_bits(act_idx as u16).to_le_bytes()),
-                    EnvTchDType::F32 => {
-                        action_bytes.extend_from_slice(&(act_idx as f32).to_le_bytes())
-                    }
-                    EnvTchDType::F64 => {
-                        action_bytes.extend_from_slice(&(act_idx as f64).to_le_bytes())
-                    }
-                    EnvTchDType::U8 => {
-                        action_bytes.extend_from_slice(&(act_idx as u8).to_le_bytes())
-                    }
-                    EnvTchDType::Bool => {
-                        action_bytes.extend_from_slice(&if act_idx != 0 { [1u8] } else { [0u8] })
-                    }
-                    _ => return Err(TrainingError::UnsupportedEnvDType(act_dtype.to_string())),
-                },
-                #[cfg(not(feature = "tch-backend"))]
-                _ => return Err(TrainingError::UnsupportedEnvDType(act_dtype.to_string())),
+        async fn refresh_models<B2, KindIn2, KindOut2, Pi2>(
+            runtime: &Arc<dyn ErasedActorRuntime<B2>>,
+            actor_id: &ActorUuid,
+            trainer: &mut PPOTrainer<B2, KindIn2, KindOut2, Pi2>,
+            device: &DeviceType,
+        ) -> Result<(), TrainingError>
+        where
+            B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+        {
+            if let Some(pi_module) = trainer.acquire_pi_module() {
+                runtime
+                    .perform_env_refresh_model_erased("ppo_pi", pi_module, device.clone())
+                    .await
+                    .map_err(|e| {
+                        TrainingError::TrainerError(format!(
+                            "[TrainingInterface] {} - PPO Policy ModelModule refresh failed: {}",
+                            actor_id, e
+                        ))
+                    })?;
             }
-
-            Ok((action_bytes, logp_bytes))
+            if let Some(vf_module) = trainer.acquire_vf_module() {
+                runtime
+                    .perform_env_refresh_model_erased("ppo_vf", vf_module, device.clone())
+                    .await
+                    .map_err(|e| {
+                        TrainingError::TrainerError(format!(
+                            "[TrainingInterface] {} - PPO Value ModelModule refresh failed: {}",
+                            actor_id, e
+                        ))
+                    })?;
+            }
+            Ok(())
         }
 
-        fn trajectory_send_procedure() {}
+        #[inline(always)]
+        fn log_epoch<B2, KindIn2, KindOut2, Pi2>(
+            trainer: &mut PPOTrainer<B2, KindIn2, KindOut2, Pi2>,
+            output: EpochTrainOutput<B2, KindIn2, KindOut2, Pi2>,
+            epoch_count: &std::sync::atomic::AtomicU64,
+        ) where
+            B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+        {
+            trainer.apply_epoch_result(output);
+            trainer.log_epoch();
+            epoch_count.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+
+        let (max_episode_steps, rollout_len, traj_per_epoch, normalize_obs, device) =
+            match &trainer_spec {
+                PPOTrainerSpec::PPO {
+                    args, hyperparams, ..
+                }
+                | PPOTrainerSpec::IPPO {
+                    args, hyperparams, ..
+                } => {
+                    let p = hyperparams
+                        .as_ref()
+                        .map_or_else(|| PPOParams::default(), |hp| hp.clone());
+
+                    (
+                        p.max_episode_steps,
+                        p.rollout_len,
+                        p.traj_per_epoch as usize,
+                        p.normalize_obs,
+                        args.device.clone(),
+                    )
+                }
+                _ => {
+                    return Err(TrainingError::AlgorithmConfig(
+                        "[TrainingInterface] Expected PPO/IPPO, got MAPPO".to_string(),
+                    ));
+                }
+            };
 
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
+            let local_runtime = tokio::task::LocalSet::new();
+
+            tokio::runtime::Handle::current().block_on(local_runtime.run_until(async {
                 let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
                     TrainingError::EnvironmentInterfaceNotFound(actor_id)
                 })?;
@@ -347,128 +165,122 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     TrainingError::EnvironmentInterfaceNotFound(actor_id)
                 })?;
 
-                let env_context = env_interface.get_env_context().unwrap_or_else(|| {
-                    format!("{}:ppo:{}", ENVIRONMENT_CONTEXT_PREFIX, actor_id)
-                });
+                let (traj_tx, mut traj_rx) = tokio::sync::mpsc::channel::<RelayRLTrajectory>(traj_per_epoch);
 
-                let obs_dim = env_interface.obs_dim().unwrap_or(0);
-                let act_dim = env_interface.act_dim().unwrap_or(0);;
-                
-                let (_temp_env_dir, trainer_args) = {
-                    let temp_env_dir = tempfile::tempdir().map_err(|e| TrainingError::TempDirCreationFailed(e))?;
-                    let temp_env_dir_path = temp_env_dir.path().to_path_buf();
-                    let trainer_args = TrainerArgs {
-                        env_dir: temp_env_dir_path,
-                        save_model_path: save_model_path.clone(),
-                        obs_dim,
-                        act_dim,
-                        buffer_size: replay_buffer_size,
-                    };
-                    (temp_env_dir, trainer_args)
-                };
+                let shared_epoch_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-                let discrete = env_interface.action_is_discrete().ok_or_else(|| {
-                    TrainingError::EnvironmentInterfaceNotFound(actor_id)
-                })?;
-
-                let max_episode_steps: Option<usize> = match &algorithm_cfg {
-                    AlgorithmCfg::PPO(Some(p)) | AlgorithmCfg::IPPO(Some(p)) => p.max_episode_steps,
-                    _ => None,
-                };
-                let spec = match algorithm_cfg {
-                    AlgorithmCfg::PPO(params) => PpoTrainerSpec::ppo(trainer_args, params),
-                    AlgorithmCfg::IPPO(params) => PpoTrainerSpec::ippo(trainer_args, params),
-                    other => return Err(TrainingError::AlgorithmConfigError(format!("[StateManager] Expected PPO/IPPO, got {:?}", other))),
-                };
-
-                let mut trainer: PpoTrainer<B, KindIn, KindOut, KN> = PpoTrainer::new(spec, kernel).map_err(TrainingError::from)?;
-
-                trainer.register_first_slot_with_key(actor_id.to_string());
-
-                if let Some(model_module) = trainer.acquire_model_module() {
-                    runtime.perform_refresh_model(model_module, device.clone())
-                        .await
-                        .map_err(|e| TrainingError::TrainerError(
-                            format!("[StateManager] ORT policy prime failed: {}", e)
-                        ))?;
+                let trainer = Arc::new(tokio::sync::RwLock::new(PPOTrainer::new(trainer_spec).map_err(TrainingError::Algorithm)?));
+                {
+                    let mut trainer_write = trainer.write().await;
+                    trainer_write.register_first_slot_with_key(actor_id.to_string());
+                    refresh_models(&Arc::clone(&runtime), &actor_id, &mut trainer_write, &device).await?;
                 }
 
-                if let Some(vf_module) = trainer.acquire_value_module() {
-                    runtime.perform_refresh_value_model(vf_module, device.clone())
-                        .await
-                        .map_err(|e| TrainingError::TrainerError(
-                            format!("[StateManager] ORT value prime failed: {}", e)
-                        ))?;
-                }
+                let learner_epoch_count = Arc::clone(&shared_epoch_count);
+                let learner_runtime = Arc::clone(&runtime);
+                let learner_device = device.clone();
 
-                let (traj_tx, mut traj_rx) = tokio::sync::mpsc::channel::<RelayRLTrajectory>(2);
-                let atomic_epoch_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-                let shared_epoch_count = Arc::clone(&atomic_epoch_count);
-                let shared_runtime = Arc::clone(&runtime);
-                let device = device.clone();
+                let learner_trainer = trainer.clone();
+                let learner_handle = tokio::task::spawn_local(async move {
+                    let mut pending_train: Option<tokio::task::JoinHandle<EpochTrainOutput<B, KindIn, KindOut, Pi>>> = None;
 
-                let learner_task = tokio::task::spawn(async move {
-                    let mut trainer = trainer;
-                    
                     loop {
-                        tokio::select! {
-                            biased;
-
-                            _ = async {
-                                if let Some(rx) = &mut shutdown_rx {
-                                    let _ = rx.recv().await;
-                                } else {
-                                    std::future::pending::<()>().await;
+                        if let Some(ref mut handle) = pending_train {
+                            tokio::select! {
+                                _ = async {
+                                    if let Some(ref mut rx) = shutdown_rx {
+                                        let _ = rx.recv().await;
+                                    } else {
+                                        std::future::pending::<()>().await;
+                                    }
+                                } => {
+                                    break;
                                 }
-                            } => {
-                                break;
+
+                                result = handle => {
+                                    pending_train = None;
+                                    let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
+
+                                    let mut trainer_write = learner_trainer.write().await;
+                                    log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer_write, output, &learner_epoch_count);
+                                    refresh_models(&learner_runtime, &actor_id, &mut trainer_write, &learner_device).await?;
+
+                                    pending_train = trainer_write.start_epoch_training();
+                                }
+
+                                maybe_traj = traj_rx.recv() => {
+                                    match maybe_traj {
+                                        Some(traj) => {
+                                            learner_trainer.write().await.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                                        }
+                                        None => {
+                                            if let Some(handle) = pending_train.take() {
+                                                if let Ok(output) = handle.await {
+                                                    let mut trainer_write = learner_trainer.write().await;
+                                                    log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer_write, output, &learner_epoch_count);
+                                                    refresh_models(&learner_runtime, &actor_id, &mut trainer_write, &learner_device).await?;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
                             }
-    
-                            _ = Some(traj) = traj_rx.recv() => {
-                                let trained = AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(&mut trainer, traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
-    
-                                if trained {
-                                    shared_epoch_count.fetch_add(1, std::sync::atomic::Ordering::Release);
-                                    
-                                    if let Some(pi_module) = trainer.acquire_model_module() {
-                                        let _ = shared_runtime.perform_env_refresh_model("ppo_pi", pi_module, device).await;
+                        } else {
+                            match traj_rx.recv().await {
+                                Some(traj) => {
+                                    let mut trainer_write = learner_trainer.write().await;
+                                    let epoch_started = trainer_write.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                                    if epoch_started {
+                                        pending_train = trainer_write.start_epoch_training();
                                     }
-                                    if let Some(vf_module) = trainer.acquire_value_module() {
-                                        let _ = shared_runtime.perform_env_refresh_model("ppo_vf", vf_module, device).await;
-                                    }
+                                }
+                                None => {
+                                    break;
                                 }
                             }
                         }
+
                     }
+
+                    Ok::<(), TrainingError>(())
                 });
 
                 let mut per_env_trajs: Vec<RelayRLTrajectory> = (0..n_envs).map(|_| RelayRLTrajectory::new(max_traj_length)).collect();
                 let mut per_env_episode: Vec<u64> = vec![0u64; n_envs];
                 let mut per_env_step_count: Vec<usize> = vec![0usize; n_envs];
-                
+                let mut per_env_rollout_step: Vec<usize> = vec![0usize; n_envs];
                 let mut per_env_episode_return: Vec<f32> = vec![0.0f32; n_envs];
+
                 let mut completed_episodes: u64 = 0;
                 let mut return_window: Vec<f32> = Vec::with_capacity(100);
                 let mut last_printed_epoch: u64 = 0;
 
-                let obs_dtype = env_interface.obs_dtype().unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
-                let act_dtype = env_interface.act_dtype().unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                let obs_dtype: DType = env_dtype_to_dtype(match &env_interface.obs_dtype() {
+                    Some(d) => d,
+                    None => return Err(TrainingError::EnvironmentInterfaceNotFound(actor_id)),
+                })?;
+                let act_dtype: DType = env_dtype_to_dtype(match &env_interface.act_dtype() {
+                    Some(d) => d,
+                    None => return Err(TrainingError::EnvironmentInterfaceNotFound(actor_id)),
+                })?;
 
                 let (obs_bytes_per_env, act_bytes_per_env) = {
-                    fn dtype_bytes_per_elem(dtype: &EnvDType) -> usize {
+                    #[inline(always)]
+                    fn dtype_bytes_per_elem(dtype: &DType) -> usize {
                         match dtype {
-                            EnvDType::NdArray(nd) => match nd {
-                                EnvNdArrayDType::F16 | EnvNdArrayDType::I16 => 2,
-                                EnvNdArrayDType::F32 | EnvNdArrayDType::I32 => 4,
-                                EnvNdArrayDType::F64 | EnvNdArrayDType::I64 => 8,
-                                EnvNdArrayDType::I8 | EnvNdArrayDType::Bool => 1,
+                            DType::NdArray(nd) => match nd {
+                                NdArrayDType::F16 | NdArrayDType::I16 => 2,
+                                NdArrayDType::F32 | NdArrayDType::I32 => 4,
+                                NdArrayDType::F64 | NdArrayDType::I64 => 8,
+                                NdArrayDType::I8 | NdArrayDType::Bool => 1,
                             }
                             #[cfg(feature = "tch-backend")]
-                            EnvDType::Tch(tch) => match tch {
-                                EnvTchDType::F16 | EnvTchDType::Bf16 | EnvTchDType::I16 => 2,
-                                EnvTchDType::F32 | EnvTchDType::I32 => 4,
-                                EnvTchDType::F64 | EnvTchDType::I64 => 8,
-                                EnvTchDType::I8 | EnvTchDType::U8 | EnvTchDType::Bool => 1,
+                            DType::Tch(tch) => match tch {
+                                TchDType::F16 | TchDType::Bf16 | TchDType::I16 => 2,
+                                TchDType::F32 | TchDType::I32 => 4,
+                                TchDType::F64 | TchDType::I64 => 8,
+                                TchDType::I8 | TchDType::U8 | TchDType::Bool => 1,
                             }
                         }
                     }
@@ -479,95 +291,134 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     (obs_bytes, act_bytes)
                 };
 
-                let mut obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
-                    TrainingError::EnvironmentInterfaceNotFound(actor_id)
-                })?;
-                let mask_bytes = env_interface.flat_mask_bytes().ok_or_else(|| {
-                    TrainingError::EnvironmentInterfaceNotFound(actor_id)
-                })?;
+                let mut obs_normalizer = ObsNormalizer::new(obs_dim, obs_dtype.clone());
 
-                for _ in 0..step_count {
-                    let (action_bytes, logp_bytes) = {
-                        let raw_pi_output = runtime.perform_env_byte_inference("policy",
-                            &obs_bytes, n_envs, obs_dim, &obs_dtype,
-                        )
-                        .await
-                        .map_err(|e| TrainingError::InferenceRequestError(e.to_string()))?;
+                let backend = B::get_supported_backend();
+                let backend_f32_dtype = match &backend {
+                    SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
+                    #[cfg(feature = "tch-backend")]
+                    SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
+                    _ => panic!("Unsupported backend: {:?}", backend.clone()),
+                };
 
-                        build_ppo_action(&raw_pi_output, None, n_envs, act_dim, &act_dtype, discrete)?
-                    };
+                let inference_trainer = trainer.clone();
+                let (inference_obs_tx, mut inference_act_rx, inference_handle) = {
+                    let (inf_obs_tx, mut inf_obs_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Option<Vec<u8>>)>(2);
+                    let (inf_act_tx, inf_act_rx) = tokio::sync::mpsc::channel::<((Vec<u8>, Vec<u8>), Vec<f32>)>(2);
+                    let inf_runtime = Arc::clone(&runtime);
+                    let inf_obs_dtype = obs_dtype.clone();
+                    let inf_act_dtype = act_dtype.clone();
+                    let inf_backend_f32 = backend_f32_dtype.clone();
 
-                    let values_f32 = {
-                        let raw_vf_output = runtime.perform_env_byte_inference("value", &obs_bytes, n_envs, obs_dim, &obs_dtype,
-                        )
-                        .await
-                        .map_err(|e| TrainingError::InferenceRequestError(e.to_string()))?;
+                    let inference_handle = tokio::task::spawn_local(async move {
+                        let trainer_read = inference_trainer.read().await;
+                        let task_kernel_ref = trainer_read.get_ppo_actor_kernel().map_err(|e| TrainingError::TrainerError(e.to_string()))?;
 
-                        bytemuck::cast_slice::<u8, f32>(&raw_vf_output.data).to_vec()
-                    };
+                        while let Some((obs_bytes, mask_bytes)) = inf_obs_rx.recv().await {
+                            let (raw_pi_output, raw_vf_output) = tokio::join!(
+                                async { inf_runtime.perform_env_byte_inference_erased("ppo_pi", &obs_bytes, n_envs, obs_dim, &inf_obs_dtype).await.map_err(|e| TrainingError::InferenceRequestError(e.to_string())) },
+                                async { inf_runtime.perform_env_byte_inference_erased("ppo_vf", &obs_bytes, n_envs, obs_dim, &inf_obs_dtype).await.map_err(|e| TrainingError::InferenceRequestError(e.to_string())) },
+                            );
 
-                    let (new_obs_bytes, new_mask_bytes, rewards, dones, truncateds) = env_interface.step_bytes(&action_bytes).ok_or_else(|| {
+                            let pi_result = task_kernel_ref.policy_forward_bytes(&raw_pi_output?, mask_bytes.as_deref(), n_envs, &inf_act_dtype);
+                            let vf_f32 = convert_byte_dtype_to_f32(raw_vf_output?.data, inf_backend_f32.clone())?;
+
+                            match pi_result {
+                                Ok((action_bytes, logp_bytes)) => {
+                                    let msg = ((action_bytes, logp_bytes), vf_f32);
+                                    if inf_act_tx.send(msg).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => {
+                                    break;
+                                }
+                            }
+                        }
+
+                        Ok::<(), TrainingError>(())
+                    });
+
+                    (inf_obs_tx, inf_act_rx, inference_handle)
+                };
+
+                let (mut current_obs_bytes, (mut current_act_bytes, mut current_logp_bytes), mut current_values): (Vec<u8>, (Vec<u8>, Vec<u8>), Vec<f32>) = {
+                    let mut initial_obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
                         TrainingError::EnvironmentInterfaceNotFound(actor_id)
                     })?;
 
-                    obs_bytes = new_obs_bytes;
+                    if normalize_obs {
+                        obs_normalizer.update(&initial_obs_bytes);
+                        obs_normalizer.normalize(&mut initial_obs_bytes);
+                    }
+                    let initial_mask_bytes = env_interface.flat_mask_bytes();
 
-                    match n_envs {
-                        _ if n_envs <= PARALLEL_ITER_MIN_ENVS => {  // serial processing
-                            for i in 0..n_envs {
-                                trajectory_send_procedure(i);
-                            }
-                        }
-                        _ => {
-                            (0..n_envs).into_par_iter().map(|i| {  // parallel processing
-                                trajectory_send_procedure(i);
-                            })
-                        }
+                    inference_obs_tx.send((initial_obs_bytes.clone(), initial_mask_bytes.clone())).await.map_err(|e| TrainingError::InferenceRequestError(format!("[TrainingInterface] {} - PPO inference worker died at bootstrap values: {}", actor_id, e)))?;
+                    let (initial_obs_bytes, (initial_act_bytes, initial_logp_bytes), initial_values) = match inference_act_rx.recv().await {
+                        Some(result) => (initial_obs_bytes, (result.0.0, result.0.1), result.1),
+                        None => return Err(TrainingError::InferenceRequestError(format!("[TrainingInterface] {} - PPO inference worker closed at bootstrap values", actor_id))),
+                    };
+
+                    (initial_obs_bytes, (initial_act_bytes, initial_logp_bytes), initial_values)
+                };
+
+                let loop_epoch_count = Arc::clone(&shared_epoch_count);
+                for _ in 0..loop_iters {
+                    let (mut new_obs_bytes, new_mask_bytes, rewards, dones, truncateds) = env_interface.step_bytes(&current_act_bytes).ok_or_else(|| TrainingError::EnvironmentInterfaceNotFound(actor_id))?;
+
+                    if normalize_obs {
+                        obs_normalizer.update(&new_obs_bytes);
+                        obs_normalizer.normalize(&mut new_obs_bytes);
                     }
 
-                    (0..n_envs).into_par_iter().map(|i| {
+                    inference_obs_tx.send((new_obs_bytes.clone(), new_mask_bytes.clone())).await.map_err(|e| TrainingError::InferenceRequestError(format!("[TrainingInterface] {} - PPO inference worker died during collection: {}", actor_id, e)))?;
+
+                    for i in 0..n_envs {
                         let obs_i = {
                             let start = i * obs_bytes_per_env;
-                            TensorData::new(vec![obs_dim], env_dtype_to_dtype(&obs_dtype)?, obs_bytes[start..start + obs_bytes_per_env].to_vec(), B::get_supported_backend())
+                            TensorData::new(vec![obs_dim], obs_dtype.clone(), current_obs_bytes[start..start + obs_bytes_per_env].to_vec(), backend.clone())
                         };
 
                         let action_i = {
-                            let start = i * obs_bytes_per_env;
-                            TensorData::new(vec![act_dim], env_dtype_to_dtype(&act_dtype)?, action_bytes[start..start + act_bytes_per_env].to_vec(), B::get_supported_backend())
+                            let start = i * act_bytes_per_env;
+                            TensorData::new(vec![act_dim], act_dtype.clone(), current_act_bytes[start..start + act_bytes_per_env].to_vec(), backend.clone())
+                        };
+
+                        let mask_i = match new_mask_bytes {
+                            Some(ref mask_bytes) => {
+                                let start = i * 4;
+                                Some(TensorData::new(vec![act_dim], backend_f32_dtype.clone(), mask_bytes[start..start + 4].to_vec(), backend.clone()))
+                            }
+                            None => None,
                         };
 
                         let data_map = {
                             let logp_i = {
                                 let start = i * 4;
-                                let logp_dtype = match B::get_supported_backend() {
-                                    SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
-                                    SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
-                                };
-                                TensorData::new(vec![1], logp_dtype, logp_bytes[start..start + 4].to_vec(), B::get_supported_backend())
+                                TensorData::new(vec![1], backend_f32_dtype.clone(), current_logp_bytes[start..start + 4].to_vec(), backend.clone())
                             };
 
                             let value_i = {
-                                let bytes = values_f32[i].to_le_bytes().to_vec();
-                                let value_dtype = match B::get_supported_backend() {
-                                    SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
-                                    SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
-                                };
-                                TensorData::new(vec![1], value_dtype, bytes, B::get_supported_backend())
+                                let bytes = current_values.get(i).copied().unwrap_or(0.0);
+                                TensorData::new(vec![1], backend_f32_dtype.clone(), bytes.to_le_bytes().to_vec(), backend.clone())
                             };
 
-                            let map = HashMap::new();
+                            let mut map: HashMap<String, RelayRLData> = HashMap::new();
                             map.insert("logp_a".to_string(), RelayRLData::Tensor(logp_i));
                             map.insert("val".to_string(), RelayRLData::Tensor(value_i));
                             map
                         };
 
-                        per_env_ep_return[i] += rewards[i];
+                        per_env_episode_return[i] += rewards[i];
                         per_env_step_count[i] += 1;
+                        if rollout_len.is_some() {
+                            per_env_rollout_step[i] += 1;
+                        }
 
                         let action_obj = RelayRLAction::new(
                             Some(obs_i),
                             Some(action_i),
-                            None,
+                            mask_i,
                             rewards[i],
                             dones[i],
                             Some(data_map),
@@ -575,19 +426,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         );
                         per_env_trajs[i].add_action(action_obj);
 
-                        if dones[i] {
-                            let episode_return = per_env_ep_return[i];
-                            per_env_ep_return[i] = 0.0;
-                            match n_envs {
-                                _ if n_envs <= PARALLEL_ITER_MIN_ENVS => {  // serial processing
-                                    return_window.push(episode_return);
-                                    if return_window.len() > 100 { return_window.remove(0); }
-                                    completed_episodes += 1;
-                                }
-                                _ => {  // parallel processing
-
-                                }
+                        if dones[i] || truncateds[i] {
+                            let episode_return = per_env_episode_return[i];
+                            per_env_episode_return[i] = 0.0;
+                            return_window.push(episode_return);
+                            if return_window.len() > 100 {
+                                return_window.remove(0);
                             }
+                            completed_episodes += 1;
 
                             let mut traj = std::mem::replace(
                                 &mut per_env_trajs[i],
@@ -596,24 +442,305 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             traj.set_episode(per_env_episode[i]);
                             per_env_episode[i] += 1;
 
+                            if truncateds[i] {
+                                traj.set_truncated();
+                            } else if let Some(max_steps) = max_episode_steps {
+                                if per_env_step_count[i] >= max_steps {
+                                    traj.set_truncated();
+                                }
+                            }
+
+                            per_env_step_count[i] = 0;
+                            per_env_rollout_step[i] = 0;
+
+                            let _ = traj_tx.send(traj).await;
+
+                            let current_epoch = loop_epoch_count.load(std::sync::atomic::Ordering::Acquire);
+                            if current_epoch > last_printed_epoch {
+                                last_printed_epoch = current_epoch;
+                                let mean_ret = if return_window.is_empty() {
+                                    0.0
+                                } else {
+                                    return_window.iter().sum::<f32>() / return_window.len() as f32
+                                };
+                                println!("[TrainingInterface] {} - Epoch {:>4} - Episodes={:>5} - MeanReturn={:>8.1} - LastEpisode={:>8.1}", actor_id, current_epoch, completed_episodes, mean_ret, episode_return);
+                            }
+                        } else if let Some(rl) = rollout_len {
+                            if per_env_rollout_step[i] >= rl {
+                                let mut traj = std::mem::replace(
+                                    &mut per_env_trajs[i],
+                                    RelayRLTrajectory::new(max_traj_length),
+                                );
+                                traj.set_episode(per_env_episode[i]);
+                                traj.set_truncated();
+                                per_env_rollout_step[i] = 0;
+                                let _ = traj_tx.send(traj).await;
+                                continue;
+                            }
                         }
-                    }))
+
+                        let ((next_action_bytes, next_logp_bytes), next_values) = inference_act_rx.recv().await.ok_or_else(|| TrainingError::InferenceRequestError(format!("[TrainingInterface] {} - PPO inference worker closed at loop iteration: {}", actor_id, loop_iters)))?;
+
+                        current_obs_bytes = new_obs_bytes.clone();
+                        current_act_bytes = next_action_bytes;
+                        current_logp_bytes = next_logp_bytes;
+                        current_values = next_values;
+                    }
                 }
 
-            })
+                learner_handle.await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                inference_handle.await.map_err(|e| TrainingError::InferenceRequestError(e.to_string()))?;
+
+                Ok(())
+            }))
         })
     }
 
-    pub(crate) fn train_mappo<KindIn: TensorKind<B> + BasicOps<B>, KindOut: TensorKind<B> + BasicOps<B>, Pi: NeuralNetwork<B, KindIn, KindOut>>(
-        actor_id: ActorUuid,
-        shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
-        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
-        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
-        step_count: usize,
-        max_traj_length: usize,
-        training_spec: MAPPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    pub(crate) fn train_ippo<KindIn, KindOut, Pi>(
+        _actor_id: ActorUuid,
+        _shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        _runtime: Arc<dyn ErasedActorRuntime<B>>,
+        _env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        _loop_iters: usize,
+        _max_traj_length: usize,
+        _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), TrainingError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
     {
         unimplemented!()
+    }
+
+    pub(crate) fn train_mappo<KindIn, KindOut, Pi>(
+        _actor_id: ActorUuid,
+        _shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        _runtime: Arc<dyn ErasedActorRuntime<B>>,
+        _env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        _loop_iters: usize,
+        _max_traj_length: usize,
+        _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), TrainingError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+    {
+        unimplemented!()
+    }
+}
+
+struct ObsNormalizer {
+    mean: Vec<f64>,
+    var: Vec<f64>,
+    count: u64,
+    obs_dtype: DType,
+}
+impl ObsNormalizer {
+    fn new(obs_dim: usize, obs_dtype: DType) -> Self {
+        Self {
+            mean: vec![0.0; obs_dim],
+            var: vec![1.0; obs_dim],
+            count: 0,
+            obs_dtype,
+        }
+    }
+
+    fn update(&mut self, obs_bytes: &[u8]) -> Result<(), TrainingError> {
+        enum DTypeSlice<'a> {
+            F16(&'a [half::f16]),
+            Bf16(&'a [half::bf16]),
+            F32(&'a [f32]),
+            F64(&'a [f64]),
+        }
+
+        impl<'a> DTypeSlice<'a> {
+            fn len(&self) -> usize {
+                match self {
+                    DTypeSlice::F16(slice) => slice.len(),
+                    DTypeSlice::Bf16(slice) => slice.len(),
+                    DTypeSlice::F32(slice) => slice.len(),
+                    DTypeSlice::F64(slice) => slice.len(),
+                }
+            }
+
+            fn get_f64(&self, index: usize) -> f64 {
+                match self {
+                    DTypeSlice::F16(slice) => f64::from(slice[index]),
+                    DTypeSlice::Bf16(slice) => f64::from(slice[index]),
+                    DTypeSlice::F32(slice) => slice[index] as f64,
+                    DTypeSlice::F64(slice) => slice[index],
+                }
+            }
+        }
+
+        #[inline(always)]
+        fn byte_slice_to_dtype(
+            bytes: &[u8],
+            byte_dtype: DType,
+        ) -> Result<DTypeSlice, TrainingError> {
+            let dtype_vec = match byte_dtype {
+                DType::NdArray(nd) => match nd {
+                    NdArrayDType::F16 => {
+                        DTypeSlice::F16(bytemuck::cast_slice::<u8, half::f16>(bytes))
+                    }
+                    NdArrayDType::F32 => DTypeSlice::F32(bytemuck::cast_slice::<u8, f32>(bytes)),
+                    NdArrayDType::F64 => DTypeSlice::F64(bytemuck::cast_slice::<u8, f64>(bytes)),
+                    _ => {
+                        return Err(TrainingError::AlgorithmConfig(format!(
+                            "Unsupported byte dtype for NdArray Obs Normalizer: {:?}",
+                            nd
+                        )));
+                    }
+                },
+                #[cfg(feature = "tch-backend")]
+                DType::Tch(tch) => match tch {
+                    TchDType::F16 => DTypeSlice::F16(bytemuck::cast_slice::<u8, half::f16>(bytes)),
+                    TchDType::Bf16 => {
+                        DTypeSlice::Bf16(bytemuck::cast_slice::<u8, half::bf16>(bytes))
+                    }
+                    TchDType::F32 => DTypeSlice::F32(bytemuck::cast_slice::<u8, f32>(bytes)),
+                    TchDType::F64 => DTypeSlice::F64(bytemuck::cast_slice::<u8, f64>(bytes)),
+                    _ => {
+                        return Err(TrainingError::AlgorithmConfig(format!(
+                            "Unsupported byte dtype for Tch Obs Normalizer: {:?}",
+                            tch
+                        )));
+                    }
+                },
+                _ => {
+                    return Err(TrainingError::AlgorithmConfig(format!(
+                        "Unsupported byte backend for Obs Normalizer"
+                    )));
+                }
+            };
+
+            Ok(dtype_vec)
+        }
+
+        let obs_slice: DTypeSlice = byte_slice_to_dtype(obs_bytes, self.obs_dtype.clone())?;
+        let obs_dim = self.mean.len(); // mean same size as obs_dim var
+        let n_envs = obs_slice.len() / obs_dim;
+
+        for i in 0..n_envs {
+            self.count += 1;
+            let start = i * obs_dim;
+
+            for j in 0..obs_dim {
+                let x = obs_slice.get_f64(start + j) as f64;
+                let delta = x - self.mean[j];
+                self.mean[j] += delta / self.count as f64;
+                let delta2 = x - self.mean[j];
+                self.var[j] += delta * delta2;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn normalize(&self, obs_bytes: &mut [u8]) -> Result<(), TrainingError> {
+        enum DTypeSliceMut<'a> {
+            F16(&'a mut [half::f16]),
+            Bf16(&'a mut [half::bf16]),
+            F32(&'a mut [f32]),
+            F64(&'a mut [f64]),
+        }
+
+        impl<'a> DTypeSliceMut<'a> {
+            fn len(&self) -> usize {
+                match self {
+                    DTypeSliceMut::F16(slice) => slice.len(),
+                    DTypeSliceMut::Bf16(slice) => slice.len(),
+                    DTypeSliceMut::F32(slice) => slice.len(),
+                    DTypeSliceMut::F64(slice) => slice.len(),
+                }
+            }
+
+            fn get_f64(&self, index: usize) -> f64 {
+                match self {
+                    DTypeSliceMut::F16(slice) => f64::from(slice[index]),
+                    DTypeSliceMut::Bf16(slice) => f64::from(slice[index]),
+                    DTypeSliceMut::F32(slice) => slice[index] as f64,
+                    DTypeSliceMut::F64(slice) => slice[index],
+                }
+            }
+
+            fn set_f64(&mut self, index: usize, value: f64) -> Result<(), TrainingError> {
+                match self {
+                    DTypeSliceMut::F16(slice) => slice[index] = half::f16::from_f64(value),
+                    DTypeSliceMut::Bf16(slice) => slice[index] = half::bf16::from_f64(value),
+                    DTypeSliceMut::F32(slice) => slice[index] = value as f32,
+                    DTypeSliceMut::F64(slice) => slice[index] = value,
+                }
+
+                Ok(())
+            }
+        }
+
+        #[inline(always)]
+        fn byte_slice_to_dtype_mut(
+            bytes: &mut [u8],
+            byte_dtype: DType,
+        ) -> Result<DTypeSliceMut, TrainingError> {
+            let dtype_vec = match byte_dtype {
+                DType::NdArray(nd) => match nd {
+                    NdArrayDType::F16 => {
+                        DTypeSliceMut::F16(bytemuck::cast_slice_mut::<u8, half::f16>(bytes))
+                    }
+                    NdArrayDType::F32 => {
+                        DTypeSliceMut::F32(bytemuck::cast_slice_mut::<u8, f32>(bytes))
+                    }
+                    NdArrayDType::F64 => {
+                        DTypeSliceMut::F64(bytemuck::cast_slice_mut::<u8, f64>(bytes))
+                    }
+                    _ => {
+                        return Err(TrainingError::AlgorithmConfig(format!(
+                            "Unsupported byte dtype for NdArray Obs Normalizer: {:?}",
+                            nd
+                        )));
+                    }
+                },
+                #[cfg(feature = "tch-backend")]
+                DType::Tch(tch) => match tch {
+                    TchDType::F16 => {
+                        DTypeSliceMut::F16(bytemuck::cast_slice_mut::<u8, half::f16>(bytes))
+                    }
+                    TchDType::Bf16 => {
+                        DTypeSliceMut::Bf16(bytemuck::cast_slice_mut::<u8, half::bf16>(bytes))
+                    }
+                    TchDType::F32 => DTypeSliceMut::F32(bytemuck::cast_slice_mut::<u8, f32>(bytes)),
+                    TchDType::F64 => DTypeSliceMut::F64(bytemuck::cast_slice_mut::<u8, f64>(bytes)),
+                    _ => {
+                        return Err(TrainingError::AlgorithmConfig(format!(
+                            "Unsupported byte dtype for Tch Obs Normalizer: {:?}",
+                            tch
+                        )));
+                    }
+                },
+                _ => {
+                    return Err(TrainingError::AlgorithmConfig(format!(
+                        "Unsupported byte backend for Obs Normalizer"
+                    )));
+                }
+            };
+
+            Ok(dtype_vec)
+        }
+
+        let mut obs_slice = byte_slice_to_dtype_mut(obs_bytes, self.obs_dtype.clone())?;
+        let obs_dim = self.mean.len(); // mean same size as obs_dim var
+        let n_envs = obs_slice.len() / obs_dim;
+
+        for i in 0..n_envs {
+            let start = i * obs_dim;
+            for j in 0..obs_dim {
+                let std = (self.var[j] / self.count.max(1) as f64).sqrt().max(1e-4);
+                let norm = (obs_slice.get_f64(i * obs_dim + j) - self.mean[j]) / std;
+                obs_slice.set_f64(i * obs_dim + j, norm)?;
+            }
+        }
+
+        Ok(())
     }
 }

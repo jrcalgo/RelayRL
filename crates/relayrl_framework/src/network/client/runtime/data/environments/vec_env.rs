@@ -76,7 +76,10 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     }
 
     /// Returns `(new_obs_bytes, new_mask_bytes, rewards, dones, truncateds)`.
-    fn step_bytes(&mut self, _actions: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
+    fn step_bytes(
+        &mut self,
+        _actions: &[u8],
+    ) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
         None
     }
 
@@ -100,11 +103,11 @@ pub(crate) struct ScalarVecEnv {
     envs: Vec<Box<dyn DynScalarEnvironment>>,
     ordered_ids: Vec<EnvironmentUuid>,
     uuid_to_idx: HashMap<EnvironmentUuid, usize>,
-    obs_flat: Vec<u8>,        // raw bytes; element dtype = observation_dtype
-    obs_dim: usize,           // obs elements per env (for ONNX shape)
-    obs_bytes_per_env: usize, // obs_flat stride per env
-    act_dim: usize,           // action elements per env
-    act_bytes_per_env: usize, // action bytes per env (1 for discrete, dtype-sized for continuous)
+    obs_flat: Vec<u8>,          // raw bytes; element dtype = observation_dtype
+    obs_dim: usize,             // obs elements per env (for ONNX shape)
+    obs_bytes_per_env: usize,   // obs_flat stride per env
+    act_dim: usize,             // action elements per env
+    act_bytes_per_env: usize,   // action bytes per env (1 for discrete, dtype-sized for continuous)
     mask_flat: Option<Vec<u8>>, // raw bytes; element dtype = action_dtype
     #[allow(dead_code)]
     device: DeviceType,
@@ -338,7 +341,10 @@ impl VecEnvTrait for ScalarVecEnv {
         Some(self.obs_flat.clone())
     }
 
-    fn step_bytes(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+    fn step_bytes(
+        &mut self,
+        actions: &[u8],
+    ) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
         if self.obs_bytes_per_env == 0 {
             return None;
         }
@@ -349,8 +355,8 @@ impl VecEnvTrait for ScalarVecEnv {
         if n >= RAYON_STEP_MIN_ENVS {
             let mut rewards = vec![0.0f32; n];
             let mut dones = vec![false; n];
+            let mut truncateds = vec![false; n];
 
-            // Disjoint field borrows across the closure boundary.
             let env_vec = &self.envs;
             let obs_flat = &mut self.obs_flat;
 
@@ -360,32 +366,38 @@ impl VecEnvTrait for ScalarVecEnv {
                 .zip(actions.par_chunks(act_bpe))
                 .zip(rewards.par_iter_mut())
                 .zip(dones.par_iter_mut())
-                .map(|((((env, obs_chunk), env_act), reward), done)| {
-                    let (obs, mask, reward, done, truncated) = env.dyn_step(env_act)?;
-                    obs_chunk.copy_from_slice(&obs);
-                    *reward = r;
-                    *done = d;
-                    Some(())
-                })
+                .zip(truncateds.par_iter_mut())
+                .map(
+                    |(((((env, obs_chunk), env_act), reward), done), truncated)| {
+                        let (obs, _mask, r, d, t) = env.dyn_step(env_act)?;
+                        obs_chunk.copy_from_slice(&obs);
+                        *reward = r;
+                        *done = d;
+                        *truncated = t;
+                        Some(())
+                    },
+                )
                 .all(|r| r.is_some());
 
             if ok {
-                Some((self.obs_flat.clone(), rewards, dones))
+                Some((self.obs_flat.clone(), None, rewards, dones, truncateds))
             } else {
                 None
             }
         } else {
             let mut rewards = Vec::with_capacity(n);
             let mut dones = Vec::with_capacity(n);
+            let mut truncateds = Vec::with_capacity(n);
 
             for (i, env) in self.envs.iter().enumerate() {
                 let env_act = &actions[i * act_bpe..(i + 1) * act_bpe];
-                let (obs, mask, reward, done, truncated) = env.dyn_step(env_act)?;
+                let (obs, _mask, reward, done, truncated) = env.dyn_step(env_act)?;
                 self.obs_flat[i * obs_bpe..(i + 1) * obs_bpe].copy_from_slice(&obs);
                 rewards.push(reward);
                 dones.push(done);
+                truncateds.push(truncated);
             }
-            Some((self.obs_flat.clone(), rewards, dones))
+            Some((self.obs_flat.clone(), None, rewards, dones, truncateds))
         }
     }
 
@@ -530,7 +542,10 @@ impl VecEnvTrait for BatchVecEnv {
         self.env.flat_mask_bytes()
     }
 
-    fn step_bytes(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
+    fn step_bytes(
+        &mut self,
+        actions: &[u8],
+    ) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
         self.env.step_bytes(actions)
     }
 
