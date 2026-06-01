@@ -4,12 +4,9 @@
 //! training the model, and logging training epochs.
 
 use burn_tensor::backend::Backend;
-use burn_tensor::{Float, Int, TensorKind};
 use relayrl_types::prelude::records::{ArrowTrajectory, CsvTrajectory};
-use relayrl_types::prelude::tensor::burn::Tensor;
-use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, TensorData, TensorError};
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::RelayRLTrajectory;
-use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]
@@ -20,6 +17,12 @@ pub enum AlgorithmError {
     TrajectoryInsertionError(String),
     #[error("Buffer sampling failed: {0}")]
     BufferSamplingError(String),
+    #[error("Kernel registration failed: {0}")]
+    KernelRegistrationError(String),
+    #[error("Invalid specification: {0}")]
+    InvalidSpec(String),
+    #[error(transparent)]
+    NeuralNetworkError(#[from] crate::algorithms::NeuralNetworkError),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -77,13 +80,6 @@ impl TrajectoryData for ArrowTrajectory {
 ///   Log the training status or results for the current epoch. This may include metrics such as loss,
 ///   reward averages, etc.
 pub trait AlgorithmTrait<T: TrajectoryData> {
-    /// Saves the current model to a file specified by `filename`.
-    ///
-    /// # Arguments
-    ///
-    /// * `filename` - The path where the model should be saved.
-    fn save(&self, filename: &str);
-
     /// Receives a trajectory of actions and incorporates it into the training process.
     ///
     /// # Arguments
@@ -101,70 +97,23 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     ///
     /// This method can be used to print or store metrics such as loss, accuracy, rewards, etc.
     fn log_epoch(&mut self);
-}
 
-pub enum ForwardOutput<B: Backend + BackendMatcher, const OUT_D: usize> {
-    Discrete {
-        probs: Tensor<B, OUT_D, Float>,
-        logits: Tensor<B, OUT_D, Float>,
-        logp_a: Option<Tensor<B, OUT_D, Float>>,
-    },
-    Continuous {
-        mean: Tensor<B, OUT_D, Float>,
-        std: Tensor<B, 2, Float>,
-        logp_a: Option<Tensor<B, OUT_D, Float>>,
-    },
-}
-
-pub enum StepAction<B: Backend + BackendMatcher> {
-    Discrete(Tensor<B, 2, Int>),
-    Continuous(Tensor<B, 2, Float>),
-}
-
-pub trait ForwardKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
-    fn forward<const IN_D: usize, const OUT_D: usize>(
-        &self,
-        obs: Tensor<B, IN_D, InK>,
-        mask: Tensor<B, OUT_D, OutK>,
-        act: Option<Tensor<B, OUT_D, OutK>>,
-    ) -> ForwardOutput<B, OUT_D>;
-}
-
-pub trait StepKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> {
-    fn step<const IN_D: usize, const OUT_D: usize>(
-        &self,
-        obs: Tensor<B, IN_D, InK>,
-        mask: Tensor<B, OUT_D, OutK>,
-    ) -> Result<(StepAction<B>, HashMap<String, TensorData>), TensorError>;
-
-    fn get_input_dim(&self) -> usize;
-    fn get_output_dim(&self) -> usize;
-}
-
-/// Trait for kernels that support gradient-based training.
-///
-/// The backend type used for autodiff is encapsulated inside the implementation —
-/// callers only deal with `TensorData` (serialized tensors from the replay buffer)
-/// and scalar outputs. This decouples the inference backend from the training backend,
-/// allowing the concrete kernel to use `Autodiff<NdArray>` internally while
-/// the algorithm stays generic over `B: Backend + BackendMatcher`.
-pub trait TrainableKernelTrait {
-    /// Compute and apply the policy gradient update step.
+    /// Saves the current model to a file specified by `filename`.
     ///
-    /// Returns `(scalar_loss, info)` where `info` contains:
-    ///   - `"kl"` — approximate KL divergence between old and new policy
-    ///   - `"entropy"` — policy entropy
-    fn train_pi_step(
-        &mut self,
-        obs: &[TensorData],
-        act: &[TensorData],
-        mask: &[TensorData],
-        adv: &[f32],
-        logp_old: &[TensorData],
-    ) -> (f32, HashMap<String, f32>);
-
-    /// Compute and apply the value function update step.
+    /// # Arguments
     ///
-    /// Returns the scalar MSE loss.
-    fn train_vf_step(&mut self, obs: &[TensorData], mask: &[TensorData], ret: &[f32]) -> f32;
+    /// * `filename` - The path where the model should be saved.
+    fn save_model(&self, filename: &str);
+
+    /// Acquires the trained model as a ModelModule for inference or export.
+    ///
+    /// Returns `None` if no model has been trained yet, if weight export is not supported,
+    /// or if the required feature flags are not enabled.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `B` - The Burn backend type (e.g., NdArray or LibTorch)
+    fn acquire_model<B: Backend + BackendMatcher<Backend = B>>(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B>>;
 }

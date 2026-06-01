@@ -3,55 +3,634 @@
 //! Actors own local inference state, trajectory assembly, and the message-handling loop for the
 //! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
 
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::AlgorithmInitArgs;
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::TransportError;
+use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
+    ControlPayload, DataPayload, InferenceRequest, RoutedMessage, RoutingProtocol,
 };
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
+use active_uuid_registry::registry_uuid::Uuid;
+use arc_swap::ArcSwapOption;
+use dashmap::DashMap;
+#[cfg(feature = "tch-backend")]
+use relayrl_env_trait::EnvTchDType;
+use relayrl_env_trait::{EnvDType, EnvNdArrayDType};
 use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
+#[cfg(feature = "tch-backend")]
+use relayrl_types::data::tensor::TchDType;
+use relayrl_types::data::tensor::{
+    BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TensorData,
+};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
+use std::any::Any;
+use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
+use tokio::sync::{Mutex, RwLock};
 
 use burn_tensor::backend::Backend;
 use thiserror::Error;
 
 /// Shared handle to a hot-reloadable model.
 ///
-/// The outer `Arc<RwLock<Option<...>>>` enables two ownership modes:
+/// The outer `Arc<ArcSwapOption<...>>` enables two ownership modes:
 /// - **Independent**: each actor holds its own `Arc`, wrapping its own model.
 /// - **Shared**: all actors on the same device hold a clone of the *same* `Arc`, so
-///   a write through any one actor (handshake / model update) is immediately visible
+///   a snapshot swap through any one actor (handshake / model update) is immediately visible
 ///   to every other actor that shares it.
-pub(crate) type LocalModelHandle<B> = Arc<RwLock<Option<HotReloadableModel<B>>>>;
+pub(crate) type LocalModelHandle<B> = Arc<ArcSwapOption<HotReloadableModel<B>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ActorShape {
+    pub(crate) d_in: usize,
+    pub(crate) d_out: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActorDTypes {
+    pub(crate) dtype_in: DType,
+    pub(crate) dtype_out: DType,
+}
+
+pub(crate) trait ErasedActorRuntime<B: Backend + BackendMatcher<Backend = B>>:
+    Send + Sync
+{
+    fn actor_shape(&self) -> ActorShape;
+
+    fn current_model_dtypes(&self) -> Result<ActorDTypes, ActorError>;
+
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    fn current_algorithm_args(&self) -> Result<AlgorithmInitArgs, ActorError>;
+
+    fn request_inference_erased(
+        &self,
+        observation: Box<dyn Any + Send + Sync>,
+        mask: Box<dyn Any + Send + Sync>,
+        reward: f32,
+    ) -> Pin<Box<dyn Future<Output = Result<RelayRLAction, ActorError>> + Send + '_>>;
+
+    fn flag_last_action_erased(
+        &self,
+        reward: f32,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
+        return_traj_override: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RelayRLTrajectory>, ActorError>> + Send + '_>>;
+
+    fn perform_env_byte_inference_erased<'a>(
+        &'a self,
+        model_name: &'a str,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        obs_dtype: &'a DType,
+    ) -> Pin<Box<dyn Future<Output = Result<TensorData, ActorError>> + Send + 'a>>;
+
+    fn perform_env_refresh_model_erased<'a>(
+        &'a self,
+        name: &'a str,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send + 'a>>;
+}
+
+struct ActorTrajectoryState {
+    current_traj: RelayRLTrajectory,
+    current_episode: u64,
+    per_env_trajs: HashMap<Uuid, RelayRLTrajectory>,
+    per_env_episodes: HashMap<Uuid, u64>,
+    per_env_labels: HashMap<Uuid, String>,
+}
+
+impl ActorTrajectoryState {
+    fn new(max_traj_length: Arc<usize>) -> Self {
+        Self {
+            current_traj: RelayRLTrajectory::new(*max_traj_length),
+            current_episode: 0,
+            per_env_trajs: HashMap::new(),
+            per_env_episodes: HashMap::new(),
+            per_env_labels: HashMap::new(),
+        }
+    }
+
+    fn ensure_env_trajectory(
+        &mut self,
+        actor_id: ActorUuid,
+        env_id: Uuid,
+        env_label: impl Into<String>,
+        max_traj_length: Arc<usize>,
+    ) -> &mut RelayRLTrajectory {
+        let label = env_label.into();
+        self.per_env_labels
+            .entry(env_id)
+            .or_insert_with(|| label.clone());
+        self.per_env_trajs.entry(env_id).or_insert_with(|| {
+            RelayRLTrajectory::with_metadata(
+                *max_traj_length,
+                Some(actor_id),
+                Some(env_id),
+                Some(label),
+                None,
+                None,
+            )
+        })
+    }
+
+    fn take_completed_env_trajectory(
+        &mut self,
+        actor_id: ActorUuid,
+        env_id: Uuid,
+        env_label: Option<String>,
+        reward: f32,
+        max_traj_length: Arc<usize>,
+    ) -> RelayRLTrajectory {
+        let label = env_label.unwrap_or_else(|| {
+            self.per_env_labels
+                .get(&env_id)
+                .cloned()
+                .unwrap_or_else(|| env_id.to_string())
+        });
+        let traj =
+            self.ensure_env_trajectory(actor_id, env_id, label.clone(), max_traj_length.clone());
+        traj.add_action(RelayRLAction::new(
+            None,
+            None,
+            None,
+            reward,
+            true,
+            None,
+            Some(actor_id),
+        ));
+
+        let mut traj_to_send = self
+            .per_env_trajs
+            .insert(
+                env_id,
+                RelayRLTrajectory::with_metadata(
+                    *max_traj_length,
+                    Some(actor_id),
+                    Some(env_id),
+                    Some(label),
+                    None,
+                    None,
+                ),
+            )
+            .expect("env trajectory should exist before flush");
+        let episode = self.per_env_episodes.entry(env_id).or_insert(0);
+        traj_to_send.set_episode(*episode);
+        *episode += 1;
+        traj_to_send
+    }
+
+    fn take_completed_actor_trajectory(
+        &mut self,
+        actor_id: ActorUuid,
+        reward: f32,
+        max_traj_length: Arc<usize>,
+    ) -> RelayRLTrajectory {
+        let last_action = RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
+        self.current_traj.add_action(last_action);
+
+        let mut traj_to_send = std::mem::replace(
+            &mut self.current_traj,
+            RelayRLTrajectory::new(*max_traj_length),
+        );
+        traj_to_send.set_episode(self.current_episode);
+        self.current_episode += 1;
+        traj_to_send
+    }
+
+    fn take_shutdown_trajectories(
+        &mut self,
+        actor_id: ActorUuid,
+        max_traj_length: Arc<usize>,
+    ) -> Vec<RelayRLTrajectory> {
+        let mut trajectories = Vec::new();
+
+        if !self.current_traj.actions.is_empty() {
+            trajectories.push(std::mem::replace(
+                &mut self.current_traj,
+                RelayRLTrajectory::new(*max_traj_length),
+            ));
+        }
+
+        let env_ids_to_flush: Vec<_> = self
+            .per_env_trajs
+            .iter()
+            .filter_map(|(env_id, traj)| (!traj.actions.is_empty()).then_some(*env_id))
+            .collect();
+        for env_id in env_ids_to_flush {
+            let env_label = self.per_env_labels.get(&env_id).cloned();
+            trajectories.push(self.take_completed_env_trajectory(
+                actor_id,
+                env_id,
+                env_label,
+                0.0,
+                max_traj_length.clone(),
+            ));
+        }
+
+        trajectories
+    }
+}
+
+pub(crate) struct ActorRuntime<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
+    actor_id: ActorUuid,
+    pub(crate) reloadable_model: LocalModelHandle<B>,
+    temp_env_models: DashMap<String, LocalModelHandle<B>>,
+    max_traj_length: Arc<usize>,
+    shared_tx_to_buffer: Sender<RoutedMessage>,
+    trajectories: Mutex<ActorTrajectoryState>,
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    algorithm_args: AlgorithmInitArgs,
+    #[cfg(feature = "metrics")]
+    metrics: MetricsManager,
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+> ActorRuntime<B, D_IN, D_OUT>
+{
+    pub(crate) async fn new(
+        actor_id: ActorUuid,
+        reloadable_model: LocalModelHandle<B>,
+        max_traj_length: usize,
+        shared_tx_to_buffer: Sender<RoutedMessage>,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        algorithm_args: AlgorithmInitArgs,
+    ) -> Self {
+        let max_traj_length = Arc::new(max_traj_length);
+        Self {
+            actor_id,
+            reloadable_model,
+            temp_env_models: DashMap::new(),
+            max_traj_length: max_traj_length.clone(),
+            shared_tx_to_buffer,
+            trajectories: Mutex::new(ActorTrajectoryState::new(max_traj_length.clone())),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            algorithm_args,
+            #[cfg(feature = "metrics")]
+            metrics,
+        }
+    }
+
+    fn build_send_trajectory_message(
+        &self,
+        trajectory: RelayRLTrajectory,
+    ) -> Result<RoutedMessage, ActorError> {
+        let now = SystemTime::now();
+        let duration = now
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
+        Ok(RoutedMessage {
+            actor_id: self.actor_id,
+            protocol: RoutingProtocol::Data(DataPayload::SendTrajectory {
+                timestamp: (duration.as_millis(), duration.as_nanos()),
+                trajectory,
+            }),
+        })
+    }
+
+    async fn send_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(), ActorError> {
+        if self.shared_tx_to_buffer.is_closed() {
+            // indicates that the buffer is disabled via client mode OR is shutdown
+            return Ok(());
+        }
+        let send_traj_msg = self.build_send_trajectory_message(trajectory)?;
+        self.shared_tx_to_buffer
+            .send(send_traj_msg)
+            .await
+            .map_err(|e| ActorError::TrajectorySendError(format!("{e:?}")))
+    }
+
+    pub(crate) async fn perform_local_inference(
+        &self,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
+        reward: f32,
+    ) -> Result<RelayRLAction, ActorError> {
+        #[cfg(feature = "metrics")]
+        let start_time = Instant::now();
+
+        let result = async {
+            let action = {
+                let guard = self.reloadable_model.load();
+                let reloadable_model = match &*guard {
+                    Some(m) => m,
+                    None => {
+                        return Err(ActorError::SystemError(
+                            "Model not loaded/available for actor inference".to_string(),
+                        ));
+                    }
+                };
+                reloadable_model
+                    .forward::<D_IN, D_OUT>(observation, mask, reward, self.actor_id)
+                    .map_err(ActorError::from)?
+            };
+
+            let mut trajectories = self.trajectories.lock().await;
+            trajectories.current_traj.add_action(action.clone());
+            Ok(action)
+        }
+        .await;
+
+        #[cfg(feature = "metrics")]
+        match &result {
+            Ok(_) => {
+                let duration = start_time.elapsed().as_secs_f64();
+                self.metrics
+                    .record_histogram("actor_local_inference_latency", duration, &[])
+                    .await;
+                self.metrics
+                    .record_counter("actor_local_inferences", 1, &[])
+                    .await;
+            }
+            Err(_) => {
+                self.metrics
+                    .record_counter("actor_local_inference_failures", 1, &[])
+                    .await;
+            }
+        }
+
+        result
+    }
+
+    pub(crate) async fn perform_env_byte_inference(
+        &self,
+        model_name: &str,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        obs_dtype: &DType,
+    ) -> Result<TensorData, ActorError> {
+        let guard = self.temp_env_models.get(model_name);
+        let slot = guard.as_ref().ok_or_else(|| {
+            ActorError::SystemError(format!(
+                "Model slot '{}' not loaded — call perform_env_refresh_model first",
+                model_name
+            ))
+        })?;
+        let model = slot.load_full().ok_or_else(|| {
+            ActorError::SystemError(format!("Model slot '{}' handle is empty", model_name))
+        })?;
+        let module = model.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            obs_dtype.clone(),
+            obs_bytes.to_vec(),
+            B::get_supported_backend(),
+        );
+
+        Ok(module
+            .flat_batch_inference(input)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs)))
+    }
+
+    pub(crate) async fn flag_last_action(
+        &self,
+        reward: f32,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
+        return_traj_override: bool,
+    ) -> Result<Option<RelayRLTrajectory>, ActorError> {
+        #[cfg(feature = "metrics")]
+        let start_time = Instant::now();
+
+        let result = async {
+            let maybe_trajectory = {
+                let mut trajectories = self.trajectories.lock().await;
+                Some(match env_id {
+                    Some(env_id) => trajectories.take_completed_env_trajectory(
+                        self.actor_id,
+                        env_id,
+                        env_label,
+                        reward,
+                        self.max_traj_length.clone(),
+                    ),
+                    None => trajectories.take_completed_actor_trajectory(
+                        self.actor_id,
+                        reward,
+                        self.max_traj_length.clone(),
+                    ),
+                })
+            };
+
+            if let Some(trajectory) = maybe_trajectory {
+                if return_traj_override {
+                    return Ok(Some(trajectory));
+                } else {
+                    self.send_trajectory(trajectory).await?;
+                }
+            }
+
+            Ok(None)
+        }
+        .await;
+
+        #[cfg(feature = "metrics")]
+        match &result {
+            Ok(_) => {
+                let duration = start_time.elapsed().as_secs_f64();
+                self.metrics
+                    .record_histogram("actor_flag_last_action_latency", duration, &[])
+                    .await;
+                self.metrics
+                    .record_counter("actor_flag_last_actions", 1, &[])
+                    .await;
+            }
+            Err(_) => {
+                self.metrics
+                    .record_counter("actor_flag_last_action_failures", 1, &[])
+                    .await;
+            }
+        }
+
+        result
+    }
+
+    /// Load or hot-reload a named model slot used by `perform_env_byte_inference`.
+    pub(crate) async fn perform_env_refresh_model(
+        &self,
+        name: &str,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Result<(), ActorError> {
+        if let Some(slot) = self.temp_env_models.get(name) {
+            match slot.load_full() {
+                Some(model) => {
+                    model
+                        .reload_from_module(model_module, model.version())
+                        .await
+                        .map_err(ActorError::from)?;
+                }
+                None => {
+                    let reloadable = Arc::new(
+                        HotReloadableModel::<B>::new_from_module(model_module, device).await?,
+                    );
+                    slot.store(Some(reloadable));
+                }
+            }
+        } else {
+            let reloadable =
+                Arc::new(HotReloadableModel::<B>::new_from_module(model_module, device).await?);
+            self.temp_env_models.insert(
+                name.to_string(),
+                Arc::new(arc_swap::ArcSwapOption::new(Some(reloadable))),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn flush_shutdown_trajectories(&self) -> Result<(), ActorError> {
+        let trajectories = {
+            let mut state = self.trajectories.lock().await;
+            state.take_shutdown_trajectories(self.actor_id, self.max_traj_length.clone())
+        };
+
+        for trajectory in trajectories {
+            self.send_trajectory(trajectory).await?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<B, const D_IN: usize, const D_OUT: usize> ErasedActorRuntime<B>
+    for ActorRuntime<B, D_IN, D_OUT>
+where
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+{
+    fn actor_shape(&self) -> ActorShape {
+        ActorShape {
+            d_in: D_IN,
+            d_out: D_OUT,
+        }
+    }
+
+    fn current_model_dtypes(&self) -> Result<ActorDTypes, ActorError> {
+        let model = self
+            .reloadable_model
+            .load()
+            .clone()
+            .ok_or(ActorError::ModelNotLoadedError)?;
+        Ok(ActorDTypes {
+            dtype_in: model.current_module().metadata.input_dtype.clone(),
+            dtype_out: model.current_module().metadata.output_dtype.clone(),
+        })
+    }
+
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    fn current_algorithm_args(&self) -> Result<AlgorithmInitArgs, ActorError> {
+        Ok(self.algorithm_args.clone())
+    }
+
+    fn request_inference_erased(
+        &self,
+        observation: Box<dyn Any + Send + Sync>,
+        mask: Box<dyn Any + Send + Sync>,
+        reward: f32,
+    ) -> Pin<Box<dyn Future<Output = Result<RelayRLAction, ActorError>> + Send + '_>> {
+        Box::pin(async move {
+            let observation = *observation
+                .downcast::<Arc<AnyBurnTensor<B, D_IN>>>()
+                .map_err(|_| {
+                    ActorError::TypeConversionError(
+                        "invalid observation shape for actor runtime".to_string(),
+                    )
+                })?;
+
+            let mask = *mask
+                .downcast::<Option<Arc<AnyBurnTensor<B, D_OUT>>>>()
+                .map_err(|_| {
+                    ActorError::TypeConversionError(
+                        "invalid mask shape for actor runtime".to_string(),
+                    )
+                })?;
+
+            self.perform_local_inference(observation, mask, reward)
+                .await
+        })
+    }
+
+    fn flag_last_action_erased(
+        &self,
+        reward: f32,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
+        return_traj_override: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RelayRLTrajectory>, ActorError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            self.flag_last_action(reward, env_id, env_label, return_traj_override)
+                .await
+        })
+    }
+
+    fn perform_env_byte_inference_erased<'a>(
+        &'a self,
+        model_name: &'a str,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        obs_dtype: &'a DType,
+    ) -> Pin<Box<dyn Future<Output = Result<TensorData, ActorError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.perform_env_byte_inference(model_name, obs_bytes, n_envs, obs_dim, obs_dtype)
+                .await
+        })
+    }
+
+    fn perform_env_refresh_model_erased<'a>(
+        &'a self,
+        name: &'a str,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.perform_env_refresh_model(name, model_module, device)
+                .await
+        })
+    }
+}
 
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
 pub enum ActorError {
     #[error(transparent)]
     ModelError(#[from] ModelError),
+    #[error("Model not loaded")]
+    ModelNotLoadedError,
     #[error("Trajectory send failed: {0}")]
     TrajectorySendError(String),
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -70,15 +649,19 @@ pub enum ActorError {
     TransportError(#[from] TransportError),
 }
 
-pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + 'static {
+pub trait ActorEntity<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+>: Send + Sync + 'static
+{
     #[allow(clippy::too_many_arguments)]
     async fn new(
         client_namespace: Arc<str>,
         actor_id: ActorUuid,
         device: DeviceType,
-        model_handle: LocalModelHandle<B>,
+        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
-        shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -86,7 +669,6 @@ pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + '
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         rx_from_router: Receiver<RoutedMessage>,
-        shared_tx_to_buffer: Sender<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) -> Self
@@ -108,9 +690,8 @@ pub(crate) struct Actor<
     #[allow(dead_code)]
     client_namespace: Arc<str>,
     actor_id: ActorUuid,
-    reloadable_model: LocalModelHandle<B>,
+    runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
-    shared_max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -118,16 +699,17 @@ pub(crate) struct Actor<
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     model_device: DeviceType,
-    current_traj: RelayRLTrajectory,
     rx_from_router: Receiver<RoutedMessage>,
-    shared_tx_to_buffer: Sender<RoutedMessage>,
     shared_client_modes: Arc<ClientModes>,
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    Actor<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+> Actor<B, D_IN, D_OUT>
 {
     #[inline(always)]
     #[allow(clippy::type_complexity)]
@@ -142,7 +724,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         ),
         ActorError,
     > {
-        let RoutedPayload::RequestInference(req) = msg.payload else {
+        let RoutingProtocol::Data(DataPayload::RequestInference(req)) = msg.protocol else {
             return Err(ActorError::MessageHandlingError(
                 "Expected RequestInference payload".to_string(),
             ));
@@ -174,62 +756,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ActorInferenceMode::Local(_) => self.perform_local_inference(msg).await,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             ActorInferenceMode::Server(_) => self.request_server_inference(msg).await,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            ActorInferenceMode::ServerOverflow(_, _) => {
+                self.request_server_overflow_inference(msg).await
+            }
         }
     }
 
     async fn perform_local_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        #[cfg(feature = "metrics")]
-        let start_time = Instant::now();
-
-        // Clone the Arc so the closure owns an independent reference count.
-        // In Shared mode all actors clone the same underlying Arc; in Independent mode
-        // each actor has its own Arc.
-        let model_handle = self.reloadable_model.clone();
         let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
-        let actor_id = self.actor_id;
-
-        let result = async {
-            let r4sa = tokio::task::spawn_blocking(move || -> Result<RelayRLAction, ModelError> {
-                let guard = model_handle.blocking_read();
-                let reloadable_model = guard.as_ref().ok_or_else(|| {
-                    ModelError::IoError(
-                        "Model not loaded/available for actor inference".to_string(),
-                    )
-                })?;
-                reloadable_model.forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
-            })
-            .await
-            .map_err(|e| ActorError::SystemError(format!("spawn_blocking join error: {e}")))?
-            .map_err(ActorError::from)?;
-
-            self.current_traj.add_action(r4sa.clone());
-            reply_to.send(Arc::new(r4sa)).map_err(|e| {
-                ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
-            })?;
-
-            Ok(())
-        }
-        .await;
-
-        #[cfg(feature = "metrics")]
-        match &result {
-            Ok(()) => {
-                let duration = start_time.elapsed().as_secs_f64();
-                self.metrics
-                    .record_histogram("actor_local_inference_latency", duration, &[])
-                    .await;
-                self.metrics
-                    .record_counter("actor_local_inferences", 1, &[])
-                    .await;
-            }
-            Err(_) => {
-                self.metrics
-                    .record_counter("actor_local_inference_failures", 1, &[])
-                    .await;
-            }
-        }
-
-        result
+        let action = self
+            .runtime
+            .perform_local_inference(obs, mask, reward)
+            .await?;
+        reply_to.send(Arc::new(action)).map_err(|e| {
+            ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
+        })?;
+        Ok(())
     }
 
     /// Server inference: serialize observation (and optionally mask) and send to server.
@@ -260,12 +803,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 crate::network::ACTOR_CONTEXT.to_string(),
                 self.actor_id,
             );
-            let r4sa = inference_dispatcher
+            let rla = inference_dispatcher
                 .send_inference_request(actor_entry, obs_bytes, shared_transport_addresses)
                 .await?;
 
-            self.current_traj.add_action(r4sa.clone());
-            reply_to.send(Arc::new(r4sa)).map_err(|e| {
+            let mut trajectories = self.runtime.trajectories.lock().await;
+            trajectories.current_traj.add_action(rla.clone());
+            reply_to.send(Arc::new(rla)).map_err(|e| {
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
         } else {
@@ -276,88 +820,42 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(())
     }
 
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    async fn request_server_overflow_inference(
+        &mut self,
+        msg: RoutedMessage,
+    ) -> Result<(), ActorError> {
+        todo!()
+    }
+
     async fn perform_flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::FlagLastInference { reward } = msg.payload {
-            #[cfg(feature = "metrics")]
-            let start_time = Instant::now();
-
-            let result = async {
-                {
-                    let actor_id = self.actor_id;
-                    let mut last_action =
-                        RelayRLAction::new(None, None, None, reward, true, None, Some(actor_id));
-                    last_action.update_reward(reward);
-                    self.current_traj.add_action(last_action);
-                }
-
-                let traj_to_send: RelayRLTrajectory = {
-                    let max_traj_length: usize = *self.shared_max_traj_length.read().await;
-                    std::mem::replace(
-                        &mut self.current_traj,
-                        RelayRLTrajectory::new(max_traj_length),
-                    )
-                };
-
-                let (duration_ms, duration_ns) = {
-                    let now: SystemTime = SystemTime::now();
-                    let duration = now
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
-                    (duration.as_millis(), duration.as_nanos())
-                };
-
-                let send_traj_msg = RoutedMessage {
-                    actor_id: self.actor_id,
-                    protocol: RoutingProtocol::SendTrajectory,
-                    payload: RoutedPayload::SendTrajectory {
-                        timestamp: (duration_ms, duration_ns),
-                        trajectory: traj_to_send,
-                    },
-                };
-
-                self.shared_tx_to_buffer
-                    .send(send_traj_msg)
-                    .await
-                    .map_err(|e| ActorError::TrajectorySendError(format!("{e:?}")))?;
-
-                Ok(())
-            }
-            .await;
-
-            #[cfg(feature = "metrics")]
-            match &result {
-                Ok(()) => {
-                    let duration = start_time.elapsed().as_secs_f64();
-                    self.metrics
-                        .record_histogram("actor_flag_last_action_latency", duration, &[])
-                        .await;
-                    self.metrics
-                        .record_counter("actor_flag_last_actions", 1, &[])
-                        .await;
-                }
-                Err(_) => {
-                    self.metrics
-                        .record_counter("actor_flag_last_action_failures", 1, &[])
-                        .await;
-                }
-            }
-
-            return result;
+        if let RoutingProtocol::Data(DataPayload::FlagLastAction {
+            reward,
+            env_id,
+            env_label,
+        }) = msg.protocol
+        {
+            let _ = self
+                .runtime
+                .flag_last_action(reward, env_id, env_label, false)
+                .await;
         }
         Ok(())
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ActorEntity<B>
-    for Actor<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+> ActorEntity<B, D_IN, D_OUT> for Actor<B, D_IN, D_OUT>
 {
     async fn new(
         client_namespace: Arc<str>,
         actor_id: ActorUuid,
         device: DeviceType,
-        model_handle: LocalModelHandle<B>,
+        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
-        shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -365,16 +863,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         rx_from_router: Receiver<RoutedMessage>,
-        shared_tx_to_buffer: Sender<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
     ) -> Self
     where
         Self: Sized,
     {
-        let max_traj_length: usize = *shared_max_traj_length.read().await;
-
-        let model_init_flag = model_handle.read().await.is_none();
+        let model_init_flag = runtime.reloadable_model.load_full().is_none();
         if model_init_flag {
             log::warn!(
                 "[ActorEntity] Startup model is None, initial model handshake necessitated..."
@@ -384,9 +879,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let actor: Actor<B, D_IN, D_OUT> = Self {
             client_namespace,
             actor_id,
-            reloadable_model: model_handle,
+            runtime,
             shared_local_model_path,
-            shared_max_traj_length,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_inference_dispatcher,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -394,9 +888,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses,
             model_device: device,
-            current_traj: RelayRLTrajectory::new(max_traj_length),
             rx_from_router,
-            shared_tx_to_buffer,
             shared_client_modes,
             #[cfg(feature = "metrics")]
             metrics,
@@ -408,22 +900,29 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn spawn_loop(&mut self) -> Result<(), ActorError> {
         while let Some(msg) = self.rx_from_router.recv().await {
             match msg.protocol {
-                RoutingProtocol::ModelHandshake => {
+                RoutingProtocol::Control(ControlPayload::ModelHandshake) => {
                     self.initial_model_handshake(msg).await?;
                 }
-                RoutingProtocol::RequestInference => {
+                RoutingProtocol::Data(DataPayload::RequestInference(_)) => {
                     self.handle_inference_kind(msg).await?;
                 }
-                RoutingProtocol::FlagLastInference => {
+                RoutingProtocol::Data(DataPayload::FlagLastAction {
+                    reward: _,
+                    env_id: _,
+                    env_label: _,
+                }) => {
                     self.perform_flag_last_action(msg).await?;
                 }
-                RoutingProtocol::ModelVersion => {
+                RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: _ }) => {
                     self.get_model_version(msg).await?;
                 }
-                RoutingProtocol::ModelUpdate => {
+                RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                    model_bytes: _,
+                    version: _,
+                }) => {
                     self.refresh_model(msg).await?;
                 }
-                RoutingProtocol::Shutdown => {
+                RoutingProtocol::Control(ControlPayload::Shutdown) => {
                     self.handle_shutdown(msg).await?;
                     break;
                 }
@@ -434,17 +933,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::ModelHandshake = msg.payload {
+        if let RoutingProtocol::Control(ControlPayload::ModelHandshake) = msg.protocol {
             // Fast path: skip the handshake when a model is already available locally.
-            {
-                let model_guard = self.reloadable_model.read().await;
-                if model_guard.is_some() {
-                    log::warn!(
-                        "[Actor {:?}] Model already available, handshake not needed",
-                        self.actor_id
-                    );
-                    return Ok(());
-                }
+            if self.runtime.reloadable_model.load_full().is_some() {
+                log::warn!(
+                    "[Actor {:?}] Model already available, handshake not needed",
+                    self.actor_id
+                );
+                return Ok(());
             }
 
             #[cfg(feature = "metrics")]
@@ -497,8 +993,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 let model_device = self.model_device.clone();
                                 let actor_id = self.actor_id;
 
-                                let mut model_guard = self.reloadable_model.write().await;
-                                match model_guard.as_ref() {
+                                match self.runtime.reloadable_model.load_full() {
                                     Some(existing_model) => {
                                         let version = existing_model.version() + 1;
                                         existing_model
@@ -513,11 +1008,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                                     actor_id,
                                                     e
                                                 );
-                                                ActorError::from(e)
+                                                ActorError::ModelError(e)
                                             })?;
                                     }
                                     None => {
-                                        *model_guard = Some(
+                                        let reloadable_model = Arc::new(
                                             HotReloadableModel::<B>::new_from_module(
                                                 model,
                                                 model_device,
@@ -525,6 +1020,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                             .await
                                             .map_err(ActorError::from)?,
                                         );
+                                        self.runtime.reloadable_model.store(Some(reloadable_model));
                                     }
                                 }
 
@@ -583,14 +1079,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::ModelVersion { reply_to } = msg.payload {
-            let version = {
-                let model_guard = self.reloadable_model.read().await;
-                match model_guard.as_ref() {
-                    Some(model) => model.version(),
-                    None => -1,
-                }
-            };
+        if let RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to }) = msg.protocol {
+            let version = self
+                .runtime
+                .reloadable_model
+                .load_full()
+                .map(|model| model.version())
+                .unwrap_or(-1);
             reply_to
                 .send(version)
                 .map_err(|e| ActorError::MessageHandlingError(format!("{:?}", e)))?;
@@ -600,10 +1095,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     async fn refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::ModelUpdate {
+        if let RoutingProtocol::Control(ControlPayload::ModelUpdate {
             model_bytes,
             version,
-        } = msg.payload
+        }) = msg.protocol
         {
             #[cfg(feature = "metrics")]
             let start_time = Instant::now();
@@ -632,11 +1127,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         return Err(e);
                     }
 
-                    // Acquire the outer write lock; in Shared mode this also blocks other actors
-                    // from running inference until the swap is complete.
                     let model_device = self.model_device.clone();
-                    let mut model_guard = self.reloadable_model.write().await;
-                    match model_guard.as_ref() {
+                    match self.runtime.reloadable_model.load_full() {
                         Some(existing_model) => {
                             existing_model
                                 .reload_from_module(ok_model, version)
@@ -644,12 +1136,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 .map_err(ActorError::from)?;
                         }
                         None => {
-                            // Model handle is empty; initialise it now so the actor can run.
-                            *model_guard = Some(
+                            let reloadable_model = Arc::new(
                                 HotReloadableModel::<B>::new_from_module(ok_model, model_device)
                                     .await
                                     .map_err(ActorError::from)?,
                             );
+                            self.runtime.reloadable_model.store(Some(reloadable_model));
                         }
                     }
 
@@ -685,36 +1177,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     async fn handle_shutdown(&mut self, _msg: RoutedMessage) -> Result<(), ActorError> {
-        if !self.current_traj.actions.is_empty() {
-            let send_traj_msg = {
-                let traj_to_send: RelayRLTrajectory = {
-                    let max_traj_length: usize = *self.shared_max_traj_length.read().await;
-                    std::mem::replace(
-                        &mut self.current_traj,
-                        RelayRLTrajectory::new(max_traj_length),
-                    )
-                };
-
-                let (duration_ms, duration_ns) = {
-                    let now: SystemTime = SystemTime::now();
-                    let duration = now
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|e| ActorError::SystemError(format!("Clock skew: {}", e)))?;
-                    (duration.as_millis(), duration.as_nanos())
-                };
-
-                RoutedMessage {
-                    actor_id: self.actor_id,
-                    protocol: RoutingProtocol::SendTrajectory,
-                    payload: RoutedPayload::SendTrajectory {
-                        timestamp: (duration_ms, duration_ns),
-                        trajectory: traj_to_send,
-                    },
-                }
-            };
-
-            let _ = self.shared_tx_to_buffer.send(send_traj_msg).await;
-        }
+        let _ = self.runtime.flush_shutdown_trajectories().await;
 
         active_uuid_registry::interface::remove_id(
             self.client_namespace.as_ref(),
@@ -737,18 +1200,15 @@ mod unit_tests {
     use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 
     use active_uuid_registry::registry_uuid::Uuid;
-    use relayrl_types::data::tensor::DeviceType;
-    use relayrl_types::data::tensor::NdArrayDType;
-    use relayrl_types::prelude::tensor::relayrl::DType;
-    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
+    use relayrl_types::data::tensor::{DType, DeviceType, NdArrayDType};
 
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{RwLock, mpsc, oneshot};
 
     use burn_ndarray::NdArray;
-    use burn_ndarray::NdArrayDevice;
-    use burn_tensor::Tensor;
+    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
+    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
     type NdArrayBackend = NdArray<f32>;
 
@@ -763,7 +1223,20 @@ mod unit_tests {
     }
 
     fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
-        Arc::new(RwLock::new(None))
+        Arc::new(ArcSwapOption::new(None))
+    }
+
+    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArrayBackend, D_IN>> {
+        let device = NdArrayBackend::get_device(&DeviceType::Cpu).unwrap();
+        let tensor = Tensor::<NdArrayBackend, D_IN, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
+            &device,
+        );
+
+        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        }))
     }
 
     async fn create_ndarray_actor(
@@ -777,14 +1250,27 @@ mod unit_tests {
         let actor_id = Uuid::new_v4();
         let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let model_handle = empty_onnx_model_handle();
+        let runtime = Arc::new(
+            ActorRuntime::new(
+                actor_id,
+                model_handle,
+                max_traj_length,
+                tx_to_buffer.clone(),
+                #[cfg(feature = "metrics")]
+                test_metrics(),
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                AlgorithmInitArgs::default(),
+            )
+            .await,
+        );
 
         let actor = Actor::<NdArrayBackend, D_IN, D_OUT>::new(
             Arc::from("test-actor-namespace"),
             actor_id,
             device,
-            empty_onnx_model_handle(),
+            runtime,
             Arc::new(RwLock::new(PathBuf::new())),
-            Arc::new(RwLock::new(max_traj_length)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -792,7 +1278,6 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             rx_from_router,
-            tx_to_buffer,
             disabled_data_mode(),
             #[cfg(feature = "metrics")]
             test_metrics(),
@@ -802,16 +1287,8 @@ mod unit_tests {
         (actor, tx_to_actor, rx_from_buffer)
     }
 
-    fn build_msg(
-        actor_id: ActorUuid,
-        protocol: RoutingProtocol,
-        payload: RoutedPayload,
-    ) -> RoutedMessage {
-        RoutedMessage {
-            actor_id,
-            protocol,
-            payload,
-        }
+    fn build_msg(actor_id: ActorUuid, protocol: RoutingProtocol) -> RoutedMessage {
+        RoutedMessage { actor_id, protocol }
     }
 
     #[cfg(feature = "metrics")]
@@ -855,8 +1332,7 @@ mod unit_tests {
 
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -881,8 +1357,7 @@ mod unit_tests {
         let (reply_tx, reply_rx) = oneshot::channel::<i64>();
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::ModelVersion,
-            RoutedPayload::ModelVersion { reply_to: reply_tx },
+            RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: reply_tx }),
         ))
         .await
         .unwrap();
@@ -897,8 +1372,7 @@ mod unit_tests {
         // Shutdown the actor
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -914,8 +1388,11 @@ mod unit_tests {
         // Build trajectory via FlagLastInference (adds a terminal action)
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::FlagLastInference,
-            RoutedPayload::FlagLastInference { reward: 1.0 },
+            RoutingProtocol::Data(DataPayload::FlagLastAction {
+                reward: 1.0,
+                env_id: None,
+                env_label: None,
+            }),
         ))
         .await
         .unwrap();
@@ -927,15 +1404,14 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(matches!(
-            traj_msg.payload,
-            RoutedPayload::SendTrajectory { .. }
+            traj_msg.protocol,
+            RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
         ));
 
         // Now send Shutdown
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -951,8 +1427,7 @@ mod unit_tests {
         // Send Shutdown immediately without adding any actions
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::Shutdown,
-            RoutedPayload::Shutdown,
+            RoutingProtocol::Control(ControlPayload::Shutdown),
         ))
         .await
         .unwrap();
@@ -973,8 +1448,11 @@ mod unit_tests {
 
         tx.send(build_msg(
             actor_id,
-            RoutingProtocol::FlagLastInference,
-            RoutedPayload::FlagLastInference { reward: 0.0 },
+            RoutingProtocol::Data(DataPayload::FlagLastAction {
+                reward: 0.0,
+                env_id: None,
+                env_label: None,
+            }),
         ))
         .await
         .unwrap();
@@ -985,8 +1463,85 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(
-            matches!(msg.payload, RoutedPayload::SendTrajectory { .. }),
+            matches!(
+                msg.protocol,
+                RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
+            ),
             "FlagLastInference should produce a SendTrajectory message"
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_last_action_with_env_id_flushes_only_target_env_traj() {
+        let (mut actor, _tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
+        let env_id_1 = Uuid::new_v4();
+        let env_id_2 = Uuid::new_v4();
+
+        let mut trajectories = actor.runtime.trajectories.lock().await;
+        trajectories
+            .per_env_labels
+            .insert(env_id_1, "env-1".to_string());
+        trajectories
+            .per_env_labels
+            .insert(env_id_2, "env-2".to_string());
+        let mut traj_1 = RelayRLTrajectory::with_metadata(
+            10,
+            Some(actor.actor_id),
+            Some(env_id_1),
+            Some("env-1".to_string()),
+            None,
+            None,
+        );
+        traj_1.add_action(RelayRLAction::minimal(0.5, false));
+        let mut traj_2 = RelayRLTrajectory::with_metadata(
+            10,
+            Some(actor.actor_id),
+            Some(env_id_2),
+            Some("env-2".to_string()),
+            None,
+            None,
+        );
+        traj_2.add_action(RelayRLAction::minimal(0.25, false));
+        trajectories.per_env_trajs.insert(env_id_1, traj_1);
+        trajectories.per_env_trajs.insert(env_id_2, traj_2);
+        drop(trajectories);
+
+        actor
+            .perform_flag_last_action(build_msg(
+                actor.actor_id,
+                RoutingProtocol::Data(DataPayload::FlagLastAction {
+                    reward: 1.0,
+                    env_id: Some(env_id_1),
+                    env_label: Some("env-1".to_string()),
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let msg = rx_buf.recv().await.expect("expected env trajectory flush");
+        match msg.protocol {
+            RoutingProtocol::Data(DataPayload::SendTrajectory { trajectory, .. }) => {
+                assert_eq!(trajectory.get_env_id(), Some(&env_id_1));
+                assert_eq!(trajectory.get_env_label(), Some("env-1"));
+            }
+            other => panic!(
+                "expected SendTrajectory payload, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        let trajectories = actor.runtime.trajectories.lock().await;
+        assert!(
+            trajectories
+                .per_env_trajs
+                .get(&env_id_1)
+                .is_some_and(|trajectory| trajectory.is_empty())
+        );
+        assert!(
+            trajectories
+                .per_env_trajs
+                .get(&env_id_2)
+                .is_some_and(|trajectory| !trajectory.is_empty())
         );
     }
 
@@ -1007,8 +1562,7 @@ mod unit_tests {
             // Immediately shut each actor down
             tx.send(build_msg(
                 actor_id,
-                RoutingProtocol::Shutdown,
-                RoutedPayload::Shutdown,
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
@@ -1035,8 +1589,11 @@ mod unit_tests {
         let result = actor
             .perform_flag_last_action(build_msg(
                 actor_id,
-                RoutingProtocol::FlagLastInference,
-                RoutedPayload::FlagLastInference { reward: 0.0 },
+                RoutingProtocol::Data(DataPayload::FlagLastAction {
+                    reward: 0.0,
+                    env_id: None,
+                    env_label: None,
+                }),
             ))
             .await;
 
@@ -1060,8 +1617,7 @@ mod unit_tests {
         let result = actor
             .get_model_version(build_msg(
                 actor_id,
-                RoutingProtocol::ModelVersion,
-                RoutedPayload::ModelVersion { reply_to: reply_tx },
+                RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: reply_tx }),
             ))
             .await;
 

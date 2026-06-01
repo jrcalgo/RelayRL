@@ -1,6 +1,8 @@
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::coordination::state_manager::{ActorUuid, SharedRouterState};
-use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol};
+use crate::network::client::runtime::router::{
+    ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
+};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
@@ -143,14 +145,25 @@ impl RouterDispatcher {
 
     fn get_timeout_for_message_protocol(protocol: &RoutingProtocol) -> Duration {
         match protocol {
-            RoutingProtocol::RequestInference => Duration::from_secs(10),
-            RoutingProtocol::ModelVersion => Duration::from_secs(15),
-            RoutingProtocol::FlagLastInference => Duration::from_secs(20),
-            RoutingProtocol::ModelHandshake | RoutingProtocol::SendTrajectory => {
-                Duration::from_secs(30)
+            RoutingProtocol::Data(DataPayload::RequestInference(_)) => Duration::from_secs(10),
+            RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: _ }) => {
+                Duration::from_secs(15)
             }
-
-            RoutingProtocol::ModelUpdate | RoutingProtocol::Shutdown => Duration::from_secs(60),
+            RoutingProtocol::Data(DataPayload::FlagLastAction {
+                reward: _,
+                env_id: _,
+                env_label: _,
+            }) => Duration::from_secs(20),
+            RoutingProtocol::Control(ControlPayload::ModelHandshake)
+            | RoutingProtocol::Data(DataPayload::SendTrajectory {
+                timestamp: _,
+                trajectory: _,
+            }) => Duration::from_secs(30),
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                model_bytes: _,
+                version: _,
+            })
+            | RoutingProtocol::Control(ControlPayload::Shutdown) => Duration::from_secs(60),
         }
     }
 
@@ -257,9 +270,9 @@ impl RouterDispatcher {
                 // Check router assignment (async operation, no lock needed)
                 let router_namespace = {
                     shared_router_state
-                        .actor_router_addresses
+                        .actor_routes
                         .get(&actor_id)
-                        .map(|entry| entry.value().clone())
+                        .and_then(|entry| entry.value().router_namespace.clone())
                 };
 
                 match router_namespace {
@@ -340,9 +353,9 @@ impl RouterDispatcher {
         // Look up which router this actor is assigned to
         let router_namespace = {
             self.shared_router_state
-                .actor_router_addresses
+                .actor_routes
                 .get(&actor_id)
-                .map(|entry| entry.value().clone())
+                .and_then(|entry| entry.value().router_namespace.clone())
         };
 
         match router_namespace {
@@ -402,8 +415,8 @@ mod unit_tests {
     use crate::network::client::agent::{
         ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::state_manager::StateManager;
-    use crate::network::client::runtime::router::{RoutedPayload, RoutingProtocol};
+    use crate::network::client::runtime::coordination::state_manager::{ActorRoute, StateManager};
+    use crate::network::client::runtime::router::{ControlPayload, DataPayload, RoutingProtocol};
     #[cfg(feature = "metrics")]
     use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::registry_uuid::Uuid;
@@ -423,18 +436,14 @@ mod unit_tests {
         })
     }
 
-    fn make_state_manager() -> (
-        StateManager<TestBackend, D_IN, D_OUT>,
-        mpsc::Receiver<RoutedMessage>,
-    ) {
-        StateManager::<TestBackend, D_IN, D_OUT>::new(
+    fn make_state_manager() -> (StateManager<TestBackend>, mpsc::Receiver<RoutedMessage>) {
+        StateManager::<TestBackend>::new(
             Arc::from("test-dispatcher"),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             disabled_modes(),
-            Arc::new(RwLock::new(100)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -457,10 +466,14 @@ mod unit_tests {
     }
 
     fn make_routed_message(actor_id: Uuid, protocol: RoutingProtocol) -> RoutedMessage {
-        RoutedMessage {
-            actor_id,
-            protocol,
-            payload: RoutedPayload::ModelHandshake,
+        RoutedMessage { actor_id, protocol }
+    }
+
+    fn make_actor_route(router_namespace: Option<RouterNamespace>) -> ActorRoute {
+        let (tx, _rx) = mpsc::channel::<RoutedMessage>(4);
+        ActorRoute {
+            router_namespace,
+            inbox: tx,
         }
     }
 
@@ -491,32 +504,67 @@ mod unit_tests {
 
     #[test]
     fn get_timeout_for_protocol_correct_values() {
+        use crate::network::client::runtime::router::InferenceRequest;
+        use relayrl_types::data::trajectory::RelayRLTrajectory;
+        use tokio::sync::oneshot;
+        let (tx, _rx) =
+            oneshot::channel::<std::sync::Arc<relayrl_types::data::action::RelayRLAction>>();
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::RequestInference),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Data(
+                DataPayload::RequestInference(Box::new(InferenceRequest {
+                    observation: Box::new(()),
+                    mask: Box::new(()),
+                    reward: 0.0,
+                    reply_to: tx,
+                }))
+            )),
             Duration::from_secs(10)
         );
+        let (tx2, _rx2) = oneshot::channel::<i64>();
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::ModelVersion),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Control(
+                ControlPayload::ModelVersion { reply_to: tx2 }
+            )),
             Duration::from_secs(15)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::FlagLastInference),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Data(
+                DataPayload::FlagLastAction {
+                    reward: 0.0,
+                    env_id: None,
+                    env_label: None,
+                }
+            )),
             Duration::from_secs(20)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::ModelHandshake),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Control(
+                ControlPayload::ModelHandshake
+            )),
             Duration::from_secs(30)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::SendTrajectory),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Data(
+                DataPayload::SendTrajectory {
+                    timestamp: (0, 0),
+                    trajectory: RelayRLTrajectory::new(1),
+                }
+            )),
             Duration::from_secs(30)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::ModelUpdate),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Control(
+                ControlPayload::ModelUpdate {
+                    model_bytes: vec![],
+                    version: 0,
+                }
+            )),
             Duration::from_secs(60)
         );
         assert_eq!(
-            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Shutdown),
+            RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Control(
+                ControlPayload::Shutdown
+            )),
             Duration::from_secs(60)
         );
     }
@@ -530,8 +578,8 @@ mod unit_tests {
 
         // Register actor → namespace in state
         shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, ns.clone());
+            .actor_routes
+            .insert(actor_id, make_actor_route(Some(ns.clone())));
 
         // Create router channel and register it
         let (router_tx, mut router_rx) = mpsc::channel::<RoutedMessage>(4);
@@ -546,7 +594,7 @@ mod unit_tests {
         global_tx
             .send(make_routed_message(
                 actor_id,
-                RoutingProtocol::ModelHandshake,
+                RoutingProtocol::Control(ControlPayload::ModelHandshake),
             ))
             .await
             .unwrap();
@@ -567,7 +615,10 @@ mod unit_tests {
 
         let actor_id = Uuid::new_v4();
         // Actor has no router assignment → dispatch_message should queue it
-        let msg = make_routed_message(actor_id, RoutingProtocol::ModelHandshake);
+        let msg = make_routed_message(
+            actor_id,
+            RoutingProtocol::Control(ControlPayload::ModelHandshake),
+        );
         let result = dispatcher.dispatch_message(msg).await;
         assert!(
             matches!(result, Err(RouterDispatcherError::ActorNotAssignedError(_))),
@@ -602,7 +653,7 @@ mod unit_tests {
         global_tx
             .send(make_routed_message(
                 actor_id,
-                RoutingProtocol::ModelHandshake,
+                RoutingProtocol::Control(ControlPayload::ModelHandshake),
             ))
             .await
             .unwrap();
@@ -611,8 +662,8 @@ mod unit_tests {
 
         // Now assign actor to a router
         shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, ns.clone());
+            .actor_routes
+            .insert(actor_id, make_actor_route(Some(ns.clone())));
         router_channels.insert(ns, router_tx);
 
         // Wait for retry loop to deliver (up to 500ms)
@@ -668,8 +719,8 @@ mod unit_tests {
         let ns: RouterNamespace = Arc::from("closed-router-ns");
 
         shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, ns.clone());
+            .actor_routes
+            .insert(actor_id, make_actor_route(Some(ns.clone())));
 
         // Insert a router channel, then immediately drop the rx side
         let (router_tx, router_rx) = mpsc::channel::<RoutedMessage>(4);
@@ -684,7 +735,7 @@ mod unit_tests {
         global_tx
             .send(make_routed_message(
                 actor_id,
-                RoutingProtocol::ModelHandshake,
+                RoutingProtocol::Control(ControlPayload::ModelHandshake),
             ))
             .await
             .unwrap();

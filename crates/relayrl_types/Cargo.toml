@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_types"
-version = "0.5.4"
+version = "0.8.0"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
@@ -12,17 +12,17 @@ categories = ['science', 'data-structures', 'encoding']
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend", "codec-full", "inference-models"]
+default = ["ndarray-backend", "onnx-model"]
  
-ndarray-backend = ["burn-ndarray"]
-tch-backend = ["burn-tch"]
+ndarray-backend = ["burn-ndarray", "half"]
+tch-backend = ["burn-tch", "half"]
 
 inference-models = ["tch-model", "onnx-model"]
 tch-model = ["tch", "tokio", "tempfile"]
 onnx-model = ["ort", "tokio", "tempfile", "ndarray"]
 
-encryption = ["chacha20poly1305"]
-compression = ["lz4_flex", "zstd"]
+encryption = ["chacha20poly1305", "bincode"]
+compression = ["lz4_flex", "zstd", "bincode"]
 integrity = ["blake3"]
 quantization = ["half"]
 metadata = ["bincode"]
@@ -49,15 +49,16 @@ arrow = { workspace = true }
 burn-tensor = { workspace = true }
 burn-ndarray = { workspace = true, optional = true}
 burn-tch = { workspace = true, optional = true}
-# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm (probably 0.6.0)
-# burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda (probably 0.6.0)
-# burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu (probably 0.6.0)
+# burn-rocm = {version = "0.18.0", optional = true} # TODO: Add support for rocm 
+# burn-cuda = {version = "0.18.0", optional = true} # TODO: Add support for cuda 
+# burn-wgpu = {version = "0.18.0", optional = true} # TODO: Add support for wgpu 
 
 tch = { version = "=0.22.0", features = ["download-libtorch"], default-features = false, optional = true }
 ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"], default-features = false, optional = true }
 tokio = { workspace = true, features = ["full"], optional = true }
 tempfile = { workspace = true, optional = true }
 ndarray = { version = "0.17.2", optional = true }
+arc-swap = "1.9.1"
 
 [dependencies.blake3]
 version = "1.8.3"

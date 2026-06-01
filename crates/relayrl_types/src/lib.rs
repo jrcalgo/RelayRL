@@ -1,5 +1,8 @@
 pub mod data;
-#[cfg(all(any(feature = "tch-model", feature = "onnx-model"), any(feature = "ndarray-backend", feature = "tch-backend")))]
+#[cfg(all(
+    any(feature = "tch-model", feature = "onnx-model"),
+    any(feature = "ndarray-backend", feature = "tch-backend")
+))]
 pub mod model;
 
 pub mod prelude {
@@ -37,7 +40,10 @@ pub mod prelude {
         pub use crate::data::records::csv::{CsvTrajectory, CsvTrajectoryError};
     }
 
-    #[cfg(all(any(feature = "tch-model", feature = "onnx-model"), any(feature = "ndarray-backend", feature = "tch-backend")))]
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
     pub mod model {
         pub use crate::model::{HotReloadableModel, ModelError, ModelModule};
     }

@@ -1,4 +1,3 @@
-use half::f16;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -7,7 +6,7 @@ use burn_ndarray::NdArray;
 #[cfg(feature = "tch-backend")]
 use burn_tch::LibTorch as Tch;
 #[cfg(feature = "tch-backend")]
-use half::bf16;
+use half::{bf16, f16};
 
 use burn_tensor::{
     BasicOps, Bool, Float, Int, Shape, Tensor, TensorData as BurnTensorData, TensorKind,
@@ -97,7 +96,7 @@ impl BackendMatcher for NdArray {
     fn get_supported_backend() -> SupportedTensorBackend {
         SupportedTensorBackend::NdArray
     }
-        
+
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError> {
         match device {
             DeviceType::Cpu => Ok(burn_tensor::Device::<Self::Backend>::Cpu),
@@ -554,7 +553,7 @@ impl TensorData {
                 match dtype {
                     #[cfg(feature = "quantization")]
                     NdArrayDType::F16 => {
-                        let values: &[f16] = bytemuck::cast_slice(&self.data);
+                        let values: &[half::f16] = bytemuck::cast_slice(&self.data);
                         // Convert f16 to f32 for processing
                         let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
                         let data = BurnTensorData::new(f32_values, shape);
@@ -969,7 +968,10 @@ mod unit_tests {
     #[test]
     fn ndarray_backend_matcher_reports_backend_and_cpu_device() {
         assert!(NdArray::matches_backend(&SupportedTensorBackend::NdArray));
-        assert_eq!(NdArray::get_supported_backend(), SupportedTensorBackend::NdArray);
+        assert_eq!(
+            NdArray::get_supported_backend(),
+            SupportedTensorBackend::NdArray
+        );
         assert!(matches!(NdArray::get_device(&DeviceType::Cpu), Ok(_)));
     }
 
@@ -1032,7 +1034,9 @@ mod unit_tests {
             .to_float_tensor::<NdArray, 1>(&DeviceType::Cpu)
             .expect_err("integer tensors cannot be converted to float tensors");
 
-        assert!(matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert")));
+        assert!(
+            matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert"))
+        );
     }
 
     #[test]
@@ -1043,7 +1047,9 @@ mod unit_tests {
             .to_bool_tensor::<NdArray, 1>(&DeviceType::Cpu)
             .expect_err("float tensors cannot be converted to bool tensors");
 
-        assert!(matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert")));
+        assert!(
+            matches!(err, TensorError::DTypeError(message) if message.contains("Cannot convert"))
+        );
     }
 
     #[test]
@@ -1070,7 +1076,10 @@ mod unit_tests {
         let tensor_data = any_tensor.into_f32_data().unwrap();
 
         assert_eq!(tensor_data.shape, vec![2]);
-        assert_eq!(tensor_data.supported_backend, SupportedTensorBackend::NdArray);
+        assert_eq!(
+            tensor_data.supported_backend,
+            SupportedTensorBackend::NdArray
+        );
         assert_eq!(tensor_data.data, f32_bytes(&[3.0, 6.0]));
     }
 

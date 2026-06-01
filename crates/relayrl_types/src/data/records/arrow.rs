@@ -1,14 +1,14 @@
 use super::{get_backend_str, tensor_to_data_frame};
 use crate::data::action::RelayRLAction;
-use crate::data::tensor::{DType, TensorData};
 #[cfg(feature = "ndarray-backend")]
 use crate::data::tensor::NdArrayDType;
 #[cfg(feature = "tch-backend")]
 use crate::data::tensor::TchDType;
+use crate::data::tensor::{DType, TensorData};
 use crate::data::trajectory::RelayRLTrajectory;
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BinaryBuilder, BooleanArray, Float32Array, Float32Builder, Float64Array,
-    Float64Builder, ListArray, ListBuilder, StringArray, UInt64Array, UInt64Builder,
+    Array, ArrayRef, BinaryArray, BinaryBuilder, BooleanArray, Float32Array, Float32Builder,
+    Float64Array, Float64Builder, ListArray, ListBuilder, StringArray, UInt64Array, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::FileReader;
@@ -17,8 +17,8 @@ use arrow::record_batch::RecordBatch;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
-use uuid::Uuid;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Error, Debug)]
 pub enum ArrowDataError {
@@ -49,7 +49,9 @@ impl ArrowTrajectory {
 
     pub fn to_arrow<P: AsRef<Path>>(self, path: P) -> Result<Self, ArrowDataError> {
         let trajectory = self.trajectory.as_ref().ok_or_else(|| {
-            ArrowDataError::TrajectoryNotInitialized("No trajectory initialized to write".to_string())
+            ArrowDataError::TrajectoryNotInitialized(
+                "No trajectory initialized to write".to_string(),
+            )
         })?;
         let file = File::create(path.as_ref())?;
         self.write_trajectory(file, trajectory)?;
@@ -108,16 +110,28 @@ impl ArrowTrajectory {
             actions: Vec::with_capacity(batch.num_rows()),
             max_length: batch.num_rows(),
             agent_id: None,
+            env_id: None,
+            env_label: None,
             timestamp: 0,
             episode,
             training_step,
+            is_truncated: false,
+            policy_version: 0,
         });
 
         for index in 0..batch.num_rows() {
-            let obs = reconstruct_tensor(obs_dtype, obs_shape, obs_f32, obs_f64, obs_binary, index)?;
-            let act = reconstruct_tensor(act_dtype, act_shape, act_f32, act_f64, act_binary, index)?;
-            let mask =
-                reconstruct_tensor(mask_dtype, mask_shape, mask_f32, mask_f64, mask_binary, index)?;
+            let obs =
+                reconstruct_tensor(obs_dtype, obs_shape, obs_f32, obs_f64, obs_binary, index)?;
+            let act =
+                reconstruct_tensor(act_dtype, act_shape, act_f32, act_f64, act_binary, index)?;
+            let mask = reconstruct_tensor(
+                mask_dtype,
+                mask_shape,
+                mask_f32,
+                mask_f64,
+                mask_binary,
+                index,
+            )?;
 
             let agent_id = if agent_ids.is_null(index) {
                 None
@@ -154,7 +168,11 @@ impl ArrowTrajectory {
         Ok(())
     }
 
-    fn write_trajectory(&self, file: File, trajectory: &RelayRLTrajectory) -> Result<(), ArrowDataError> {
+    fn write_trajectory(
+        &self,
+        file: File,
+        trajectory: &RelayRLTrajectory,
+    ) -> Result<(), ArrowDataError> {
         let num_actions = trajectory.actions.len();
         let schema = create_arrow_schema();
 
@@ -437,7 +455,7 @@ fn parse_dtype(dtype: &str) -> Result<DType, ArrowDataError> {
             _ => {
                 return Err(ArrowDataError::RecordBatchBuildFailure(format!(
                     "Unsupported NdArray dtype '{inner}'"
-                )))
+                )));
             }
         };
         return Ok(DType::NdArray(parsed));
@@ -460,7 +478,7 @@ fn parse_dtype(dtype: &str) -> Result<DType, ArrowDataError> {
             _ => {
                 return Err(ArrowDataError::RecordBatchBuildFailure(format!(
                     "Unsupported Tch dtype '{inner}'"
-                )))
+                )));
             }
         };
         return Ok(DType::Tch(parsed));
@@ -476,9 +494,12 @@ fn extract_u64_list(list: &ListArray, index: usize) -> Result<Option<Vec<u64>>, 
         return Ok(None);
     }
     let values = list.value(index);
-    let array = values.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| {
-        ArrowDataError::RecordBatchBuildFailure("Expected UInt64 list values".to_string())
-    })?;
+    let array = values
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            ArrowDataError::RecordBatchBuildFailure("Expected UInt64 list values".to_string())
+        })?;
     Ok(Some((0..array.len()).map(|i| array.value(i)).collect()))
 }
 
@@ -487,9 +508,12 @@ fn extract_f32_list(list: &ListArray, index: usize) -> Result<Option<Vec<f32>>, 
         return Ok(None);
     }
     let values = list.value(index);
-    let array = values.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
-        ArrowDataError::RecordBatchBuildFailure("Expected Float32 list values".to_string())
-    })?;
+    let array = values
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| {
+            ArrowDataError::RecordBatchBuildFailure("Expected Float32 list values".to_string())
+        })?;
     Ok(Some((0..array.len()).map(|i| array.value(i)).collect()))
 }
 
@@ -498,9 +522,12 @@ fn extract_f64_list(list: &ListArray, index: usize) -> Result<Option<Vec<f64>>, 
         return Ok(None);
     }
     let values = list.value(index);
-    let array = values.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-        ArrowDataError::RecordBatchBuildFailure("Expected Float64 list values".to_string())
-    })?;
+    let array = values
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| {
+            ArrowDataError::RecordBatchBuildFailure("Expected Float64 list values".to_string())
+        })?;
     Ok(Some((0..array.len()).map(|i| array.value(i)).collect()))
 }
 
@@ -578,7 +605,10 @@ mod unit_tests {
         TensorData::new(
             shape,
             DType::NdArray(NdArrayDType::F32),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::F32)),
         )
     }
@@ -587,7 +617,10 @@ mod unit_tests {
         TensorData::new(
             shape,
             DType::NdArray(NdArrayDType::F64),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::F64)),
         )
     }
@@ -596,7 +629,10 @@ mod unit_tests {
         TensorData::new(
             shape,
             DType::NdArray(NdArrayDType::I32),
-            values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
             TensorData::get_backend_from_dtype(&DType::NdArray(NdArrayDType::I32)),
         )
     }
@@ -605,7 +641,8 @@ mod unit_tests {
     fn arrow_round_trip_preserves_float_and_binary_tensors() {
         let path = temp_arrow_path("roundtrip");
         let agent_id = Uuid::new_v4();
-        let mut trajectory = RelayRLTrajectory::with_metadata(4, Some(agent_id), Some(7), Some(11));
+        let mut trajectory =
+            RelayRLTrajectory::with_metadata(4, Some(agent_id), None, None, Some(7), Some(11));
         trajectory.add_action(RelayRLAction::new(
             Some(f32_tensor(vec![2], &[1.0, 2.0])),
             Some(i32_tensor(vec![2], &[3, 4])),
@@ -623,7 +660,9 @@ mod unit_tests {
         let loaded = ArrowTrajectory::new(None)
             .from_arrow(&path, Some(7), Some(11))
             .expect("reading the Arrow file should succeed");
-        let loaded_trajectory = loaded.trajectory.expect("trajectory should be reconstructed");
+        let loaded_trajectory = loaded
+            .trajectory
+            .expect("trajectory should be reconstructed");
         let loaded_action = &loaded_trajectory.actions[0];
 
         assert_eq!(loaded_trajectory.get_episode(), Some(7));
@@ -631,9 +670,18 @@ mod unit_tests {
         assert_eq!(loaded_trajectory.get_agent_id(), Some(&agent_id));
         assert_eq!(loaded_action.get_rew(), 1.25);
         assert!(loaded_action.get_done());
-        assert_eq!(loaded_action.get_obs().unwrap().data, f32_tensor(vec![2], &[1.0, 2.0]).data);
-        assert_eq!(loaded_action.get_act().unwrap().data, i32_tensor(vec![2], &[3, 4]).data);
-        assert_eq!(loaded_action.get_mask().unwrap().data, f64_tensor(vec![2], &[0.5, 1.5]).data);
+        assert_eq!(
+            loaded_action.get_obs().unwrap().data,
+            f32_tensor(vec![2], &[1.0, 2.0]).data
+        );
+        assert_eq!(
+            loaded_action.get_act().unwrap().data,
+            i32_tensor(vec![2], &[3, 4]).data
+        );
+        assert_eq!(
+            loaded_action.get_mask().unwrap().data,
+            f64_tensor(vec![2], &[0.5, 1.5]).data
+        );
 
         let _ = fs::remove_file(path);
     }
@@ -718,8 +766,8 @@ mod unit_tests {
 
     #[test]
     fn parse_dtype_rejects_unknown_strings() {
-        let err = parse_dtype("RelayRL(F128)")
-            .expect_err("unsupported dtype strings should not parse");
+        let err =
+            parse_dtype("RelayRL(F128)").expect_err("unsupported dtype strings should not parse");
 
         assert!(matches!(
             err,

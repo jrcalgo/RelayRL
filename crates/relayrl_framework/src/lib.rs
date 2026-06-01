@@ -166,6 +166,7 @@ pub mod network;
 /// - `observability`: Logging (log4rs) and metrics (Prometheus/OpenTelemetry) systems
 /// - `tokio`: Tokio runtime utilities
 pub mod utilities {
+    pub(crate) mod config_json;
     pub mod configuration;
     pub(crate) mod observability;
 }
@@ -198,6 +199,7 @@ pub mod prelude {
             TransportConfigBuilder, TransportConfigParams,
         };
         pub use relayrl_types::HyperparameterArgs;
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         pub mod network_codec {
             pub use relayrl_types::data::utilities::chunking::*;
             pub use relayrl_types::data::utilities::compress::*;
@@ -221,7 +223,7 @@ pub mod prelude {
         }
 
         pub mod environment {
-            pub use relayrl_env_trait::environment_traits::*;
+            pub use relayrl_env_trait::*;
         }
     }
 

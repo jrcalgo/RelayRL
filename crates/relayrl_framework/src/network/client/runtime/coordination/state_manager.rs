@@ -3,32 +3,49 @@
 //! This module tracks actor task handles, inboxes, router assignments, and local model handles for
 //! the client runtime.
 
-use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
+use crate::network::client::agent::{
+    ActorInferenceMode, AlgorithmInitArgs, ClientModes, ModelMode,
+};
+use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
 use crate::network::client::runtime::actor::LocalModelHandle;
-use crate::network::client::runtime::actor::{Actor, ActorEntity};
+use crate::network::client::runtime::actor::{
+    Actor, ActorEntity, ActorError, ActorRuntime, ErasedActorRuntime,
+};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
+use crate::network::client::runtime::data::environments::EnvironmentInterface;
+use crate::network::client::runtime::data::environments::EnvironmentInterfaceError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
+use crate::network::client::runtime::data::training::{TrainingError, TrainingInterface};
+use crate::network::client::runtime::router::{
+    ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
+};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
+use crossbeam_utils::CachePadded;
 
 use std::path::PathBuf;
 use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
-use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
+use relayrl_algorithms::prelude::nn::NeuralNetwork;
+use relayrl_algorithms::prelude::ppo::trainer::PPOTrainerSpec;
+use relayrl_env_trait::{EnvDType, EnvNdArrayDType, Environment, EnvironmentUuid};
+use relayrl_types::data::tensor::{BackendMatcher, DType, DeviceType, NdArrayDType};
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::{HotReloadableModel, ModelModule};
+use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
+use arc_swap::ArcSwapOption;
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -69,28 +86,60 @@ pub enum StateManagerError {
     GetConfigError(String),
     #[error("Set config failed: {0}")]
     SetConfigError(String),
+    #[error("Set env failed: {0}")]
+    SetEnvError(String),
+    #[error("Step env failed: {0}")]
+    StepEnvError(String),
+    #[error("Get env info failed: {0}")]
+    GetEnvInfoError(String),
+    #[error("Get env count failed: {0}")]
+    GetEnvCountError(String),
+    #[error("Increase env count failed: {0}")]
+    IncreaseEnvCountError(String),
+    #[error("Decrease env count failed: {0}")]
+    DecreaseEnvCountError(String),
+    #[error("Remove envs failed: {0}")]
+    RemoveEnvError(String),
+    #[error("Invalid environment kind: {0}")]
+    InvalidEnvironmentKindError(String),
+    #[error(transparent)]
+    EnvironmentInterfaceError(#[from] EnvironmentInterfaceError),
+    #[error("Tensor conversion failed: {0}")]
+    TensorConversionError(String),
+    #[error("Inference request failed: {0}")]
+    InferenceRequestError(String),
+    #[error("Environment training error: {0}")]
+    TrainerError(String),
+    #[error(transparent)]
+    AlgorithmError(#[from] relayrl_algorithms::templates::base_algorithm::AlgorithmError),
+    #[error("Algorithm config init failed: {0}")]
+    AlgorithmConfigInitError(String),
+    #[error(transparent)]
+    TrainingError(#[from] TrainingError),
+    #[error(transparent)]
+    ActorError(#[from] crate::network::client::runtime::actor::ActorError),
 }
 
 pub type ActorUuid = Uuid;
 
+#[derive(Clone)]
+pub(crate) struct ActorRoute {
+    pub(crate) router_namespace: Option<RouterNamespace>,
+    pub(crate) inbox: Sender<RoutedMessage>,
+}
+
 pub(crate) struct SharedRouterState {
-    pub(crate) actor_inboxes: DashMap<ActorUuid, Sender<RoutedMessage>>,
-    pub(crate) actor_router_addresses: DashMap<ActorUuid, RouterNamespace>,
+    pub(crate) actor_routes: DashMap<ActorUuid, ActorRoute>,
 }
 
 /// In-memory actor state management and global channel transport
-pub(crate) struct StateManager<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
+pub(crate) struct StateManager<B: Backend + BackendMatcher<Backend = B>> {
     client_namespace: Arc<str>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
     shared_client_modes: Arc<ClientModes>,
-    shared_max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -100,16 +149,17 @@ pub(crate) struct StateManager<
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) shared_router_state: Arc<SharedRouterState>,
+    actor_envs: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
-    pub(crate) shared_actor_count: Arc<AtomicUsize>,
+    pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
+    pub(crate) actor_runtime_handles: Arc<DashMap<ActorUuid, Arc<dyn ErasedActorRuntime<B>>>>,
+    pub(crate) shared_actor_count: Arc<CachePadded<AtomicUsize>>,
 }
 
 // ===== Construction and actor lifecycle =====
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    StateManager<B, D_IN, D_OUT>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client_namespace: Arc<str>,
@@ -118,7 +168,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
         shared_client_modes: Arc<ClientModes>,
-        shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -135,7 +184,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_training_dispatcher,
                 shared_client_modes,
-                shared_max_traj_length,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_transport_addresses,
                 shared_local_model_path,
@@ -145,12 +193,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 metrics,
                 global_dispatcher_tx,
                 shared_router_state: Arc::new(SharedRouterState {
-                    actor_inboxes: DashMap::new(),
-                    actor_router_addresses: DashMap::new(),
+                    actor_routes: DashMap::new(),
                 }),
+                actor_envs: Arc::new(DashMap::new()),
                 actor_handles: DashMap::new(),
                 actor_devices: DashMap::new(),
-                shared_actor_count: Arc::new(AtomicUsize::new(0)),
+                actor_model_handles: DashMap::new(),
+                actor_runtime_handles: Arc::new(DashMap::new()),
+                shared_actor_count: Arc::new(CachePadded::new(AtomicUsize::new(0))),
             },
             global_dispatcher_rx,
         )
@@ -217,7 +267,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Returns a `(LocalModelHandle<B>, needs_handshake)` pair for a new actor on `device`.
     ///
-    /// - **Independent** mode: always creates a fresh `Arc<RwLock<Option<...>>>`.
+    /// - **Independent** mode: always creates a fresh `Arc<ArcSwapOption<...>>`.
     ///   `needs_handshake` is `true` when no model could be pre-loaded.
     /// - **Shared** mode: looks up the per-device pool.  The *first* actor on a given device
     ///   creates the slot (and triggers a handshake if no model is available); every subsequent
@@ -246,7 +296,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
+                let handle: LocalModelHandle<B> =
+                    Arc::new(ArcSwapOption::new(reloadable.map(Arc::new)));
                 self.shared_local_models.push((device, handle.clone()));
                 Ok((handle, needs_handshake))
             }
@@ -257,19 +308,24 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
+                let handle: LocalModelHandle<B> =
+                    Arc::new(ArcSwapOption::new(reloadable.map(Arc::new)));
                 Ok((handle, needs_handshake))
             }
         }
     }
 
-    pub(crate) async fn new_actor(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_actor<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         actor_id: ActorUuid,
         router_namespace: RouterNamespace,
         device: DeviceType,
+        max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        algorithm_args: AlgorithmInitArgs,
     ) -> Result<(), StateManagerError> {
         if self.actor_handles.contains_key(&actor_id) {
             log::warn!(
@@ -281,12 +337,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         // Create actor inbox for receiving messages from the filter
         let (tx_to_actor, actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        self.shared_router_state
-            .actor_inboxes
-            .insert(actor_id, tx_to_actor.clone());
+        self.shared_router_state.actor_routes.insert(
+            actor_id,
+            ActorRoute {
+                router_namespace: Some(router_namespace.clone()),
+                inbox: tx_to_actor.clone(),
+            },
+        );
 
         let shared_local_model_path = self.shared_local_model_path.clone();
-        let shared_max_traj_length = self.shared_max_traj_length.clone();
         let shared_client_modes = self.shared_client_modes.clone();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_inference_dispatcher = self.shared_inference_dispatcher.clone();
@@ -295,23 +354,45 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let shared_transport_addresses = self.shared_transport_addresses.clone();
         #[cfg(feature = "metrics")]
-        let metrics = self.metrics.clone();
+        let actor_metrics = self.metrics.clone();
+        #[cfg(feature = "metrics")]
+        let runtime_metrics = self.metrics.clone();
 
         let client_namespace = self.client_namespace.clone();
 
-        let (model_handle, model_handshake_flag) = self
+        let (model_handle, _model_handshake_flag) = self
             .get_or_init_model_handle(default_model, device.clone())
             .await?;
         self.actor_devices.insert(actor_id, device.clone());
+        self.actor_envs.insert(
+            actor_id,
+            EnvironmentInterface::new(self.client_namespace.clone(), device.clone()),
+        );
+        self.actor_model_handles
+            .insert(actor_id, model_handle.clone());
+        let runtime = Arc::new(
+            ActorRuntime::<B, D_IN, D_OUT>::new(
+                actor_id,
+                model_handle.clone(),
+                max_traj_length,
+                tx_to_buffer.clone(),
+                #[cfg(feature = "metrics")]
+                runtime_metrics,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                algorithm_args,
+            )
+            .await,
+        );
+        let erased_runtime: Arc<dyn ErasedActorRuntime<B>> = runtime.clone();
+        self.actor_runtime_handles.insert(actor_id, erased_runtime);
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let mut actor: Actor<B, D_IN, D_OUT> = Actor::<B, D_IN, D_OUT>::new(
                 client_namespace,
                 actor_id,
                 device.clone(),
-                model_handle,
+                runtime,
                 shared_local_model_path,
-                shared_max_traj_length,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_inference_dispatcher,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -319,20 +400,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 shared_transport_addresses,
                 actor_inbox_rx,
-                tx_to_buffer,
                 shared_client_modes,
                 #[cfg(feature = "metrics")]
-                metrics,
+                actor_metrics,
             )
             .await;
 
             // Use the flag computed by StateManager so that, in Shared mode, only the first
             // actor per device triggers the network handshake.
-            if model_handshake_flag {
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            if _model_handshake_flag {
                 let model_handshake_ms = RoutedMessage {
                     actor_id,
-                    protocol: RoutingProtocol::ModelHandshake,
-                    payload: RoutedPayload::ModelHandshake,
+                    protocol: RoutingProtocol::Control(ControlPayload::ModelHandshake),
                 };
                 let _ = tx_to_actor.send(model_handshake_ms).await;
             }
@@ -343,31 +423,34 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }));
 
         self.actor_handles.insert(actor_id, handle);
-        self.shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, router_namespace);
 
-        self.shared_actor_count.fetch_add(1, Ordering::Relaxed);
+        self.shared_actor_count.fetch_add(1, Ordering::Release);
 
         Ok(())
     }
 
     #[allow(unused)]
-    pub(crate) async fn restart_actor(
+    pub(crate) async fn restart_actor<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         actor_id: ActorUuid,
         router_namespace: RouterNamespace,
         device: DeviceType,
+        max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        algorithm_args: AlgorithmInitArgs,
     ) -> Result<(), StateManagerError> {
         self.remove_actor(actor_id)?;
-        self.new_actor(
+        self.new_actor::<D_IN, D_OUT>(
             actor_id,
             router_namespace,
             device,
+            max_traj_length,
             default_model,
             tx_to_buffer,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            algorithm_args,
         )
         .await?;
         Ok(())
@@ -375,13 +458,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) async fn shutdown_all_actors(&self) -> Result<(), StateManagerError> {
         // Send Shutdown message to every actor inbox; actors will flush and exit
-        for entry in self.shared_router_state.actor_inboxes.iter() {
+        for entry in self.shared_router_state.actor_routes.iter() {
             let actor_id: ActorUuid = *entry.key();
-            let tx: Sender<RoutedMessage> = entry.value().clone();
+            let tx: Sender<RoutedMessage> = entry.value().inbox.clone();
             let shutdown_msg = RoutedMessage {
                 actor_id,
-                protocol: RoutingProtocol::Shutdown,
-                payload: RoutedPayload::Shutdown,
+                protocol: RoutingProtocol::Control(ControlPayload::Shutdown),
             };
             let _ = tx.send(shutdown_msg).await;
 
@@ -425,23 +507,30 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) async fn clear_runtime_components(&mut self) -> Result<(), StateManagerError> {
         self.actor_handles.clear();
-        self.shared_router_state.actor_inboxes.clear();
+        self.shared_router_state.actor_routes.clear();
         self.actor_devices.clear();
-        self.shared_router_state.actor_router_addresses.clear();
+        self.actor_model_handles.clear();
+        self.actor_runtime_handles.clear();
         self.shared_local_models.clear();
 
         Ok(())
     }
 
     pub(crate) fn remove_actor(&mut self, id: Uuid) -> Result<(), StateManagerError> {
+        if let Some(mut route) = self.shared_router_state.actor_routes.get_mut(&id) {
+            route.router_namespace = None;
+        }
+
         if let Some((_, handle)) = self.actor_handles.remove(&id) {
             handle.abort();
         }
 
-        self.shared_router_state.actor_inboxes.remove(&id);
+        self.actor_envs.remove(&id);
         self.actor_devices.remove(&id);
-        self.shared_router_state.actor_router_addresses.remove(&id);
-        self.shared_actor_count.fetch_sub(1, Ordering::Relaxed);
+        self.actor_model_handles.remove(&id);
+        self.actor_runtime_handles.remove(&id);
+        self.shared_router_state.actor_routes.remove(&id);
+        self.shared_actor_count.fetch_sub(1, Ordering::Release);
         remove_id(
             self.client_namespace.as_ref(),
             crate::network::ACTOR_CONTEXT,
@@ -457,29 +546,26 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         current_id: ActorUuid,
         new_id: ActorUuid,
     ) -> Result<(), StateManagerError> {
-        let current_id_handle =
-            match StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, current_id) {
-                Some(handle) => handle.clone(),
-                None => {
-                    return Err(StateManagerError::ActorHandleNotFoundError(format!(
-                        "[StateManager] Actor ID {} not found",
-                        current_id
-                    )));
-                }
-            };
-        let current_id_inbox =
-            match StateManager::<B, D_IN, D_OUT>::get_actor_inbox(self, current_id) {
-                Some(inbox) => inbox.clone(),
-                None => {
-                    return Err(StateManagerError::ActorInboxNotFoundError(format!(
-                        "[StateManager] Actor ID {} not found",
-                        current_id
-                    )));
-                }
-            };
-
-        if StateManager::<B, D_IN, D_OUT>::get_actor_handle(self, new_id).is_some()
-            || StateManager::<B, D_IN, D_OUT>::get_actor_inbox(self, new_id).is_some()
+        let current_id_handle = match StateManager::<B>::get_actor_handle(self, current_id) {
+            Some(handle) => handle.clone(),
+            None => {
+                return Err(StateManagerError::ActorHandleNotFoundError(format!(
+                    "[StateManager] Actor ID {} not found",
+                    current_id
+                )));
+            }
+        };
+        let current_route = match StateManager::<B>::get_actor_route(self, current_id) {
+            Some(route) => route,
+            None => {
+                return Err(StateManagerError::ActorInboxNotFoundError(format!(
+                    "[StateManager] Actor ID {} not found",
+                    current_id
+                )));
+            }
+        };
+        if StateManager::<B>::get_actor_handle(self, new_id).is_some()
+            || StateManager::<B>::get_actor_route(self, new_id).is_some()
         {
             return Err(StateManagerError::ActorAlreadyTakenError(format!(
                 "[StateManager] Actor ID {} already taken",
@@ -490,20 +576,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_handles.insert(new_id, current_id_handle);
         self.actor_handles.remove(&current_id);
         self.shared_router_state
-            .actor_inboxes
-            .insert(new_id, current_id_inbox);
-        self.shared_router_state.actor_inboxes.remove(&current_id);
+            .actor_routes
+            .insert(new_id, current_route);
+        self.shared_router_state.actor_routes.remove(&current_id);
         if let Some((_, current_device)) = self.actor_devices.remove(&current_id) {
             self.actor_devices.insert(new_id, current_device);
         }
-        if let Some((_, router_namespace)) = self
-            .shared_router_state
-            .actor_router_addresses
-            .remove(&current_id)
-        {
-            self.shared_router_state
-                .actor_router_addresses
-                .insert(new_id, router_namespace);
+        if let Some((_, current_env)) = self.actor_envs.remove(&current_id) {
+            self.actor_envs.insert(new_id, current_env);
+        }
+        if let Some((_, runtime)) = self.actor_runtime_handles.remove(&current_id) {
+            self.actor_runtime_handles.insert(new_id, runtime);
         }
 
         replace_id(
@@ -522,40 +605,46 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             return;
         }
 
-        let actor_ids: Vec<ActorUuid> = StateManager::<B, D_IN, D_OUT>::get_actor_id_list(self);
+        let mut actor_ids: Vec<ActorUuid> = StateManager::<B>::get_actor_id_list(self);
+        actor_ids.sort_by_key(|actor_id| actor_id.to_string());
 
         for (i, actor_id) in actor_ids.iter().enumerate() {
             let router_namespace = router_namespaces[i % router_namespaces.len()].clone();
-            self.shared_router_state
-                .actor_router_addresses
-                .insert(*actor_id, router_namespace);
+            if let Some(mut route) = self.shared_router_state.actor_routes.get_mut(actor_id) {
+                route.router_namespace = Some(router_namespace);
+            }
         }
     }
 
     /// Replaces all actor-router mappings with the provided snapshot.
     ///
-    /// Takes `&self` for the same reason as `distribute_actors`: `actor_router_addresses`
+    /// Takes `&self` for the same reason as `distribute_actors`: `actor_routes`
     /// is a `DashMap` and mutation is safe through a shared reference.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn restore_actor_router_mappings(
         &self,
         mappings: Vec<(ActorUuid, RouterNamespace)>,
     ) {
-        self.shared_router_state.actor_router_addresses.clear();
+        let mappings_by_actor: std::collections::HashMap<ActorUuid, RouterNamespace> =
+            mappings.into_iter().collect();
 
-        for (actor_id, router_namespace) in mappings {
-            self.shared_router_state
-                .actor_router_addresses
-                .insert(actor_id, router_namespace);
+        for mut route in self.shared_router_state.actor_routes.iter_mut() {
+            route.router_namespace = mappings_by_actor.get(route.key()).cloned();
         }
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) fn get_actor_router_mappings(&self) -> Vec<(ActorUuid, RouterNamespace)> {
         self.shared_router_state
-            .actor_router_addresses
+            .actor_routes
             .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
+            .filter_map(|entry| {
+                entry
+                    .value()
+                    .router_namespace
+                    .clone()
+                    .map(|router_namespace| (*entry.key(), router_namespace))
+            })
             .collect()
     }
 
@@ -650,11 +739,548 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map(|handle| Arc::clone(handle.value()))
     }
 
-    fn get_actor_inbox(&self, id: Uuid) -> Option<Sender<RoutedMessage>> {
+    fn get_actor_route(&self, id: Uuid) -> Option<ActorRoute> {
         self.shared_router_state
-            .actor_inboxes
+            .actor_routes
             .get(&id)
-            .map(|tx| tx.value().clone())
+            .map(|route| route.value().clone())
+    }
+
+    fn get_actor_runtime(&self, id: Uuid) -> Option<Arc<dyn ErasedActorRuntime<B>>> {
+        self.actor_runtime_handles
+            .get(&id)
+            .map(|runtime| Arc::clone(runtime.value()))
+    }
+
+    pub(crate) fn set_env(
+        &self,
+        id: Uuid,
+        env: Box<dyn Environment>,
+        count: u32,
+    ) -> Result<(), StateManagerError> {
+        let device = self
+            .actor_devices
+            .get(&id)
+            .map(|device| device.clone())
+            .ok_or_else(|| {
+                StateManagerError::SetEnvError(format!(
+                    "[StateManager] Actor device not found for {}",
+                    id
+                ))
+            })?;
+
+        if let Some(mut env_interface) = self.actor_envs.get_mut(&id) {
+            env_interface.set_env(Some(env), count as usize)?;
+        } else {
+            let mut env_interface =
+                EnvironmentInterface::new(self.client_namespace.clone(), device);
+            env_interface.set_env(Some(env), count as usize)?;
+            self.actor_envs.insert(id, env_interface);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, StateManagerError> {
+        self.actor_envs
+            .get(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::GetEnvCountError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .get_env_count()
+            .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn increase_env_count(
+        &self,
+        actor_id: ActorUuid,
+        count: u32,
+    ) -> Result<(), StateManagerError> {
+        self.actor_envs
+            .get_mut(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::IncreaseEnvCountError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .increase_env_count(count)
+            .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn decrease_env_count(
+        &self,
+        actor_id: ActorUuid,
+        count: u32,
+    ) -> Result<(), StateManagerError> {
+        self.actor_envs
+            .get_mut(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::DecreaseEnvCountError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .decrease_env_count(count)
+            .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn remove_env(&self, actor_id: ActorUuid) -> Result<(), StateManagerError> {
+        self.actor_envs
+            .get_mut(&actor_id)
+            .ok_or_else(|| {
+                StateManagerError::RemoveEnvError(format!(
+                    "[StateManager] Environment interface not found for {}",
+                    actor_id
+                ))
+            })?
+            .remove_env()
+            .map_err(StateManagerError::from)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn get_run_env_handles(
+        &self,
+        actor_id: ActorUuid,
+    ) -> Result<
+        (
+            Arc<dyn ErasedActorRuntime<B>>,
+            Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        ),
+        StateManagerError,
+    > {
+        if !self.actor_envs.contains_key(&actor_id) {
+            return Err(StateManagerError::GetEnvInfoError(format!(
+                "[StateManager] Environment interface not found for {}",
+                actor_id
+            )));
+        }
+
+        let runtime = self.get_actor_runtime(actor_id).ok_or_else(|| {
+            StateManagerError::ActorHandleNotFoundError(format!(
+                "[StateManager] Actor runtime not found for {}",
+                actor_id
+            ))
+        })?;
+
+        Ok((runtime, self.actor_envs.clone()))
+    }
+
+    pub(crate) fn run_env_eval_step_loop(
+        actor_id: ActorUuid,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        loop_iters: usize,
+    ) -> Result<(), StateManagerError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
+                    StateManagerError::GetEnvInfoError(format!(
+                        "[StateManager] Environment interface not found for {}",
+                        actor_id
+                    ))
+                })?;
+
+                env_interface.ensure_ready()?;
+
+                let (n_envs, obs_dim, act_dim) = env_interface.n_envs_dims().ok_or_else(|| {
+                    StateManagerError::StepEnvError(format!(
+                        "[StateManager] Failed to get environment dimensions for {}",
+                        actor_id
+                    ))
+                })?;
+
+                let obs_dtype = env_interface
+                    .obs_dtype()
+                    .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                let act_dtype = env_interface
+                    .act_dtype()
+                    .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                let discrete = env_interface.action_is_discrete().unwrap_or(true);
+
+                for _ in 0..loop_iters {
+                    let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
+                        StateManagerError::StepEnvError(
+                            "[StateManager] flat_observation_bytes returned None".to_string(),
+                        )
+                    })?;
+                    let obs_dtype_conv = env_dtype_to_dtype(&obs_dtype)?;
+                    let raw_output = runtime
+                        .perform_env_byte_inference_erased(
+                            "model",
+                            &obs_bytes,
+                            n_envs,
+                            obs_dim,
+                            &obs_dtype_conv,
+                        )
+                        .await
+                        .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
+
+                    let action_bytes = if discrete {
+                        decode_argmax(
+                            &raw_output.data,
+                            &env_dtype_to_dtype(&act_dtype)?,
+                            n_envs,
+                            act_dim,
+                        )
+                    } else {
+                        decode_continuous_bytes(
+                            &raw_output.data,
+                            &raw_output.dtype,
+                            n_envs * act_dim,
+                            &env_dtype_to_dtype(&act_dtype)?,
+                        )
+                    };
+
+                    let _ = env_interface.step_bytes(&action_bytes).ok_or_else(|| {
+                        StateManagerError::GetEnvInfoError(
+                            "[StateManager] step_bytes returned None".to_string(),
+                        )
+                    })?;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    pub(crate) fn run_env_step_loop_with_ppo<KindIn, KindOut, Pi>(
+        actor_id: ActorUuid,
+        shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        loop_iters: usize,
+        max_traj_length: usize,
+        trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), StateManagerError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
+        B: Default + Send + Sync + 'static,
+    {
+        TrainingInterface::<B>::train_ppo(
+            actor_id,
+            shutdown_rx,
+            runtime,
+            env_map,
+            loop_iters,
+            max_traj_length,
+            trainer_spec,
+        )
+        .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn run_env_step_loop_with_ippo<KindIn, KindOut, Pi>(
+        actor_id: ActorUuid,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        loop_iters: usize,
+        max_traj_length: usize,
+        trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), StateManagerError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        B: Default + Send + Sync + 'static,
+    {
+        TrainingInterface::<B>::train_ippo(
+            actor_id,
+            shutdown_rx,
+            runtime,
+            env_map,
+            loop_iters,
+            max_traj_length,
+            trainer_spec,
+        )
+        .map_err(StateManagerError::from)
+    }
+
+    pub(crate) fn run_env_step_loop_with_mappo<KindIn, KindOut, Pi>(
+        actor_id: ActorUuid,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        runtime: Arc<dyn ErasedActorRuntime<B>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
+        loop_iters: usize,
+        max_traj_length: usize,
+        trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
+    ) -> Result<(), StateManagerError>
+    where
+        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        B: Default + Send + Sync + 'static,
+    {
+        TrainingInterface::<B>::train_mappo(
+            actor_id,
+            shutdown_rx,
+            runtime,
+            env_map,
+            loop_iters,
+            max_traj_length,
+            trainer_spec,
+        )
+        .map_err(StateManagerError::from)
+    }
+}
+
+pub(crate) fn env_dtype_to_dtype(dtype: &EnvDType) -> Result<DType, ActorError> {
+    match dtype {
+        EnvDType::NdArray(nd_type) => Ok(DType::NdArray(match nd_type {
+            EnvNdArrayDType::F16 => NdArrayDType::F16,
+            EnvNdArrayDType::F32 => NdArrayDType::F32,
+            EnvNdArrayDType::F64 => NdArrayDType::F64,
+            EnvNdArrayDType::I8 => NdArrayDType::I8,
+            EnvNdArrayDType::I16 => NdArrayDType::I16,
+            EnvNdArrayDType::I32 => NdArrayDType::I32,
+            EnvNdArrayDType::I64 => NdArrayDType::I64,
+            EnvNdArrayDType::Bool => NdArrayDType::Bool,
+        })),
+        #[cfg(feature = "tch-backend")]
+        EnvDType::Tch(tch_type) => Ok(DType::Tch(match tch_type {
+            EnvTchDType::F16 => TchDType::F16,
+            EnvTchDType::Bf16 => TchDType::Bf16,
+            EnvTchDType::F32 => TchDType::F32,
+            EnvTchDType::F64 => TchDType::F64,
+            EnvTchDType::I8 => TchDType::I8,
+            EnvTchDType::I16 => TchDType::I16,
+            EnvTchDType::I32 => TchDType::I32,
+            EnvTchDType::I64 => TchDType::I64,
+            EnvTchDType::U8 => TchDType::U8,
+            EnvTchDType::Bool => TchDType::Bool,
+        })),
+        #[cfg(not(feature = "tch-backend"))]
+        EnvDType::Tch(_) => Err(ActorError::TypeConversionError(format!(
+            "Unsupported environment dtype: {dtype:?}"
+        ))),
+    }
+}
+
+/// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
+fn decode_argmax(
+    data: &[u8],
+    dtype: &relayrl_types::data::tensor::DType,
+    n_envs: usize,
+    act_dim: usize,
+) -> Vec<u8> {
+    macro_rules! argmax_float {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs)
+                .map(|i| {
+                    vals[i * act_dim..(i + 1) * act_dim]
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(j, _)| j as u8)
+                        .unwrap_or(0)
+                })
+                .collect()
+        }};
+    }
+
+    macro_rules! argmax_int {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs)
+                .map(|i| {
+                    vals[i * act_dim..(i + 1) * act_dim]
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.cmp(b))
+                        .map(|(j, _)| j as u8)
+                        .unwrap_or(0)
+                })
+                .collect()
+        }};
+    }
+
+    match dtype {
+        DType::NdArray(NdArrayDType::F16) => argmax_float!(half::f16),
+        DType::NdArray(NdArrayDType::F32) => argmax_float!(f32),
+        DType::NdArray(NdArrayDType::F64) => argmax_float!(f64),
+        DType::NdArray(NdArrayDType::I8) => argmax_int!(i8),
+        DType::NdArray(NdArrayDType::I16) => argmax_int!(i16),
+        DType::NdArray(NdArrayDType::I32) => argmax_int!(i32),
+        DType::NdArray(NdArrayDType::I64) => argmax_int!(i64),
+        DType::NdArray(NdArrayDType::Bool) => argmax_int!(u8),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch_type) => match tch_type {
+            TchDType::F16 => argmax_float!(half::f16),
+            TchDType::Bf16 => argmax_float!(half::bf16),
+            TchDType::F32 => argmax_float!(f32),
+            TchDType::F64 => argmax_float!(f64),
+            TchDType::I8 => argmax_int!(i8),
+            TchDType::I16 => argmax_int!(i16),
+            TchDType::I32 => argmax_int!(i32),
+            TchDType::I64 => argmax_int!(i64),
+            TchDType::Bool => argmax_int!(u8),
+            TchDType::U8 => argmax_int!(u8),
+        },
+    }
+}
+
+fn decode_continuous_bytes(
+    data: &[u8],
+    src_dtype: &DType,
+    count: usize,
+    tgt_dtype: &DType,
+) -> Vec<u8> {
+    let as_f64: Vec<f64> = match src_dtype {
+        DType::NdArray(NdArrayDType::F16) => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
+            .iter()
+            .map(|&x| f64::from(x))
+            .collect(),
+        DType::NdArray(NdArrayDType::F32) => bytemuck::cast_slice::<u8, f32>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::F64) => {
+            bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec()
+        }
+        DType::NdArray(NdArrayDType::I8) => bytemuck::cast_slice::<u8, i8>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I16) => bytemuck::cast_slice::<u8, i16>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I32) => bytemuck::cast_slice::<u8, i32>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::I64) => bytemuck::cast_slice::<u8, i64>(data)[..count]
+            .iter()
+            .map(|&x| x as f64)
+            .collect(),
+        DType::NdArray(NdArrayDType::Bool) => data[..count]
+            .iter()
+            .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
+            .collect(),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tc) => {
+            use relayrl_types::data::tensor::TchDType;
+            match tc {
+                TchDType::F16 => bytemuck::cast_slice::<u8, half::f16>(data)[..count]
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect(),
+                TchDType::Bf16 => bytemuck::cast_slice::<u8, half::bf16>(data)[..count]
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect(),
+                TchDType::F32 => bytemuck::cast_slice::<u8, f32>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::F64 => bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec(),
+                TchDType::I8 => bytemuck::cast_slice::<u8, i8>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I16 => bytemuck::cast_slice::<u8, i16>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I32 => bytemuck::cast_slice::<u8, i32>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::I64 => bytemuck::cast_slice::<u8, i64>(data)[..count]
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect(),
+                TchDType::U8 => data[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::Bool => data[..count]
+                    .iter()
+                    .map(|&x| if x != 0 { 1.0f64 } else { 0.0 })
+                    .collect(),
+            }
+        }
+    };
+
+    match tgt_dtype {
+        DType::NdArray(NdArrayDType::F16) => {
+            let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
+            bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::F32) => {
+            let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
+            bytemuck::cast_slice::<f32, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::F64) => bytemuck::cast_slice::<f64, u8>(&as_f64).to_vec(),
+        DType::NdArray(NdArrayDType::I8) => {
+            let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
+            bytemuck::cast_slice::<i8, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I16) => {
+            let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
+            bytemuck::cast_slice::<i16, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I32) => {
+            let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
+            bytemuck::cast_slice::<i32, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::I64) => {
+            let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
+            bytemuck::cast_slice::<i64, u8>(&v).to_vec()
+        }
+        DType::NdArray(NdArrayDType::Bool) => as_f64
+            .iter()
+            .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
+            .collect(),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch_type) => match tch_type {
+            TchDType::F16 => {
+                let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
+                bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
+            }
+            TchDType::Bf16 => {
+                let v: Vec<half::bf16> = as_f64.iter().map(|&x| half::bf16::from_f64(x)).collect();
+                bytemuck::cast_slice::<half::bf16, u8>(&v).to_vec()
+            }
+            TchDType::F32 => {
+                let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
+                bytemuck::cast_slice::<f32, u8>(&v).to_vec()
+            }
+            TchDType::F64 => {
+                let v: Vec<f64> = as_f64.iter().map(|&x| x as f64).collect();
+                bytemuck::cast_slice::<f64, u8>(&v).to_vec()
+            }
+            TchDType::I8 => {
+                let v: Vec<i8> = as_f64.iter().map(|&x| x as i8).collect();
+                bytemuck::cast_slice::<i8, u8>(&v).to_vec()
+            }
+            TchDType::I16 => {
+                let v: Vec<i16> = as_f64.iter().map(|&x| x as i16).collect();
+                bytemuck::cast_slice::<i16, u8>(&v).to_vec()
+            }
+            TchDType::I32 => {
+                let v: Vec<i32> = as_f64.iter().map(|&x| x as i32).collect();
+                bytemuck::cast_slice::<i32, u8>(&v).to_vec()
+            }
+            TchDType::I64 => {
+                let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
+                bytemuck::cast_slice::<i64, u8>(&v).to_vec()
+            }
+            TchDType::U8 => {
+                let v: Vec<u8> = as_f64.iter().map(|&x| x as u8).collect();
+                bytemuck::cast_slice::<u8, u8>(&v).to_vec()
+            }
+            TchDType::Bool => as_f64
+                .iter()
+                .map(|&x| if x != 0.0 { 1u8 } else { 0u8 })
+                .collect(),
+        },
     }
 }
 
@@ -666,11 +1292,16 @@ mod unit_tests {
     };
     use active_uuid_registry::interface::{reserve_id_with, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
+    use arc_swap::ArcSwapOption;
     use burn_ndarray::NdArray;
-    use relayrl_types::data::tensor::DeviceType;
+    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
+    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::{RwLock, mpsc};
+
+    use relayrl_types::data::tensor::{AnyBurnTensor, DType, DeviceType, NdArrayDType};
+    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
     type TestBackend = NdArray<f32>;
     const D_IN: usize = 4;
@@ -693,18 +1324,17 @@ mod unit_tests {
     fn make_state_manager(
         modes: Arc<ClientModes>,
     ) -> (
-        StateManager<TestBackend, D_IN, D_OUT>,
+        StateManager<TestBackend>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
         let namespace: Arc<str> = Arc::from(format!("test-sm-{}", Uuid::new_v4()));
-        StateManager::<TestBackend, D_IN, D_OUT>::new(
+        StateManager::<TestBackend>::new(
             namespace,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             modes,
-            Arc::new(RwLock::new(100)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -732,6 +1362,19 @@ mod unit_tests {
         Uuid::from_bytes(bytes)
     }
 
+    fn float_any_tensor(values: &[f32]) -> AnyBurnTensor<TestBackend, D_IN> {
+        let device = TestBackend::get_device(&DeviceType::Cpu).unwrap();
+        let tensor = Tensor::<TestBackend, D_IN, Float>::from_data(
+            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
+            &device,
+        );
+
+        AnyBurnTensor::Float(FloatBurnTensor {
+            tensor: Arc::new(tensor),
+            dtype: DType::NdArray(NdArrayDType::F32),
+        })
+    }
+
     #[tokio::test]
     async fn distribute_actors_round_robin_2_routers() {
         let (sm, _rx) = make_state_manager(disabled_modes());
@@ -742,19 +1385,32 @@ mod unit_tests {
         for id in &actor_ids {
             let handle = Arc::new(tokio::spawn(async {}));
             sm.actor_handles.insert(*id, handle);
+            let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            sm.shared_router_state.actor_routes.insert(
+                *id,
+                ActorRoute {
+                    router_namespace: None,
+                    inbox: tx_to_actor,
+                },
+            );
         }
 
         sm.distribute_actors(vec![ns1.clone(), ns2.clone()]);
 
-        assert_eq!(sm.shared_router_state.actor_router_addresses.len(), 4);
-        for id in &actor_ids {
-            let assigned = sm
-                .shared_router_state
-                .actor_router_addresses
-                .get(id)
-                .unwrap();
-            assert!(
-                *assigned == ns1 || *assigned == ns2,
+        let mut sorted_actor_ids = actor_ids.clone();
+        sorted_actor_ids.sort_by_key(|actor_id| actor_id.to_string());
+
+        assert_eq!(sm.shared_router_state.actor_routes.len(), 4);
+        for (index, id) in sorted_actor_ids.iter().enumerate() {
+            let assigned = sm.shared_router_state.actor_routes.get(id).unwrap();
+            let expected_namespace = if index % 2 == 0 {
+                ns1.clone()
+            } else {
+                ns2.clone()
+            };
+            assert_eq!(
+                assigned.router_namespace,
+                Some(expected_namespace),
                 "Actor {} assigned to unexpected namespace",
                 id
             );
@@ -768,18 +1424,23 @@ mod unit_tests {
         let original_ns: RouterNamespace = Arc::from("original");
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, original_ns.clone());
+        let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        sm.shared_router_state.actor_routes.insert(
+            actor_id,
+            ActorRoute {
+                router_namespace: Some(original_ns.clone()),
+                inbox: tx_to_actor,
+            },
+        );
 
         sm.distribute_actors(vec![]);
 
-        let assigned = sm
-            .shared_router_state
-            .actor_router_addresses
-            .get(&actor_id)
-            .unwrap();
-        assert_eq!(*assigned, original_ns, "Namespace should not change");
+        let assigned = sm.shared_router_state.actor_routes.get(&actor_id).unwrap();
+        assert_eq!(
+            assigned.router_namespace,
+            Some(original_ns),
+            "Namespace should not change"
+        );
     }
 
     #[tokio::test]
@@ -791,17 +1452,21 @@ mod unit_tests {
         for id in &actor_ids {
             sm.actor_handles
                 .insert(*id, Arc::new(tokio::spawn(async {})));
+            let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+            sm.shared_router_state.actor_routes.insert(
+                *id,
+                ActorRoute {
+                    router_namespace: None,
+                    inbox: tx_to_actor,
+                },
+            );
         }
 
         sm.distribute_actors(vec![ns.clone()]);
 
         for id in &actor_ids {
-            let assigned = sm
-                .shared_router_state
-                .actor_router_addresses
-                .get(id)
-                .unwrap();
-            assert_eq!(*assigned, ns);
+            let assigned = sm.shared_router_state.actor_routes.get(id).unwrap();
+            assert_eq!(assigned.router_namespace, Some(ns.clone()));
         }
     }
 
@@ -814,34 +1479,53 @@ mod unit_tests {
         let old_ns: RouterNamespace = Arc::from("old");
         let new_ns: RouterNamespace = Arc::from("new");
 
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(old_id, old_ns);
+        let (old_tx, _old_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (new_tx, _new_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        sm.shared_router_state.actor_routes.insert(
+            old_id,
+            ActorRoute {
+                router_namespace: Some(old_ns),
+                inbox: old_tx,
+            },
+        );
+        sm.shared_router_state.actor_routes.insert(
+            new_id,
+            ActorRoute {
+                router_namespace: None,
+                inbox: new_tx,
+            },
+        );
         sm.restore_actor_router_mappings(vec![(new_id, new_ns.clone())]);
 
         assert!(
-            !sm.shared_router_state
-                .actor_router_addresses
-                .contains_key(&old_id),
-            "Old mapping should be cleared"
+            matches!(
+                sm.shared_router_state.actor_routes.get(&old_id),
+                Some(route) if route.router_namespace.is_none()
+            ),
+            "Old mapping should be cleared while preserving the inbox"
         );
-        let assigned = sm
-            .shared_router_state
-            .actor_router_addresses
-            .get(&new_id)
-            .unwrap();
-        assert_eq!(*assigned, new_ns);
+        let assigned = sm.shared_router_state.actor_routes.get(&new_id).unwrap();
+        assert_eq!(assigned.router_namespace, Some(new_ns));
     }
 
     #[test]
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     fn restore_with_empty_clears_all() {
         let (sm, _rx) = make_state_manager(disabled_modes());
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(Uuid::new_v4(), Arc::from("ns"));
+        let actor_id = Uuid::new_v4();
+        let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        sm.shared_router_state.actor_routes.insert(
+            actor_id,
+            ActorRoute {
+                router_namespace: Some(Arc::from("ns")),
+                inbox: tx_to_actor,
+            },
+        );
         sm.restore_actor_router_mappings(vec![]);
-        assert!(sm.shared_router_state.actor_router_addresses.is_empty());
+        assert!(matches!(
+            sm.shared_router_state.actor_routes.get(&actor_id),
+            Some(route) if route.router_namespace.is_none()
+        ));
     }
 
     #[test]
@@ -855,15 +1539,30 @@ mod unit_tests {
         let ns2: RouterNamespace = Arc::from("r2");
         let ns3: RouterNamespace = Arc::from("r3");
 
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(id1, ns1.clone());
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(id2, ns2.clone());
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(id3, ns3.clone());
+        let (tx1, _rx1) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (tx2, _rx2) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (tx3, _rx3) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        sm.shared_router_state.actor_routes.insert(
+            id1,
+            ActorRoute {
+                router_namespace: Some(ns1.clone()),
+                inbox: tx1,
+            },
+        );
+        sm.shared_router_state.actor_routes.insert(
+            id2,
+            ActorRoute {
+                router_namespace: Some(ns2.clone()),
+                inbox: tx2,
+            },
+        );
+        sm.shared_router_state.actor_routes.insert(
+            id3,
+            ActorRoute {
+                router_namespace: Some(ns3.clone()),
+                inbox: tx3,
+            },
+        );
 
         let result = sm.get_actor_router_mappings();
         assert_eq!(result.len(), 3);
@@ -904,30 +1603,20 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(actor_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state
-            .actor_inboxes
-            .insert(actor_id, tx_to_actor);
+        sm.shared_router_state.actor_routes.insert(
+            actor_id,
+            ActorRoute {
+                router_namespace: Some(Arc::from("router-a")),
+                inbox: tx_to_actor,
+            },
+        );
         sm.actor_devices.insert(actor_id, DeviceType::Cpu);
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(actor_id, Arc::from("router-a"));
 
         sm.remove_actor(actor_id).unwrap();
 
         assert!(sm.actor_handles.get(&actor_id).is_none());
-        assert!(
-            sm.shared_router_state
-                .actor_inboxes
-                .get(&actor_id)
-                .is_none()
-        );
+        assert!(sm.shared_router_state.actor_routes.get(&actor_id).is_none());
         assert!(sm.actor_devices.get(&actor_id).is_none());
-        assert!(
-            sm.shared_router_state
-                .actor_router_addresses
-                .get(&actor_id)
-                .is_none()
-        );
     }
 
     #[tokio::test]
@@ -946,39 +1635,34 @@ mod unit_tests {
 
         sm.actor_handles
             .insert(current_id, Arc::new(tokio::spawn(async {})));
-        sm.shared_router_state
-            .actor_inboxes
-            .insert(current_id, tx_to_actor);
+        sm.shared_router_state.actor_routes.insert(
+            current_id,
+            ActorRoute {
+                router_namespace: Some(Arc::from("router-a")),
+                inbox: tx_to_actor,
+            },
+        );
         sm.actor_devices.insert(current_id, DeviceType::Cpu);
-        sm.shared_router_state
-            .actor_router_addresses
-            .insert(current_id, Arc::from("router-a"));
 
         sm.set_actor_id(current_id, new_id).unwrap();
 
         assert!(sm.actor_handles.get(&current_id).is_none());
         assert!(
             sm.shared_router_state
-                .actor_inboxes
+                .actor_routes
                 .get(&current_id)
                 .is_none()
         );
         assert!(sm.actor_devices.get(&current_id).is_none());
-        assert!(
-            sm.shared_router_state
-                .actor_router_addresses
-                .get(&current_id)
-                .is_none()
-        );
         assert!(sm.actor_handles.get(&new_id).is_some());
-        assert!(sm.shared_router_state.actor_inboxes.get(&new_id).is_some());
+        assert!(sm.shared_router_state.actor_routes.get(&new_id).is_some());
         assert!(matches!(
             sm.actor_devices.get(&new_id),
             Some(device) if *device == DeviceType::Cpu
         ));
         assert!(matches!(
-            sm.shared_router_state.actor_router_addresses.get(&new_id),
-            Some(namespace) if *namespace == Arc::<str>::from("router-a")
+            sm.shared_router_state.actor_routes.get(&new_id),
+            Some(route) if route.router_namespace == Some(Arc::<str>::from("router-a"))
         ));
     }
 
@@ -1179,5 +1863,61 @@ mod unit_tests {
             needs_handshake,
             "No model available → needs_handshake must be true"
         );
+    }
+
+    #[tokio::test]
+    async fn flag_last_action_direct_bypasses_actor_inbox() {
+        let (sm, _rx) = make_state_manager(disabled_modes());
+        let actor_id = Uuid::new_v4();
+        let env_id = Uuid::new_v4();
+        let (tx_to_actor, mut rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let (tx_to_buffer, mut rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let runtime = Arc::new(
+            ActorRuntime::<TestBackend, D_IN, D_OUT>::new(
+                actor_id,
+                Arc::new(ArcSwapOption::new(None)),
+                10usize,
+                tx_to_buffer,
+                #[cfg(feature = "metrics")]
+                test_metrics(),
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                AlgorithmInitArgs::default(),
+            )
+            .await,
+        );
+        sm.shared_router_state.actor_routes.insert(
+            actor_id,
+            ActorRoute {
+                router_namespace: Some(Arc::from("router-a")),
+                inbox: tx_to_actor,
+            },
+        );
+
+        let erased_runtime: Arc<dyn ErasedActorRuntime<TestBackend>> = runtime;
+        StateManager::<TestBackend>::flag_last_action_direct(
+            &erased_runtime,
+            1.25,
+            Some(env_id),
+            Some("env-1".to_string()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(rx_from_actor.try_recv(), Err(TryRecvError::Empty)));
+        let msg = rx_from_buffer
+            .recv()
+            .await
+            .expect("expected trajectory flush");
+        match msg.protocol {
+            RoutingProtocol::Data(DataPayload::SendTrajectory { trajectory, .. }) => {
+                assert_eq!(trajectory.get_env_id(), Some(&env_id));
+                assert_eq!(trajectory.get_env_label(), Some("env-1"));
+            }
+            other => panic!(
+                "expected SendTrajectory payload, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
     }
 }

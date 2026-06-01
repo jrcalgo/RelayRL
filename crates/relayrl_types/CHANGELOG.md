@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-05-24
+
+### Breaking
+- **New RelayRLTrajectory fields** - Added `is_truncated` and `policy_version` metadata fields to RelayRLTrajectory struct.
+  - `is_truncated` symbolizes a series of episodes that terminated without reaching the `done` state.
+  - `policy_version` is a metadata tag that reflects the model version used for acquiring `act` tensors.
+
+## [0.7.2] - 2026-05-06
+
+### Added
+- **TorchScript byte-backed model modules** - Added `ModelModule::from_pt_bytes()` for constructing `ModelModule` values directly from serialized TorchScript bytes.
+  - When `tch-model` is enabled, the bytes are written to a temporary file so LibTorch can load the `CModule` through its path-based API
+  - When `tch-model` is disabled, the module preserves the raw `.pt` bytes with `InferenceModel::Unsupported` so metadata and serialization paths can still carry the artifact
+
+## [0.7.1] - 2026-04-26
+
+### Added
+- **Flattened batched model inference helpers** - `ModelModule::flat_batch_inference()` exposes direct `TensorData`-to-`TensorData` inference via the existing flattened tensor-data path, and `ModelModule::flat_batch_zeros()` exposes flattened zero-action batch creation for callers that already operate on batched tensor payloads
+
+### Changed
+- **README changelog badge** - Updated the README changelog badge from `0.5.4` to `0.7.0`
+
+## [0.7.0] - 2026-04-23
+
+### Added
+- **Batched model inference** - `ModelModule::step_batch()` runs a single forward pass over a batch of observations with per-row optional masks, returning action tensors, mask tensors, and auxiliary maps per row
+- **Batched hot-reload forward** - `HotReloadableModel::forward_batch()` maps batched observations and rewards into a `Vec<RelayRLAction>` using the active module
+
+### Changed
+- **Trajectory environment metadata** - `RelayRLTrajectory` now carries optional `env_id` and `env_label` with `get_env_id`, `get_env_label`, `set_env_id`, and `set_env_label`; defaults and constructors initialize them to `None`
+- **Records and trajectory builders** - CSV and Arrow trajectory reconstruction paths construct trajectories with the new fields set to `None` so existing serialized data continues to load without env columns
+
+### Breaking
+- **`RelayRLTrajectory::with_metadata` signature** - The constructor now takes `env_id: Option<Uuid>` and `env_label: Option<String>` after `agent_id`; call sites must pass the two new arguments (or `None`) before `episode` and `training_step`
+
+## [0.6.0] - 2026-04-13
+
+### Added
+- **In-memory ONNX model construction** - Added APIs for building ONNX-backed models directly from raw bytes without writing model files first
+  - `Model::from_onnx_bytes()` and `ModelModule::from_onnx_bytes()` now support byte-backed initialization for metadata-driven model loading paths
+
+### Changed
+- **Model bundle serialization** - Serialized model modules now carry `metadata.json` alongside the model bytes so deserialization can reconstruct a complete module from one payload
+  - `serialize_model_module()` now packages metadata and model bytes together, and `deserialize_model_module()` restores both before loading the module
+- **Default feature set and feature wiring** - Default builds now target `ndarray-backend` with `onnx-model` instead of enabling `codec-full` and both inference backends by default
+  - `ndarray-backend` and `tch-backend` now pull in `half`
+  - `compression` and `encryption` now pull in `bincode`
+
+### Fixed
+- **Reduced-feature builds** - Corrected optional codec imports so `action` and `trajectory` compile cleanly when `metadata`, `compression`, and `encryption` are not enabled
+
+### Breaking
+- **Hot-reload model handle API** - `HotReloadableModel` now uses atomic swaps internally and exposes `current_module()` for direct access to the active module
+  - The public `Clone` implementation was removed, so code that cloned `HotReloadableModel` directly must switch to external shared ownership
+
 ## [0.5.4] - 2026-03-29
 
 ### Fixed

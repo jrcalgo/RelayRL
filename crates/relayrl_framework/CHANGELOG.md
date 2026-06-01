@@ -2,6 +2,143 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta.5] - 2026-06-01
+
+### Added
+- **`AgentBuilder` extracted into `builder.rs`** - `AgentBuilder`, `AgentStartParameters`, `ClientModes`, `ActorInferenceMode`, `ActorTrainingDataMode`, `ModelMode`, `LocalTrajectoryFileParams`, `LocalTrajectoryFileType`, `AlgorithmInitArgs`, `DefaultHyperparameterArgs`, `InferenceParams`, `TrainingParams`, and all transport address args are moved from `agent.rs` into a new `builder.rs` module and re-exported from `agent.rs`.
+- **`run_env_with_ppo`, `run_env_with_ippo`, `run_env_with_mappo` on `RelayRLActorEnv`** - `RelayRLActorEnv` now exposes three PPO-specific `run_env_with_*` methods alongside `run_env_eval` so callers can drive integrated PPO/IPPO/MAPPO training directly from the environment loop without supplying a generic kernel.
+- **`TrainingInterface` and `runtime/data/training/mod.rs`** - New module introduces `TrainingInterface<B>`, `TrainingError`, `train_ppo`, and a `train_mappo` stub that own the per-actor async PPO training loop: observation collection, GAE finalization, background SGD through `PPOTrainer`, and refreshing the pi/vf `ModelModule` back into the actor runtime after each epoch.
+- **`ErasedActorRuntime` trait** - New object-safe `ErasedActorRuntime<B>` trait in `actor.rs` allows `StateManager` and coordinator to store actor runtimes as `Arc<dyn ErasedActorRuntime<B>>`, eliminating the `D_IN`/`D_OUT` const-generic parameters from manager structs and impl blocks. `ActorShape` and `ActorDTypes` helper structs accompany the trait.
+- **`ToAnyBurnTensor` trait** - Added to `coordinator.rs` with implementations for `Tensor<B, D, Float>`, `Tensor<B, D, Int>`, and `Tensor<B, D, Bool>`, enabling typed tensor inputs to `request_action` without requiring callers to pre-wrap in `AnyBurnTensor`.
+- **`router_buffer_size_per_actor` configuration field** - `ClientConfigParams` and the transport builder now expose `router_buffer_size_per_actor` (default `1000`); the config JSON template includes the field and the loader round-trips it.
+- **`flat_mask_bytes` on environment interfaces** - `EnvironmentInterface`, `ScalarVecEnv`, `BatchVecEnv`, and `SingleVecEnv` now expose `flat_mask_bytes()` returning `Option<Vec<u8>>`, propagating action masks from environments through the runtime. `ScalarVecEnv::new` gathers masks at construction time.
+- **`rand_distr` workspace dependency** - Added to `relayrl_framework` as a direct dependency.
+- **Transport features now on by default** - `nats-transport` and `zmq-transport` added to the crate's `default` feature set.
+
+### Changed
+- **`RelayRLAgent` and `RelayRLAgentActors` de-generified** - `RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>` and the `RelayRLAgentActors` trait are simplified to `RelayRLAgent<B>` / `RelayRLAgentActors<B>`; dimension and kind type parameters move to individual `new_actor<const D_IN, const D_OUT>()` and `new_actors<const D_IN, const D_OUT>()` call sites.
+- **`request_action` now accepts plain `Tensor` inputs** - `request_action<D_IN, D_OUT, KindIn, KindOut>` accepts `Tensor<B, D_IN, KindIn>` and `Option<Tensor<B, D_OUT, KindOut>>` directly via `ToAnyBurnTensor` bounds, instead of `Arc<AnyBurnTensor<B, D>>`.
+- **`RelayRLActorEnv` simplified** - `run_env()` with its wide generic kernel bounds (`StepKernelTrait`, `REINFORCEKernelTrait`, `DDPGKernelTrait`, …) is replaced by `run_env_eval()` for pure inference loops and the typed `run_env_with_ppo/ippo/mappo` methods for integrated training.
+- **`StateManager` de-generified** - `StateManager<B, D_IN, D_OUT>` collapses to `StateManager<B>`; dimension parameters move to individual `new_actor<D_IN, D_OUT>` and `restart_actor<D_IN, D_OUT>` call sites, consistent with the `ErasedActorRuntime` change.
+- **`ClientInterface` and `ClientEnvironments` de-generified** - Both coordinator traits drop their `D_IN`/`D_OUT` const-generic parameters; `new_actor` becomes `new_actor<const D_IN, const D_OUT>`.
+- **`AlgorithmCfg` replaced by `AlgorithmInitArgs`** - `AlgorithmCfg` (covering DDPG, TD3, REINFORCE, PPO, and custom) is replaced by `AlgorithmInitArgs { PPO, IPPO, MAPPO }`, reflecting the algorithm scope reduction in `relayrl_algorithms` 0.4.0; `configuration.rs` hyperparameter defaults are updated accordingly.
+- **Config JSON and `ClientConfigParams` updated** - `algorithm_name` field renamed to `algorithm`; DDPG/TD3/REINFORCE/custom hyperparameter blocks removed from the generated config JSON; PPO defaults adjusted (`traj_per_epoch: 1`, `clip_ratio: 0.1`, `train_pi_iters: 40`, `vf_lr: 3e-4`); `max_traj_length` removed from `ClientConfigParams`; `get_algorithm_name()` / `set_algorithm_name()` removed; `set_router_buffer_size_per_actor()` added to the builder.
+- **`step_bytes` return type extended** - `EnvironmentInterface::step_bytes`, `ScalarVecEnv::step_bytes`, and the `VectorEnvironment`/`ScalarEnvironment` trait methods now return `(obs_bytes, Option<mask_bytes>, rewards, dones, truncateds)`, adding truncation signals and optional mask bytes alongside the existing done flags.
+- **`env_dtype_to_dtype`, `decode_argmax`, `decode_continuous_bytes` consolidated** - These internal helpers are removed from `actor.rs` and moved to `state_manager.rs`.
+- **Crate description updated** - `relayrl_framework` description changed to "A heterogeneous RL runtime control platform for concurrent multi-actor execution."
+- **Legacy server files removed** - `server/legacy/training_grpc.rs`, `training_server_wrapper.rs`, and `training_zmq.rs` deleted.
+- **`relayrl_types` updated to `0.8.0`, `relayrl_algorithms` updated to `0.4.0`** - Workspace dependency versions bumped in root `Cargo.toml`.
+- **`relayrl_env_trait` updated** - Self-documenting type aliases (`Observation`, `Mask`, `Reward`, `Done`, `Truncated`) added to the trait surface; `build_mask()` and `flat_mask_bytes()` added to `Environment`; `DynScalarEnvironment`/`DynVectorEnv` formatting cleaned up; `ScalarEnvironment`/`VectorEnvironment` step signatures updated to match the extended return type.
+
+### Breaking
+- **`RelayRLAgent` generic parameters changed** - `RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>` is now `RelayRLAgent<B>`; dimension and kind generics move to individual actor methods.
+- **`RelayRLActorEnv::run_env()` removed** - The broad-kernel `run_env()` is gone; use `run_env_eval()` for inference-only loops or the new `run_env_with_ppo/ippo/mappo` for integrated training.
+- **`AlgorithmCfg` removed** - The old multi-algorithm enum is replaced by `AlgorithmInitArgs { PPO, IPPO, MAPPO }`.
+- **`ClientConfigParams::algorithm_name` renamed** - The config field is now `algorithm` in both the Rust struct and the client config JSON; `get_algorithm_name()` is removed.
+- **`ClientConfigParams::max_traj_length` removed** - The field no longer exists at the config level; max trajectory length is provided per actor at `new_actor` call time.
+- **`ReplayBufferSize` and `SaveModelPath` type aliases removed** - Previously in `agent.rs`; callers should use `usize` and `PathBuf` directly.
+- **`step_bytes` return type** - Environment `step_bytes` now returns a 5-tuple `(obs, Option<mask>, rewards, dones, truncateds)` instead of a 3-tuple; custom environment implementations must be updated.
+
+## [0.5.0-beta.4] - 2026-05-06
+
+### Added
+- **Config-driven algorithm selection** - Client configuration now carries `algorithm_name` plus structured initial hyperparameters for PPO, REINFORCE, DDPG, TD3, and their independent / multi-agent variants.
+  - Added `Algorithm` / `AlgorithmCfg` coverage for `DDPG`, `IDDPG`, `MADDPG`, `TD3`, `ITD3`, and `MATD3`
+  - Default config JSON generation moved into `utilities::config_json` and now includes per-algorithm defaults for the expanded algorithm set
+- **Optional training during local environment runs** - `run_env()` can now accept an algorithm configuration, save path, replay-buffer size, device, and kernel so local environment stepping can feed trajectories into `relayrl_algorithms` trainers.
+  - Trained model modules are acquired from the selected trainer and refreshed back into the actor runtime for subsequent local inference
+- **Actor runtime model refresh helper** - Added `ActorRuntime::perform_refresh_model()` to initialize or reload the hot-reloadable local model from a `ModelModule` and `DeviceType`.
+
+### Changed
+- **Local action hot paths** - `request_action()` and `flag_last_action()` now use cached hot-path state for local runtimes, reducing router/task boundaries for local inference and terminal-action handling.
+  - `flag_last_action()` can return completed trajectories internally for training while still preserving the public send-to-buffer behavior
+- **Vector environment execution** - `ScalarVecEnv` now uses Rayon-backed parallel reset and `step_bytes()` paths for larger environment batches.
+- **Router message model** - Routed messages now carry only `actor_id` and a nested `RoutingProtocol`, with control and data payloads split into `ControlPayload` and `DataPayload`.
+  - Router timeouts and actor dispatch now match against the nested protocol variants instead of a separate routed payload field
+- **Package metadata and dependencies** - `relayrl_framework` crate version is now `0.5.0-beta.4`, `rayon` is a direct dependency, and the direct `half` dependency no longer enables a misspelled `feature = ["bytemuck"]` entry.
+
+### Fixed
+- **Config hyperparameter field mapping** - Generated and loaded algorithm hyperparameters now align with the current `relayrl_algorithms` parameter structs, including actor/critic learning-rate names and TD3/DDPG training fields.
+- **Local terminal-action handling** - Actor `perform_flag_last_action()` now discards the optional returned trajectory for message-driven calls and still reports success after processing the terminal action.
+
+### Breaking
+- **`run_env()` algorithm-training signature** - `RelayRLActorEnv::run_env()` and coordinator/state-manager environment execution now take an optional algorithm-training tuple when callers want integrated training.
+  - Callers using the trait directly may need to update method signatures and generic kernel bounds to include the expanded algorithm kernel traits and `WeightProvider`
+- **Internal router protocol API** - Crate-internal users of `RoutedMessage`, `RoutingProtocol`, or `RoutedPayload` must migrate to the new `ControlPayload` / `DataPayload` protocol shape.
+
+## [0.5.0-beta.3] - 2026-04-26
+
+### Added
+- **Actor runtime direct-operation handle** - Added `ActorRuntime` ownership for local model state, trajectory state, max-trajectory length, buffer sending, and metrics so coordinator/state-manager paths can execute selected actor operations directly without routing every operation through the actor inbox
+- **Flattened byte inference path for environments** - `ActorRuntime::perform_local_byte_inference()` converts flat environment observation bytes into `TensorData`, calls `ModelModule::flat_batch_inference()`, falls back to `flat_batch_zeros()` on inference failure, and decodes model outputs back to action bytes for discrete and continuous action spaces
+- **Environment byte-buffer execution support** - Environment interfaces and scalar/vector wrappers now expose `n_envs_dims()`, `flat_observation_bytes()`, `step_bytes()`, `flat_env_ids()`, and `action_is_discrete()` so `run_env()` can drive scalar and vector environments through the `relayrl_env_trait` 1.2 flattened API
+- **Action decoding utilities** - Added dtype mapping plus `decode_argmax()` and `decode_continuous_bytes()` helpers for NdArray and Tch environment action dtypes, including half/bfloat16 handling where supported
+- **Action-routing regression coverage** - Added coordinator/state-manager tests for direct `flag_last_action` behavior and request-action routing through the global dispatcher
+
+### Changed
+- **Package metadata and dependencies** - `relayrl_framework` crate version is now `0.5.0-beta.3`, and `half` is a direct dependency for half/bfloat16 byte decoding
+- **Environment integration API alignment** - `RelayRLActorEnv::set_env()`, `ClientEnvironments::set_env()`, and state-manager environment storage now accept `Box<dyn relayrl_env_trait::Environment>` instead of the old backend/dimension/tensor-kind-generic environment trait object
+- **Environment run loop** - `run_env()` now supports the local inference mode by pulling an `ActorRuntime` and shared environment map, then executing `step_count` iterations of observation bytes -> local model inference -> environment `step_bytes()` -> per-environment `flag_last_action` when done
+- **Scalar and vector environment wrappers** - `ScalarVecEnv` now maintains stable environment ordering and flat observation/action byte strides; `BatchVecEnv` delegates flattened observation, step, dimension, id, and action-space queries to the wrapped vector environment
+- **Router protocol shape** - Environment batching now happens through the local byte path, so router-level `RequestInferenceBatch` routing was removed from timeout handling and dispatch
+- **Runtime locking and handle storage** - State-manager environment operations use shared/read access with interior concurrent maps, actor runtimes are stored alongside actor model handles, and runtime handles are updated/cleared during actor id changes, removals, and shutdown
+- **Buffer worker throughput constants** - Trajectory buffer worker batching changed from `10` items every `100ms` to `10_000` items every `1ms` as a temporary throughput patch
+- **Internal sink module layout** - The memory sink module moved under `runtime/data/sinks/memory_sink`, aligning it with the transport sink layout
+
+### Fixed
+- **Online memory mode detection** - `uses_in_memory_data()` now recognizes transport-enabled `OnlineWithMemory(TrainingParams)` and `OnlineWithFilesAndMemory(TrainingParams, Option<LocalTrajectoryFileParams>)`
+- **Training address extraction** - Coordinator startup now includes `OnlineWithFilesAndMemory` when deriving training server address arguments, and treats offline memory/file-and-memory modes as local-only
+- **Transport sink import paths** - Internal transport imports now point at `runtime/data/sinks/transport_sink`, matching the current sink module location
+- **Optional codec startup wiring** - Agent `start()` and `restart()` now pass transport codecs as `Some(codec)` into coordinator startup when transport features are enabled
+
+### Removed
+- **Router-level batched inference messages** - Removed `RoutingProtocol::RequestInferenceBatch`, `RoutedPayload::RequestInferenceBatch`, and `BatchedInferenceRequest`
+- **Old benchmark files** - Deleted the stale `benches/old` network/runtime benchmark files that no longer matched the current runtime architecture
+- **Legacy environment tensor conversion path** - Removed the framework-side `IntoAnyTensorKind` requirement and old `TensorData`-to-`AnyBurnTensor` environment action conversion path in favor of byte-buffer environment stepping
+
+### Breaking
+- **Custom environment integration** - Code passing generic `Environment<B, D_IN, D_OUT, KindIn, KindOut>` objects into `RelayRLActorEnv::set_env()` must migrate to the `relayrl_env_trait` 1.2 object-safe `Environment` API and provide flattened byte observation/action methods
+- **Internal router integrations** - Any crate-internal or downstream code depending on `RequestInferenceBatch`/`BatchedInferenceRequest` must use the live `request_action` path or the new local environment byte path instead
+- **Internal module paths** - References to the old `runtime/data/memory_sink` location must move to `runtime/data/sinks/memory_sink`
+
+## [0.5.0-beta.2] - 2026-04-23
+
+### Added
+- **Actor environment control API** - `RelayRLActorEnv` adds `run_env`, `set_env`, `remove_env`, `get_env_count`, and `set_env_count` so local actors can manage scalar and vector environment lifecycles through the coordinator
+- **Batched local inference routing** - `RequestInferenceBatch` and `BatchedInferenceRequest` add batched observation dispatch for vectorized local environments
+  - `FlagLastInference` now carries optional `env_id` and `env_label` so finalized trajectories can preserve environment identity across batched runs
+
+### Changed
+- **Environment trait alignment** - `relayrl_framework` now inherits `relayrl_env_trait` from the workspace and targets the 1.1 environment API surface used by the new actor environment plumbing
+- **Runtime routing and vectorized environment handling** - Coordinator, state-manager, and router paths were reworked around shared router state, batched environment execution, and explicit routing timeouts for `RequestInferenceBatch` and `FlagLastInference`
+- **Hot-path runtime optimizations** - Cache padding and ordering refinements were applied across shared actor counts, router flags, backpressure permits, circuit-breaker counters, and shutdown state to reduce contention and improve responsiveness under load
+
+### Fixed
+- **Action request coordination** - `request_action()` now acquires shared dispatcher and valid-id state in one path and tightens the routing window to reduce actor reply races
+- **Runtime ordering and recovery behavior** - Actor distribution/removal ordering, backpressure wakeups, and circuit-breaker state transitions were tightened to behave more predictably under load
+
+### Breaking
+- **Environment integration surface** - Consumers integrating custom environments must adapt to the newer `relayrl_env_trait` 1.1 generics and method requirements now used by framework environment APIs
+  - Projects that pinned `relayrl_env_trait` `1.0.x` alongside `0.5.0-beta.1` need to align with the workspace-managed env-trait dependency before moving to `0.5.0-beta.2`
+
+## [0.5.0-beta.1] - 2026-04-13
+
+### Added
+- **In-memory trajectory retrieval** - `RelayRLAgent::get_trajectory_memory()` added for draining accumulated per-actor trajectory memory from the runtime coordinator
+  - Completed trajectories can now be retained in bounded in-memory buffers, and `flag_last_action` now stamps each emitted trajectory with an episode id before dispatch
+- **Overflow inference mode** - `ActorInferenceMode::ServerOverflow(ModelMode, InferenceParams)` added as an experimental transport-gated mode for mixing local model ownership with remote inference fallback
+
+### Changed
+- **Local model/runtime concurrency** - Local actor model handles now use `ArcSwapOption` instead of lock-based storage so inference and model swaps can proceed through snapshot-style loads rather than blocking reload paths
+
+### Fixed
+- **Action request handling** - `request_action()` follow-up fixes improved actor reply coordination and corrected id/reference handling in the runtime action path
+- **Trajectory-length defaults** - Generated config JSON and builder defaults now cap `max_traj_length` at `1000` instead of `100000000` to avoid runaway memory use in default configurations
+
+### Breaking
+- **Feature and codec surface** - Default features dropped `tch-backend`, `relayrl_framework` no longer forces `relayrl_types` `ndarray-backend` / `onnx-model` features in its dependency declaration, and `prelude::config::network_codec` now exists only when `nats-transport` or `zmq-transport` is enabled
+- **Training-data mode API redesign** - `ActorTrainingDataMode` was expanded from the older `Offline` / `Hybrid` shape into explicit file and memory variants such as `OfflineWithFiles`, `OfflineWithMemory`, `OnlineWithFiles`, and `OnlineWithMemory`; the non-transport default is now `OfflineWithMemory`
+
 ## [0.5.0-beta] - 2026-04-06
 
 ### Added

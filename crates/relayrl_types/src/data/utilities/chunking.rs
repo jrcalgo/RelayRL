@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "integrity")]
-use crate::data::utilities::integrity::{compute_checksum, Checksum};
+use crate::data::utilities::integrity::{Checksum, compute_checksum};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorChunk {

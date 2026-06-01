@@ -61,7 +61,8 @@
         },
         "trajectory_file_output": {
             "directory": "experiment_data",
-            "file_type": "json"
+            "_comment": "use `Csv` or `Arrow`",
+            "file_type": "Csv"
         }
     },
     "transport_config": {
@@ -110,6 +111,6 @@
             "model_name": "client_model",
             "format": "pt"
         },
-        "max_traj_length": 100000000
+        "max_traj_length": 1000
     }
 }

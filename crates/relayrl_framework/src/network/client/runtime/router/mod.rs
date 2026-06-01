@@ -34,37 +34,33 @@ pub enum RouterError {
 pub(crate) struct RoutedMessage {
     pub actor_id: Uuid,
     pub protocol: RoutingProtocol,
-    pub payload: RoutedPayload,
 }
 
 pub(crate) enum RoutingProtocol {
+    Control(ControlPayload),
+    Data(DataPayload),
+}
+
+pub(crate) enum ControlPayload {
     ModelHandshake,
-    RequestInference,
-    FlagLastInference,
-    ModelVersion,
-    ModelUpdate,
-    SendTrajectory,
+    ModelVersion { reply_to: oneshot::Sender<i64> },
+    ModelUpdate { model_bytes: Vec<u8>, version: i64 },
     Shutdown,
 }
 
-pub(crate) enum RoutedPayload {
-    ModelHandshake,
+pub(crate) enum DataPayload {
+    // online inference only
     RequestInference(Box<InferenceRequest>),
-    FlagLastInference {
+    // online inference only
+    FlagLastAction {
         reward: f32,
-    },
-    ModelVersion {
-        reply_to: oneshot::Sender<i64>,
-    },
-    ModelUpdate {
-        model_bytes: Vec<u8>,
-        version: i64,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
     },
     SendTrajectory {
         timestamp: (u128, u128),
         trajectory: RelayRLTrajectory,
     },
-    Shutdown,
 }
 
 /// observation and mask are Arc<AnyBurnTensor<B, D_IN>> and Arc<Option<AnyBurnTensor<B, D_OUT>>> respectively
