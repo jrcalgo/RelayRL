@@ -1,45 +1,42 @@
 [package]
 name = "relayrl_algorithms"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
-description = "A collection of Multi-Agent Deep Reinforcement Learning Algorithms (IPPO, MAPPO, etc.)"
+description = "Independent / Multi-Agent Proximal Policy Optimization (PPO) Algorithms for the RelayRL framework"
 repository = "https://github.com/jrcalgo/relayrl"
 documentation = "https://docs.rs/crate/relayrl_algorithms"
-keywords = ['rl-algorithms', 'multi-agent', 'deep-learning', 'ai', 'training']
-categories = ['science', 'algorithms', 'simulation', 'concurrency', 'mathematics']
+keywords = ['rl-algorithms', 'multi-agent', 'single-agent', 'deep-learning', 'ai']
+categories = ['science', 'algorithms', 'artificial-intelligence', 'concurrency', 'mathematics']
 license = "Apache-2.0"
 
 [features]
-default = ["ndarray-backend", "onnx-model"]
-ndarray-backend = ["burn-ndarray", "relayrl_types/ndarray-backend"]
 tch-backend = ["burn-tch", "relayrl_types/tch-backend"]
-onnx-model = ["relayrl_types/onnx-model"]
-tch-model = ["relayrl_types/tch-model", "tch", "tempfile"]
+tch-model = ["relayrl_types/tch-model", "tch"]
 
 [dependencies]
-relayrl_types = { workspace = true }
-
-bytemuck = { workspace = true }
+relayrl_types = { workspace = true, features = ["ndarray-backend", "onnx-model"] }
 
 burn-core = { workspace = true }
 burn-tensor = { workspace = true }
 burn-optim = { workspace = true }
 burn-nn = { workspace = true }
 burn-autodiff = { workspace = true }
-burn-ndarray = { workspace = true, optional = true }
+burn-ndarray = { workspace = true }
 burn-tch = { workspace = true, optional = true }
 
-tch = { version = "=0.22.0", features = ["download-libtorch"], default-features = false, optional = true }
-tempfile = { version = "3.20.0", optional = true }
-
+bytemuck = { workspace = true }
 dashmap = { workspace = true }
 ndarray = { workspace = true }
 rand = { workspace = true }
-
+rand_distr = { workspace = true }
+half = { workspace = true }
 tokio = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-
 log = { workspace = true }
-
 async-trait = { workspace = true }
+tempfile = { workspace = true }
+
+tch = { version = "=0.22.0", features = ["download-libtorch"], default-features = false, optional = true }
+

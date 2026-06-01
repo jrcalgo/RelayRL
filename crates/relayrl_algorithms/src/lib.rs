@@ -11,7 +11,8 @@ pub mod prelude {
         pub mod algorithm {
             pub use crate::algorithms::PPO::kernel::{
                 ContinuousPPOPolicyHead, DiscretePPOPolicyHead, PPOKernel, PPOKernelFactory,
-                PPOKernelOps, PPOKernelTraining, PPOKernelTrainingArgs, PPOPolicyHead,
+                PPOKernelOps, PPOKernelSnapshot, PPOKernelTraining, PPOKernelTrainingArgs,
+                PPOPolicyHead,
             };
             pub use crate::algorithms::PPO::{
                 EpochTrainOutput, IPPOParams, IndependentPPOAlgorithm, MAPPOParams,

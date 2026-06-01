@@ -1,7 +1,5 @@
 use crate::algorithms::{compute_normed_advantages, discounted_cumsum, scalar_stats};
-use crate::templates::base_replay_buffer::{
-    Batch, GenericReplayBuffer, ReplayBufferError,
-};
+use crate::templates::base_replay_buffer::{Batch, GenericReplayBuffer, ReplayBufferError};
 use async_trait::async_trait;
 use relayrl_types::prelude::action::RelayRLData;
 use relayrl_types::prelude::tensor::relayrl::TensorData;

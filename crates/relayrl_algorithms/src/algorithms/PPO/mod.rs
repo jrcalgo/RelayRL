@@ -425,10 +425,15 @@ where
     KindOut: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
     Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
 {
-    pub fn register_first_slot_with_key(&mut self, agent_key: String) -> Result<(), AlgorithmError> {
+    pub fn register_first_slot_with_key(
+        &mut self,
+        agent_key: String,
+    ) -> Result<(), AlgorithmError> {
         match self {
             PPOTrainer::PPO(inner) | PPOTrainer::IPPO(inner) => {
-                inner.register_first_slot_with_key(agent_key).map_err(|e| AlgorithmError::InitializationError(e.to_string()))?;
+                inner
+                    .register_first_slot_with_key(agent_key)
+                    .map_err(|e| AlgorithmError::InitializationError(e.to_string()))?;
             }
             PPOTrainer::MAPPO(_) => unimplemented!(),
         }

@@ -251,8 +251,7 @@ where
     KindOut: BasicOps<B>,
 {
     fn get_layer_specs(&self) -> LayerSpecs {
-        self
-            .layers
+        self.layers
             .iter()
             .map(|layer| -> (usize, usize, Vec<f32>, Vec<f32>) {
                 let w = layer.weight.val();
@@ -586,7 +585,8 @@ pub fn convert_byte_dtype_to_f32(
                 .iter()
                 .map(|&x| if x != 0 { 1.0f32 } else { 0.0f32 })
                 .collect::<Vec<f32>>(),
-        }    })
+        },
+    })
 }
 
 #[inline(always)]
@@ -665,5 +665,6 @@ pub fn convert_byte_dtype_to_i64(
                 .iter()
                 .map(|&x| if x != 0 { 1i64 } else { 0i64 })
                 .collect::<Vec<i64>>(),
-        }    })
+        },
+    })
 }

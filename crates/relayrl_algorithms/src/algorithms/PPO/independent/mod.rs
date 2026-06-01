@@ -453,7 +453,10 @@ where
 
     /// Pre-register the first agent slot so the kernel is available for inference
     /// before any trajectory has been received.
-    pub fn register_first_slot_with_key(&mut self, agent_key: String) -> Result<(), AlgorithmError> {
+    pub fn register_first_slot_with_key(
+        &mut self,
+        agent_key: String,
+    ) -> Result<(), AlgorithmError> {
         if self
             .runtime
             .components
@@ -461,7 +464,8 @@ where
             .get(&agent_key)
             .is_none()
         {
-            self.register_agent_slot(agent_key).map_err(|e| AlgorithmError::InitializationError(e.to_string()))?;
+            self.register_agent_slot(agent_key)
+                .map_err(|e| AlgorithmError::InitializationError(e.to_string()))?;
         }
         Ok(())
     }
@@ -610,7 +614,9 @@ where
     fn backend_f32_dtype() -> relayrl_types::data::tensor::DType {
         match B::get_supported_backend() {
             #[cfg(feature = "tch-backend")]
-            relayrl_types::data::tensor::SupportedTensorBackend::Tch => relayrl_types::data::tensor::DType::Tch(relayrl_types::data::tensor::TchDType::F32),
+            relayrl_types::data::tensor::SupportedTensorBackend::Tch => {
+                relayrl_types::data::tensor::DType::Tch(relayrl_types::data::tensor::TchDType::F32)
+            }
             _ => DType::NdArray(relayrl_types::data::tensor::NdArrayDType::F32),
         }
     }
