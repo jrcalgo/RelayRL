@@ -1,6 +1,5 @@
 use crate::algorithms::{
-    GenericMlp, LayerSpecs, NeuralNetwork, NeuralNetworkError, 
-    NeuralNetworkSpec, ValueFunction,
+    GenericMlp, LayerSpecs, NeuralNetwork, NeuralNetworkError, NeuralNetworkSpec, ValueFunction,
 };
 use crate::algorithms::{convert_byte_dtype_to_f32, convert_byte_dtype_to_i64};
 
@@ -15,7 +14,7 @@ use relayrl_types::data::tensor::NdArrayDType;
 use relayrl_types::data::tensor::TchDType;
 use relayrl_types::data::tensor::{DType, TensorData};
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 // ---- training module  ----
 
@@ -612,6 +611,29 @@ pub enum PPOKernel<
     Continuous(ContinuousPPOKernel<B, KindIn, KindOut, Pi>),
 }
 
+pub struct PPOKernelSnapshot<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
+> {
+    kernel: Arc<PPOKernel<B, KindIn, KindOut, Pi>>,
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
+> Clone for PPOKernelSnapshot<B, KindIn, KindOut, Pi>
+{
+    fn clone(&self) -> Self {
+        Self {
+            kernel: Arc::clone(&self.kernel),
+        }
+    }
+}
+
 /// Training parameters for the actor-critic kernel.
 pub struct PPOKernelTrainingArgs {
     pub pi_lr: f64,
@@ -724,6 +746,60 @@ impl<
 }
 
 const MIN_RAYON_PARALLEL_ENVS: usize = 8;
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut> + Clone,
+> PPOKernel<B, KindIn, KindOut, Pi>
+{
+    pub fn clone_for_inference(&self) -> Self {
+        match self {
+            PPOKernel::Discrete(kernel) => PPOKernel::Discrete(DiscretePPOKernel {
+                pi: kernel.pi.clone(),
+                vf: kernel.vf.clone(),
+                trainer: None,
+                returns_mean: kernel.returns_mean,
+                returns_variance: kernel.returns_variance,
+                returns_count: kernel.returns_count,
+            }),
+            PPOKernel::Continuous(kernel) => PPOKernel::Continuous(ContinuousPPOKernel {
+                pi: kernel.pi.clone(),
+                vf: kernel.vf.clone(),
+                trainer: None,
+                returns_mean: kernel.returns_mean,
+                returns_variance: kernel.returns_variance,
+                returns_count: kernel.returns_count,
+            }),
+        }
+    }
+
+    pub fn to_arc_snapshot(&self) -> PPOKernelSnapshot<B, KindIn, KindOut, Pi> {
+        PPOKernelSnapshot {
+            kernel: Arc::new(self.clone_for_inference()),
+        }
+    }
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
+> PPOKernelSnapshot<B, KindIn, KindOut, Pi>
+{
+    pub fn policy_forward_bytes(
+        &self,
+        raw_model_output: &TensorData,
+        mask_bytes: Option<&[u8]>,
+        n_envs: usize,
+        act_dtype: &DType,
+    ) -> Result<(ActBytes, LogpBytes), NeuralNetworkError> {
+        self.kernel
+            .policy_forward_bytes(raw_model_output, mask_bytes, n_envs, act_dtype)
+    }
+}
 
 impl<
     B: Backend + BackendMatcher<Backend = B>,
