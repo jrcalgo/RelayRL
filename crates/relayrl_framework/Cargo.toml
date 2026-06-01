@@ -23,7 +23,7 @@ name = "relayrl_framework"
 crate-type = ["rlib"]
 
 [features]
-default = ["client", "logging", "metrics", "nats-transport", "zmq-transport"]
+default = ["client", "logging", "metrics"]
 
 client = []
 training-server = []
