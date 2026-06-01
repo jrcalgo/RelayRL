@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-06-01
+
+### Added
+- **Payload type aliases** - Added `Observation`, `Mask`, `Reward`, `Done`, and `Truncated` as self-documenting type aliases for the byte-oriented payload types used in step and observation methods, replacing bare `Vec<u8>`, `Option<Vec<u8>>`, `f32`, and `bool` in all trait signatures.
+- **Mask support on `Environment`** - `Environment` now requires `build_mask()` returning `Result<Box<dyn Any>, EnvironmentError>` and `flat_mask_bytes()` returning `Mask` (`Option<Vec<u8>>`), providing the same type-erased and flat byte interfaces for action masks that already exist for observations.
+- **`dyn_flat_mask()` on `DynScalarEnvironment`** - Added a `dyn_flat_mask()` forwarding helper to `DynScalarEnvironment` that delegates to `Environment::flat_mask_bytes()`, alongside the existing `dyn_flat_obs()` and `dyn_step()` helpers.
+
+### Changed
+- **`step_bytes` return type extended** - `ScalarEnvironment::step_bytes()` now returns `Option<(Observation, Mask, Reward, Done, Truncated)>` and `VectorEnvironment::step_bytes()` now returns `Option<(Observation, Mask, Vec<Reward>, Vec<Done>, Vec<Truncated>)>`, adding optional mask bytes and explicit truncation flags alongside the existing observation, reward, and done values.
+- **`dyn_step` return type extended** - `DynScalarEnvironment::dyn_step()` now returns `Option<(Observation, Mask, Reward, Done, Truncated)>` to match the updated `ScalarEnvironment::step_bytes()` signature it forwards to.
+- **Return type aliases applied to existing methods** - `flat_observation_bytes()` and `dyn_flat_obs()` now declare their return type as `Observation` instead of `Vec<u8>`, and `VectorEnvironment::step_bytes()` uses `Vec<Reward>`, `Vec<Done>`, and `Vec<Truncated>` instead of `Vec<f32>` and `Vec<bool>`.
+
+### Removed
+- **`EnvironmentKind::Other` and `EnvironmentKind::Unknown` variants** - `EnvironmentKind` now contains only `Scalar` and `Vector`; the previously unused `Other(String)` and `Unknown` variants are removed.
+
+### Breaking
+- **`Environment` implementors must add two new methods** - `build_mask()` and `flat_mask_bytes()` are now required by the `Environment` trait; existing implementations must implement both (returning a zero-element or `None` mask is acceptable for environments that have no action mask).
+- **`step_bytes` return tuples changed** - `ScalarEnvironment::step_bytes()` now returns a 5-element tuple and `VectorEnvironment::step_bytes()` now returns a 5-element tuple; all existing implementations must be updated to include mask bytes (`None` is valid) and a truncation boolean.
+- **`EnvironmentKind::Other` and `EnvironmentKind::Unknown` removed** - Code that matches or constructs these variants must be updated; only `Scalar` and `Vector` remain.
+
 ## [1.2.0] - 2026-04-26
 
 ### Added
