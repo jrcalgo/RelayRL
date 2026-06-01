@@ -3,11 +3,12 @@
 **Core Library for Deep Multi-Agent Reinforcement Learning**
 
 ---
-**Version:** 0.5.0-beta.4
+**Version:** 0.5.0-beta.5
 
 **Status:** Under active development, expect breaking changes.
 
-**Tested Platform Support:** macOS (Silicon), Linux (Ubuntu), Windows 10 (x86_64)
+## Changelog
+[CHANGELOG](CHANGELOG.md)
 
 ## Overview
 
@@ -15,7 +16,7 @@ With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `rel
 
 As of now, the supported beta path is the local/default client runtime. Provide your own
 `TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface.
-Transport-backed and server-backed workflows remain experimental in `0.5.0-beta.4`.
+Transport-backed and server-backed workflows remain experimental in `0.5.0-beta.5`.
 
 All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
 
@@ -41,23 +42,24 @@ All feature flags other than `client` are (more) **unstable** - if not entirely 
 - **Improved Error Handling:** Near complete removal of panics and replacement with proper error handling (retries, branches, etc.) and upstream propagation.
 - **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building strong `ZMQ` and `NATS` transport implementations.
 - **Type System:** Moved to a separate crate (`relayrl_types`).
-- **RL Algorithms:** Moved to a separate crate (`relayrl_algorithms`), which remains unimplemented for now.
+- **RL Algorithms:** Moved to a separate crate (`relayrl_algorithms`).
 - **Python Bindings:** Moved to a separate crate (`relayrl_python`), which remains unimplemented for now.
 
 ## Quick Start
 
 ### 0.5.0-beta Scope
 
-Supported in `0.5.0-beta.4`:
+Supported in `0.5.0-beta.5`:
 
 - local inference
 - actor lifecycle management
 - router scaling
 - local Arrow/CSV trajectory writing
 - in-memory trajectory retrieval
-- internal environment batching
+- algorithm training on PPO
+- parallelized environment batching
 
-Experimental in `0.5.0-beta.4`:
+Experimental in `0.5.0-beta.5`:
 
 - `zmq-transport`
 - `nats-transport`
