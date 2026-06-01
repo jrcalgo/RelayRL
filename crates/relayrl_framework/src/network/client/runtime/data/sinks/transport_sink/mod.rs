@@ -4,8 +4,8 @@
 //! `0.5.0-beta`; the local/default client runtime is the supported beta path.
 
 use crate::network::TransportType;
-use crate::network::client::agent::ModelMode;
 use crate::network::client::agent::AlgorithmInitArgs;
+use crate::network::client::agent::ModelMode;
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
 #[cfg(feature = "nats-transport")]

@@ -3,6 +3,8 @@
 //! Actors own local inference state, trajectory assembly, and the message-handling loop for the
 //! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
 
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::AlgorithmInitArgs;
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
@@ -18,8 +20,6 @@ use crate::network::client::runtime::router::{
 };
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::AlgorithmInitArgs;
 
 use active_uuid_registry::registry_uuid::Uuid;
 use arc_swap::ArcSwapOption;
@@ -173,7 +173,8 @@ impl ActorTrajectoryState {
                 .cloned()
                 .unwrap_or_else(|| env_id.to_string())
         });
-        let traj = self.ensure_env_trajectory(actor_id, env_id, label.clone(), max_traj_length.clone());
+        let traj =
+            self.ensure_env_trajectory(actor_id, env_id, label.clone(), max_traj_length.clone());
         traj.add_action(RelayRLAction::new(
             None,
             None,
@@ -478,28 +479,6 @@ impl<
         result
     }
 
-    pub(crate) async fn perform_refresh_model(
-        &self,
-        model_module: ModelModule<B>,
-        device: DeviceType,
-    ) -> Result<(), ActorError> {
-        match self.reloadable_model.load_full() {
-            Some(model) => {
-                model
-                    .reload_from_module(model_module, model.version())
-                    .await
-                    .map_err(ActorError::from)?;
-                Ok(())
-            }
-            None => {
-                let reloadable_model =
-                    Arc::new(HotReloadableModel::<B>::new_from_module(model_module, device).await?);
-                self.reloadable_model.store(Some(reloadable_model));
-                Ok(())
-            }
-        }
-    }
-
     /// Load or hot-reload a named model slot used by `perform_env_byte_inference`.
     pub(crate) async fn perform_env_refresh_model(
         &self,
@@ -562,8 +541,9 @@ where
     fn current_model_dtypes(&self) -> Result<ActorDTypes, ActorError> {
         let model = self
             .reloadable_model
-            .load().clone()
-            .ok_or_else(|| ActorError::ModelNotLoadedError)?;
+            .load()
+            .clone()
+            .ok_or(ActorError::ModelNotLoadedError)?;
         Ok(ActorDTypes {
             dtype_in: model.current_module().metadata.input_dtype.clone(),
             dtype_out: model.current_module().metadata.output_dtype.clone(),
@@ -1483,7 +1463,10 @@ mod unit_tests {
             .expect("buffer rx closed");
 
         assert!(
-            matches!(msg.protocol, RoutingProtocol::Data(DataPayload::SendTrajectory { .. })),
+            matches!(
+                msg.protocol,
+                RoutingProtocol::Data(DataPayload::SendTrajectory { .. })
+            ),
             "FlagLastInference should produce a SendTrajectory message"
         );
     }

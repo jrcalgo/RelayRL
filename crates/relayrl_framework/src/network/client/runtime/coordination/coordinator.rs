@@ -6,9 +6,11 @@
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes, DefaultHyperparameterArgs, AlgorithmInitArgs, ReplayBufferSize, SaveModelPath};
+use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::{InferenceAddressesArgs, TrainingAddressesArgs};
+use crate::network::client::agent::{
+    AlgorithmInitArgs, DefaultHyperparameterArgs, InferenceAddressesArgs, TrainingAddressesArgs,
+};
 use crate::network::client::runtime::actor::{ActorDTypes, ActorShape, ErasedActorRuntime};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     LifecycleManager, LifecycleManagerError,
@@ -66,8 +68,12 @@ use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::serialize_model_module;
-use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind, Tensor, Float, Int, Bool};
-use relayrl_types::prelude::tensor::relayrl::{DeviceType, DType, FloatBurnTensor, IntBurnTensor, BoolBurnTensor};
+use relayrl_types::prelude::tensor::burn::{
+    BasicOps, Bool, Float, Int, Numeric, Tensor, TensorKind,
+};
+use relayrl_types::prelude::tensor::relayrl::{
+    BoolBurnTensor, DType, DeviceType, FloatBurnTensor, IntBurnTensor,
+};
 
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -222,7 +228,12 @@ pub(crate) trait ClientInterface<B: Backend + BackendMatcher<Backend = B>> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         default_hyperparameters: DefaultHyperparameterArgs,
     ) -> Result<(), CoordinatorError>;
-    async fn request_action<const D_IN: usize, const D_OUT: usize, KindIn: TensorKind<B> + 'static, KindOut: TensorKind<B> + 'static>(
+    async fn request_action<
+        const D_IN: usize,
+        const D_OUT: usize,
+        KindIn: TensorKind<B> + 'static,
+        KindOut: TensorKind<B> + 'static,
+    >(
         &self,
         ids: Vec<ActorUuid>,
         observation: Tensor<B, D_IN, KindIn>,
@@ -288,7 +299,7 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
     async fn run_env_with_ppo<
         KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
         KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -619,9 +630,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
             default_hyperparameters,
             &config_loader,
             config_path,
+            router_buffer_size_per_actor,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             self.transport_type,
-            router_buffer_size_per_actor,
         );
 
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -907,26 +918,25 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
                 _ => None,
             };
 
-            let scaling = 
-                ScaleManager::new(
-                    client_namespace.clone(),
-                    shared_client_modes,
-                    shared_state.clone(),
-                    global_dispatcher_rx,
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    scaling_dispatcher,
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    training_dispatcher,
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    shared_transport_addresses.clone(),
-                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                    training_codec,
-                    #[cfg(feature = "metrics")]
-                    metrics.clone(),
-                    lifecycle.clone(),
-                )
-                .await
-                .map_err(CoordinatorError::from)?;
+            let scaling = ScaleManager::new(
+                client_namespace.clone(),
+                shared_client_modes,
+                shared_state.clone(),
+                global_dispatcher_rx,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                scaling_dispatcher,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                training_dispatcher,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                shared_transport_addresses.clone(),
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                training_codec,
+                #[cfg(feature = "metrics")]
+                metrics.clone(),
+                lifecycle.clone(),
+            )
+            .await
+            .map_err(CoordinatorError::from)?;
 
             self.runtime_params = Some(CoordinatorParams {
                 client_namespace,
@@ -1114,8 +1124,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
                     })?;
                     let obs_tensor: Arc<AnyBurnTensor<B, D_IN>> =
                         Arc::new(observation.to_owned().to_any_burn_tensor(dtype_in));
-                    let mask_tensor: Option<Arc<AnyBurnTensor<B, D_OUT>>> =
-                        mask.as_ref().map(|tensor| Arc::new(tensor.to_owned().to_any_burn_tensor(dtype_out)));
+                    let mask_tensor: Option<Arc<AnyBurnTensor<B, D_OUT>>> = mask
+                        .as_ref()
+                        .map(|tensor| Arc::new(tensor.to_owned().to_any_burn_tensor(dtype_out)));
 
                     let action = runtime
                         .request_inference_erased(
@@ -1533,8 +1544,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
             )),
         }
     }
-
-
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> ClientActors<B> for ClientCoordinator<B> {
@@ -1617,9 +1626,30 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientActors<B> for ClientCoordin
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 let initialized_algorithm_args = match algorithm_args {
-                    AlgorithmInitArgs::PPO(None) => AlgorithmInitArgs::PPO(Some(params.lifecycle.get_ppo_hyperparameters().read().await.clone())),
-                    AlgorithmInitArgs::IPPO(None) => AlgorithmInitArgs::IPPO(Some(params.lifecycle.get_ippo_hyperparameters().read().await.clone())),
-                    AlgorithmInitArgs::MAPPO(None) => AlgorithmInitArgs::MAPPO(Some(params.lifecycle.get_mappo_hyperparameters().read().await.clone())),
+                    AlgorithmInitArgs::PPO(None) => AlgorithmInitArgs::PPO(Some(
+                        params
+                            .lifecycle
+                            .get_ppo_hyperparameters()
+                            .read()
+                            .await
+                            .clone(),
+                    )),
+                    AlgorithmInitArgs::IPPO(None) => AlgorithmInitArgs::IPPO(Some(
+                        params
+                            .lifecycle
+                            .get_ippo_hyperparameters()
+                            .read()
+                            .await
+                            .clone(),
+                    )),
+                    AlgorithmInitArgs::MAPPO(None) => AlgorithmInitArgs::MAPPO(Some(
+                        params
+                            .lifecycle
+                            .get_mappo_hyperparameters()
+                            .read()
+                            .await
+                            .clone(),
+                    )),
                     _ => algorithm_args,
                 };
 
@@ -1658,7 +1688,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientActors<B> for ClientCoordin
                                 .scaling
                                 .send_process_init_request(
                                     actor_entry,
-                                    ProcessInitFlag::<B>::TrainingAlgorithmInit(initialized_algorithm_args),
+                                    ProcessInitFlag::<B>::TrainingAlgorithmInit(
+                                        initialized_algorithm_args,
+                                    ),
                                 )
                                 .await?;
                         }
@@ -1836,7 +1868,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
     where
         KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
         KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         match &self.runtime_params {
@@ -1854,18 +1886,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                         (runtime, env_map, shutdown_rx)
                     };
 
-                    let result =
-                        StateManager::<B>::run_env_step_loop_with_ppo::<KindIn, KindOut, Pi>(
-                            actor_id,
-                            Some(shutdown_rx),
-                            Arc::clone(&runtime),
-                            env_map,
-                            loop_iters,
-                            max_traj_length,
-                            trainer_spec,
-                        )
-                        .map_err(CoordinatorError::from);
-                    result
+                    StateManager::<B>::run_env_step_loop_with_ppo::<KindIn, KindOut, Pi>(
+                        actor_id,
+                        Some(shutdown_rx),
+                        Arc::clone(&runtime),
+                        env_map,
+                        loop_iters,
+                        max_traj_length,
+                        trainer_spec,
+                    )
+                    .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
@@ -1908,19 +1938,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                         (runtime, env_map, shutdown_rx)
                     };
 
-                    let result =
-                        StateManager::<B>::run_env_step_loop_with_ippo::<KindIn, KindOut, Pi>(
-                            actor_id,
-                            shutdown_rx,
-                            Arc::clone(&runtime),
-                            env_map,
-                            loop_iters,
-                            max_traj_length,
-                            trainer_spec,
-                        )
-                        .map_err(CoordinatorError::from);
-
-                    result
+                    StateManager::<B>::run_env_step_loop_with_ippo::<KindIn, KindOut, Pi>(
+                        actor_id,
+                        shutdown_rx,
+                        Arc::clone(&runtime),
+                        env_map,
+                        loop_iters,
+                        max_traj_length,
+                        trainer_spec,
+                    )
+                    .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
@@ -1963,19 +1990,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                         (runtime, env_map, shutdown_rx)
                     };
 
-                    let result =
-                        StateManager::<B>::run_env_step_loop_with_mappo::<KindIn, KindOut, Pi>(
-                            actor_id,
-                            shutdown_rx,
-                            Arc::clone(&runtime),
-                            env_map,
-                            loop_iters,
-                            max_traj_length,
-                            trainer_spec,
-                        )
-                        .map_err(CoordinatorError::from);
-
-                    result
+                    StateManager::<B>::run_env_step_loop_with_mappo::<KindIn, KindOut, Pi>(
+                        actor_id,
+                        shutdown_rx,
+                        Arc::clone(&runtime),
+                        env_map,
+                        loop_iters,
+                        max_traj_length,
+                        trainer_spec,
+                    )
+                    .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
@@ -2328,12 +2352,7 @@ mod unit_tests {
         );
 
         let actions = coordinator
-            .request_action::<4, 1, Float, Float>(
-                vec![actor_id],
-                tensor,
-                None,
-                0.75,
-            )
+            .request_action::<4, 1, Float, Float>(vec![actor_id], tensor, None, 0.75)
             .await
             .unwrap();
         responder.await.unwrap();

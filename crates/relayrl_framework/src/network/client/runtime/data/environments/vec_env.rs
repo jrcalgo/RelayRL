@@ -76,6 +76,7 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     }
 
     /// Returns `(new_obs_bytes, new_mask_bytes, rewards, dones, truncateds)`.
+    #[allow(clippy::type_complexity)]
     fn step_bytes(
         &mut self,
         _actions: &[u8],

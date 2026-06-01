@@ -1,47 +1,20 @@
-use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::agent::{ClientError, RelayRLAgent};
-use crate::network::client::runtime::actor::ActorShape;
-use crate::network::client::runtime::coordination::coordinator::{
-    ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
-};
-use crate::network::client::runtime::coordination::state_manager::ActorUuid;
-use crate::prelude::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::NetworkParams;
 
-use active_uuid_registry::UuidPoolError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use active_uuid_registry::interface::get_context_entries;
-use active_uuid_registry::interface::list_ids;
-use relayrl_algorithms::prelude::nn::NeuralNetwork;
 use relayrl_algorithms::prelude::ppo::algorithm::{IPPOParams, MAPPOParams, PPOParams};
-use relayrl_algorithms::prelude::ppo::trainer::PPOTrainerSpec;
-use relayrl_env_trait::traits::Environment;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
-use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::tensor::{
-    AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-    IntBurnTensor, SupportedTensorBackend,
-};
-use relayrl_types::data::trajectory::RelayRLTrajectory;
+use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::model::ModelModule;
-use relayrl_types::model::utils::validate_module;
 
-use active_uuid_registry::registry_uuid::Uuid;
-
-use burn_tensor::{BasicOps, Bool, Float, Int, Numeric, Tensor, TensorKind, backend::Backend};
-use dashmap::{DashMap, DashSet};
+use burn_tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "metrics", feature = "logging"))]
-use std::collections::HashMap;
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
-use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DefaultHyperparameterArgs {
@@ -412,19 +385,6 @@ pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
 impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for AgentStartParameters<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RLAgentStartParameters")
-    }
-}
-
-impl<B: Backend + BackendMatcher<Backend = B>> AgentStartParameters<B> {
-    pub(crate) fn infer_dtypes(&self) -> (Option<DType>, Option<DType>) {
-        if let Some(model_module) = &self.default_model {
-            return (
-                Some(model_module.metadata.input_dtype.clone()),
-                Some(model_module.metadata.output_dtype.clone()),
-            );
-        }
-
-        (None, None)
     }
 }
 

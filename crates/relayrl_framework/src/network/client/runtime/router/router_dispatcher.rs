@@ -436,10 +436,7 @@ mod unit_tests {
         })
     }
 
-    fn make_state_manager() -> (
-        StateManager<TestBackend>,
-        mpsc::Receiver<RoutedMessage>,
-    ) {
+    fn make_state_manager() -> (StateManager<TestBackend>, mpsc::Receiver<RoutedMessage>) {
         StateManager::<TestBackend>::new(
             Arc::from("test-dispatcher"),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

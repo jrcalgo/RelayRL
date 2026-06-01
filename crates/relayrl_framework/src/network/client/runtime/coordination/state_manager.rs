@@ -3,7 +3,9 @@
 //! This module tracks actor task handles, inboxes, router assignments, and local model handles for
 //! the client runtime.
 
-use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode, AlgorithmInitArgs};
+use crate::network::client::agent::{
+    ActorInferenceMode, AlgorithmInitArgs, ClientModes, ModelMode,
+};
 use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{
@@ -313,6 +315,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_actor<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         actor_id: ActorUuid,
@@ -955,7 +958,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
     where
         KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
         KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         TrainingInterface::<B>::train_ppo(

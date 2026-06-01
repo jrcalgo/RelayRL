@@ -219,6 +219,7 @@ impl EnvironmentInterface {
         self.env.as_ref().and_then(|env| env.flat_mask_bytes())
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn step_bytes(
         &mut self,
         actions: &[u8],

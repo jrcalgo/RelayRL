@@ -5,7 +5,7 @@
 
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::{ActorInferenceMode, ModelMode, AlgorithmInitArgs};
+use crate::network::client::agent::{ActorInferenceMode, AlgorithmInitArgs, ModelMode};
 use crate::network::client::agent::{
     ActorTrainingDataMode, ClientModes, uses_in_memory_data, uses_local_file_writing,
 };
@@ -342,10 +342,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
                             _ => ModelMode::Independent,
                         };
 
-                    ProcessInitRequest::TrainingAlgorithmInit(
-                        algorithm_model_mode,
-                        algorithm_args,
-                    )
+                    ProcessInitRequest::TrainingAlgorithmInit(algorithm_model_mode, algorithm_args)
                 }
                 ProcessInitFlag::InferenceModelInit(default_model) => {
                     let model_mode = match self.shared_client_modes.actor_inference_mode.clone() {

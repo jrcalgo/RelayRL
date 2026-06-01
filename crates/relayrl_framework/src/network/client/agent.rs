@@ -14,17 +14,17 @@
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-pub use crate::network::client::builder::{
-    ActorInferenceMode, ActorParams, ActorTrainingDataMode, AgentBuilder, AgentStartParameters,
-    AlgorithmInitArgs, ClientModes, DefaultHyperparameterArgs,
-    LocalTrajectoryFileParams, LocalTrajectoryFileType, ModelMode, ReplayBufferSize, SaveModelPath,
-};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-pub use crate::network::client::builder::{InferenceParams, TrainingParams};
 #[cfg(feature = "zmq-transport")]
 pub use crate::network::client::builder::ZmqTrainingAddressesArgs;
+pub use crate::network::client::builder::{
+    ActorInferenceMode, ActorParams, ActorTrainingDataMode, AgentBuilder, AgentStartParameters,
+    AlgorithmInitArgs, ClientModes, DefaultHyperparameterArgs, LocalTrajectoryFileParams,
+    LocalTrajectoryFileType, ModelMode, ReplayBufferSize, SaveModelPath,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub use crate::network::client::builder::{InferenceAddressesArgs, TrainingAddressesArgs};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+pub use crate::network::client::builder::{InferenceParams, TrainingParams};
 pub(crate) use crate::network::client::builder::{uses_in_memory_data, uses_local_file_writing};
 use crate::network::client::runtime::coordination::coordinator::{
     ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
@@ -56,6 +56,7 @@ use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
+use async_trait::async_trait;
 use burn_tensor::{BasicOps, Bool, Float, Int, Numeric, Tensor, TensorKind, backend::Backend};
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
@@ -66,7 +67,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
-use async_trait::async_trait;
 
 /// Errors returned by the client API.
 #[derive(Debug, Error)]
@@ -253,7 +253,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         observation: Tensor<B, D_IN, KindIn>,
         mask: Option<Tensor<B, D_OUT, KindOut>>,
         reward: f32,
-    ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, ClientError> where Tensor<B, D_IN, KindIn>: ToAnyBurnTensor<B, D_IN>, Tensor<B, D_OUT, KindOut>: ToAnyBurnTensor<B, D_OUT> {
+    ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, ClientError>
+    where
+        Tensor<B, D_IN, KindIn>: ToAnyBurnTensor<B, D_IN>,
+        Tensor<B, D_OUT, KindOut>: ToAnyBurnTensor<B, D_OUT>,
+    {
         match B::matches_backend(&self.supported_backend) {
             true => {
                 let result = self
@@ -349,8 +353,9 @@ pub trait RelayRLAgentActors<B: Backend + BackendMatcher<Backend = B>> {
         device: DeviceType,
         max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: Option<AlgorithmInitArgs>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
+            AlgorithmInitArgs,
+        >,
     ) -> Result<(), ClientError>;
     async fn new_actors<const D_IN: usize, const D_OUT: usize>(
         &mut self,
@@ -358,8 +363,9 @@ pub trait RelayRLAgentActors<B: Backend + BackendMatcher<Backend = B>> {
         device: DeviceType,
         max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: Option<AlgorithmInitArgs>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
+            AlgorithmInitArgs,
+        >,
     ) -> Result<(), ClientError>;
     async fn remove_actor(&mut self, id: Uuid) -> Result<(), ClientError>;
     async fn remove_actors(&mut self, ids: Vec<Uuid>) -> Result<(), ClientError>;
@@ -375,13 +381,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
         device: DeviceType,
         max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: Option<AlgorithmInitArgs>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
+            AlgorithmInitArgs,
+        >,
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let _ = self
             .coordinator
-            .new_actor::<D_IN, D_OUT>(device, max_traj_length, default_model, algorithm_args.unwrap_or_default(), true, true)
+            .new_actor::<D_IN, D_OUT>(
+                device,
+                max_traj_length,
+                default_model,
+                algorithm_args.unwrap_or_default(),
+                true,
+                true,
+            )
             .await?;
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
         let _ = self
@@ -398,16 +412,23 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
         device: DeviceType,
         max_traj_length: usize,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: Option<AlgorithmInitArgs>,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
+            AlgorithmInitArgs,
+        >,
     ) -> Result<(), ClientError> {
         if count == 0 {
             Err(ClientError::NoopActorCount(
                 "Noop actor count: `count` set to zero".to_string(),
             ))
         } else if count == 1 {
-            self.new_actor::<D_IN, D_OUT>(device, max_traj_length, default_model, #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args)
-                .await
+            self.new_actor::<D_IN, D_OUT>(
+                device,
+                max_traj_length,
+                default_model,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                algorithm_args,
+            )
+            .await
         } else {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             let mut actor_ids: Vec<Uuid> = Vec::new();
@@ -463,9 +484,30 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
 
                 let resolved_algorithm_args: AlgorithmInitArgs = {
                     let some_relevant_actor_id = actor_entries[0].2;
-                    let state_read = self.coordinator.runtime_params.as_ref().ok_or(ClientError::CoordinatorError(CoordinatorError::NoRuntimeInstanceError))?.shared_state.read().await;
-                    let actor_runtime_handle = state_read.actor_runtime_handles.get(&some_relevant_actor_id).ok_or(ClientError::CoordinatorError(CoordinatorError::NoRuntimeInstanceError))?;
-                    actor_runtime_handle.value().current_algorithm_args().map_err(|e| ClientError::CoordinatorError(CoordinatorError::StateManagerError(StateManagerError::from(e))))?
+                    let state_read = self
+                        .coordinator
+                        .runtime_params
+                        .as_ref()
+                        .ok_or(ClientError::CoordinatorError(
+                            CoordinatorError::NoRuntimeInstanceError,
+                        ))?
+                        .shared_state
+                        .read()
+                        .await;
+                    let actor_runtime_handle = state_read
+                        .actor_runtime_handles
+                        .get(&some_relevant_actor_id)
+                        .ok_or(ClientError::CoordinatorError(
+                            CoordinatorError::NoRuntimeInstanceError,
+                        ))?;
+                    actor_runtime_handle
+                        .value()
+                        .current_algorithm_args()
+                        .map_err(|e| {
+                            ClientError::CoordinatorError(CoordinatorError::StateManagerError(
+                                StateManagerError::from(e),
+                            ))
+                        })?
                 };
 
                 self.coordinator
@@ -592,7 +634,7 @@ pub trait RelayRLActorEnv<B: Backend + BackendMatcher<Backend = B>> {
     async fn run_env_with_ppo<
         KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
         KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -657,7 +699,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAge
     async fn run_env_with_ppo<
         KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
         KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -962,7 +1004,14 @@ mod unit_tests {
             ClientModes::default(),
         );
         let result = agent
-            .new_actors::<4, 1>(0, DeviceType::Cpu, 0usize, None, #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] None)
+            .new_actors::<4, 1>(
+                0,
+                DeviceType::Cpu,
+                0usize,
+                None,
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                None,
+            )
             .await;
         assert!(matches!(result, Err(ClientError::NoopActorCount(_))));
     }

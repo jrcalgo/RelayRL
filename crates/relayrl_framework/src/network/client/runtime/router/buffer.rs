@@ -214,7 +214,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_client_modes: Arc<ClientModes>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] training_codec: CodecConfig,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        training_codec: CodecConfig,
     ) -> Self {
         Self {
             associated_router_namespace,
@@ -290,18 +291,20 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let (traj_queue_tx, mut traj_queue_rx) =
             tokio::sync::mpsc::unbounded_channel::<SinkQueueEntry>();
 
-        let (mut rx_semaphore, initial_semaphore_capacity) =
-            match (&self.shared_router_buffer_size_per_actor, &self.shared_actor_count) {
-                (Some(rbs), Some(ac)) => {
-                    let cap = rbs
-                        .try_read()
-                        .map(|g| *g)
-                        .unwrap_or(1000)
-                        .saturating_mul(ac.load(Ordering::Acquire).max(1));
-                    (Some(Arc::new(Semaphore::new(cap.max(1)))), cap)
-                }
-                _ => (None, 0),
-            };
+        let (mut rx_semaphore, initial_semaphore_capacity) = match (
+            &self.shared_router_buffer_size_per_actor,
+            &self.shared_actor_count,
+        ) {
+            (Some(rbs), Some(ac)) => {
+                let cap = rbs
+                    .try_read()
+                    .map(|g| *g)
+                    .unwrap_or(1000)
+                    .saturating_mul(ac.load(Ordering::Acquire).max(1));
+                (Some(Arc::new(Semaphore::new(cap.max(1)))), cap)
+            }
+            _ => (None, 0),
+        };
         let recv_router_buffer_size_per_actor = self.shared_router_buffer_size_per_actor.clone();
         let recv_actor_count = self.shared_actor_count.clone();
 

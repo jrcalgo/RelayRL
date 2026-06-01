@@ -4,7 +4,7 @@
 //! this module remain experimental.
 
 use crate::network::HyperparameterArgs;
-use crate::network::client::agent::{ModelMode, AlgorithmInitArgs};
+use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
     SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
@@ -1104,7 +1104,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
                     "Failed to serialize hyperparams: {}",
                     e
                 ))
-            })?
+            })?,
         };
 
         let empty_frame: Vec<u8> = vec![];

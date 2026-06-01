@@ -17,8 +17,10 @@ pub(super) const NATS_CLIENT_CONTEXT: &str = "nats-client";
 
 #[cfg(feature = "client")]
 pub(super) const ROUTER_NAMESPACE_PREFIX: &str = "router";
-#[cfg(all(feature = "client", feature = "nats-transport"))]
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(all(
+    feature = "client",
+    any(feature = "nats-transport", feature = "zmq-transport")
+))]
 pub(super) const RECEIVER_CONTEXT: &str = "receiver";
 #[cfg(feature = "client")]
 pub(super) const BUFFER_CONTEXT: &str = "buffer";

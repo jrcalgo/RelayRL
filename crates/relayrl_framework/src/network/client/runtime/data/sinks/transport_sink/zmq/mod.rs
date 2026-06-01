@@ -2,7 +2,7 @@ pub(crate) mod interface;
 pub(super) mod ops;
 pub(super) mod policies;
 
-use crate::network::client::agent::{ModelMode, AlgorithmInitArgs};
+use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
 use crate::network::client::runtime::data::sinks::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::ops::ZmqPoolError;

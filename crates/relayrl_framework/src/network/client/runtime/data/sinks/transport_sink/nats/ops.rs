@@ -7,7 +7,7 @@ use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
 use crate::network::client::runtime::data::sinks::transport_sink::{
     ScalingOperation, TransportError,
 };
-use crate::network::client::runtime::router::{RoutedMessage, RoutingProtocol, ControlPayload};
+use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
 
 use super::inference_subjects::{

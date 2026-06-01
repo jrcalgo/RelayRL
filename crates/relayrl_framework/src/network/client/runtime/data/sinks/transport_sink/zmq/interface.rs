@@ -1,6 +1,6 @@
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, ModelMode, AlgorithmInitArgs,
+    ActorInferenceMode, ActorTrainingDataMode, AlgorithmInitArgs, ModelMode,
 };
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::sinks::transport_sink::combine_scaling_results;
