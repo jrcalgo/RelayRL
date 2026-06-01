@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta.5] - 2026-06-01
+
+### Added
+- **`AgentBuilder` extracted into `builder.rs`** - `AgentBuilder`, `AgentStartParameters`, `ClientModes`, `ActorInferenceMode`, `ActorTrainingDataMode`, `ModelMode`, `LocalTrajectoryFileParams`, `LocalTrajectoryFileType`, `AlgorithmInitArgs`, `DefaultHyperparameterArgs`, `InferenceParams`, `TrainingParams`, and all transport address args are moved from `agent.rs` into a new `builder.rs` module and re-exported from `agent.rs`.
+- **`run_env_with_ppo`, `run_env_with_ippo`, `run_env_with_mappo` on `RelayRLActorEnv`** - `RelayRLActorEnv` now exposes three PPO-specific `run_env_with_*` methods alongside `run_env_eval` so callers can drive integrated PPO/IPPO/MAPPO training directly from the environment loop without supplying a generic kernel.
+- **`TrainingInterface` and `runtime/data/training/mod.rs`** - New module introduces `TrainingInterface<B>`, `TrainingError`, `train_ppo`, and a `train_mappo` stub that own the per-actor async PPO training loop: observation collection, GAE finalization, background SGD through `PPOTrainer`, and refreshing the pi/vf `ModelModule` back into the actor runtime after each epoch.
+- **`ErasedActorRuntime` trait** - New object-safe `ErasedActorRuntime<B>` trait in `actor.rs` allows `StateManager` and coordinator to store actor runtimes as `Arc<dyn ErasedActorRuntime<B>>`, eliminating the `D_IN`/`D_OUT` const-generic parameters from manager structs and impl blocks. `ActorShape` and `ActorDTypes` helper structs accompany the trait.
+- **`ToAnyBurnTensor` trait** - Added to `coordinator.rs` with implementations for `Tensor<B, D, Float>`, `Tensor<B, D, Int>`, and `Tensor<B, D, Bool>`, enabling typed tensor inputs to `request_action` without requiring callers to pre-wrap in `AnyBurnTensor`.
+- **`router_buffer_size_per_actor` configuration field** - `ClientConfigParams` and the transport builder now expose `router_buffer_size_per_actor` (default `1000`); the config JSON template includes the field and the loader round-trips it.
+- **`flat_mask_bytes` on environment interfaces** - `EnvironmentInterface`, `ScalarVecEnv`, `BatchVecEnv`, and `SingleVecEnv` now expose `flat_mask_bytes()` returning `Option<Vec<u8>>`, propagating action masks from environments through the runtime. `ScalarVecEnv::new` gathers masks at construction time.
+- **`rand_distr` workspace dependency** - Added to `relayrl_framework` as a direct dependency.
+- **Transport features now on by default** - `nats-transport` and `zmq-transport` added to the crate's `default` feature set.
+
+### Changed
+- **`RelayRLAgent` and `RelayRLAgentActors` de-generified** - `RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>` and the `RelayRLAgentActors` trait are simplified to `RelayRLAgent<B>` / `RelayRLAgentActors<B>`; dimension and kind type parameters move to individual `new_actor<const D_IN, const D_OUT>()` and `new_actors<const D_IN, const D_OUT>()` call sites.
+- **`request_action` now accepts plain `Tensor` inputs** - `request_action<D_IN, D_OUT, KindIn, KindOut>` accepts `Tensor<B, D_IN, KindIn>` and `Option<Tensor<B, D_OUT, KindOut>>` directly via `ToAnyBurnTensor` bounds, instead of `Arc<AnyBurnTensor<B, D>>`.
+- **`RelayRLActorEnv` simplified** - `run_env()` with its wide generic kernel bounds (`StepKernelTrait`, `REINFORCEKernelTrait`, `DDPGKernelTrait`, …) is replaced by `run_env_eval()` for pure inference loops and the typed `run_env_with_ppo/ippo/mappo` methods for integrated training.
+- **`StateManager` de-generified** - `StateManager<B, D_IN, D_OUT>` collapses to `StateManager<B>`; dimension parameters move to individual `new_actor<D_IN, D_OUT>` and `restart_actor<D_IN, D_OUT>` call sites, consistent with the `ErasedActorRuntime` change.
+- **`ClientInterface` and `ClientEnvironments` de-generified** - Both coordinator traits drop their `D_IN`/`D_OUT` const-generic parameters; `new_actor` becomes `new_actor<const D_IN, const D_OUT>`.
+- **`AlgorithmCfg` replaced by `AlgorithmInitArgs`** - `AlgorithmCfg` (covering DDPG, TD3, REINFORCE, PPO, and custom) is replaced by `AlgorithmInitArgs { PPO, IPPO, MAPPO }`, reflecting the algorithm scope reduction in `relayrl_algorithms` 0.4.0; `configuration.rs` hyperparameter defaults are updated accordingly.
+- **Config JSON and `ClientConfigParams` updated** - `algorithm_name` field renamed to `algorithm`; DDPG/TD3/REINFORCE/custom hyperparameter blocks removed from the generated config JSON; PPO defaults adjusted (`traj_per_epoch: 1`, `clip_ratio: 0.1`, `train_pi_iters: 40`, `vf_lr: 3e-4`); `max_traj_length` removed from `ClientConfigParams`; `get_algorithm_name()` / `set_algorithm_name()` removed; `set_router_buffer_size_per_actor()` added to the builder.
+- **`step_bytes` return type extended** - `EnvironmentInterface::step_bytes`, `ScalarVecEnv::step_bytes`, and the `VectorEnvironment`/`ScalarEnvironment` trait methods now return `(obs_bytes, Option<mask_bytes>, rewards, dones, truncateds)`, adding truncation signals and optional mask bytes alongside the existing done flags.
+- **`env_dtype_to_dtype`, `decode_argmax`, `decode_continuous_bytes` consolidated** - These internal helpers are removed from `actor.rs` and moved to `state_manager.rs`.
+- **Crate description updated** - `relayrl_framework` description changed to "A heterogeneous RL runtime control platform for concurrent multi-actor execution."
+- **Legacy server files removed** - `server/legacy/training_grpc.rs`, `training_server_wrapper.rs`, and `training_zmq.rs` deleted.
+- **`relayrl_types` updated to `0.8.0`, `relayrl_algorithms` updated to `0.4.0`** - Workspace dependency versions bumped in root `Cargo.toml`.
+- **`relayrl_env_trait` updated** - Self-documenting type aliases (`Observation`, `Mask`, `Reward`, `Done`, `Truncated`) added to the trait surface; `build_mask()` and `flat_mask_bytes()` added to `Environment`; `DynScalarEnvironment`/`DynVectorEnv` formatting cleaned up; `ScalarEnvironment`/`VectorEnvironment` step signatures updated to match the extended return type.
+
+### Breaking
+- **`RelayRLAgent` generic parameters changed** - `RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>` is now `RelayRLAgent<B>`; dimension and kind generics move to individual actor methods.
+- **`RelayRLActorEnv::run_env()` removed** - The broad-kernel `run_env()` is gone; use `run_env_eval()` for inference-only loops or the new `run_env_with_ppo/ippo/mappo` for integrated training.
+- **`AlgorithmCfg` removed** - The old multi-algorithm enum is replaced by `AlgorithmInitArgs { PPO, IPPO, MAPPO }`.
+- **`ClientConfigParams::algorithm_name` renamed** - The config field is now `algorithm` in both the Rust struct and the client config JSON; `get_algorithm_name()` is removed.
+- **`ClientConfigParams::max_traj_length` removed** - The field no longer exists at the config level; max trajectory length is provided per actor at `new_actor` call time.
+- **`ReplayBufferSize` and `SaveModelPath` type aliases removed** - Previously in `agent.rs`; callers should use `usize` and `PathBuf` directly.
+- **`step_bytes` return type** - Environment `step_bytes` now returns a 5-tuple `(obs, Option<mask>, rewards, dones, truncateds)` instead of a 3-tuple; custom environment implementations must be updated.
+
 ## [0.5.0-beta.4] - 2026-05-06
 
 ### Added
