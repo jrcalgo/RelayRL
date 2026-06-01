@@ -443,6 +443,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         any(feature = "tch-model", feature = "onnx-model"),
         any(feature = "ndarray-backend", feature = "tch-backend")
     ))]
+    #[allow(clippy::type_complexity)]
     pub fn step_batch<const D_IN: usize, const D_OUT: usize>(
         &self,
         observations: &[Arc<AnyBurnTensor<B, D_IN>>],
@@ -1151,7 +1152,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             let (_, owned_slice) = value.try_extract_tensor::<OUT>().map_err(|e| {
                 ModelError::BackendError(format!("Failed to extract tensor from output: {:?}", e))
             })?;
-            Ok(bytemuck::cast_slice(&owned_slice.to_vec()).to_vec())
+            Ok(bytemuck::cast_slice(owned_slice).to_vec())
         }
 
         fn match_obs_to_act<IN>(

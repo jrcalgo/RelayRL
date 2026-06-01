@@ -163,7 +163,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
             )));
         }
 
-        Ok(steps
+        steps
             .into_iter()
             .zip(observations.iter())
             .zip(rewards.iter().copied())
@@ -194,7 +194,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
                     Some(actor_id),
                 ))
             })
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()
     }
 }
 

@@ -1,4 +1,3 @@
-use half::f16;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -7,7 +6,7 @@ use burn_ndarray::NdArray;
 #[cfg(feature = "tch-backend")]
 use burn_tch::LibTorch as Tch;
 #[cfg(feature = "tch-backend")]
-use half::bf16;
+use half::{bf16, f16};
 
 use burn_tensor::{
     BasicOps, Bool, Float, Int, Shape, Tensor, TensorData as BurnTensorData, TensorKind,
@@ -554,7 +553,7 @@ impl TensorData {
                 match dtype {
                     #[cfg(feature = "quantization")]
                     NdArrayDType::F16 => {
-                        let values: &[f16] = bytemuck::cast_slice(&self.data);
+                        let values: &[half::f16] = bytemuck::cast_slice(&self.data);
                         // Convert f16 to f32 for processing
                         let f32_values: Vec<f32> = values.iter().map(|&v| v.to_f32()).collect();
                         let data = BurnTensorData::new(f32_values, shape);

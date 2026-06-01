@@ -184,6 +184,8 @@ mod unit_tests {
             timestamp: 0,
             episode: None,
             training_step: None,
+            is_truncated: false,
+            policy_version: 0,
         };
 
         assert_eq!(get_backend_str(&trajectory), "NdArray");
@@ -201,6 +203,8 @@ mod unit_tests {
             timestamp: 0,
             episode: None,
             training_step: None,
+            is_truncated: false,
+            policy_version: 0,
         };
 
         assert_eq!(get_backend_str(&trajectory), "None");

@@ -249,7 +249,7 @@ impl RelayRLAction {
 }
 
 /// Codec configuration for encoding/decoding actions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CodecConfig {
     #[cfg(feature = "compression")]
     pub compression: Option<CompressionScheme>,
