@@ -1,0 +1,31 @@
+[package]
+name = "relayrl"
+version = "0.5.0"
+authors = ["jrcalgo <jacksonr121@outlook.com>"]
+edition = "2024"
+description = "A Rust reinforcement learning runtime for concurrent multi-actor inference and trajectory collection, with per-actor hot-swappable models."
+repository = "https://github.com/jrcalgo/relayrl"
+documentation = "https://docs.rs/crate/relayrl"
+readme = "README.md"
+keywords = ["reinforcement", "multi-agent", "multi-actor", "machine-learning", "concurrent"]
+categories = ["concurrency", "asynchronous", "science", "simulation", "network-programming"]
+license = "Apache-2.0"
+
+[dependencies]
+relayrl_framework = { workspace = true }
+
+[features]
+default = ["client", "logging", "metrics"]
+client = ["relayrl_framework/client"]
+metrics = ["relayrl_framework/metrics"]
+logging = ["relayrl_framework/logging"]
+tch-backend = ["relayrl_framework/tch-backend"]
+zmq-transport = ["relayrl_framework/zmq-transport"]
+nats-transport = ["relayrl_framework/nats-transport"]
+training-server = ["relayrl_framework/training-server"]
+inference-server = ["relayrl_framework/inference-server"]
+profile = ["relayrl_framework/profile"]
+
+[dev-dependencies]
+burn-ndarray = { workspace = true }
+burn-tch = { workspace = true }
