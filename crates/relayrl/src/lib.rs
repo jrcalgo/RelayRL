@@ -1,5 +1,5 @@
 //! A Rust-native, deep reinforcement learning **runtime** for concurrent actor execution and data collection, all in a single process.
-//! 
+//!
 //! RelayRL's agent provides a full actor lifecycle, live router scaling, per-actor model hot-swap, trajectory data collection, and both **step-driven** and **environment-driven** control patterns.
 //!
 //! Unlike other RL frameworks that scale replicas of one policy across multiple processes, RelayRL focuses on **heterogeneous** policy execution.
@@ -32,7 +32,7 @@
 //!
 //! The builder defaults to `ActorInferenceMode::Client(ModelMode::Independent)` inference, `ActorTrainingDataMode::OfflineWithMemory`
 //! trajectory recording, a router scale of `1`, no default model, a buffer size of `1024` per actor, and no config path.
-//! 
+//!
 //! ```rust
 //! use relayrl::network::client::{AgentBuilder, ActorInferenceMode, ActorTrainingDataMode, ModelMode};
 //! use relayrl::types::model::ModelModule;
@@ -54,9 +54,9 @@
 //! # }
 //! ```
 //!
-//! There are a series of client modes and parameters that can be set on the builder when `zmq-transport` or `nats-transport` feature flags are enabled; 
+//! There are a series of client modes and parameters that can be set on the builder when `zmq-transport` or `nats-transport` feature flags are enabled;
 //! see [Experimental Network Transport](#experimental-network-transport).
-//! 
+//!
 //! #### Inference Configuration
 //!
 //! Inference mode is set via [`ActorInferenceMode`](crate::network::ActorInferenceMode), where a
@@ -83,15 +83,15 @@
 //! - `OfflineWithFilesAndMemory`: write to local files and keep in memory simultaneously.
 //! - `Disabled`: trajectory recording is disabled entirely; useful when
 //!   data collection is managed externally or the actors are used purely for inference.
-//! 
+//!
 //! #### JSON Configuration
 //!
 //! Every agent is backed by a JSON configuration file that is used to load the runtime's operational settings while it is live. The path defaults to
 //! `client_config.json` in the current working directory and can be overridden with
 //! [`AgentBuilder::config_path`](crate::network::AgentBuilder). If the file does not exist it is
 //! created on first use, pre-populated with defaults; if it exists it is read and parsed
-//! into a [`ClientConfigLoader`](crate::config::ClientConfigLoader). 
-//! 
+//! into a [`ClientConfigLoader`](crate::config::ClientConfigLoader).
+//!
 //! A malformed file does not abort
 //! startup, the loader logs the error and falls back to built-in defaults.
 //!
@@ -114,7 +114,7 @@
 //!     }
 //! }
 //! ```
-//! 
+//!
 //! ##### Defaults vs. arguments vs. config changes
 //!
 //! A setting can be supplied from three places, resolved in a fixed order of precedence at startup
@@ -169,7 +169,7 @@
 //! trajectory buffer of `max_traj_length` steps, and, if `model` is `Some`, pre-loads that
 //! model into its handle; otherwise the actor waits for a model to be provided via
 //! `update_model` before it can perform inference.
-//! 
+//!
 //! ```rust
 //! # async fn run(mut nd_agent: RelayRLAgent<burn_ndarray::NdArray>, tch_agent: RelayRLAgent<burn_tch::Tch>, params: AgentStartParameters<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
 //! use types::model::ModelModule;
@@ -220,7 +220,7 @@
 //!   `OfflineWithFilesAndMemory` modes for `ActorTrainingDataMode`).
 //! - `get_config()` — fetches the active `ClientConfigLoader` being watched by the lifecycle manager.
 //! - `set_config_path(path)` — hot-swap the configuration file path without restarting the runtime.
-//! 
+//!
 //! #### Actor Management
 //!
 //! Every actor created by `new_actor` / `new_actors` runs as its own Tokio task and is tracked
@@ -263,7 +263,7 @@
 //! # Ok(())
 //! # }
 //! ```
-//! 
+//!
 //! #### Router Scaling
 //!
 //! Between the coordinator and the actors sits a pool of data routing workers that dispatch
@@ -285,30 +285,30 @@
 //! # }
 //! ```
 //!
-//! Note that this will consume the runtime for the duration of the operation, thus it's **not** recommended to perform a scale operation 
+//! Note that this will consume the runtime for the duration of the operation, thus it's **not** recommended to perform a scale operation
 //! while actors are actively running unless your application can tolerate a pause in execution.
-//! 
+//!
 //! Performing a `scale_throughput` operation will distribute all actors across all available routers upon completion. Assuming there is an equal number of actors and routers,
 //! the runtime's `ScaleManager` will designate a 1:1 ratio of routers-to-actors. Any excess routers will be left idle. If there are more actors than routers, actors will be
 //! distributed as evenly as possible across the available routers with more actors per router.
 //!
-//! **Static** workloads should initialize with a router scale equal to the expected number of actors. Under **dynamic** workloads where actors are **consistently added and removed**, initializing 
+//! **Static** workloads should initialize with a router scale equal to the expected number of actors. Under **dynamic** workloads where actors are **consistently added and removed**, initializing
 //! with a higher router scale than the expected number of actors is recommended.
 //! This minimizes contention for router resources and avoids unnecessary scaling operations needed to maintain a stable router throughput across actors.
-//! 
+//!
 //! #### Config Lifecycle
 //!
 //! After `start`, a background `LifecycleManager` task watches the config file and automatically reloads it whenever its
 //! modification time changes. On the local/default path a reload refreshes the
 //! trajectory-file output, the resolved local model path, and the per-actor router buffer size (plus
 //! the metrics meter/endpoint under the `metrics` feature); transport addresses and default
-//! hyperparameters are additionally refreshed when a transport feature is enabled. 
-//! 
+//! hyperparameters are additionally refreshed when a transport feature is enabled.
+//!
 //! If `config_update_polling_seconds` itself changes, the polling interval is rebuilt to match.
 //!
 //! The watched path can be swapped at runtime with [`RelayRLAgent::set_config_path`](crate::network::RelayRLAgent),
 //! and the active loader is retrievable with [`RelayRLAgent::get_config`](crate::network::RelayRLAgent).
-//! 
+//!
 //! # Heterogeneous Actor Execution
 //!
 //! Actors are independent units of execution. Each runs in its own task, and in
@@ -322,7 +322,7 @@
 //! policy into specific actors while the rest keep serving the previous one, with no restart and
 //! no downtime. Passing `None` updates all live actors. In `ModelMode::Shared`, the runtime
 //! refreshes one representative actor per device so each shared handle is updated exactly once.
-//! 
+//!
 //! Note that `update_model` is rejected (returns `ModelUpdateNotSupported`) when the agent is
 //! configured with any `Online` training data mode, since model updates are managed server-side
 //! in that case.
@@ -384,7 +384,7 @@
 //! #### Environment-driven Integration
 //!
 //! In the environment-driven pattern, the [`RelayRLAgent`](crate::network::RelayRLAgent) owns the loop. You implement either the
-//! [`ScalarEnvironment`](crate::env_trait::ScalarEnvironment) or [`VectorEnvironment`](crate::env_trait::VectorEnvironment) trait (both extend the base [`Environment`](crate::env_trait::Environment) trait
+//! `ScalarEnvironment` or `VectorEnvironment` trait (both extend the base `Environment` trait
 //! from [`relayrl_env_trait`](https://docs.rs/relayrl_env_trait/1.3.1/relayrl_env_trait/)) for your environment, bind it to an actor with
 //! `RelayRLActorEnv::set_env(actor_id, Box<dyn Environment>, count)`, and let the runtime
 //! drive the rollout. The `count` argument controls how many logical environment copies are
@@ -399,7 +399,7 @@
 //! - `run_env_eval(actor_id, loop_iters)` — runs `loop_iters` evaluation steps on the bound
 //!   environment; no training update is applied.
 //! - `run_env_with_ppo(actor_id, loop_iters, max_traj_length, trainer_spec)` — runs a
-//!   single-agent PPO training rollout. Requires a [`PPOTrainerSpec<B, KindIn, KindOut, Pi>`](crate::algorithms::PPOTrainerSpec)
+//!   single-agent PPO training rollout. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
 //!   where **Pi** is a [`NeuralNetwork<B, KindIn, KindOut>`](crate::algorithms::NeuralNetwork). See [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.4.1/relayrl_algorithms/) for details on
 //!   constructing the trainer spec.
 //! - `run_env_with_ippo` and `run_env_with_mappo` — independent and multi-agent PPO training
