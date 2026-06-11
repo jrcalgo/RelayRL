@@ -1,24 +1,14 @@
-/// LibTorch (TorchScript) model builder for fully-connected MLPs.
+/// LibTorch (TorchScript) model builder for fully-connected MLPs and ConvNets.
 ///
-/// This module creates TorchScript models from layer specifications that match
-/// the format used by `WeightProvider::get_pi_layer_specs`. It serves as the
-/// LibTorch counterpart to `onnx_builder.rs`.
+/// Two public entry points:
+/// - `build_pt_mlp_temp`  — dense MLP from flat `LayerSpecs`.
+/// - `build_pt_conv_temp` — architecture-aware conv+dense network from `ArchLayer` slice.
 ///
-/// # Layout
-///
-/// The layer specifications follow Burn's `Linear` convention: weights are stored
-/// in row-major `[in_features, out_features]` order. This builder constructs a
-/// sequential model with Linear layers and ReLU activations between layers (but
-/// not after the final layer).
-///
-/// # Temporary File Approach
-///
-/// Since `tch::CModule::load` only supports loading from filesystem paths (no
-/// in-memory buffer API like ONNX Runtime's `commit_from_memory`), this builder:
-/// 1. Constructs the model in memory using `tch::nn`
-/// 2. Saves it to a temporary file via `CModule::save`
-/// 3. Reads the file bytes back for storage
-/// 4. Returns both the bytes and the temp path (caller must load from path)
+/// Both follow the same temporary-file approach:
+/// 1. Construct the model in memory using `tch::nn`.
+/// 2. Freeze parameters and trace via `CModule::create_by_tracing`.
+/// 3. Save to a temp file with `CModule::save`.
+/// 4. Read the bytes back and return `(bytes, temp_path)`.
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -46,7 +36,7 @@ pub fn build_pt_mlp_temp(
     }
 
     // Create a variable store for building the model
-    let vs = nn::VarStore::new(Device::Cpu);
+    let mut vs = nn::VarStore::new(Device::Cpu);
     let root = vs.root();
 
     // Build sequential layers
@@ -100,6 +90,12 @@ pub fn build_pt_mlp_temp(
 
     let temp_path = temp_file.path().to_path_buf();
 
+    // Freeze all VarStore parameters before tracing: the JIT tracer bakes captured
+    // tensors as constants, and PyTorch refuses tensors with requires_grad=true in
+    // that role. no_grad() only disables gradient *computation*; freeze() clears the
+    // requires_grad flag on every parameter so the tracer accepts them.
+    vs.freeze();
+
     // Trace the model to create a TorchScript module
     // We need an example input to trace - use the first layer's input dimension
     let in_dim = layer_specs[0].0 as i64;
@@ -109,9 +105,10 @@ pub fn build_pt_mlp_temp(
     // The closure must return Vec<Tensor> and be passed as &mut
     let mut trace_closure = |inputs: &[Tensor]| -> Vec<Tensor> { vec![seq.forward(&inputs[0])] };
 
-    let module =
+    let module = tch::no_grad(|| {
         tch::CModule::create_by_tracing("mlp", "forward", &[example_input], &mut trace_closure)
-            .map_err(|e| format!("Failed to create traced module: {}", e))?;
+    })
+    .map_err(|e| format!("Failed to create traced module: {}", e))?;
 
     // Save the traced module
     module
@@ -135,6 +132,140 @@ pub fn build_pt_mlp_temp(
 #[cfg(not(feature = "tch-model"))]
 pub fn build_pt_mlp_temp(
     _layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)],
+) -> Result<(Vec<u8>, PathBuf), String> {
+    Err("tch-model feature not enabled".to_string())
+}
+
+// ── Conv model builder ────────────────────────────────────────────────────────
+
+/// Build a TorchScript `.pt` model from an `ArchLayer` sequence (conv + dense).
+///
+/// `arch` — the layer sequence returned by `ConvNetPolicy::get_arch_spec()`.
+/// `obs_dim` — flat input size (e.g. 27 648 for VizDoom); used for the example
+///             input during JIT tracing.
+///
+/// Returns `(bytes, temp_path)`.  The caller is responsible for keeping the
+/// temp file alive if they need to reload via `CModule::load(&temp_path)`.
+#[cfg(feature = "tch-model")]
+pub fn build_pt_conv_temp(
+    arch: &[crate::algorithms::ArchLayer],
+    obs_dim: usize,
+) -> Result<(Vec<u8>, PathBuf), String> {
+    use crate::algorithms::ArchLayer;
+    use tch::nn::Module;
+    use tch::{Device, Kind, Tensor, nn};
+
+    if arch.is_empty() {
+        return Err("Empty arch spec".to_string());
+    }
+
+    let mut vs = nn::VarStore::new(Device::Cpu);
+    let root = vs.root();
+    let mut seq = nn::seq();
+
+    let mut conv_idx = 0usize;
+    let mut fc_idx = 0usize;
+
+    for layer in arch {
+        match layer {
+            ArchLayer::Reshape { shape } => {
+                let shape: Vec<i64> = shape.clone();
+                seq = seq.add_fn(move |x| x.reshape(shape.as_slice()));
+            }
+            ArchLayer::Conv2d {
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                weights,
+                biases,
+            } => {
+                let in_ch = *in_channels as i64;
+                let out_ch = *out_channels as i64;
+                let k = *kernel_size as i64;
+                let s = *stride as i64;
+                let path = root.sub(&format!("conv_{conv_idx}"));
+                let mut conv = nn::conv2d(
+                    &path,
+                    in_ch,
+                    out_ch,
+                    k,
+                    nn::ConvConfig { stride: s, padding: 0, ..Default::default() },
+                );
+                // Load weights (OIHW: same layout as Burn and ONNX, no transpose needed).
+                let w_t = Tensor::from_slice(weights).reshape([out_ch, in_ch, k, k]);
+                let b_t = Tensor::from_slice(biases.as_slice());
+                tch::no_grad(|| {
+                    conv.ws.copy_(&w_t);
+                    if let Some(ref mut bs) = conv.bs {
+                        bs.copy_(&b_t);
+                    }
+                });
+                seq = seq.add(conv);
+                conv_idx += 1;
+            }
+            ArchLayer::Elu => {
+                seq = seq.add_fn(|x| x.elu());
+            }
+            ArchLayer::Flatten => {
+                seq = seq.add_fn(|x| x.flatten(1, -1));
+            }
+            ArchLayer::Linear { in_dim, out_dim, weights, biases } => {
+                let in_d = *in_dim as i64;
+                let out_d = *out_dim as i64;
+                let path = root.sub(&format!("fc_{fc_idx}"));
+                let mut linear =
+                    nn::linear(&path, in_d, out_d, nn::LinearConfig { bias: true, ..Default::default() });
+                // Burn stores [in, out]; PyTorch/tch expects [out, in] for nn.Linear.
+                let w_t = Tensor::from_slice(weights.as_slice())
+                    .reshape([in_d, out_d])
+                    .transpose(0, 1);
+                let b_t = Tensor::from_slice(biases.as_slice());
+                tch::no_grad(|| {
+                    linear.ws.copy_(&w_t);
+                    if let Some(ref mut bs) = linear.bs {
+                        bs.copy_(&b_t);
+                    }
+                });
+                seq = seq.add(linear);
+                fc_idx += 1;
+            }
+        }
+    }
+
+    let temp_file = tempfile::Builder::new()
+        .prefix("relayrl_pt_conv_")
+        .suffix(".pt")
+        .tempfile()
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    let temp_path = temp_file.path().to_path_buf();
+
+    vs.freeze();
+    let example_input = Tensor::zeros([1, obs_dim as i64], (Kind::Float, Device::Cpu));
+    let mut trace_fn = |inputs: &[Tensor]| -> Vec<Tensor> { vec![seq.forward(&inputs[0])] };
+    let module = tch::no_grad(|| {
+        tch::CModule::create_by_tracing("convnet", "forward", &[example_input], &mut trace_fn)
+    })
+    .map_err(|e| format!("Failed to create traced module: {e}"))?;
+
+    module
+        .save(&temp_path)
+        .map_err(|e| format!("Failed to save model: {e}"))?;
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(&temp_path)
+        .map_err(|e| format!("Failed to open saved model: {e}"))?
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read model bytes: {e}"))?;
+
+    std::mem::forget(temp_file);
+    Ok((bytes, temp_path))
+}
+
+#[cfg(not(feature = "tch-model"))]
+pub fn build_pt_conv_temp(
+    _arch: &[crate::algorithms::ArchLayer],
+    _obs_dim: usize,
 ) -> Result<(Vec<u8>, PathBuf), String> {
     Err("tch-model feature not enabled".to_string())
 }

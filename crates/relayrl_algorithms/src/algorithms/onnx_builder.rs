@@ -1,22 +1,5 @@
-/// Hand-rolled ONNX protobuf encoder for fully-connected MLPs.
-///
-/// No external protobuf library is required. The output is a valid ONNX `ModelProto`
-/// (opset 17) that can be loaded directly by ORT's `commit_from_memory()`.
-///
-/// # Layout
-///
-/// `build_onnx_mlp_bytes` is the public entry point. It accepts a slice of layer
-/// specs (produced by `WeightProvider::get_pi_layer_specs`) and returns the raw bytes
-/// of the serialized model.
-///
-/// ## Burn weight layout
-///
-/// Burn's `Linear` stores weights in row-major `[in_features, out_features]` order.
-/// ONNX `Gemm` computes `Y = alpha * A * B^transB + beta * C`.  With `transB=0` and
-/// B shaped `[in, out]`, the result is `[batch, out]` — exactly the right shape when A
-/// is `[batch, in]`.  The old code had `transB=1` (PyTorch convention) which is wrong
-/// for Burn.
-///
+use crate::algorithms::ArchLayer;
+
 /// Build a serialized ONNX `ModelProto` for a fully-connected MLP.
 ///
 /// `layer_specs`: `(in_dim, out_dim, flat_weights, flat_biases)` per layer, ordered
@@ -281,6 +264,221 @@ fn build_model_proto(graph: Vec<u8>) -> Vec<u8> {
     msg.extend(field_msg(8, &build_opset_import("", 17))); // opset_import (field 8)
     msg.extend(field_msg(7, &graph)); // graph (field 7)
     msg
+}
+
+// ── Extended helpers for conv graphs ─────────────────────────────────────────
+
+/// Build a `TensorProto` (initializer) for a 1-D int64 tensor.
+///
+/// Used for the `shape` input of ONNX `Reshape` nodes.
+fn build_tensor_proto_i64(name: &str, dims: &[i64], data: &[i64]) -> Vec<u8> {
+    let mut msg = Vec::new();
+    for &d in dims {
+        msg.extend(field_varint(1, d as u64)); // dims (field 1, repeated int64)
+    }
+    msg.extend(field_varint(2, 7)); // data_type = INT64 = 7 (field 2)
+    msg.extend(field_str(8, name)); // name (field 8)
+    let raw: Vec<u8> = data.iter().flat_map(|&v| v.to_le_bytes()).collect();
+    msg.extend(field_bytes(9, &raw)); // raw_data (field 9)
+    msg
+}
+
+/// Build an `AttributeProto` of type INTS (repeated int64, type=7).
+fn build_attribute_ints(name: &str, vals: &[i64]) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend(field_str(1, name)); // name (field 1)
+    msg.extend(field_varint(20, 7)); // type = INTS = 7 (field 20)
+    for &v in vals {
+        msg.extend(field_varint(7, v as u64)); // ints (field 7, repeated varint)
+    }
+    msg
+}
+
+/// Build a `NodeProto` for a `Conv` operation (square kernel, equal H/W stride,
+/// no padding).
+///
+/// Weight shape expected: `[out_ch, in_ch, kH, kW]` (OIHW, same as Burn and ONNX).
+fn build_conv_node(
+    name: &str,
+    x: &str,
+    weight: &str,
+    bias: &str,
+    output: &str,
+    kernel_size: usize,
+    stride: usize,
+) -> Vec<u8> {
+    let k = kernel_size as i64;
+    let s = stride as i64;
+    let mut msg = Vec::new();
+    msg.extend(field_str(1, x)); // input[0] = X
+    msg.extend(field_str(1, weight)); // input[1] = W
+    msg.extend(field_str(1, bias)); // input[2] = B
+    msg.extend(field_str(2, output)); // output[0]
+    msg.extend(field_str(3, name)); // name
+    msg.extend(field_str(4, "Conv")); // op_type
+    msg.extend(field_msg(6, &build_attribute_ints("kernel_shape", &[k, k])));
+    msg.extend(field_msg(6, &build_attribute_ints("strides", &[s, s])));
+    msg
+}
+
+/// Build a `NodeProto` for an `Elu` operation (alpha=1.0, matching SF default).
+fn build_elu_node(name: &str, input: &str, output: &str) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend(field_str(1, input));
+    msg.extend(field_str(2, output));
+    msg.extend(field_str(3, name));
+    msg.extend(field_str(4, "Elu"));
+    msg.extend(field_msg(6, &build_attribute_float("alpha", 1.0_f32)));
+    msg
+}
+
+/// Build a `NodeProto` for a `Flatten` operation (axis=1 — flattens all dims
+/// after the batch dimension).
+fn build_flatten_node(name: &str, input: &str, output: &str) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend(field_str(1, input));
+    msg.extend(field_str(2, output));
+    msg.extend(field_str(3, name));
+    msg.extend(field_str(4, "Flatten"));
+    msg.extend(field_msg(6, &build_attribute_int("axis", 1)));
+    msg
+}
+
+/// Build a `NodeProto` for a `Reshape` operation.
+///
+/// `data` — the name of the tensor to reshape.
+/// `shape` — the name of the int64 initializer containing the target shape.
+fn build_reshape_node(name: &str, data: &str, shape: &str, output: &str) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend(field_str(1, data)); // input[0] = data
+    msg.extend(field_str(1, shape)); // input[1] = shape
+    msg.extend(field_str(2, output)); // output[0]
+    msg.extend(field_str(3, name)); // name
+    msg.extend(field_str(4, "Reshape")); // op_type
+    msg
+}
+
+// ── Conv model builder ────────────────────────────────────────────────────────
+
+/// Build a serialized ONNX `ModelProto` for a `ConvNetPolicy`-style network.
+///
+/// `arch` — sequence of [`ArchLayer`] describing the full forward pass, as
+/// returned by `ConvNetPolicy::get_arch_spec()`.  The first element **must** be
+/// `ArchLayer::Reshape`.
+///
+/// `obs_dim` — flat input size (e.g. 27 648 for VizDoom).
+/// `act_dim` — output size (e.g. 9 for doom_benchmark).
+///
+/// The input to the ONNX graph is `"input"` with shape `[batch_size, obs_dim]`.
+/// The output is whatever the last layer produces, with shape `[batch_size, act_dim]`.
+pub fn build_onnx_conv_bytes(arch: &[ArchLayer], obs_dim: usize, act_dim: usize) -> Vec<u8> {
+    if arch.is_empty() {
+        return Vec::new();
+    }
+
+    let mut initializers: Vec<Vec<u8>> = Vec::new();
+    let mut nodes: Vec<Vec<u8>> = Vec::new();
+
+    let mut current = "input".to_string();
+    let mut idx_reshape = 0usize;
+    let mut idx_conv = 0usize;
+    let mut idx_elu = 0usize;
+    let mut idx_flat = 0usize;
+    let mut idx_fc = 0usize;
+
+    for layer in arch {
+        match layer {
+            ArchLayer::Reshape { shape } => {
+                let shape_name = format!("reshape_shape_{idx_reshape}");
+                initializers.push(build_tensor_proto_i64(
+                    &shape_name,
+                    &[shape.len() as i64],
+                    shape,
+                ));
+                let out = format!("reshape_{idx_reshape}");
+                nodes.push(build_reshape_node(
+                    &format!("Reshape_{idx_reshape}"),
+                    &current,
+                    &shape_name,
+                    &out,
+                ));
+                current = out;
+                idx_reshape += 1;
+            }
+            ArchLayer::Conv2d {
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                weights,
+                biases,
+            } => {
+                let ksize = *kernel_size as i64;
+                let w_name = format!("conv_W{idx_conv}");
+                let b_name = format!("conv_b{idx_conv}");
+                initializers.push(build_tensor_proto(
+                    &w_name,
+                    &[*out_channels as i64, *in_channels as i64, ksize, ksize],
+                    weights,
+                ));
+                initializers.push(build_tensor_proto(&b_name, &[*out_channels as i64], biases));
+                let out = format!("conv_{idx_conv}");
+                nodes.push(build_conv_node(
+                    &format!("Conv_{idx_conv}"),
+                    &current,
+                    &w_name,
+                    &b_name,
+                    &out,
+                    *kernel_size,
+                    *stride,
+                ));
+                current = out;
+                idx_conv += 1;
+            }
+            ArchLayer::Elu => {
+                let out = format!("elu_{idx_elu}");
+                nodes.push(build_elu_node(&format!("Elu_{idx_elu}"), &current, &out));
+                current = out;
+                idx_elu += 1;
+            }
+            ArchLayer::Flatten => {
+                let out = format!("flat_{idx_flat}");
+                nodes.push(build_flatten_node(
+                    &format!("Flatten_{idx_flat}"),
+                    &current,
+                    &out,
+                ));
+                current = out;
+                idx_flat += 1;
+            }
+            ArchLayer::Linear { in_dim, out_dim, weights, biases } => {
+                let w_name = format!("fc_W{idx_fc}");
+                let b_name = format!("fc_b{idx_fc}");
+                initializers.push(build_tensor_proto(
+                    &w_name,
+                    &[*in_dim as i64, *out_dim as i64],
+                    weights,
+                ));
+                initializers.push(build_tensor_proto(&b_name, &[*out_dim as i64], biases));
+                let out = format!("fc_{idx_fc}");
+                nodes.push(build_gemm_node(
+                    &format!("Gemm_{idx_fc}"),
+                    &current,
+                    &w_name,
+                    &b_name,
+                    &out,
+                ));
+                current = out;
+                idx_fc += 1;
+            }
+        }
+    }
+
+    let input_info = build_value_info("input", obs_dim);
+    let output_info = build_value_info(&current, act_dim);
+    let graph =
+        build_graph_proto("convnet", &nodes, &initializers, &[input_info], &[output_info]);
+    build_model_proto(graph)
 }
 
 #[cfg(test)]
