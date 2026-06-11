@@ -38,6 +38,7 @@ pub mod prelude {
     }
 }
 
+/// Common trainer arguments (directories, dimensions, dtypes, buffer size, device) consumed by `PPOTrainerSpec::default`.
 #[derive(Clone, Debug)]
 pub struct TrainerArgs {
     pub env_dir: PathBuf,

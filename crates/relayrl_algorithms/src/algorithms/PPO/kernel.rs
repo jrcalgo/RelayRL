@@ -429,6 +429,7 @@ pub(crate) mod training {
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
+/// Wraps a policy network as either discrete (categorical) or continuous (Gaussian) for PPO inference.
 pub enum PPOPolicyHead<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -440,6 +441,7 @@ pub enum PPOPolicyHead<
 }
 
 #[derive(Clone, Debug)]
+/// A policy head that samples discrete actions from a categorical distribution over network logits.
 pub struct DiscretePPOPolicyHead<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -477,6 +479,7 @@ where
 }
 
 #[derive(Clone, Debug)]
+/// A policy head that samples continuous actions from a Gaussian distribution.
 pub struct ContinuousPPOPolicyHead<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -515,10 +518,14 @@ where
 
 // ---- kernel interfaces ----
 
+/// Policy loss value from a PPO gradient step.
 pub type PiLoss = f32;
+/// Value function loss from a PPO gradient step.
 pub type VfLoss = f32;
+/// Diagnostic key-value pairs from a training step.
 pub type Info = HashMap<String, f32>;
 
+/// Provides the gradient update step for a PPO policy/value kernel.
 pub trait PPOKernelTraining<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -541,9 +548,12 @@ pub trait PPOKernelTraining<
     ) -> (PiLoss, VfLoss, Info);
 }
 
+/// Serialized action bytes produced by a PPO policy forward pass.
 pub type ActBytes = Vec<u8>;
+/// Serialized log-probability bytes corresponding to sampled actions.
 pub type LogpBytes = Vec<u8>;
 
+/// Provides inference-side operations for a PPO kernel: action sampling and log-probability computation.
 pub trait PPOKernelOps<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -564,6 +574,7 @@ pub trait PPOKernelOps<
 }
 
 /// Factory for constructing continuous or discrete PPO kernels.
+/// Constructs a `PPOKernel` from separate policy head and value function, validating dimension consistency.
 pub struct PPOKernelFactory<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -601,6 +612,7 @@ pub struct ContinuousPPOKernel<
     pub returns_count: u64,
 }
 
+/// Active PPO kernel holding the policy head and value function along with their training state.
 pub enum PPOKernel<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -611,6 +623,7 @@ pub enum PPOKernel<
     Continuous(ContinuousPPOKernel<B, KindIn, KindOut, Pi>),
 }
 
+/// A read-only reference snapshot of a `PPOKernel` used for inference without holding the full kernel.
 pub struct PPOKernelSnapshot<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -635,6 +648,7 @@ impl<
 }
 
 /// Training parameters for the actor-critic kernel.
+/// Learning-rate, value-function coefficient, and optional LR schedule for a `PPOKernel`.
 pub struct PPOKernelTrainingArgs {
     pub pi_lr: f64,
     pub vf_coef: f32,

@@ -29,6 +29,7 @@ struct BufferMetadata {
     buffer_path_start_idx: AtomicUsize,
 }
 
+/// A normalized training batch ready for PPO gradient updates: observations, actions, log-probabilities, advantages, returns, and values.
 pub struct PPOBatch {
     pub obs: Vec<TensorData>,
     pub obs_dim: usize,
@@ -39,6 +40,7 @@ pub struct PPOBatch {
     pub val: Vec<f32>,
 }
 
+/// Experience replay buffer for PPO that accumulates trajectories and computes GAE-normalized advantages on drain.
 pub struct PPOReplayBuffer {
     buffers: Arc<Mutex<Buffers>>,
     metadata: Arc<BufferMetadata>,
@@ -52,6 +54,7 @@ impl Default for PPOReplayBuffer {
 }
 
 impl PPOReplayBuffer {
+    /// Creates a PPO replay buffer with the given capacity, discount (`gamma`), GAE lambda (`lam`), and optional episode cap.
     pub fn new(
         buffer_size: usize,
         gamma: f32,

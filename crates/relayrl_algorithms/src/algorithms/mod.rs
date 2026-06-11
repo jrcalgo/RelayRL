@@ -16,6 +16,7 @@ pub mod onnx_builder;
 #[cfg(feature = "tch-model")]
 pub mod torch_builder;
 
+/// Errors from neural network construction, dimension validation, or device/dtype resolution.
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum NeuralNetworkError {
     #[error("Unsupported device: {0}")]
@@ -32,6 +33,7 @@ pub enum NeuralNetworkError {
     InvalidDistribution,
 }
 
+/// Activation function variant passed to `GenericMlp::new` and `ValueFunction`.
 #[derive(Clone, Debug)]
 pub enum ActivationKind<B: Backend + BackendMatcher<Backend = B>> {
     ReLU(burn_nn::activation::Relu),
@@ -46,6 +48,9 @@ pub enum ActivationKind<B: Backend + BackendMatcher<Backend = B>> {
     None,
 }
 
+/// Combined supertrait for all algorithm-compatible networks: spec, forward pass, and weight export.
+///
+/// Implement this trait to plug a custom architecture into `PPOTrainerSpec`.
 pub trait NeuralNetwork<B, KindIn, KindOut>:
     NeuralNetworkSpec<B, KindIn, KindOut> + NeuralNetworkForward<B, KindIn, KindOut> + WeightProvider
 where
@@ -62,6 +67,7 @@ where
     ) -> Self;
 }
 
+/// Exposes the input/output dimensions and dtypes of a network for validation and config.
 pub trait NeuralNetworkSpec<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -74,6 +80,7 @@ pub trait NeuralNetworkSpec<
     fn output_dtype(&self) -> &DType;
 }
 
+/// Generic forward pass used by actors and algorithm kernels.
 pub trait NeuralNetworkForward<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -86,10 +93,15 @@ pub trait NeuralNetworkForward<
     ) -> Tensor<B, OUT_D, KindOut>;
 }
 
+/// Input dimension of a linear layer.
 pub type Dim0 = usize;
+/// Output dimension of a linear layer.
 pub type Dim1 = usize;
+/// Flat weight vector for a linear layer.
 pub type Weights = Vec<f32>;
+/// Flat bias vector for a linear layer.
 pub type Biases = Vec<f32>;
+/// Per-layer `(in_dim, out_dim, weights, biases)` specs produced by `WeightProvider::get_layer_specs`.
 pub type LayerSpecs = Vec<(Dim0, Dim1, Weights, Biases)>;
 
 /// Trait for extracting per-layer weight specs from a network.
@@ -97,9 +109,7 @@ pub trait WeightProvider {
     fn get_layer_specs(&self) -> LayerSpecs;
 }
 
-// ---- generic MLP for easy usage ----
-// implements NeuralNetworkSpec and NeuralNetworkForward, is compatible with all algorithms
-
+/// A fully-connected MLP that implements `NeuralNetwork`, usable as the policy head or value function in any algorithm.
 #[derive(Clone, Debug)]
 pub struct GenericMlp<
     B: Backend + BackendMatcher<Backend = B>,
@@ -122,6 +132,24 @@ impl<
     KindOut: TensorKind<B> + BasicOps<B>,
 > GenericMlp<B, KindIn, KindOut>
 {
+    /// Constructs a MLP with the given input/output dims, hidden layer sizes, activation, and device.
+    ///
+    /// ```ignore
+    /// # use relayrl::algorithms::{GenericMlp, ActivationKind};
+    /// # use burn_ndarray::NdArray;
+    /// # use burn_tensor::Float;
+    /// # use relayrl::types::tensor::relayrl::{DType, NdArrayDType};
+    /// let device = Default::default();
+    /// let mlp = GenericMlp::<NdArray, Float, Float>::new(
+    ///     8,
+    ///     DType::NdArray(NdArrayDType::F32),
+    ///     &[64, 64],
+    ///     4,
+    ///     DType::NdArray(NdArrayDType::F32),
+    ///     ActivationKind::ReLU(Default::default()),
+    ///     &device,
+    /// );
+    /// ```
     pub fn new(
         input_dim: usize,
         input_dtype: DType,
@@ -272,10 +300,24 @@ where
     }
 }
 
-// ---- value function ----
-// wraps GenericMlp and ensures output is Float
-// implements NeuralNetworkSpec and NeuralNetworkForward, is compatible with all algorithms
+/// A generic convolutional network stub implementing `NeuralNetwork` (work in progress).
+#[derive(Clone, Debug)]
+pub struct GenericCnn<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+> {
+    input_dim: usize,
+    input_dtype: DType,
+    output_dim: usize,
+    output_dtype: DType,
+    layers: Vec<Linear<B>>,
+    activation: ActivationKind<B>,
+    _in_k: std::marker::PhantomData<KindIn>,
+    _out_k: std::marker::PhantomData<KindOut>,
+}
 
+/// A critic network wrapping a `GenericMlp` and enforcing a single f32 output — the value estimate.
 #[derive(Clone, Debug)]
 pub struct ValueFunction<
     B: Backend + BackendMatcher<Backend = B>,
@@ -285,6 +327,7 @@ pub struct ValueFunction<
 impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B> + BasicOps<B>>
     ValueFunction<B, KindIn>
 {
+    /// Wraps a `GenericMlp` as a value function, returning an error if the output is not a single f32.
     pub fn new(vf_mlp: GenericMlp<B, KindIn, Float>) -> Result<Self, NeuralNetworkError> {
         match (vf_mlp.output_dtype(), vf_mlp.output_dim()) {
             (DType::NdArray(NdArrayDType::F32), 1) => Ok(Self(vf_mlp)),

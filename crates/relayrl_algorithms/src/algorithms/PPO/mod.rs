@@ -25,18 +25,19 @@ use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, DeviceType};
 
 use std::path::PathBuf;
 
-/// Convenience alias: MAPPO and PPO share the same spec structure.
+/// Convenience alias: MAPPO uses the same spec structure as PPO.
 pub type MAPPOTrainerSpec<B, KindIn, KindOut, Pi> = PPOTrainerSpec<B, KindIn, KindOut, Pi>;
 
 // ---- PPO-related inference & algorithm interfaces ----
 
+/// Policy head and value function paired together for `PPOTrainerSpec` construction.
 #[derive(Debug)]
 pub struct PPONetworkArgs<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B>,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     pub pi_head: PPOPolicyHead<B, KindIn, KindOut, Pi>,
     pub vf_mlp: GenericMlp<B, KindIn, Float>,
@@ -45,9 +46,9 @@ where
 impl<B, KindIn, KindOut, Pi> PPONetworkArgs<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     pub fn default(
         obs_dim: usize,
@@ -73,13 +74,30 @@ where
     }
 }
 
+/// Selects the PPO algorithm variant (`PPO`, `IPPO`, or `MAPPO`) and bundles network architecture with training arguments.
+///
+/// ```ignore
+/// use relayrl::algorithms::{GenericMlp, PPONetworkArgs, PPOTrainerSpec, PPOTrainer};
+/// use burn_ndarray::NdArray;
+/// use burn_tensor::Float;
+/// use relayrl::types::tensor::relayrl::{DType, NdArrayDType, DeviceType};
+///
+/// let spec = PPOTrainerSpec::<NdArray, Float, Float, GenericMlp<_, _, _>>::default(
+///     env_dir,
+///     save_model_path,
+///     8, DType::NdArray(NdArrayDType::F32),
+///     4, DType::NdArray(NdArrayDType::F32),
+///     1000, DeviceType::Cpu,
+/// )?;
+/// let trainer = PPOTrainer::new(spec)?;
+/// ```
 #[derive(Debug)]
 pub enum PPOTrainerSpec<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     PPO {
         args: TrainerArgs,
@@ -101,9 +119,9 @@ where
 impl<B, KindIn, KindOut, Pi> PPOTrainerSpec<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn default(
@@ -148,9 +166,9 @@ where
 impl<B, KindIn, KindOut, Pi> PPOTrainerSpec<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     pub fn ppo(
         args: TrainerArgs,
@@ -189,12 +207,13 @@ where
     }
 }
 
+/// Dispatches training to the selected PPO algorithm variant and provides a uniform interface for training loops.
 pub enum PPOTrainer<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     PPO(IndependentPPOAlgorithm<B, KindIn, KindOut, Pi>),
     IPPO(IndependentPPOAlgorithm<B, KindIn, KindOut, Pi>),
@@ -204,9 +223,9 @@ where
 impl<B, KindIn, KindOut, Pi> PPOTrainer<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     pub fn new(spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
@@ -275,9 +294,9 @@ where
 
 fn validate_ppo_spec<
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 >(
     args: &TrainerArgs,
     networks: &PPONetworkArgs<B, KindIn, KindOut, Pi>,
@@ -421,9 +440,9 @@ fn validate_ppo_spec<
 impl<B, KindIn, KindOut, Pi> PPOTrainer<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default + Send + 'static,
-    KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-    KindOut: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+    KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+    KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
+    Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
 {
     pub fn register_first_slot_with_key(
         &mut self,

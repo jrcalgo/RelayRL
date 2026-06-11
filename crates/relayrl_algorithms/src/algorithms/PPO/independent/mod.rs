@@ -26,6 +26,7 @@ use super::replay_buffer::PPOBatch;
 type AgentKey = String;
 const DEFAULT_AGENT_KEY: &str = "__default_ppo_agent__";
 
+/// Per-agent training metrics from one PPO epoch: policy/value losses, KL divergence, entropy, and clip fraction.
 pub struct SlotTrainResult<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -43,6 +44,7 @@ pub struct SlotTrainResult<
     pub stop_iter: f32,
 }
 
+/// Aggregated results from one full PPO epoch across all agent slots.
 pub struct EpochTrainOutput<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -84,6 +86,7 @@ impl AgentRegistry {
     }
 }
 
+/// Hyperparameters for Independent PPO (IPPO) training: discount, clipping, learning rates, and epoch controls.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IPPOParams {
@@ -136,6 +139,7 @@ impl Default for IPPOParams {
     }
 }
 
+/// Alias for `IPPOParams`; single-agent PPO uses the same hyperparameter set.
 pub type PPOParams = IPPOParams;
 
 #[allow(dead_code)]
@@ -258,6 +262,7 @@ where
     }
 }
 
+/// Single-agent and independent multi-agent PPO algorithm implementation.
 pub struct IndependentPPOAlgorithm<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
