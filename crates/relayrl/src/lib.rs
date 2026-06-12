@@ -6,10 +6,10 @@
 //! Each actor can bind its own environment and its own independent (or device-shared), **hot-swappable** model. This makes it well suited for embedding RL
 //! inside a native application, running distinct policies side by side, or swapping a policy into a subset of actors with **near zero downtime**.
 //!
-//! RelayRL also outperforms (expectedly) other popular, GIL-bound RL frameworks in terms of raw throughput and latency, memory consumption, and scalability. See [relayrl.dev](https://relayrl.dev) for more details.
+//! RelayRL also outperforms (expectedly) other popular, GIL-bound RL frameworks in terms of raw throughput and latency, memory consumption, and scalability.
+//! For benchmarks and other system details, visit [relayrl.dev](https://relayrl.dev).
 //!
-//! This crate is a thin facade re-exporting the **most recent stable release** of [`relayrl_framework`].
-//!
+//! This crate is a thin facade re-exporting the **most recent stable release** of [`relayrl_framework`]. 
 //! RL algorithms, data types, and the environment trait live in [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/latest/relayrl_algorithms/),
 //! [`relayrl_types`](https://docs.rs/relayrl_types/latest/relayrl_types/), and [`relayrl_env_trait`](https://docs.rs/relayrl_env_trait/latest/relayrl_env_trait/) respectively.
 //!
@@ -17,8 +17,54 @@
 //!
 //! - A [Tokio](https://docs.rs/tokio/1.52.3/tokio/) runtime. On a current-threaded runtime, actors will execute concurrently, but not in parallel. To enable parallel execution, use a multi-threaded runtime.
 //! - A compatible [Burn](https://docs.rs/burn/0.21.0/burn/) backend. Currently, only [Burn-NdArray](https://docs.rs/burn-ndarray/0.21.0/burn_ndarray/) and [Burn-Tch](https://docs.rs/burn-tch/0.21.0/burn_tch/) are supported.
-//! - A compatible inference runtime. Currently, only **LibTorch** and the **ONNX Runtime (ORT)** are supported.
+//! - A compatible inference runtime. Currently, only **LibTorch 2.9.0** and the **ONNX Runtime (ORT) 1.26.0** are supported.
 //!
+//! # Quick Start
+//! 
+//! ```rust
+//! use relayrl::network::client::*;
+//! use relayrl::types::model::ModelModule;
+//! use relayrl::types::tensor::relayrl::DeviceType;
+//! 
+//! use burn_ndarray::NdArray;
+//! use burn_tensor::{Float, Tensor};
+//!
+//! [tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Build the agent handle and its startup parameters.
+//!     let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+//!     let (mut agent, params) = AgentBuilder::<NdArray>::builder()
+//!         .router_scale(2)
+//!         .default_model(default_model)
+//!         .build()
+//!         .await?;
+//!
+//!     // Start the runtime: coordinator, lifecycle manager, and router workers.
+//!     agent.start(params).await?;
+//!
+//!     // Create four actors with rank-2 observations and rank-2 actions.
+//!     let actor_ids = agent
+//!         .new_actors::<2, 2>(4, DeviceType::Cpu, 1_000, None)
+//!         .await?;
+//!
+//!     // Request actions for all actors. The const generics must match creation.
+//!     let observation = Tensor::<NdArray, 2, Float>::zeros(
+//!         [1, 4],
+//!         &Default::default(),
+//!     );
+//!     let actions = agent
+//!         .request_action::<2, 2, Float, Float>(actor_ids.clone(), observation, None, 0.0)
+//!         .await?;
+//!
+//!     // Use actions in your simulator, then mark the episode boundary.
+//!     let _ = actions;
+//!     agent.flag_last_action(actor_ids, Some(1.0)).await?;
+//! 
+//!     agent.shutdown().await?;
+//!     Ok(())
+//! }
+//! ```
+//! 
 //! # Building the Agent
 //!
 //! An agent is constructed with [`AgentBuilder<B>`](crate::network::AgentBuilder), which separates *runtime-invariant*
@@ -34,24 +80,25 @@
 //! trajectory recording, a router scale of `1`, no default model, a buffer size of `1024` per actor, and no config path.
 //!
 //! ```rust
-//! use relayrl::network::client::{AgentBuilder, ActorInferenceMode, ActorTrainingDataMode, ModelMode};
+//! use relayrl::network::AgentBuilder;
+//! use relayrl::network::{ActorInferenceMode, ActorTrainingDataMode, ModelMode};
 //! use relayrl::types::model::ModelModule;
 //! use burn_ndarray::NdArray;
 //!
-//! # async fn build() -> Result<(), Box<dyn std::error::Error>> {
-//! let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+//! async fn build() -> Result<(), Box<dyn std::error::Error>> {
+//!     let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
 //!
-//! let (mut agent, params) = AgentBuilder::<NdArray>::builder()
-//!     .actor_inference_mode(ActorInferenceMode::Client(ModelMode::Shared))
-//!     .actor_training_data_mode(ActorTrainingDataMode::OfflineWithFilesAndMemory(None))
-//!     .router_scale(2)
-//!     .router_buffer_size_per_actor(2048)
-//!     .default_model(default_model)
-//!     .config_path(std::path::PathBuf::from("client_config.json"))
-//!     .build()
-//!     .await?;
-//! # Ok(())
-//! # }
+//!     let (mut agent, params) = AgentBuilder::<NdArray>::builder()
+//!         .actor_inference_mode(ActorInferenceMode::Client(ModelMode::Shared))
+//!         .actor_training_data_mode(ActorTrainingDataMode::OfflineWithFilesAndMemory(None))
+//!         .router_scale(2)
+//!         .router_buffer_size_per_actor(2048)
+//!         .default_model(default_model)
+//!         .config_path(std::path::PathBuf::from("client_config.json"))
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! There are a series of client modes and parameters that can be set on the builder when `zmq-transport` or `nats-transport` feature flags are enabled;
@@ -90,7 +137,7 @@
 //! `client_config.json` in the current working directory and can be overridden with
 //! [`AgentBuilder::config_path`](crate::network::AgentBuilder). If the file does not exist it is
 //! created on first use, pre-populated with defaults; if it exists it is read and parsed
-//! into a [`ClientConfigLoader`](crate::config::ClientConfigLoader).
+//! into a [`ClientConfigLoader`](crate::utilities::config::ClientConfigLoader).
 //!
 //! A malformed file does not abort
 //! startup, the loader logs the error and falls back to built-in defaults.
@@ -141,12 +188,13 @@
 //!
 //! ##### Config changes at runtime
 //!
-//! After `start`, a background task polls the file every `config_update_polling_seconds` and, when
+//! After [`RelayRLAgent::start`](crate::network::RelayRLAgent::start), a background task polls the file every `config_update_polling_seconds` and, when
 //! the file's modification time changes, reloads it and applies a subset of settings to the running
 //! agent with no restart: the trajectory-file output, the resolved local model path, and the
 //! per-actor router buffer size (plus the metrics meter/endpoint under the `metrics` feature, and the
-//! transport addresses and default hyperparameters under a transport feature). Note that a live
-//! reload of `router_buffer_size_per_actor` is applied unconditionally, so it overrides whatever the
+//! transport addresses and default hyperparameters under a transport feature). 
+//! 
+//! **Note:** a live reload of `router_buffer_size_per_actor` is applied unconditionally, so it overrides whatever the
 //! builder set at startup. The active configuration can be re-read on demand with
 //! [`RelayRLAgent::get_config`](crate::network::RelayRLAgent).
 //!
@@ -171,47 +219,51 @@
 //! `update_model` before it can perform inference.
 //!
 //! ```rust
-//! # async fn run(mut nd_agent: RelayRLAgent<burn_ndarray::NdArray>, tch_agent: RelayRLAgent<burn_tch::Tch>, params: AgentStartParameters<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
-//! use types::model::ModelModule;
-//! use burn_ndarray::NdArray;
+//! async fn run(
+//!     mut nd_agent: RelayRLAgent<burn_ndarray::NdArray>,
+//!     tch_agent: RelayRLAgent<burn_tch::Tch>,
+//!     params: AgentStartParameters<burn_ndarray::NdArray>,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
+//!     use types::model::ModelModule;
+//!     use burn_ndarray::NdArray;
 //!
-//! nd_agent.start(params).await?;
-//! tch_agent.start(params).await?;
+//!     nd_agent.start(params).await?;
+//!     tch_agent.start(params).await?;
 //!
-//! const ENV1_OBS_IN: usize = 2;
-//! const ENV1_ACT_OUT: usize = 2;
-//! let env1_actors = 4;
-//! let env1_max_traj_length = 1_000;
+//!     const ENV1_OBS_IN: usize = 2;
+//!     const ENV1_ACT_OUT: usize = 2;
+//!     let env1_actors = 4;
+//!     let env1_max_traj_length = 1_000;
 //!
-//! const ENV2_OBS_IN: usize = 6;
-//! const ENV2_ACT_OUT: usize = 1;
-//! let env2_actors = 3;
-//! let env2_max_traj_length = 2_000;
+//!     const ENV2_OBS_IN: usize = 6;
+//!     const ENV2_ACT_OUT: usize = 1;
+//!     let env2_actors = 3;
+//!     let env2_max_traj_length = 2_000;
 //!
-//! let no_default_model: Option<ModelModule<NdArray>> = None;
+//!     let no_default_model: Option<ModelModule<NdArray>> = None;
 //!
-//! // Create two groups of actors with different obs/action ranks on different devices.
-//! let env1_actor_ids = nd_agent.new_actors::<ENV1_OBS_IN, ENV1_ACT_OUT>(
-//!     env1_actors, DeviceType::Cpu, env1_max_traj_length, no_default_model.clone()
-//! ).await?;
-//! let env2_actor_ids = tch_agent.new_actors::<ENV2_OBS_IN, ENV2_ACT_OUT>(
-//!     env2_actors, DeviceType::Gpu(0), env2_max_traj_length, no_default_model.clone()
-//! ).await?;
+//!     // Create two groups of actors with different obs/action ranks on different devices.
+//!     let env1_actor_ids = nd_agent.new_actors::<ENV1_OBS_IN, ENV1_ACT_OUT>(
+//!         env1_actors, DeviceType::Cpu, env1_max_traj_length, no_default_model.clone()
+//!     ).await?;
+//!     let env2_actor_ids = tch_agent.new_actors::<ENV2_OBS_IN, ENV2_ACT_OUT>(
+//!         env2_actors, DeviceType::Gpu(0), env2_max_traj_length, no_default_model.clone()
+//!     ).await?;
 //!
-//! let all_nd_actor_ids = nd_agent.get_actor_ids()?;
-//! let all_tch_actor_ids = tch_agent.get_actor_ids()?;
+//!     let all_nd_actor_ids = nd_agent.get_actor_ids()?;
+//!     let all_tch_actor_ids = tch_agent.get_actor_ids()?;
 //!
-//! // ... interact ...
+//!     // ... interact ...
 //!
-//! nd_agent.remove_actors(all_nd_actor_ids).await?;
-//! tch_agent.remove_actors(all_tch_actor_ids).await?;
-//! nd_agent.shutdown().await?;
-//! tch_agent.shutdown().await?;
-//! # Ok(())
-//! # }
+//!     nd_agent.remove_actors(all_nd_actor_ids).await?;
+//!     tch_agent.remove_actors(all_tch_actor_ids).await?;
+//!     nd_agent.shutdown().await?;
+//!     tch_agent.shutdown().await?;
+//!     Ok(())
+//! }
 //! ```
 //!
-//! #### Introspection methods after `start`:
+//! #### Introspection methods after [`RelayRLAgent::start`](crate::network::RelayRLAgent::start):
 //!
 //! - `get_model_version(actor_ids)` — returns `(ActorUuid, version: i64)` pairs reflecting how
 //!   many times each actor's model has been hot-swapped since startup.
@@ -247,21 +299,21 @@
 //!   external system (for example a session or player ID).
 //!
 //! ```rust
-//! # async fn manage(agent: &mut RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
-//! use uuid::Uuid;
+//! async fn manage(agent: &mut RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//!     use uuid::Uuid;
 //!
-//! // Enumerate live actors (registry order; do not assume sorting).
-//! let ids = agent.get_actor_ids()?;
+//!     // Enumerate live actors (registry order; do not assume sorting).
+//!     let ids = agent.get_actor_ids()?;
 //!
-//! // Give the first actor a stable, externally-meaningful identity. The task keeps
-//! // running under the new ID with its inbox intact.
-//! let session_id = Uuid::new_v4();
-//! agent.set_actor_id(ids[0], session_id).await?;
+//!     // Give the first actor a stable, externally-meaningful identity. The task keeps
+//!     // running under the new ID with its inbox intact.
+//!     let session_id = Uuid::new_v4();
+//!     agent.set_actor_id(ids[0], session_id).await?;
 //!
-//! // Retire the remaining actors; their tasks are aborted and their UUIDs freed.
-//! agent.remove_actors(ids[1..].to_vec()).await?;
-//! # Ok(())
-//! # }
+//!     // Retire the remaining actors; their tasks are aborted and their UUIDs freed.
+//!     agent.remove_actors(ids[1..].to_vec()).await?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! #### Router Scaling
@@ -278,14 +330,14 @@
 //! scales in. This lets you grow routing capacity under load without restarting the agent.
 //!
 //! ```rust
-//! # async fn scale(agent: &mut RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
-//! agent.scale_throughput(2).await?;   // add two more routing workers
-//! agent.scale_throughput(-1).await?;  // remove one
-//! # Ok(())
-//! # }
+//! async fn scale(agent: &mut RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//!     agent.scale_throughput(2).await?;   // add two more routing workers
+//!     agent.scale_throughput(-1).await?;  // remove one
+//!     Ok(())
+//! }
 //! ```
 //!
-//! Note that this will consume the runtime for the duration of the operation, thus it's **not** recommended to perform a scale operation
+//! **Note:** this will consume the runtime for the duration of the operation, thus it's **not** recommended to perform a scale operation
 //! while actors are actively running unless your application can tolerate a pause in execution.
 //!
 //! Performing a `scale_throughput` operation will distribute all actors across all available routers upon completion. Assuming there is an equal number of actors and routers,
@@ -323,7 +375,7 @@
 //! no downtime. Passing `None` updates all live actors. In `ModelMode::Shared`, the runtime
 //! refreshes one representative actor per device so each shared handle is updated exactly once.
 //!
-//! Note that `update_model` is rejected (returns `ModelUpdateNotSupported`) when the agent is
+//! **Note:** `update_model` is rejected (returns `ModelUpdateNotSupported`) when the agent is
 //! configured with any `Online` training data mode, since model updates are managed server-side
 //! in that case.
 //!
@@ -335,14 +387,14 @@
 //! use relayrl::network::RelayRLAgent;
 //! use burn_ndarray::NdArray;
 //!
-//! # async fn swap(agent: &RelayRLAgent<NdArray>, new_model: ModelModule<NdArray>) -> Result<(), Box<dyn std::error::Error>> {
-//! let ids = agent.get_actor_ids()?;
-//! // Swap a new policy into actors 0 and 2 only; actor 1 keeps the old policy.
-//! agent.update_model(new_model, Some(vec![ids[0], ids[2]])).await?;
-//! // Verify the swap landed.
-//! let versions = agent.get_model_version(vec![ids[0], ids[2]]).await?;
-//! # Ok(())
-//! # }
+//! async fn swap(agent: &RelayRLAgent<NdArray>, new_model: ModelModule<NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//!     let ids = agent.get_actor_ids()?;
+//!     // Swap a new policy into actors 0 and 2 only; actor 1 keeps the old policy.
+//!     agent.update_model(new_model, Some(vec![ids[0], ids[2]])).await?;
+//!     // Verify the swap landed.
+//!     let versions = agent.get_model_version(vec![ids[0], ids[2]]).await?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! #### Step-driven Integration
@@ -364,21 +416,21 @@
 //! the actor begins a fresh trajectory on the next `request_action`.
 //!
 //! ```rust
-//! # async fn control_loop_step(agent: &RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
-//! use burn_ndarray::NdArray;
-//! use burn_tensor::{Tensor, Float};
+//! async fn control_loop_step(agent: &RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//!     use burn_ndarray::NdArray;
+//!     use burn_tensor::{Tensor, Float};
 //!
-//! let ids = agent.get_actor_ids()?;
-//! let obs = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
-//! let mask = None;
-//! let reward = 0.0;
+//!     let ids = agent.get_actor_ids()?;
+//!     let obs = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+//!     let mask = None;
+//!     let reward = 0.0;
 //!
-//! let _actions = agent.request_action(ids.clone(), obs, mask, reward).await?;
+//!     let _actions = agent.request_action(ids.clone(), obs, mask, reward).await?;
 //!
-//! // Mark end of episode for all actors with the terminal reward.
-//! agent.flag_last_action(ids, Some(reward + 1.0)).await?;
-//! # Ok(())
-//! # }
+//!     // Mark end of episode for all actors with the terminal reward.
+//!     agent.flag_last_action(ids, Some(reward + 1.0)).await?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! #### Environment-driven Integration
@@ -406,25 +458,25 @@
 //!   rollouts respectively; coming soon.
 //!
 //! ```rust
-//! # async fn drive(mut agent: RelayRLAgent<burn_ndarray::NdArray>, env: Box<dyn relayrl_env_trait::traits::Environment>) -> Result<(), Box<dyn std::error::Error>> {
-//! let (actor_id1, actor_id2) = {
-//!     let ids = agent.get_actor_ids()?;
-//!     (ids[0], ids[1])
-//! };
+//! async fn drive(mut agent: RelayRLAgent<burn_ndarray::NdArray>, env: Box<dyn relayrl_env_trait::traits::Environment>) -> Result<(), Box<dyn std::error::Error>> {
+//!     let (actor_id1, actor_id2) = {
+//!         let ids = agent.get_actor_ids()?;
+//!         (ids[0], ids[1])
+//!     };
 //!
-//! // sequential env stepping is enabled when env count < 8
-//! agent.set_env(actor_id1, env, 7).await?;       // 7 vectorized env copies on this actor
-//! agent.run_env_eval(actor_id1, 10_000).await?;  // run 10k loop iterations
+//!     // sequential env stepping is enabled when env count < 8
+//!     agent.set_env(actor_id1, env, 7).await?;       // 7 vectorized env copies on this actor
+//!     agent.run_env_eval(actor_id1, 10_000).await?;  // run 10k loop iterations
 //!
-//! // rayon data parallelism is enabled when env count >= 8
-//! agent.set_env(actor_id2, env, 1024).await?;    // 1024 vectorized env copies on this actor
-//! agent.run_env_eval(actor_id2, 1_000).await?;   // run 1k loop iterations
+//!     // rayon data parallelism is enabled when env count >= 8
+//!     agent.set_env(actor_id2, env, 1024).await?;    // 1024 vectorized env copies on this actor
+//!     agent.run_env_eval(actor_id2, 1_000).await?;   // run 1k loop iterations
 //!
-//! let count = agent.get_env_count(actor_id2).await?;
-//! agent.set_env_count(actor_id2, count / 2).await?;  // halve the env count live
-//! agent.remove_env(actor_id1).await?;
-//! # Ok(())
-//! # }
+//!     let count = agent.get_env_count(actor_id2).await?;
+//!     agent.set_env_count(actor_id2, count / 2).await?;  // halve the env count live
+//!     agent.remove_env(actor_id1).await?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! # Experimental Network Transport
@@ -463,13 +515,13 @@
 //!
 //! These paths are under active development and are not covered by the 0.5.x support promise.
 //!
+//! # Want to contribute?
+//! 
+//! 
+//! 
 
 pub mod algorithms {
     pub use relayrl_framework::prelude::algorithms::*;
-}
-
-pub mod config {
-    pub use relayrl_framework::prelude::config::*;
 }
 
 pub mod network {
@@ -478,4 +530,8 @@ pub mod network {
 
 pub mod types {
     pub use relayrl_framework::prelude::types::*;
+}
+
+pub mod utilities {
+    pub use relayrl_framework::prelude::utilities::*;
 }
