@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [0.4.1] - 2026-06-14
 
+### Added
+- **Convolutional policy support** - Added `ConvNetPolicy` and architecture-level network export support for convolutional policies, including `ArchLayer`, `WeightProvider::get_arch_spec()`, and `acquire_conv_model_module()`.
+- **Convolutional model builders** - Added ONNX and TorchScript builders for architecture-aware conv/dense networks via `build_onnx_conv_bytes()` and `build_pt_conv_temp()`.
+
+### Changed
+- **Neural-network module layout** - Split neural-network traits, errors, dtypes, MLPs, value functions, model export helpers, and ConvNet support into the new `algorithms::nn` module while preserving top-level re-exports.
+- **PPO trainer bounds** - Removed unnecessary `Default` bounds from `KindIn`, `KindOut`, and `Pi` in `PPOTrainer` and spec validation paths, allowing explicitly supplied network instances without requiring default construction.
+- **Package metadata** - Bumped `relayrl_algorithms` from `0.4.0` to `0.4.1`.
+- **Documentation** - Expanded crate-level, public API, PPO, neural-network, ONNX, TorchScript, and README documentation for the current PPO-focused surface.
+
+### Fixed
+- **PPO return targets** - PPO replay-buffer GAE now computes returns as advantage plus value estimates, and training batches retain return mean/std metadata for normalized-return workflows.
+- **Value prediction scale** - PPO kernels now track return denormalization stats so `value_forward()` can map normalized value predictions back to the environment reward scale.
+- **TorchScript tracing** - TorchScript builders freeze VarStore parameters before tracing so captured weights can be serialized without `requires_grad` tracing failures.
+
 ## [0.4.0] - 2026-06-01
 
 ### Added
