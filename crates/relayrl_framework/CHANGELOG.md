@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-rc] - 2026-06-14
+
+### Added
+- **Actor ID return values and rank filtering** - `new_actor` now returns the created `ActorUuid`, `new_actors` returns all created actor IDs, and `get_actor_ids_by_rank<D_IN, D_OUT>()` returns live actors matching the requested observation/action ranks.
+- **Release-candidate prelude exports** - Added `prelude::types::records` for Arrow/CSV record adapters and `prelude::utilities::uuid` for active-uuid-registry UUID types.
+
+### Changed
+- **Release-candidate package metadata** - Bumped `relayrl_framework` from `0.5.0-beta.5` to `0.5.0-rc`; the default feature set is now `client` + `logging`, with `metrics` opt-in.
+- **Docs.rs build surface** - Narrowed docs.rs feature coverage to `client` + `logging` and removed the extra docs.rs rustc cfg arg.
+- **Runtime and README documentation** - Rewrote the README and crate-level docs around the `0.5.0` local/default runtime support contract, layered architecture, feature flags, quick start, and experimental transport/server scope.
+- **Inference mode names** - Renamed the local inference variant from `ActorInferenceMode::Local` to `ActorInferenceMode::Client`, and renamed `ServerOverflow` to `ClientFallback` to describe the fallback behavior more clearly.
+- **Environment training return value** - `run_env_with_ppo`, `run_env_with_ippo`, and `run_env_with_mappo` now return the trained `ModelModule` instead of `()`, and their generic bounds no longer require `Default` for supplied network types.
+- **Trajectory memory terminology** - Renamed the in-memory trajectory accessor from `get_trajectory_memory` to `get_trajectory_cache` to better describe the shared cache returned by the runtime.
+- **Prelude layout** - Moved config and codec re-exports from `prelude::config` to `prelude::utilities::config`, and grouped UUID helpers under `prelude::utilities::uuid`.
+
+### Fixed
+- **Local environment byte inference** - Local environment evaluation now routes byte observations through an erased local inference path and decodes actions with the configured action dtype, avoiding dtype mismatches in discrete and continuous environment stepping.
+- **PPO environment rollouts** - PPO-driven environment loops now propagate the trained policy module, mark trajectories truncated when environments truncate or rollout/max-episode limits are reached, and keep observation normalization within the rollout loop.
+- **Model update call shape** - `RelayRLAgent::update_model` now takes actor IDs before the model module, aligning docs and examples around targeted model updates.
+
+### Breaking
+- **Default features changed** - Default builds no longer enable `metrics`; users relying on Prometheus/OpenTelemetry support from defaults must enable the `metrics` feature explicitly.
+- **Inference mode variants renamed** - Replace `ActorInferenceMode::Local(...)` with `ActorInferenceMode::Client(...)`, and `ActorInferenceMode::ServerOverflow(...)` with `ActorInferenceMode::ClientFallback(...)`.
+- **Actor creation return types changed** - `new_actor` now returns `ActorUuid` and `new_actors` returns `Vec<ActorUuid>` instead of `()`.
+- **Environment training return types changed** - `run_env_with_ppo`, `run_env_with_ippo`, and `run_env_with_mappo` now return `ModelModule<B>` instead of `()`.
+- **Trajectory cache accessor renamed** - Replace `get_trajectory_memory()` with `get_trajectory_cache()`.
+- **Model update argument order changed** - `update_model` now takes `(actor_ids, model)` instead of `(model, actor_ids)`.
+- **Prelude config path moved** - Replace `relayrl_framework::prelude::config::*` with `relayrl_framework::prelude::utilities::config::*`.
+
 ## [0.5.0-beta.5] - 2026-06-01
 
 ### Added
