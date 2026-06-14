@@ -10,12 +10,13 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 
-/// 256-bit encryption key
+/// 256-bit ChaCha20-Poly1305 key. Requires the `encryption` feature.
 pub type EncryptionKey = [u8; 32];
 
 /// 96-bit nonce
 pub type NonceBytes = [u8; 12];
 
+/// ChaCha20-Poly1305 AEAD ciphertext with nonce and optional additional authenticated data. Requires `encryption`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedData {
     pub ciphertext: Vec<u8>,
@@ -27,6 +28,7 @@ pub struct EncryptedData {
 }
 
 impl EncryptedData {
+    /// Encrypts `plaintext` with a fresh nonce and returns the ciphertext envelope.
     #[cfg(feature = "encryption")]
     pub fn encrypt(plaintext: &[u8], key: &EncryptionKey) -> Result<Self, EncryptionError> {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
@@ -41,6 +43,7 @@ impl EncryptedData {
         })
     }
 
+    /// Encrypts `plaintext` with additional authenticated data bound to the ciphertext.
     #[cfg(feature = "encryption")]
     pub fn encrypt_with_aad(
         plaintext: &[u8],
@@ -64,6 +67,7 @@ impl EncryptedData {
         })
     }
 
+    /// Decrypts and authenticates the ciphertext; returns `DecryptionFailed` if tampered.
     #[cfg(feature = "encryption")]
     pub fn decrypt(&self, key: &EncryptionKey) -> Result<Vec<u8>, EncryptionError> {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
@@ -85,15 +89,18 @@ impl EncryptedData {
         Ok(plaintext)
     }
 
+    /// Bytes the Poly1305 authentication tag adds to each ciphertext.
     pub const OVERHEAD_BYTES: usize = 16;
 }
 
+/// Generates a random 256-bit key suitable for ChaCha20-Poly1305. Requires `encryption`.
 #[cfg(feature = "encryption")]
 pub fn generate_key() -> EncryptionKey {
     let key = ChaCha20Poly1305::generate_key(&mut OsRng);
     key.into()
 }
 
+/// Errors from ChaCha20-Poly1305 encryption or decryption.
 #[derive(Debug, Clone)]
 pub enum EncryptionError {
     EncryptionFailed(String),

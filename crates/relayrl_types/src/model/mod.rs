@@ -43,6 +43,7 @@ use ort::{
 pub use burn_tensor::Shape;
 pub use hot_reloadable::HotReloadableModel;
 
+/// Errors from model loading, saving, format detection, and inference execution.
 #[derive(Debug, Clone, Error)]
 pub enum ModelError {
     #[error("Serialization error: {0}")]
@@ -83,6 +84,7 @@ impl From<serde_json::Error> for ModelError {
     }
 }
 
+/// On-disk format of a model file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelFileType {
@@ -91,6 +93,7 @@ pub enum ModelFileType {
 }
 
 impl ModelFileType {
+    /// Infers the model file type from the file extension (`pt` or `onnx`).
     pub fn from_path(path: &Path) -> Result<Self, ModelError> {
         match path
             .extension()
@@ -107,6 +110,7 @@ impl ModelFileType {
     }
 }
 
+/// JSON metadata (`metadata.json`) that describes a model directory: shapes, dtypes, file name, and default device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMetadata {
     pub model_file: String,
@@ -119,6 +123,7 @@ pub struct ModelMetadata {
 }
 
 impl ModelMetadata {
+    /// Reads and validates `metadata.json` from `dir`.
     pub fn load_from_dir(dir: impl Into<PathBuf>) -> Result<Self, ModelError> {
         let dir: PathBuf = dir.into();
         let meta_path: PathBuf = dir.join("metadata.json");
@@ -139,6 +144,7 @@ impl ModelMetadata {
         Ok(meta)
     }
 
+    /// Serialises this metadata to `metadata.json` inside `dir`, creating the directory if needed.
     pub fn save_to_dir(&self, dir: impl Into<PathBuf>) -> Result<(), ModelError> {
         let dir: PathBuf = dir.into();
         fs::create_dir_all(&dir)?;
@@ -148,6 +154,7 @@ impl ModelMetadata {
         Ok(())
     }
 
+    /// Returns the resolved path to the model file by joining `dir` and `model_file`.
     pub fn resolve_model_path(&self, dir: &Path) -> PathBuf {
         dir.join(&self.model_file)
     }
@@ -264,6 +271,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
     }
 }
 
+/// A loaded model bundle: the inference engine and its `ModelMetadata`. Use `load_from_path` to construct.
+///
+/// ```ignore
+/// use relayrl::types::model::ModelModule;
+/// use burn_ndarray::NdArray;
+///
+/// let model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+/// ```
 #[derive(Clone)]
 #[cfg(all(
     any(feature = "tch-model", feature = "onnx-model"),
@@ -360,6 +375,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         Ok(model)
     }
 
+    /// Stores TorchScript bytes without an active inference engine when the `tch-model` feature is disabled.
     #[cfg(not(feature = "tch-model"))]
     pub fn from_pt_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
         let raw_bytes: Arc<[u8]> = bytes.into();
@@ -444,6 +460,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         any(feature = "ndarray-backend", feature = "tch-backend")
     ))]
     #[allow(clippy::type_complexity)]
+    /// Runs batched inference over a slice of observations, returning one `(action, mask, aux)` per entry.
     pub fn step_batch<const D_IN: usize, const D_OUT: usize>(
         &self,
         observations: &[Arc<AnyBurnTensor<B, D_IN>>],
@@ -882,10 +899,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         }
     }
 
+    /// Runs inference over a pre-stacked flat `TensorData` batch and returns the output `TensorData`.
     pub fn flat_batch_inference(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
         self.run_inference_tensor_data(input_data)
     }
 
+    /// Returns a zero-filled output `TensorData` with the model's output shape, repeated `rows` times.
     pub fn flat_batch_zeros(&self, rows: usize) -> TensorData {
         self.zeros_batch_action(rows)
     }

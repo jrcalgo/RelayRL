@@ -3,6 +3,7 @@
 use bincode::config;
 use serde::{Deserialize, Serialize};
 
+/// Telemetry provenance for a tensor or trajectory: model version, training step, episode, and optional transport stats. Requires `metadata`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorMetadata {
     pub created_at: u64, // Unix timestamp
@@ -24,6 +25,7 @@ pub struct TensorMetadata {
     pub custom: Option<std::collections::HashMap<String, String>>,
 }
 
+/// Errors from binary metadata serialization/deserialization.
 #[derive(Debug, Clone)]
 pub enum MetadataError {
     SerializationError(String),
@@ -31,6 +33,7 @@ pub enum MetadataError {
 }
 
 impl TensorMetadata {
+    /// Creates minimal `TensorMetadata` with a current timestamp.
     pub fn new(model_version: i64, training_step: u64) -> Self {
         Self {
             created_at: current_timestamp(),
@@ -44,21 +47,25 @@ impl TensorMetadata {
         }
     }
 
+    /// Attaches an episode index to this metadata.
     pub fn with_episode(mut self, episode: u64) -> Self {
         self.episode = Some(episode);
         self
     }
 
+    /// Attaches an actor id string to this metadata.
     pub fn with_agent_id(mut self, agent_id: String) -> Self {
         self.agent_id = Some(agent_id);
         self
     }
 
+    /// Attaches tensor statistics to this metadata.
     pub fn with_statistics(mut self, stats: TensorStatistics) -> Self {
         self.statistics = Some(stats);
         self
     }
 
+    /// Attaches transport info to this metadata.
     pub fn with_transport(mut self, transport: TransportMetadata) -> Self {
         self.transport = Some(transport);
         self
@@ -84,6 +91,7 @@ impl TensorMetadata {
     }
 }
 
+/// Descriptive statistics of a tensor payload (mean, std, min, max, shape, dtype).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorStatistics {
     pub mean: f32,
@@ -94,6 +102,7 @@ pub struct TensorStatistics {
     pub dtype: String,
 }
 
+/// Records whether a payload was compressed/encrypted, its original size, and optional checksum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportMetadata {
     /// Was data compressed?
@@ -112,6 +121,7 @@ pub struct TransportMetadata {
 }
 
 impl TransportMetadata {
+    /// Creates `TransportMetadata` from original and transmitted sizes, inferring compression.
     pub fn new(original_size: usize, transmitted_size: usize) -> Self {
         Self {
             compressed: original_size != transmitted_size,
@@ -128,6 +138,7 @@ impl TransportMetadata {
     }
 }
 
+/// Returns the current Unix time in seconds.
 pub fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

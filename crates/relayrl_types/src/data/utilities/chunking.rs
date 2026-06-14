@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "integrity")]
 use crate::data::utilities::integrity::{Checksum, compute_checksum};
 
+/// A single chunk in a multi-part streamed tensor payload; part of the experimental transport codec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorChunk {
     pub chunk_id: u32,
@@ -15,7 +16,7 @@ pub struct TensorChunk {
     pub offset: usize,
 }
 
-/// Collection of chunks representing a full tensor
+/// Splits a byte payload into ordered, optionally integrity-verified chunks for streaming over the network.
 #[derive(Debug, Clone)]
 pub struct ChunkedTensor {
     chunks: Vec<TensorChunk>,
@@ -26,6 +27,7 @@ pub struct ChunkedTensor {
 }
 
 impl ChunkedTensor {
+    /// Splits `data` into chunks of at most `chunk_size` bytes, assigning sequential ids and optional checksums.
     pub fn from_data(data: &[u8], chunk_size: usize) -> Self {
         let total_chunks = data.len().div_ceil(chunk_size);
         let mut chunks = Vec::with_capacity(total_chunks);
@@ -47,10 +49,12 @@ impl ChunkedTensor {
         }
     }
 
+    /// Returns all chunks as a slice.
     pub fn chunks(&self) -> &[TensorChunk] {
         &self.chunks
     }
 
+    /// Sorts chunks by id, verifies optional checksums, and concatenates them back into the original byte payload.
     pub fn reassemble(chunks: &[TensorChunk]) -> Result<Vec<u8>, ChunkError> {
         if chunks.is_empty() {
             return Err(ChunkError::NoChunks);
@@ -81,10 +85,11 @@ impl ChunkedTensor {
         Ok(result)
     }
 
-    ///  network transmission chunk size (1MB)
+    /// Default network transmission chunk size (1 MiB).
     pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 }
 
+/// Errors from chunk assembly, ordering, or integrity verification.
 #[derive(Debug, Clone)]
 pub enum ChunkError {
     NoChunks,

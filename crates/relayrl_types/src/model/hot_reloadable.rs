@@ -14,8 +14,9 @@ use crate::data::tensor::{AnyBurnTensor, BackendMatcher, ConversionBurnTensor, T
 use crate::model::utils::validate_module;
 use crate::model::{ModelError, ModelModule};
 
-/// Wrapper that lets us swap the underlying model at runtime and run inference
-/// in an async-safe way.
+/// An `ArcSwap`-backed model wrapper that allows the underlying `ModelModule` to be swapped atomically at runtime with no downtime.
+///
+/// Maintained per-actor; the swap count is exposed via `version()`.
 pub struct HotReloadableModel<B: Backend + BackendMatcher<Backend = B>> {
     inner: ArcSwap<ModelModule<B>>,
     version: AtomicI64,
@@ -25,6 +26,7 @@ pub struct HotReloadableModel<B: Backend + BackendMatcher<Backend = B>> {
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
+    /// Loads a model from disk and validates it, returning a fresh reloadable wrapper.
     pub async fn new_from_path<P: AsRef<Path>>(
         path: P,
         device: DeviceType,
@@ -43,6 +45,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         })
     }
 
+    /// Validates a pre-loaded `ModelModule` and wraps it in a new reloadable handle.
     pub async fn new_from_module(
         module: ModelModule<B>,
         device: DeviceType,
@@ -60,22 +63,27 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         })
     }
 
+    /// Returns the device this model was created for.
     pub fn default_device(&self) -> &DeviceType {
         &self.default_device
     }
 
+    /// Returns the number of times this model has been hot-swapped since creation.
     pub fn version(&self) -> i64 {
         self.version.load(Ordering::SeqCst)
     }
 
+    /// Returns the input tensor rank (number of dimensions).
     pub fn input_dim(&self) -> &usize {
         &self.input_dim
     }
 
+    /// Returns the output tensor rank (number of dimensions).
     pub fn output_dim(&self) -> &usize {
         &self.output_dim
     }
 
+    /// Returns an `Arc` snapshot of the currently loaded model.
     pub fn current_module(&self) -> Arc<ModelModule<B>> {
         self.inner.load_full()
     }
@@ -88,6 +96,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         Ok(version)
     }
 
+    /// Atomically replaces the current model with `module` and records `version`, returning it.
     pub async fn reload_from_module(
         &self,
         module: ModelModule<B>,
@@ -138,6 +147,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         Ok(r4sa)
     }
 
+    /// Runs batched inference, returning one `RelayRLAction` per observation.
     pub fn forward_batch<const D_IN: usize, const D_OUT: usize>(
         &self,
         observations: &[Arc<AnyBurnTensor<B, D_IN>>],

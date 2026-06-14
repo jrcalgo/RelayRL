@@ -32,10 +32,16 @@ fn current_timestamp() -> u64 {
         .as_secs()
 }
 
-/// Core trajectory structure for RelayRL
+/// A sequence of `RelayRLAction` entries forming one episode or partial episode.
 ///
-/// A trajectory is a sequence of actions representing an episode or partial episode.
-/// Includes metadata for tracking provenance and enabling distributed training.
+/// ```ignore
+/// use relayrl::types::trajectory::RelayRLTrajectory;
+/// use relayrl::types::action::RelayRLAction;
+///
+/// let mut traj = RelayRLTrajectory::new(1_000);
+/// let done = traj.add_action(RelayRLAction::minimal(1.0, false));
+/// assert!(!done);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayRLTrajectory {
     pub actions: Vec<RelayRLAction>,
@@ -69,6 +75,7 @@ impl Default for RelayRLTrajectory {
 }
 
 impl RelayRLTrajectory {
+    /// Creates an empty trajectory with the given maximum step capacity.
     pub fn new(max_length: usize) -> Self {
         Self {
             actions: Vec::with_capacity(max_length),
@@ -84,6 +91,7 @@ impl RelayRLTrajectory {
         }
     }
 
+    /// Creates an empty trajectory pre-tagged with an actor UUID.
     pub fn with_agent_id(max_length: usize, agent_id: Uuid) -> Self {
         Self {
             actions: Vec::with_capacity(max_length),
@@ -99,6 +107,7 @@ impl RelayRLTrajectory {
         }
     }
 
+    /// Creates an empty trajectory pre-tagged with full provenance metadata.
     pub fn with_metadata(
         max_length: usize,
         agent_id: Option<Uuid>,
@@ -121,7 +130,7 @@ impl RelayRLTrajectory {
         }
     }
 
-    /// Returns true if trajectory should be flushed (reached max length or episode ended)
+    /// Appends an action and returns `true` when the trajectory should be flushed (max length reached or `done == true`).
     pub fn add_action(&mut self, action: RelayRLAction) -> bool {
         let is_done = action.get_done();
         self.actions.push(action);
@@ -129,34 +138,42 @@ impl RelayRLTrajectory {
         is_done || self.actions.len() >= self.max_length
     }
 
+    /// Same as `add_action` but borrows the action (clones internally).
     pub fn add_action_ref(&mut self, action: &RelayRLAction) -> bool {
         self.add_action(action.clone())
     }
 
+    /// Clears all stored actions without changing capacity or metadata.
     pub fn clear(&mut self) {
         self.actions.clear();
     }
 
+    /// Returns the number of stored actions.
     pub fn len(&self) -> usize {
         self.actions.len()
     }
 
+    /// Returns `true` when no actions have been stored.
     pub fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }
 
+    /// Returns `true` when the last stored action has `done == true`.
     pub fn is_complete(&self) -> bool {
         self.actions.last().is_some_and(|a| a.get_done())
     }
 
+    /// Returns `true` when the trajectory has reached its maximum length.
     pub fn is_full(&self) -> bool {
         self.actions.len() >= self.max_length
     }
 
+    /// Returns the sum of rewards across all stored actions.
     pub fn total_reward(&self) -> f32 {
         self.actions.iter().map(|a| a.get_rew()).sum()
     }
 
+    /// Returns the mean reward across all stored actions, or `0.0` when empty.
     pub fn avg_reward(&self) -> f32 {
         if self.actions.is_empty() {
             0.0
@@ -165,63 +182,78 @@ impl RelayRLTrajectory {
         }
     }
 
+    /// Returns seconds elapsed since this trajectory was created.
     pub fn age_seconds(&self) -> u64 {
         current_timestamp().saturating_sub(self.timestamp)
     }
 
+    /// Returns the stored action sequence as a slice.
     pub fn get_actions(&self) -> &[RelayRLAction] {
         &self.actions
     }
 
+    /// Returns the actor UUID associated with this trajectory.
     pub fn get_agent_id(&self) -> Option<&Uuid> {
         self.agent_id.as_ref()
     }
 
+    /// Returns the environment UUID for this trajectory.
     pub fn get_env_id(&self) -> Option<&Uuid> {
         self.env_id.as_ref()
     }
 
+    /// Returns the optional environment label string.
     pub fn get_env_label(&self) -> Option<&str> {
         self.env_label.as_deref()
     }
 
+    /// Returns the Unix creation timestamp for this trajectory.
     pub fn get_timestamp(&self) -> u64 {
         self.timestamp
     }
 
+    /// Returns the episode index, if set.
     pub fn get_episode(&self) -> Option<u64> {
         self.episode
     }
 
+    /// Returns the training step index, if set.
     pub fn get_training_step(&self) -> Option<u64> {
         self.training_step
     }
 
+    /// Sets the owning actor UUID.
     pub fn set_agent_id(&mut self, agent_id: Uuid) {
         self.agent_id = Some(agent_id);
     }
 
+    /// Sets the source environment UUID.
     pub fn set_env_id(&mut self, env_id: Uuid) {
         self.env_id = Some(env_id);
     }
 
+    /// Sets a human-readable environment label.
     pub fn set_env_label(&mut self, env_label: impl Into<String>) {
         self.env_label = Some(env_label.into());
     }
 
+    /// Sets the episode index.
     pub fn set_episode(&mut self, episode: u64) {
         self.episode = Some(episode);
     }
 
+    /// Sets the training step index.
     pub fn set_training_step(&mut self, step: u64) {
         self.training_step = Some(step);
     }
 
+    /// Marks this trajectory as truncated (cut short before the episode ended).
     pub fn set_truncated(&mut self) {
         self.is_truncated = true;
     }
 }
 
+/// A serialized, optionally compressed/encrypted/integrity-checked `RelayRLTrajectory`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodedTrajectory {
     pub data: Vec<u8>,
@@ -242,6 +274,7 @@ pub struct EncodedTrajectory {
     pub original_size: usize,
 }
 
+/// Errors arising during trajectory serialization, encoding, or network transport.
 #[derive(Debug, Clone)]
 pub enum TrajectoryError {
     SerializationError(String),
@@ -288,11 +321,7 @@ impl From<ActionError> for TrajectoryError {
 }
 
 impl RelayRLTrajectory {
-    /// Processing pipeline:
-    /// 1. Serialize to bincode
-    /// 2. Compress (if enabled)
-    /// 3. Encrypt (if enabled)
-    /// 4. Add integrity check (if enabled)
+    /// Encodes the trajectory: serialize → compress → encrypt → integrity-check, based on enabled features.
     #[cfg(feature = "metadata")]
     pub fn encode(&self, config: &CodecConfig) -> Result<EncodedTrajectory, TrajectoryError> {
         let original_data = bincode::serde::encode_to_vec(self, config::standard())
@@ -448,6 +477,7 @@ impl RelayRLTrajectory {
     }
 }
 
+/// Object-safe interface for appending actions to a trajectory.
 pub trait RelayRLTrajectoryTrait {
     type Action;
 

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "quantization")]
 use half::{bf16, f16};
 
+/// Selects how f32 values are quantized for bandwidth-efficient transport. Requires the `quantization` feature.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum QuantizationScheme {
     None,
@@ -14,6 +15,7 @@ pub enum QuantizationScheme {
     Int8Asymmetric,
 }
 
+/// Quantized tensor data with scale/zero-point and the scheme used for dequantization. Requires `quantization`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizedData {
     pub data: Vec<u8>,
@@ -24,6 +26,7 @@ pub struct QuantizedData {
 }
 
 impl QuantizedData {
+    /// Quantizes f32 values to int8 using symmetric scaling (zero-centred).
     pub fn quantize_int8_symmetric(data: &[f32]) -> Self {
         let max_abs = data.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
         let scale = max_abs / 127.0;
@@ -40,6 +43,7 @@ impl QuantizedData {
         }
     }
 
+    /// Quantizes f32 values to uint8 using asymmetric min-max scaling.
     pub fn quantize_int8_asymmetric(data: &[f32]) -> Self {
         let min_val = data.iter().fold(f32::INFINITY, |acc, &x| acc.min(x));
         let max_val = data.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
@@ -58,6 +62,7 @@ impl QuantizedData {
         }
     }
 
+    /// Quantizes f32 values to IEEE half-precision (`f16`), halving storage with minor precision loss.
     #[cfg(feature = "quantization")]
     pub fn quantize_f16(data: &[f32]) -> Self {
         let quantized: Vec<f16> = data.iter().map(|&x| f16::from_f32(x)).collect();
@@ -70,6 +75,7 @@ impl QuantizedData {
         }
     }
 
+    /// Quantizes f32 values to brain-float (`bf16`), preserving f32 exponent range at reduced mantissa precision.
     #[cfg(feature = "quantization")]
     pub fn quantize_bf16(data: &[f32]) -> Self {
         let quantized: Vec<bf16> = data.iter().map(|&x| bf16::from_f32(x)).collect();
@@ -82,6 +88,7 @@ impl QuantizedData {
         }
     }
 
+    /// Reconstructs approximate f32 values from the quantized representation.
     pub fn dequantize(&self) -> Vec<f32> {
         match self.scheme {
             QuantizationScheme::None => bytemuck::cast_slice(&self.data).to_vec(),
@@ -109,6 +116,7 @@ impl QuantizedData {
         }
     }
 
+    /// Returns `original_f32_bytes / quantized_bytes` (higher means smaller payload).
     pub fn size_reduction_ratio(&self) -> f32 {
         let original_size = self.shape.iter().product::<usize>() * 4;
         original_size as f32 / self.data.len() as f32

@@ -13,6 +13,7 @@ use burn_tensor::{
     backend::Backend,
 };
 
+/// Errors arising from tensor serialization, backend resolution, or shape/dtype mismatches.
 #[derive(Debug, Clone)]
 pub enum TensorError {
     SerializationError(String),
@@ -36,8 +37,7 @@ impl std::fmt::Display for TensorError {
     }
 }
 
-/// Tensor backend enumeration for runtime backend selection
-/// Constrains burn-tensor backends to tch and ndarray
+/// Identifies which Burn backend is active; constrains the runtime to NdArray or LibTorch.
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SupportedTensorBackend {
@@ -65,6 +65,7 @@ impl Default for SupportedTensorBackend {
     }
 }
 
+/// Target compute device for tensor operations and model inference.
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DeviceType {
@@ -76,12 +77,16 @@ pub enum DeviceType {
     Mps,
 }
 
+/// Binds a Burn backend to RelayRL's supported backend enumeration and provides device resolution.
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 pub trait BackendMatcher {
     type Backend: Backend + 'static;
 
+    /// Returns `true` when `supported` matches this backend.
     fn matches_backend(supported: &SupportedTensorBackend) -> bool;
+    /// Returns the `SupportedTensorBackend` variant for this backend.
     fn get_supported_backend() -> SupportedTensorBackend;
+    /// Resolves a `DeviceType` to a Burn device handle.
     fn get_device(device: &DeviceType) -> Result<burn_tensor::Device<Self::Backend>, TensorError>;
 }
 
@@ -131,7 +136,7 @@ impl BackendMatcher for Tch {
     }
 }
 
-/// Data type enumeration for tensor serialization
+/// Element dtype for tensor serialization, keyed to the active backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
     #[cfg(feature = "ndarray-backend")]
@@ -151,6 +156,7 @@ impl std::fmt::Display for DType {
     }
 }
 
+/// Element dtype variants for the LibTorch (`tch`) backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TchDType {
     F16,
@@ -182,6 +188,7 @@ impl std::fmt::Display for TchDType {
     }
 }
 
+/// Element dtype variants for the NdArray backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NdArrayDType {
     F16,
@@ -209,7 +216,7 @@ impl std::fmt::Display for NdArrayDType {
     }
 }
 
-/// Wraps dtype-wrapped BurnTensor objects defined in this namespace for easy storage, conversion, and retrieval
+/// A dtype-tagged Burn tensor, erased to a single enum so observations and actions of any element kind can be stored and passed uniformly.
 #[derive(Debug)]
 pub enum AnyBurnTensor<B: Backend + 'static, const D: usize> {
     Float(FloatBurnTensor<B, D>),
@@ -267,6 +274,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         }
     }
 
+    /// Returns the element-kind name (`"float"`/`"int"`/`"bool"`) and `DType` of the wrapped tensor.
     pub fn get_tensor_type(self) -> (String, DType) {
         match self {
             AnyBurnTensor::Float(wrapper) => (String::from("float"), wrapper.dtype),
@@ -275,6 +283,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         }
     }
 
+    /// Converts the wrapped float tensor into `TensorData` with an `f16` dtype.
     pub fn into_f16_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_float();
         let conversion_dtype = match backend {
@@ -291,6 +300,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped float tensor into `TensorData` with a `bf16` dtype (Tch backend only).
     #[cfg(feature = "tch-backend")]
     pub fn into_bf16_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_float();
@@ -310,6 +320,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped float tensor into `TensorData` with an `f32` dtype.
     pub fn into_f32_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_float();
         let conversion_dtype = match backend {
@@ -326,6 +337,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped float tensor into `TensorData` with an `f64` dtype.
     pub fn into_f64_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_float();
         let conversion_dtype = match backend {
@@ -342,6 +354,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped int tensor into `TensorData` with an `i8` dtype.
     pub fn into_i8_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_int();
         let conversion_dtype = match backend {
@@ -358,6 +371,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped int tensor into `TensorData` with an `i16` dtype.
     pub fn into_i16_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_int();
         let conversion_dtype = match backend {
@@ -374,6 +388,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped int tensor into `TensorData` with an `i32` dtype.
     pub fn into_i32_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_int();
         let conversion_dtype = match backend {
@@ -390,6 +405,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped int tensor into `TensorData` with an `i64` dtype.
     pub fn into_i64_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_int();
         let conversion_dtype = match backend {
@@ -407,6 +423,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     }
 
     #[cfg(feature = "tch-backend")]
+    /// Converts the wrapped int tensor into `TensorData` with a `u8` dtype.
     pub fn into_u8_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_int();
         let conversion_dtype = match backend {
@@ -427,6 +444,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
         TensorData::try_from(conversion_tensor)
     }
 
+    /// Converts the wrapped bool tensor into `TensorData` with a `bool` dtype.
     pub fn into_bool_data(self: Arc<Self>) -> Result<TensorData, TensorError> {
         let (tensor, backend) = self.extract_tensor_and_backend_bool();
         let conversion_dtype = match backend {
@@ -444,6 +462,7 @@ impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
     }
 }
 
+/// A `Float` Burn tensor paired with its `DType` for type-erased storage and serialization.
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Debug, Clone)]
 pub struct FloatBurnTensor<B: Backend + 'static, const D: usize> {
@@ -452,6 +471,7 @@ pub struct FloatBurnTensor<B: Backend + 'static, const D: usize> {
 }
 
 impl<B: Backend + 'static, const D: usize> FloatBurnTensor<B, D> {
+    /// Allocates an uninitialized float tensor of the given shape, dtype, and device.
     pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
         let tensor = Arc::new(Tensor::<B, D, Float>::empty(shape.clone(), device));
         Self {
@@ -461,6 +481,7 @@ impl<B: Backend + 'static, const D: usize> FloatBurnTensor<B, D> {
     }
 }
 
+/// An `Int` Burn tensor paired with its `DType` for type-erased storage and serialization.
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Debug, Clone)]
 pub struct IntBurnTensor<B: Backend + 'static, const D: usize> {
@@ -469,6 +490,7 @@ pub struct IntBurnTensor<B: Backend + 'static, const D: usize> {
 }
 
 impl<B: Backend + 'static, const D: usize> IntBurnTensor<B, D> {
+    /// Allocates an uninitialized int tensor of the given shape, dtype, and device.
     pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
         let tensor = Arc::new(Tensor::<B, D, Int>::empty(shape.clone(), device));
         Self {
@@ -478,6 +500,7 @@ impl<B: Backend + 'static, const D: usize> IntBurnTensor<B, D> {
     }
 }
 
+/// A `Bool` Burn tensor paired with its `DType` for type-erased storage and serialization.
 #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Debug, Clone)]
 pub struct BoolBurnTensor<B: Backend + 'static, const D: usize> {
@@ -486,6 +509,7 @@ pub struct BoolBurnTensor<B: Backend + 'static, const D: usize> {
 }
 
 impl<B: Backend + 'static, const D: usize> BoolBurnTensor<B, D> {
+    /// Allocates an uninitialized bool tensor of the given shape, dtype, and device.
     pub fn empty(shape: &Shape, dtype: &DType, device: &<B as Backend>::Device) -> Self {
         let tensor = Arc::new(Tensor::<B, D, Bool>::empty(shape.clone(), device));
         Self {
@@ -495,6 +519,9 @@ impl<B: Backend + 'static, const D: usize> BoolBurnTensor<B, D> {
     }
 }
 
+/// Serializable representation of a tensor: raw byte data, shape, dtype, and backend tag.
+///
+/// Used to move tensors across actor/coordinator boundaries and through trajectory storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorData {
     pub shape: Vec<usize>,
@@ -504,6 +531,7 @@ pub struct TensorData {
 }
 
 impl TensorData {
+    /// Constructs a `TensorData` from raw byte data, shape, dtype, and backend tag.
     pub fn new(
         shape: Vec<usize>,
         dtype: DType,
@@ -518,14 +546,17 @@ impl TensorData {
         }
     }
 
+    /// Returns the total number of elements (product of all shape dimensions).
     pub fn num_el(&self) -> usize {
         self.shape.iter().product()
     }
 
+    /// Returns the number of bytes in the raw data buffer.
     pub fn size_in_bytes(&self) -> usize {
         self.data.len()
     }
 
+    /// Infers the `SupportedTensorBackend` from a `DType`.
     pub fn get_backend_from_dtype(dtype: &DType) -> SupportedTensorBackend {
         match *dtype {
             #[cfg(feature = "ndarray-backend")]

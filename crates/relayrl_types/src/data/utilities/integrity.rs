@@ -4,8 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
-pub type Checksum = [u8; 32]; // 256-bit BLAKE3 hash
+/// 256-bit BLAKE3 hash used as a content checksum. Requires the `integrity` feature.
+pub type Checksum = [u8; 32];
 
+/// Data paired with a BLAKE3 checksum and optional timestamp for tamper detection. Requires `integrity`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedData {
     pub data: Vec<u8>,
@@ -15,6 +17,7 @@ pub struct VerifiedData {
 }
 
 impl VerifiedData {
+    /// Creates a `VerifiedData` with a fresh checksum and current timestamp.
     #[cfg(feature = "integrity")]
     pub fn new(data: Vec<u8>) -> Self {
         let checksum = compute_checksum(&data);
@@ -30,6 +33,7 @@ impl VerifiedData {
         }
     }
 
+    /// Creates a `VerifiedData` with a fresh checksum and no timestamp.
     #[cfg(feature = "integrity")]
     pub fn new_without_timestamp(data: Vec<u8>) -> Self {
         let checksum = compute_checksum(&data);
@@ -40,6 +44,7 @@ impl VerifiedData {
         }
     }
 
+    /// Returns `Err` if the stored checksum does not match a freshly computed one.
     #[cfg(feature = "integrity")]
     pub fn verify(&self) -> Result<(), IntegrityError> {
         let computed = compute_checksum(&self.data);
@@ -53,6 +58,7 @@ impl VerifiedData {
         }
     }
 
+    /// Verifies the checksum and also rejects data older than `max_age_secs`.
     #[cfg(feature = "integrity")]
     pub fn verify_with_age(&self, max_age_secs: u64) -> Result<(), IntegrityError> {
         self.verify()?;
@@ -92,6 +98,7 @@ pub fn compute_keyed_hash(data: &[u8], key: &[u8; 32]) -> Checksum {
     blake3::keyed_hash(key, data).into()
 }
 
+/// Errors from checksum verification or data-age checks.
 #[derive(Debug, Clone)]
 pub enum IntegrityError {
     ChecksumMismatch {

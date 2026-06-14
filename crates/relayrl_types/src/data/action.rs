@@ -33,7 +33,7 @@ use super::tensor::{BackendMatcher, DeviceType, SupportedTensorBackend};
 
 use super::tensor::{DType, TensorData, TensorError};
 
-/// Additional data types that can be attached to actions via the `data` parameter
+/// Auxiliary scalar or tensor value that can be attached to a `RelayRLAction`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RelayRLData {
     DType(DType),
@@ -48,14 +48,14 @@ pub enum RelayRLData {
     Bool(bool),
 }
 
-/// Represents a single timestep in an RL environment, containing:
-/// - Observation tensor
-/// - Action tensor
-/// - Action mask
-/// - Reward value
-/// - Terminal flag
-/// - Auxiliary data
-/// - Agent and timing metadata
+/// A single environment timestep: observation, action, mask, reward, terminal flag, and optional auxiliary data.
+///
+/// ```ignore
+/// use relayrl::types::action::RelayRLAction;
+///
+/// let action = RelayRLAction::minimal(1.5, false);
+/// assert_eq!(action.get_rew(), 1.5);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayRLAction {
     pub(crate) obs: Option<TensorData>,
@@ -76,6 +76,7 @@ fn current_timestamp() -> u64 {
 }
 
 impl RelayRLAction {
+    /// Constructs an action with explicit observation, action, mask, reward, done flag, auxiliary data, and agent id.
     pub fn new(
         obs: Option<TensorData>,
         act: Option<TensorData>,
@@ -97,6 +98,7 @@ impl RelayRLAction {
         }
     }
 
+    /// Converts a `TensorData` to a backend-specific `Tensor`, downcasted to `Any`.
     pub fn to_tensor<B: Backend + BackendMatcher + 'static>(
         tensor_data: &TensorData,
         device: &DeviceType,
@@ -159,6 +161,7 @@ impl RelayRLAction {
         }
     }
 
+    /// Creates a minimal action containing only reward and done flag; all tensor fields are `None`.
     pub fn minimal(rew: f32, done: bool) -> Self {
         Self {
             obs: None,
@@ -172,10 +175,12 @@ impl RelayRLAction {
         }
     }
 
+    /// Returns the stored observation tensor data.
     pub fn get_obs(&self) -> Option<&TensorData> {
         self.obs.as_ref()
     }
 
+    /// Converts and returns the observation as a backend tensor, or `None` if absent.
     pub fn get_obs_tensor<B: Backend + BackendMatcher + 'static>(
         &self,
         device: &DeviceType,
@@ -185,10 +190,12 @@ impl RelayRLAction {
             .and_then(|tensor_data| Self::to_tensor::<B>(tensor_data, device).ok())
     }
 
+    /// Returns the stored action tensor data.
     pub fn get_act(&self) -> Option<&TensorData> {
         self.act.as_ref()
     }
 
+    /// Converts and returns the action as a backend tensor, or `None` if absent.
     pub fn get_act_tensor<B: Backend + BackendMatcher + 'static>(
         &self,
         device: &DeviceType,
@@ -198,10 +205,12 @@ impl RelayRLAction {
             .and_then(|tensor_data| Self::to_tensor::<B>(tensor_data, device).ok())
     }
 
+    /// Returns the stored action mask tensor data.
     pub fn get_mask(&self) -> Option<&TensorData> {
         self.mask.as_ref()
     }
 
+    /// Converts and returns the mask as a backend tensor, or `None` if absent.
     pub fn get_mask_tensor<B: Backend + BackendMatcher + 'static>(
         &self,
         device: &DeviceType,
@@ -211,44 +220,53 @@ impl RelayRLAction {
             .and_then(|tensor_data| Self::to_tensor::<B>(tensor_data, device).ok())
     }
 
+    /// Returns the reward for this timestep.
     pub fn get_rew(&self) -> f32 {
         self.rew
     }
 
+    /// Returns `true` when this is a terminal timestep.
     pub fn get_done(&self) -> bool {
         self.done
     }
 
+    /// Returns auxiliary key-value data attached to this action.
     pub fn get_data(&self) -> Option<&HashMap<String, RelayRLData>> {
         self.data.as_ref()
     }
 
+    /// Returns the actor UUID associated with this action.
     pub fn get_agent_id(&self) -> Option<&Uuid> {
         self.agent_id.as_ref()
     }
 
+    /// Returns the Unix timestamp (seconds) at which this action was created.
     pub fn get_timestamp(&self) -> u64 {
         self.timestamp
     }
 
+    /// Sets the reward value.
     pub fn update_reward(&mut self, reward: f32) {
         self.rew = reward;
     }
 
+    /// Sets the terminal flag.
     pub fn set_done(&mut self, done: bool) {
         self.done = done;
     }
 
+    /// Attaches an actor UUID to this action.
     pub fn set_agent_id(&mut self, agent_id: Uuid) {
         self.agent_id = Some(agent_id);
     }
 
+    /// Returns the number of seconds elapsed since this action was created.
     pub fn age_seconds(&self) -> u64 {
         current_timestamp().saturating_sub(self.timestamp)
     }
 }
 
-/// Codec configuration for encoding/decoding actions
+/// Feature-gated codec settings for compress, encrypt, integrity-verify, and include-metadata pipelines.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodecConfig {
     #[cfg(feature = "compression")]
@@ -284,11 +302,13 @@ impl Default for CodecConfig {
 }
 
 impl CodecConfig {
+    /// Returns a `CodecConfig` with all enabled-feature defaults.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+/// Errors arising during action encoding, decoding, compression, encryption, or integrity checking.
 #[derive(Debug, Clone)]
 pub enum ActionError {
     TensorError(TensorError),
@@ -318,6 +338,7 @@ impl std::fmt::Display for ActionError {
 
 impl std::error::Error for ActionError {}
 
+/// A serialized, optionally compressed/encrypted/integrity-checked `RelayRLAction`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodedAction {
     pub data: Vec<u8>,

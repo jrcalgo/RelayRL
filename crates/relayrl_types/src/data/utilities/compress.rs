@@ -12,6 +12,7 @@ use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 #[cfg(feature = "compression")]
 use zstd::bulk::{compress as zstd_compress, decompress as zstd_decompress};
 
+/// Selects the algorithm used to compress transport payloads. Requires the `compression` feature.
 #[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CompressionScheme {
     /// No compression (passthrough)
@@ -21,6 +22,7 @@ pub enum CompressionScheme {
     Zstd(i32),
 }
 
+/// A compressed byte payload with its original size and the scheme used. Requires the `compression` feature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompressedData {
     pub data: Vec<u8>,
@@ -29,6 +31,7 @@ pub struct CompressedData {
 }
 
 impl CompressedData {
+    /// Compresses `data` with the given scheme and returns a `CompressedData`.
     #[cfg(feature = "compression")]
     pub fn compress(data: &[u8], scheme: CompressionScheme) -> Result<Self, CompressionError> {
         let original_size = data.len();
@@ -45,6 +48,7 @@ impl CompressedData {
         })
     }
 
+    /// Decompresses using the stored scheme.
     #[cfg(feature = "compression")]
     pub fn decompress(&self) -> Result<Vec<u8>, CompressionError> {
         match self.scheme {
@@ -56,6 +60,7 @@ impl CompressedData {
         }
     }
 
+    /// Returns `original_size / compressed_size` (higher means better compression).
     pub fn compression_ratio(&self) -> f32 {
         self.original_size as f32 / self.data.len() as f32
     }
@@ -66,6 +71,7 @@ impl CompressedData {
     }
 }
 
+/// Errors from LZ4 or Zstd compression/decompression.
 #[derive(Debug, Clone)]
 pub enum CompressionError {
     Lz4Error(String),

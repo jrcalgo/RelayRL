@@ -20,6 +20,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Errors from reading or writing trajectories in the Arrow IPC format.
 #[derive(Error, Debug)]
 pub enum ArrowDataError {
     #[error("Failed to build Arrow schema: {0}")]
@@ -36,17 +37,29 @@ pub enum ArrowDataError {
     IoError(#[from] std::io::Error),
 }
 
+/// Alias for [`ArrowDataError`].
 pub type ArrowTrajectoryError = ArrowDataError;
 
+/// Adapter that reads and writes a [`RelayRLTrajectory`] as an Arrow IPC file.
+///
+/// ```ignore
+/// use relayrl::types::records::ArrowTrajectory;
+/// use relayrl::types::trajectory::RelayRLTrajectory;
+///
+/// ArrowTrajectory::new(Some(trajectory)).to_arrow("episode.arrow")?;
+/// let loaded = ArrowTrajectory::new(None).from_arrow("episode.arrow", None, None)?;
+/// ```
 pub struct ArrowTrajectory {
     pub trajectory: Option<RelayRLTrajectory>,
 }
 
 impl ArrowTrajectory {
+    /// Wraps an optional trajectory; pass `None` when loading from a file.
     pub fn new(trajectory: Option<RelayRLTrajectory>) -> Self {
         Self { trajectory }
     }
 
+    /// Writes the held trajectory to `path` as an Arrow IPC file.
     pub fn to_arrow<P: AsRef<Path>>(self, path: P) -> Result<Self, ArrowDataError> {
         let trajectory = self.trajectory.as_ref().ok_or_else(|| {
             ArrowDataError::TrajectoryNotInitialized(
@@ -58,6 +71,7 @@ impl ArrowTrajectory {
         Ok(self)
     }
 
+    /// Loads a trajectory from the Arrow IPC file at `path`, tagging it with the given `episode` and `training_step`.
     pub fn from_arrow<P: AsRef<Path>>(
         mut self,
         path: P,
