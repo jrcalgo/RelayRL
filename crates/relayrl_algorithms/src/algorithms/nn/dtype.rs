@@ -6,6 +6,7 @@ use half;
 
 use super::error::NeuralNetworkError;
 
+/// Returns the size in bytes of one element of the given dtype.
 #[inline(always)]
 pub fn dtype_to_byte_count(dtype: DType) -> usize {
     match dtype {
@@ -35,6 +36,7 @@ pub fn dtype_to_byte_count(dtype: DType) -> usize {
     }
 }
 
+/// Reinterprets raw `bytes` of `byte_dtype` as a `Vec<f32>`.
 #[inline(always)]
 pub fn convert_byte_dtype_to_f32(
     bytes: Vec<u8>,
@@ -116,6 +118,7 @@ pub fn convert_byte_dtype_to_f32(
 }
 
 #[inline(always)]
+/// Reinterprets raw `bytes` of `byte_dtype` as a `Vec<i64>`.
 pub fn convert_byte_dtype_to_i64(
     bytes: &[u8],
     byte_dtype: &DType,

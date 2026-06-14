@@ -29,6 +29,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Constructs the MAPPO algorithm stub (full training implementation is coming soon).
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
     pub fn new(

@@ -7,6 +7,7 @@ use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use super::traits::{NeuralNetwork, NeuralNetworkForward, NeuralNetworkSpec, WeightProvider};
 use super::types::{ActivationKind, LayerSpecs};
 
+/// A fully-connected MLP that implements `NeuralNetwork`, usable as the policy head or value function in any algorithm.
 #[derive(Clone, Debug)]
 pub struct GenericMlp<
     B: Backend + BackendMatcher<Backend = B>,
@@ -29,6 +30,7 @@ impl<
     KindOut: TensorKind<B> + BasicOps<B>,
 > GenericMlp<B, KindIn, KindOut>
 {
+    /// Builds an MLP with the given input/output dims and dtypes, hidden layer sizes, activation, and device.
     pub fn new(
         input_dim: usize,
         input_dtype: DType,

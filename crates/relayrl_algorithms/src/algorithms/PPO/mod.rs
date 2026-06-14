@@ -50,6 +50,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Builds default policy and value networks for the given observation/action dims and dtypes.
     pub fn default(
         obs_dim: usize,
         obs_dtype: DType,
@@ -123,6 +124,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Builds a `PPO` spec with default networks from directories, dimensions, dtypes, buffer size, and device.
     #[allow(clippy::too_many_arguments)]
     pub fn default(
         env_dir: PathBuf,
@@ -170,6 +172,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Constructs a single-agent `PPO` spec from explicit args, hyperparameters, and networks.
     pub fn ppo(
         args: TrainerArgs,
         hyperparams: Option<IPPOParams>,
@@ -182,6 +185,7 @@ where
         }
     }
 
+    /// Constructs an independent multi-agent `IPPO` spec.
     pub fn ippo(
         args: TrainerArgs,
         hyperparams: Option<IPPOParams>,
@@ -194,6 +198,7 @@ where
         }
     }
 
+    /// Constructs a centralized multi-agent `MAPPO` spec.
     pub fn mappo(
         args: TrainerArgs,
         hyperparams: Option<MAPPOParams>,
@@ -227,6 +232,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Validates the spec and instantiates the corresponding runnable trainer.
     pub fn new(spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
             PPOTrainerSpec::PPO {
@@ -444,6 +450,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
     Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
 {
+    /// Registers the first agent slot under `agent_key` for IPPO key-based routing.
     pub fn register_first_slot_with_key(
         &mut self,
         agent_key: String,
@@ -460,6 +467,7 @@ where
         Ok(())
     }
 
+    /// Spawns the epoch's training computation, returning a join handle to its `EpochTrainOutput`.
     pub fn start_epoch_training(
         &mut self,
     ) -> Option<tokio::task::JoinHandle<EpochTrainOutput<B, KindIn, KindOut, Pi>>> {
@@ -469,6 +477,7 @@ where
         }
     }
 
+    /// Applies a completed epoch's trained kernels back into the trainer.
     pub fn apply_epoch_result(&mut self, output: EpochTrainOutput<B, KindIn, KindOut, Pi>) {
         match self {
             PPOTrainer::PPO(inner) | PPOTrainer::IPPO(inner) => inner.apply_epoch_result(output),
@@ -476,6 +485,7 @@ where
         }
     }
 
+    /// Exports the current policy network as a `ModelModule` for inference or hot-swap.
     pub fn acquire_pi_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         match self {
             PPOTrainer::PPO(inner) | PPOTrainer::IPPO(inner) => inner.acquire_pi_module(),
@@ -483,6 +493,7 @@ where
         }
     }
 
+    /// Exports the current value network as a `ModelModule`.
     pub fn acquire_vf_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         match self {
             PPOTrainer::PPO(inner) | PPOTrainer::IPPO(inner) => inner.acquire_vf_module(),
@@ -490,6 +501,7 @@ where
         }
     }
 
+    /// Ingests a trajectory into the rollout buffer, returning `true` when an epoch is ready to train.
     pub async fn receive_trajectory(
         &mut self,
         trajectory: relayrl_types::data::trajectory::RelayRLTrajectory,
@@ -508,6 +520,7 @@ where
         }
     }
 
+    /// Emits the current epoch's accumulated training metrics.
     pub fn log_epoch(&mut self) {
         use crate::templates::base_algorithm::AlgorithmTrait;
         match self {
@@ -520,6 +533,7 @@ where
         }
     }
 
+    /// Returns the single-agent PPO inference kernel.
     pub fn get_ppo_actor_kernel(
         &self,
     ) -> Result<&PPOKernel<B, KindIn, KindOut, Pi>, AlgorithmError> {
@@ -529,6 +543,7 @@ where
         }
     }
 
+    /// Returns the IPPO inference kernel for the agent registered under `agent_key`.
     pub fn get_ippo_actor_kernel(
         &self,
         agent_key: String,

@@ -112,6 +112,7 @@ impl PPOReplayBuffer {
         buffers.returns[start..end].copy_from_slice(&full_returns[..full_returns.len() - 1]);
     }
 
+    /// Returns all buffered observations and their dimension for a value-function pass before GAE.
     pub fn get_obs_for_gae_blocking(&self) -> (Vec<TensorData>, usize) {
         let buffers = self.buffers.lock().unwrap();
         let ptr = self.metadata.buffer_pointer.load(Ordering::Relaxed);
@@ -137,6 +138,7 @@ impl PPOReplayBuffer {
         (buffers.obs[..cut_step].to_vec(), obs_dim)
     }
 
+    /// Stores the value estimates and computes GAE advantages/returns over all buffered episodes.
     pub fn finalize_gae_blocking(&self, values: Vec<f32>) {
         let mut buffers = self.buffers.lock().unwrap();
         let gamma = self.metadata.gamma;
@@ -156,6 +158,7 @@ impl PPOReplayBuffer {
         }
     }
 
+    /// Finalizes GAE and drains the buffer into a normalized `PPOBatch` ready for training.
     pub fn finalize_and_drain_blocking(&self, values: Vec<f32>) -> Option<PPOBatch> {
         let mut buffers = self.buffers.lock().unwrap();
         let gamma = self.metadata.gamma;
@@ -387,6 +390,7 @@ impl PPOReplayBuffer {
             .store(old_path_start.saturating_sub(cut_step), Ordering::Relaxed);
     }
 
+    /// Returns the number of complete episodes currently buffered.
     pub fn get_episode_count(&self) -> usize {
         self.buffers.lock().unwrap().episode_boundaries.len()
     }
@@ -401,6 +405,7 @@ impl PPOReplayBuffer {
             .unwrap_or(0)
     }
 
+    /// Returns `true` when the buffered episode count has reached the configured maximum.
     pub fn is_full(&self) -> bool {
         match self.max_buffered_episodes {
             None => false,
@@ -408,6 +413,7 @@ impl PPOReplayBuffer {
         }
     }
 
+    /// Returns how many leading episodes are needed to accumulate at least `min_steps` steps.
     pub fn episodes_needed_for_steps(&self, min_steps: usize) -> usize {
         let buffers = self.buffers.lock().unwrap();
         for (i, &(_, end, _)) in buffers.episode_boundaries.iter().enumerate() {

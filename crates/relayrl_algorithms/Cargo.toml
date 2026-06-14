@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_algorithms"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Independent / Multi-Agent Proximal Policy Optimization (PPO) Algorithms for the RelayRL framework"
 repository = "https://github.com/jrcalgo/relayrl"

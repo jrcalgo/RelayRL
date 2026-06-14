@@ -1,6 +1,7 @@
 use burn_tensor::backend::Backend;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
+/// Activation function variant passed to `GenericMlp::new` and `ValueFunction`.
 #[derive(Clone, Debug)]
 pub enum ActivationKind<B: Backend + BackendMatcher<Backend = B>> {
     ReLU(burn_nn::activation::Relu),
@@ -15,10 +16,15 @@ pub enum ActivationKind<B: Backend + BackendMatcher<Backend = B>> {
     None,
 }
 
+/// Input dimension of a linear layer.
 pub type Dim0 = usize;
+/// Output dimension of a linear layer.
 pub type Dim1 = usize;
+/// Flat weight vector for a linear layer.
 pub type Weights = Vec<f32>;
+/// Flat bias vector for a linear layer.
 pub type Biases = Vec<f32>;
+/// Per-layer `(in_dim, out_dim, weights, biases)` specs produced by `WeightProvider::get_layer_specs`.
 pub type LayerSpecs = Vec<(Dim0, Dim1, Weights, Biases)>;
 
 /// Describes a single operation in an architecture-aware forward pass.

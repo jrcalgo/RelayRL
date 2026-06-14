@@ -459,6 +459,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Wraps a policy network as a discrete policy head.
     pub fn new(pi: Pi) -> Result<Self, NeuralNetworkError> {
         Ok(Self {
             pi,
@@ -466,6 +467,7 @@ where
         })
     }
 
+    /// Runs the policy network forward pass on an observation, producing action logits.
     pub fn forward<const IN_D: usize, const OUT_D: usize>(
         &self,
         obs: Tensor<B, IN_D, KindIn>,
@@ -473,6 +475,7 @@ where
         self.pi.forward(obs)
     }
 
+    /// Returns the policy network's per-layer weight specs for model export.
     pub fn get_pi_layer_specs(&self) -> LayerSpecs {
         self.pi.get_layer_specs()
     }
@@ -497,6 +500,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Wraps a policy network as a continuous policy head.
     pub fn new(pi: Pi) -> Result<Self, NeuralNetworkError> {
         Ok(Self {
             pi,
@@ -504,6 +508,7 @@ where
         })
     }
 
+    /// Runs the policy network forward pass on an observation, producing distribution parameters.
     pub fn forward<const IN_D: usize, const OUT_D: usize>(
         &self,
         obs: Tensor<B, IN_D, KindIn>,
@@ -511,6 +516,7 @@ where
         self.pi.forward(obs)
     }
 
+    /// Returns the policy network's per-layer weight specs for model export.
     pub fn get_pi_layer_specs(&self) -> LayerSpecs {
         self.pi.get_layer_specs()
     }
@@ -584,6 +590,7 @@ pub struct PPOKernelFactory<
     _phantom: std::marker::PhantomData<(B, KindIn, KindOut, Pi)>,
 }
 
+/// Concrete discrete-action PPO kernel: policy head, value function, and optional trainer with return statistics.
 pub struct DiscretePPOKernel<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -598,6 +605,7 @@ pub struct DiscretePPOKernel<
     pub returns_count: u64,
 }
 
+/// Concrete continuous-action PPO kernel: policy head, value function, and optional trainer with return statistics.
 pub struct ContinuousPPOKernel<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -662,6 +670,7 @@ impl<
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 > PPOKernelFactory<B, KindIn, KindOut, Pi>
 {
+    /// Builds a `PPOKernel` from a policy head, value MLP, and training args, validating matching dimensions.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(
         pi_head: PPOPolicyHead<B, KindIn, KindOut, Pi>,
@@ -768,6 +777,7 @@ impl<
     Pi: NeuralNetwork<B, KindIn, KindOut> + Clone,
 > PPOKernel<B, KindIn, KindOut, Pi>
 {
+    /// Clones the kernel for inference only, dropping the trainer state.
     pub fn clone_for_inference(&self) -> Self {
         match self {
             PPOKernel::Discrete(kernel) => PPOKernel::Discrete(DiscretePPOKernel {
@@ -789,6 +799,7 @@ impl<
         }
     }
 
+    /// Produces a shareable, inference-only `PPOKernelSnapshot` backed by an `Arc`.
     pub fn to_arc_snapshot(&self) -> PPOKernelSnapshot<B, KindIn, KindOut, Pi> {
         PPOKernelSnapshot {
             kernel: Arc::new(self.clone_for_inference()),
@@ -803,6 +814,7 @@ impl<
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 > PPOKernelSnapshot<B, KindIn, KindOut, Pi>
 {
+    /// Samples actions from raw policy output bytes, returning serialized action and log-probability bytes for `n_envs`.
     pub fn policy_forward_bytes(
         &self,
         raw_model_output: &TensorData,
@@ -846,6 +858,7 @@ impl<
         }
     }
 
+    /// Extracts value-function layer specs from the trainer (after training); falls back to the inference vf.
     pub fn get_vf_layer_specs(&self) -> Option<LayerSpecs> {
         match self {
             PPOKernel::Discrete(kernel) => {

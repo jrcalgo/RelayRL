@@ -3,6 +3,7 @@ use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
 use super::types::ArchLayer;
 
+/// Serializes flat MLP layer specs into a runnable `ModelModule` (ONNX, or LibTorch under `tch-model`).
 pub fn acquire_model_module<B: Backend + BackendMatcher<Backend = B>>(
     model_name: &str,
     layer_specs: Vec<(usize, usize, Vec<f32>, Vec<f32>)>,

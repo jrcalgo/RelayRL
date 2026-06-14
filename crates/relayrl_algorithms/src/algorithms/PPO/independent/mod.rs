@@ -350,6 +350,7 @@ where
         Ok(algorithm)
     }
 
+    /// Returns the inference kernel of the single (or first) agent slot.
     pub fn get_ppo_actor_kernel(
         &self,
     ) -> Result<&PPOKernel<B, KindIn, KindOut, Pi>, AlgorithmError> {
@@ -367,6 +368,7 @@ where
         ))
     }
 
+    /// Returns the inference kernel for the agent slot registered under `agent_key`.
     pub fn get_ippo_actor_kernel(
         &self,
         agent_key: AgentKey,
@@ -626,6 +628,7 @@ where
         }
     }
 
+    /// Exports the first agent slot's trained policy as a `ModelModule` for inference or hot-swap.
     pub fn acquire_pi_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         let slot = self.runtime.components.agent_slots.first()?;
         let layer_specs = slot.kernel.as_ref()?.get_pi_layer_specs()?;

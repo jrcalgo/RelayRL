@@ -5,6 +5,9 @@ use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
 use super::types::{ArchLayer, LayerSpecs};
 
+/// Combined supertrait for all algorithm-compatible networks: spec, forward pass, and weight export.
+///
+/// Implement this trait to plug a custom architecture into `PPOTrainerSpec`.
 pub trait NeuralNetwork<B, KindIn, KindOut>:
     NeuralNetworkSpec<B, KindIn, KindOut> + NeuralNetworkForward<B, KindIn, KindOut> + WeightProvider
 where
@@ -21,6 +24,7 @@ where
     ) -> Self;
 }
 
+/// Exposes the input/output dimensions and dtypes of a network for validation and config.
 pub trait NeuralNetworkSpec<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -33,6 +37,7 @@ pub trait NeuralNetworkSpec<
     fn output_dtype(&self) -> &DType;
 }
 
+/// Generic forward pass used by actors and algorithm kernels.
 pub trait NeuralNetworkForward<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,

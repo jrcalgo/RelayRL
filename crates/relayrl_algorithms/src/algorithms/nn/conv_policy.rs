@@ -60,6 +60,7 @@ fn elu<B: Backend, const D: usize>(x: Tensor<B, D, Float>) -> Tensor<B, D, Float
 
 // ── ConvNetPolicy ─────────────────────────────────────────────────────────────
 
+/// A convolutional policy network (3 conv layers + 2 dense layers) for pixel observations, implementing `NeuralNetwork`.
 #[derive(Clone, Debug)]
 pub struct ConvNetPolicy<
     B: Backend + BackendMatcher<Backend = B>,
@@ -90,6 +91,7 @@ impl<
     KindOut: TensorKind<B> + BasicOps<B>,
 > ConvNetPolicy<B, KindIn, KindOut>
 {
+    /// Builds the conv policy for a flat `input_dim` pixel observation and `output_dim` action space.
     pub fn new(
         input_dim: usize,
         input_dtype: DType,

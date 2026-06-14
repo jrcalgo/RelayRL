@@ -10,6 +10,7 @@ use super::generic_mlp::GenericMlp;
 use super::traits::{NeuralNetwork, NeuralNetworkForward, NeuralNetworkSpec, WeightProvider};
 use super::types::{ActivationKind, LayerSpecs};
 
+/// A critic network wrapping a `GenericMlp` and enforcing a single f32 output — the value estimate.
 #[derive(Clone, Debug)]
 pub struct ValueFunction<
     B: Backend + BackendMatcher<Backend = B>,
@@ -19,6 +20,7 @@ pub struct ValueFunction<
 impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B> + BasicOps<B>>
     ValueFunction<B, KindIn>
 {
+    /// Wraps a `GenericMlp` as a value function, erroring unless its output is a single f32.
     pub fn new(vf_mlp: GenericMlp<B, KindIn, Float>) -> Result<Self, NeuralNetworkError> {
         match (vf_mlp.output_dtype(), vf_mlp.output_dim()) {
             (DType::NdArray(NdArrayDType::F32), 1) => Ok(Self(vf_mlp)),
@@ -31,6 +33,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B> + BasicOps<
         }
     }
 
+    /// Builds a value function from a fresh MLP with the given hidden sizes and activation.
     pub fn new_generic_mlp(
         input_dim: usize,
         input_dtype: DType,
@@ -65,6 +68,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B> + BasicOps<
         ))
     }
 
+    /// Builds a value function from a default-sized MLP for the given input.
     pub fn new_default_mlp(
         input_dim: usize,
         input_dtype: DType,
@@ -79,6 +83,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, KindIn: TensorKind<B> + BasicOps<
         )))
     }
 
+    /// Returns the value network's per-layer weight specs for model export.
     pub fn get_vf_layer_specs(&self) -> LayerSpecs {
         self.0.get_layer_specs()
     }

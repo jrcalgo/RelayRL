@@ -1,3 +1,4 @@
+/// Errors from neural network construction, dimension validation, or device/dtype resolution.
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum NeuralNetworkError {
     #[error("Unsupported device: {0}")]

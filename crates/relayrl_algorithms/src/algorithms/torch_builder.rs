@@ -1,14 +1,14 @@
-/// LibTorch (TorchScript) model builder for fully-connected MLPs and ConvNets.
-///
-/// Two public entry points:
-/// - `build_pt_mlp_temp`  — dense MLP from flat `LayerSpecs`.
-/// - `build_pt_conv_temp` — architecture-aware conv+dense network from `ArchLayer` slice.
-///
-/// Both follow the same temporary-file approach:
-/// 1. Construct the model in memory using `tch::nn`.
-/// 2. Freeze parameters and trace via `CModule::create_by_tracing`.
-/// 3. Save to a temp file with `CModule::save`.
-/// 4. Read the bytes back and return `(bytes, temp_path)`.
+//! LibTorch (TorchScript) model builders for fully-connected MLPs and ConvNets.
+//!
+//! Two public entry points:
+//! - `build_pt_mlp_temp`  — dense MLP from flat `LayerSpecs`.
+//! - `build_pt_conv_temp` — architecture-aware conv+dense network from `ArchLayer` slice.
+//!
+//! Both follow the same temporary-file approach:
+//! 1. Construct the model in memory using `tch::nn`.
+//! 2. Freeze parameters and trace via `CModule::create_by_tracing`.
+//! 3. Save to a temp file with `CModule::save`.
+//! 4. Read the bytes back and return `(bytes, temp_path)`.
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -129,6 +129,7 @@ pub fn build_pt_mlp_temp(
     Ok((bytes, temp_path))
 }
 
+/// Stub that errors because TorchScript export requires the `tch-model` feature.
 #[cfg(not(feature = "tch-model"))]
 pub fn build_pt_mlp_temp(
     _layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)],
@@ -262,6 +263,7 @@ pub fn build_pt_conv_temp(
     Ok((bytes, temp_path))
 }
 
+/// Stub that errors because convolutional TorchScript export requires the `tch-model` feature.
 #[cfg(not(feature = "tch-model"))]
 pub fn build_pt_conv_temp(
     _arch: &[crate::algorithms::ArchLayer],
