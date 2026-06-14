@@ -357,4 +357,4 @@ Final release of the prototype version with Python-first design.
 - Single-agent focused API
 - Unified configuration system
 
-*For detailed v0.4.52 documentation, see the prototype README in [RelayRL-prototype/relayrl_framework/](https://github.com/jrcalgo/RelayRL-prototype)*
+*For detailed v0.4.52 documentation, see the prototype README in [RL4Sys-prototype/relayrl_framework/](https://github.com/jrcalgo/RL4Sys-prototype)*

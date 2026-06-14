@@ -3,135 +3,114 @@
 
 //! # RelayRL Framework
 //!
-//! **Version:** 0.5.0-beta
-//! **Status:** Under active development, expect breaking changes
-//! **Beta Scope:** The supported beta path is the local/default client runtime. Transport-backed
-//! and server-backed workflows are still experimental.
+//! **Version:** 0.5.0 &middot; **Status:** stable
 //!
-//! RelayRL is a high-performance, multi-actor native reinforcement learning framework designed for
-//! concurrent actor execution and efficient trajectory collection. This crate currently provides the core
-//! client runtime infrastructure for distributed RL experiments.
+//! RelayRL is a high-performance, multi-actor reinforcement learning framework built for
+//! concurrent actor execution and efficient trajectory collection. This crate is the
+//! top-level runtime: it composes the data model from [`relayrl_types`] and the learning
+//! logic from [`relayrl_algorithms`] into a controllable, scalable client that runs many
+//! actors, performs local inference, and streams trajectories to data sinks.
 //!
-//! ## Architecture Overview
+//! ## Architecture overview
 //!
-//! The framework follows a layered architecture optimized for concurrent multi-actor execution:
+//! The client runtime is layered, with a small public API over an internal,
+//! concurrency-oriented runtime:
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────┐
-//! │  Public API (RelayRLAgent, AgentBuilder)        │
-//! └─────────────────────────────────────────────────┘
-//!                         │
-//! ┌─────────────────────────────────────────────────┐
-//! │  Runtime Coordination Layer                     │
-//! │  - ClientCoordinator (orchestrator)                            │
-//! │  - ScaleManager (router scaling)                │
-//! │  - StateManager (actor state)                   │
-//! │  - LifecycleManager (config, shutdown)          │
-//! └─────────────────────────────────────────────────┘
-//!                         │
-//! ┌─────────────────────────────────────────────────┐
-//! │  Message Routing Layer                          │
-//! │  - RouterDispatcher                             │
-//! │  - Router instances (scalable workers)          │
-//! └─────────────────────────────────────────────────┘
-//!                         │
-//! ┌─────────────────────────────────────────────────┐
-//! │  Actor Execution Layer                          │
-//! │  - Concurrent Actor instances                   │
-//! │  - Local model inference                        │
-//! │  - Trajectory building                          │
-//! └─────────────────────────────────────────────────┘
-//!                         │
-//! ┌─────────────────────────────────────────────────┐
-//! │  Data Collection Layer                          │
-//! │  - TrajectoryBuffer (priority scheduling)       │
-//! │  - File Sink (Arrow/CSV)                        │
-//! │  - Transport Sink (ZMQ/NATS, experimental)      │
-//! └─────────────────────────────────────────────────┘
+//! Public API ......... RelayRLAgent + AgentBuilder
+//!        |
+//! Coordination ....... ClientCoordinator (orchestrator)
+//!        |             ScaleManager (router scaling)
+//!        |             StateManager (actor state)
+//!        |             LifecycleManager (config, shutdown)
+//!        |
+//! Routing ............ RouterDispatcher + scalable Router workers
+//!        |
+//! Actors ............. concurrent actors, local model inference, trajectory building
+//!        |
+//! Data sinks ......... file sink (Arrow/CSV), transport sink (ZMQ/NATS, experimental)
 //! ```
 //!
-//! ## Module Structure
+//! The local/default control flow is:
+//! `AgentBuilder` -> `RelayRLAgent` -> `ClientCoordinator` -> routers/actors -> data sinks.
 //!
-//! - **[`network::client`]**: Multi-actor client runtime (complete rewrite in v0.5.0)
-//!   - [`agent`](network::client::agent): Public API for agent construction and interaction
-//!   - `runtime`: Internal runtime components
-//!     - `actor`: Individual actor implementations with local inference
-//!     - `coordination`: Lifecycle, scaling, metrics, and state management
-//!     - `router`: Message routing between actors and data sinks
-//!     - `data`: Transport layers (ZMQ/NATS) and file sinks (Arrow/CSV)
+//! ## Module structure
 //!
-//! - **[`utilities`]**: Configuration loading, logging, metrics, and system utilities
+//! - [`network`]: the runtime.
+//!   - [`network::client`]: the multi-actor client runtime (rewritten in v0.5.0).
+//!     - [`agent`](network::client::agent): the public [`RelayRLAgent`](network::client::agent)
+//!       facade and [`AgentBuilder`](network::client::agent) construction API.
+//!     - The internal `runtime` holds `coordination` (coordinator, lifecycle, scaling, state),
+//!       `router` (message routing), and `data` (file sinks plus experimental transport sinks).
+//!   - `network::server`: optional, experimental training/inference servers behind feature
+//!     flags.
+//! - [`utilities`]: JSON configuration loading/builders, logging (log4rs), metrics
+//!   (Prometheus/OpenTelemetry), and Tokio helpers.
+//! - [`prelude`]: grouped re-exports spanning this crate plus [`relayrl_types`],
+//!   [`relayrl_algorithms`], and `relayrl_env_trait` (see the [`prelude`] docs for the
+//!   available paths).
 //!
-//! ## Current Status
+//! ## Design notes
 //!
-//! ### Available
-//! - Local/default multi-actor client runtime with concurrent execution
-//! - Local Arrow/CSV file sink for trajectory data
-//! - Builder pattern API for ergonomic agent construction
-//! - Router-based message dispatching with scaling support
-//! - Actor lifecycle management (create, remove, scale)
+//! - **Generic over a Burn backend.** [`RelayRLAgent`](network::client::agent) and
+//!   [`AgentBuilder`](network::client::agent) are parameterized by a single backend `B`
+//!   (e.g. `burn_ndarray::NdArray`); observation/action tensor ranks and kinds are supplied
+//!   per call to `request_action`, not on the builder.
+//! - **Builder produces a `(RelayRLAgent, AgentStartParameters)` pair.** The agent handle and
+//!   its startup parameters are separated so the runtime can be started, restarted, and
+//!   shut down without rebuilding the agent.
+//! - **Async, concurrent runtime.** The runtime is Tokio-based; routers can be scaled live
+//!   via `scale_throughput`, and actors run concurrently with interior-mutable shared state.
+//! - **What lives elsewhere.** Algorithms are in [`relayrl_algorithms`]; data types, tensors,
+//!   and codecs are in [`relayrl_types`]; the environment contract is in `relayrl_env_trait`.
 //!
-//! ### Under Development
-//! - Transport-backed client workflows (`zmq-transport`, `nats-transport`)
-//! - Inference server integration
-//! - Training server integration
+//! ## Quick start
 //!
-//! ### Not In This Crate
-//! - **Algorithms**: See `relayrl_algorithms` crate
-//! - **Type Definitions**: See `relayrl_types` crate
-//!
-//! ## Quick Example
+//! Build the agent, start the runtime, request actions, and shut down. The example is
+//! `no_run` because it expects a model directory and config on disk:
 //!
 //! ```rust,no_run
 //! use relayrl_framework::prelude::network::*;
 //! use relayrl_framework::prelude::types::model::ModelModule;
-//! use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
 //! use burn_ndarray::NdArray;
 //! use burn_tensor::{Tensor, Float};
 //! use std::path::PathBuf;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Build agent with 4 concurrent actors
+//! // Construct the agent and its startup parameters (single backend type parameter).
 //! let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
-//! let (mut agent, params) = AgentBuilder::<NdArray, 2, 2, Float, Float>::builder()
-//!     .actor_count(4)
+//! let (mut agent, params) = AgentBuilder::<NdArray>::builder()
 //!     .router_scale(2)
-//!     .default_device(DeviceType::Cpu)
 //!     .default_model(default_model)
 //!     .config_path(PathBuf::from("client_config.json"))
 //!     .build()
 //!     .await?;
 //!
-//! // Start runtime
+//! // Start the coordinator, routers, and actors.
 //! agent.start(params).await?;
 //!
-//! // Request actions from actors
+//! // Request actions: const generics are the observation/action tensor ranks.
 //! let ids = agent.get_actor_ids()?;
 //! let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
-//! let _actions = agent.request_action(
-//!     ids,
-//!     observation,
-//!     None,
-//!     0.0
-//! ).await?;
+//! let _actions = agent
+//!     .request_action::<2, 2, Float, Float>(ids, observation, None, 0.0)
+//!     .await?;
 //!
-//! // Shutdown gracefully
+//! // Tear everything down gracefully.
 //! agent.shutdown().await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ## Feature Flags
+//! ## Feature flags
 //!
-//! - `client` (default): Core client runtime
-//! - `tch-backend`: Tch backend support
-//! - `inference-server`: Inference server support (under development)
-//! - `training-server`: Training server support (under development)
-//! - `zmq-transport`: Experimental network transport (ZMQ)
-//! - `nats-transport`: Experimental network transport (NATS)
-//! - `logging`: Log4rs logging
-//! - `metrics`: Prometheus/OpenTelemetry metrics
-//! - `profile`: Flamegraph and tokio-console profiling
+//! - `client` (default): core client runtime.
+//! - `logging` (default): log4rs logging.
+//! - `tch-backend`: LibTorch (`tch`) backend support via [`relayrl_types`].
+//! - `metrics`: Prometheus/OpenTelemetry metrics.
+//! - `profile`: flamegraph and tokio-console profiling.
+//! - `zmq-transport` / `nats-transport`: experimental network transports.
+//! - `inference-server` / `training-server`: experimental server integrations.
 
 /// Core networking functionality for RelayRL.
 ///
@@ -142,21 +121,17 @@
 /// The [`client`](network::client) module contains the complete rewrite (v0.5.0) of the
 /// multi-actor client runtime.
 ///
-/// In `0.5.0-beta`, the supported path is the local/default client runtime, including:
+/// In `0.5.0`, the supported path is the local/default client runtime, including:
 /// - Public [`agent`](network::client::agent) API for agent construction and control
 /// - Internal runtime coordination (scaling, lifecycle, state management)
 /// - Router-based message dispatching
 /// - Actor execution with local inference
+/// - Vectorized environment execution per actor
 /// - Data collection via Arrow/CSV file sinks
 ///
 /// Transport-backed workflows remain experimental even when the corresponding feature flags are
 /// enabled.
 ///
-/// ## Server Components (Optional)
-///
-/// The [`server`](network::server) module provides training and inference server implementations,
-/// available via feature flags (`training_server`, `inference_server`). These are still
-/// experimental and not part of the `0.5.0-beta` support promise.
 pub mod network;
 
 /// Configuration, logging, metrics, and system utilities.
@@ -192,24 +167,6 @@ pub mod prelude {
         pub use relayrl_algorithms::algorithms::*;
     }
 
-    pub mod config {
-        pub use crate::utilities::configuration::{
-            ClientConfigBuilder, ClientConfigLoader, ClientConfigParams,
-            TrainingServerConfigBuilder, TrainingServerConfigLoader, TrainingServerConfigParams,
-            TransportConfigBuilder, TransportConfigParams,
-        };
-        pub use relayrl_types::HyperparameterArgs;
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        pub mod network_codec {
-            pub use relayrl_types::data::utilities::chunking::*;
-            pub use relayrl_types::data::utilities::compress::*;
-            pub use relayrl_types::data::utilities::encrypt::*;
-            pub use relayrl_types::data::utilities::integrity::*;
-            pub use relayrl_types::data::utilities::metadata::*;
-            pub use relayrl_types::data::utilities::quantize::*;
-        }
-    }
-
     pub mod network {
         pub use crate::network::client::agent::*;
         // pub use crate::network::server::inference_server::*;
@@ -228,6 +185,10 @@ pub mod prelude {
     }
 
     pub mod types {
+        pub mod action {
+            pub use relayrl_types::prelude::action::*;
+        }
+
         pub mod tensor {
             pub mod burn {
                 pub use relayrl_types::prelude::tensor::burn::*;
@@ -237,16 +198,40 @@ pub mod prelude {
             }
         }
 
-        pub mod action {
-            pub use relayrl_types::prelude::action::*;
-        }
-
         pub mod trajectory {
             pub use relayrl_types::prelude::trajectory::*;
         }
 
         pub mod model {
             pub use relayrl_types::prelude::model::*;
+        }
+
+        pub mod records {
+            pub use relayrl_types::prelude::records::*;
+        }
+    }
+
+    pub mod utilities {
+        pub mod config {
+            pub use crate::utilities::configuration::{
+                ClientConfigBuilder, ClientConfigLoader, ClientConfigParams,
+                TrainingServerConfigBuilder, TrainingServerConfigLoader,
+                TrainingServerConfigParams, TransportConfigBuilder, TransportConfigParams,
+            };
+            pub use relayrl_types::HyperparameterArgs;
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            pub mod network_codec {
+                pub use relayrl_types::data::utilities::chunking::*;
+                pub use relayrl_types::data::utilities::compress::*;
+                pub use relayrl_types::data::utilities::encrypt::*;
+                pub use relayrl_types::data::utilities::integrity::*;
+                pub use relayrl_types::data::utilities::metadata::*;
+                pub use relayrl_types::data::utilities::quantize::*;
+            }
+        }
+
+        pub mod uuid {
+            pub use active_uuid_registry::registry_uuid::*;
         }
     }
 }

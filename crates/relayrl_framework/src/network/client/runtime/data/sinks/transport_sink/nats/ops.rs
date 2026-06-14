@@ -1,6 +1,6 @@
 //! NATS transport operations for the experimental client transport path.
 //!
-//! The local/default client runtime is the supported `0.5.0-beta` path. NATS-backed workflows in
+//! The local/default client runtime is the supported `0.5.0` path. NATS-backed workflows in
 //! this module remain experimental.
 
 use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};

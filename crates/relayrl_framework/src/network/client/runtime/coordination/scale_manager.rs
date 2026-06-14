@@ -347,8 +347,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
                 ProcessInitFlag::InferenceModelInit(default_model) => {
                     let model_mode = match self.shared_client_modes.actor_inference_mode.clone() {
                         ActorInferenceMode::Server(params) => params.model_mode,
-                        ActorInferenceMode::ServerOverflow(_, _) => todo!(),
-                        ActorInferenceMode::Local(params) => params,
+                        ActorInferenceMode::ClientFallback(_, _) => todo!(),
+                        ActorInferenceMode::Client(params) => params,
                     };
 
                     ProcessInitRequest::InferenceModelInit(model_mode, default_model)

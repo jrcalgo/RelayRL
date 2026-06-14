@@ -1,6 +1,6 @@
 //! ZMQ transport operations for the experimental client transport path.
 //!
-//! The local/default client runtime is the supported `0.5.0-beta` path. ZMQ-backed workflows in
+//! The local/default client runtime is the supported `0.5.0` path. ZMQ-backed workflows in
 //! this module remain experimental.
 
 use crate::network::HyperparameterArgs;
@@ -682,7 +682,7 @@ impl ZmqInferenceOps {
 }
 
 /// Experimental client-side ZMQ inference operations. These request paths are not implemented as
-/// part of the `0.5.0-beta` support promise.
+/// part of the `0.5.0` support promise.
 impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_inference_request(
         &self,
@@ -1044,7 +1044,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         // Experimental transport path: shared vs independent server-side algorithm
-        // initialization is not finalized in `0.5.0-beta`.
+        // initialization is not finalized in `0.5.0`.
         let validated_entry = validate_entry(scaling_entry)?;
         let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[macro_use]
-pub mod client_config_macros {
+pub(crate) mod client_config_macros {
     /// Resolves config json file between argument and default value.
     #[macro_export]
     macro_rules! resolve_client_config_json_path {
@@ -57,7 +57,7 @@ pub static DEFAULT_CLIENT_CONFIG_PATH: Lazy<Option<PathBuf>> =
     Lazy::new(|| get_or_create_client_config_json_path!(PathBuf::from("client_config.json")));
 
 #[macro_use]
-pub mod server_config_macros {
+pub(crate) mod server_config_macros {
     /// Resolves config json file between argument and default value.
     #[macro_export]
     macro_rules! resolve_training_server_config_json_path {

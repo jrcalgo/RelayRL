@@ -4,14 +4,7 @@
 //! - `RelayRLAgent`: a thin facade over the runtime coordinator.
 //! - `AgentBuilder`: ergonomic construction of an agent instance plus its startup parameters.
 //! - Mode/config enums that describe inference and trajectory recording behavior.
-//!
-//! Beta scope in `0.5.0-beta`:
-//! - Supported: the local/default client path, including local inference, actor lifecycle
-//!   management, router scaling, and local trajectory writing.
-//! - Experimental: transport-backed and server-backed workflows enabled by
-//!   `zmq-transport` or `nats-transport`.
 
-use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 #[cfg(feature = "zmq-transport")]
@@ -30,8 +23,8 @@ use crate::network::client::runtime::coordination::coordinator::{
     ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
     ToAnyBurnTensor,
 };
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, StateManagerError};
-use crate::prelude::config::ClientConfigLoader;
+use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+use crate::prelude::utilities::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::NetworkParams;
 
@@ -40,16 +33,12 @@ use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::interface::list_ids;
 use relayrl_algorithms::prelude::nn::NeuralNetwork;
-use relayrl_algorithms::prelude::ppo::algorithm::{IPPOParams, MAPPOParams, PPOParams};
 use relayrl_algorithms::prelude::ppo::trainer::PPOTrainerSpec;
 use relayrl_env_trait::traits::Environment;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
-use relayrl_types::data::tensor::{
-    AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-    IntBurnTensor, SupportedTensorBackend,
-};
+use relayrl_types::data::tensor::{BackendMatcher, DeviceType, SupportedTensorBackend};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::validate_module;
@@ -68,7 +57,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
 
-/// Errors returned by the client API.
+/// Errors returned by the client-facing API.
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error(transparent)]
@@ -83,8 +72,10 @@ pub enum ClientError {
     BackendMismatchError(String),
     #[error("No input or output dtype set")]
     NoInputOrOutputDtypeSet(String),
+    /// Returned when `scale_throughput(0)` is called.
     #[error("Noop router scale: {0}")]
     NoopRouterScale(String),
+    /// Returned when `new_actors(0, ...)` or `remove_actors([])` is called.
     #[error("Noop actor count: {0}")]
     NoopActorCount(String),
     #[error("Invalid inference mode: {0}")]
@@ -95,8 +86,10 @@ pub enum ClientError {
     InvalidEnvCount(String),
     #[error("Model validation failed: {0}")]
     ModelValidationFailed(String),
+    /// Returned by `update_model` when the agent is in an `Online*` training data mode.
     #[error("Update model is not supported: {0}")]
     ModelUpdateNotSupported(String),
+    /// Returned when a second `run_env_*` call is made for an actor already running a loop.
     #[error("Run env is already active for actor {0}")]
     RunEnvActive(String),
 }
@@ -105,9 +98,6 @@ pub enum ClientError {
 ///
 /// `RelayRLAgent` is a thin facade over the runtime coordinator, providing a stable public API
 /// for starting, scaling, and interacting with runtime actors.
-///
-/// In `0.5.0-beta`, the supported path is the local/default client runtime.
-/// Transport-backed and server-backed flows remain experimental.
 pub struct RelayRLAgent<B: Backend + BackendMatcher<Backend = B>> {
     coordinator: ClientCoordinator<B>,
     supported_backend: SupportedTensorBackend,
@@ -121,13 +111,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for RelayRLAgent<
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
-    /// Create a new agent facade using runtime-invariant parameters.
+    /// Creates a new agent facade from runtime-invariant configuration; prefer `AgentBuilder` for ergonomic construction.
     ///
-    /// # Errors
-    /// Returns [`ClientError::InvalidInferenceMode`] if the selected [`ClientModes`] are
-    /// incompatible (e.g., server inference requested while inference server mode is disabled).
-    ///
-    /// Returns [`ClientError::CoordinatorError`] if the runtime coordinator fails to initialize.
+    /// ```ignore
+    /// # use relayrl::network::{RelayRLAgent, ClientModes};
+    /// # use burn_ndarray::NdArray;
+    /// let agent = RelayRLAgent::<NdArray>::new(ClientModes::default());
+    /// ```
     pub fn new(
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         transport_type: TransportType,
@@ -144,13 +134,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         }
     }
 
-    /// Start the client runtime with the specified parameters.
+    /// Starts the coordinator, routers, and supporting runtime tasks described by `params`.
     ///
-    /// This spawns the coordinator runtime components and (by default) creates `actor_count`
-    /// runtime actors.
-    ///
-    /// # Errors
-    /// Returns an error if startup fails (configuration, runtime init, transport init, etc).
+    /// ```ignore
+    /// # use relayrl::network::AgentBuilder;
+    /// # use burn_ndarray::NdArray;
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let (mut agent, params) = AgentBuilder::<NdArray>::builder().build().await?;
+    /// agent.start(params).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn start(&mut self, params: AgentStartParameters<B>) -> Result<(), ClientError> {
         let AgentStartParameters {
             router_scale,
@@ -176,10 +169,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         Ok(())
     }
 
-    /// Restart the Agent's client runtime components
+    /// Tears down and reinitialises the runtime without destroying the agent handle.
     ///
-    /// # Errors
-    /// Returns an error if restart coordination fails.
+    /// ```ignore
+    /// # async fn run(mut agent: RelayRLAgent<burn_ndarray::NdArray>, params: AgentStartParameters<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// agent.restart(params).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn restart(&mut self, params: AgentStartParameters<B>) -> Result<(), ClientError> {
         let AgentStartParameters {
             router_scale,
@@ -203,22 +199,26 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         Ok(())
     }
 
-    /// Gracefully shut down the Agent's client runtime components
+    /// Gracefully shuts down all runtime components.
     ///
-    /// # Errors
-    /// Returns an error if shutdown coordination fails.
+    /// ```ignore
+    /// # async fn run(mut agent: RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// agent.shutdown().await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn shutdown(&mut self) -> Result<(), ClientError> {
         self.coordinator.shutdown().await?;
         Ok(())
     }
 
-    /// Scale actor throughput by adjusting the number of routing workers.
+    /// Adjusts the routing worker pool live. Positive values add workers; negative values remove them.
     ///
-    /// - `router_scale > 0`: scale out by that amount.
-    /// - `router_scale < 0`: scale in by the absolute value.
-    ///
-    /// # Errors
-    /// Returns [`ClientError::NoopRouterScale`] if `router_scale == 0`.
+    /// ```ignore
+    /// # async fn run(mut agent: RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// agent.scale_throughput(2).await?;   // add two routing workers
+    /// agent.scale_throughput(-1).await?;  // remove one
+    /// # Ok(()) }
+    /// ```
     pub async fn scale_throughput(&mut self, router_scale: i32) -> Result<(), ClientError> {
         match router_scale {
             add if router_scale > 0 => {
@@ -235,13 +235,22 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         }
     }
 
-    /// Request actions from the specified actor IDs (if they exist)
+    /// Sends an observation to the specified actors and returns their actions.
     ///
-    /// This will send the action request to the specified actor instances and return the action responses
+    /// `D_IN` and `D_OUT` are the observation and action tensor ranks and must match those used when
+    /// the actors were created. Returns one `(ActorUuid, RelayRLAction)` per valid id in `ids`.
     ///
-    /// # Errors
-    /// Returns [`ClientError::BackendMismatchError`] if the agent’s backend `B` does not match
-    /// the configured runtime backend.
+    /// ```ignore
+    /// # async fn run(agent: &RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// use burn_ndarray::NdArray;
+    /// use burn_tensor::{Tensor, Float};
+    ///
+    /// let ids = agent.get_actor_ids()?;
+    /// let obs = Tensor::<NdArray, 2, Float>::zeros([1, 8], &Default::default());
+    /// let actions = agent.request_action(ids.clone(), obs, None, 0.0).await?;
+    /// agent.flag_last_action(ids, Some(1.0)).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn request_action<
         const D_IN: usize,
         const D_OUT: usize,
@@ -273,12 +282,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         }
     }
 
-    /// Mark the last action as terminal (`done=true`) for the specified actor IDs (if they exist)
+    /// Appends a terminal action (`done=true`) to each named actor's current trajectory, signalling episode end.
     ///
-    /// Appends a RelayRLAction with the done flag set to `true` and the specified reward (if any) to the actor's current trajectory.
-    ///
-    /// # Errors
-    /// Returns an error if the actor(s) do not exist or the coordinator rejects the request.
+    /// ```ignore
+    /// # async fn run(agent: &RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let ids = agent.get_actor_ids()?;
+    /// agent.flag_last_action(ids, Some(1.0)).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn flag_last_action(
         &self,
         ids: Vec<Uuid>,
@@ -288,15 +299,23 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         Ok(())
     }
 
-    /// Update the model for all actors or for the specified actor IDs (if they exist).
+    /// Hot-swaps the model into the specified actors (or all actors when `actor_ids` is `None`).
     ///
-    /// When `actor_ids` is `Some`, only the listed actors are considered for the update.
-    /// In `ModelMode::Shared`, the runtime still updates one representative actor per relevant
-    /// device so each shared model handle is refreshed only once.
+    /// In `ModelMode::Shared`, one representative actor per device is updated so each shared handle
+    /// is refreshed exactly once. Rejected with `ModelUpdateNotSupported` under `Online*` data modes.
+    ///
+    /// ```ignore
+    /// # async fn run(agent: &RelayRLAgent<burn_ndarray::NdArray>, new_model: ModelModule<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let ids = agent.get_actor_ids()?;
+    /// // Swap into actors 0 and 2 only; actor 1 keeps the previous policy.
+    /// agent.update_model(Some(vec![ids[0], ids[2]]), new_model).await?;
+    /// let versions = agent.get_model_version(vec![ids[0], ids[2]]).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn update_model(
         &self,
-        model: ModelModule<B>,
         actor_ids: Option<Vec<ActorUuid>>,
+        model: ModelModule<B>,
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         if let ActorTrainingDataMode::Online(_)
@@ -317,9 +336,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         Ok(())
     }
 
-    /// Retrieves the model version for each actor ID listed (if instance IDs exist)
+    /// Returns `(ActorUuid, swap_count)` pairs reflecting how many times each actor's model has been hot-swapped.
     ///
-    /// Returns `(ActorID, ModelVersion)` pairs.
+    /// ```ignore
+    /// # async fn run(agent: &RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let ids = agent.get_actor_ids()?;
+    /// let versions = agent.get_model_version(ids).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn get_model_version(
         &self,
         actor_ids: Vec<ActorUuid>,
@@ -327,27 +351,53 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
         Ok(self.coordinator.get_model_version(actor_ids).await?)
     }
 
-    pub async fn get_trajectory_memory(
+    /// Returns a shared view of all in-memory trajectories collected across actors.
+    ///
+    /// Only populated under `OfflineWithMemory` or `OfflineWithFilesAndMemory` data modes.
+    ///
+    /// ```ignore
+    /// # async fn run(agent: &RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let cache = agent.get_trajectory_cache().await?;
+    /// for entry in cache.iter() {
+    ///     println!("actor {:?} has {} trajectories", entry.key(), entry.value().len());
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_trajectory_cache(
         &self,
     ) -> Result<Arc<DashMap<ActorUuid, Vec<Arc<RelayRLTrajectory>>>>, ClientError> {
-        Ok(self.coordinator.get_trajectory_memory().await?)
+        Ok(self.coordinator.get_trajectory_cache().await?)
     }
 
-    /// Fetch the active client configuration.
+    /// Reads and returns the current `ClientConfigLoader` from the watched config file.
     pub async fn get_config(&self) -> Result<ClientConfigLoader, ClientError> {
         Ok(self.coordinator.get_config().await?)
     }
 
-    /// Set the configuration path used by the runtime.
+    /// Applies the config at `config_path` immediately and updates the active runtime settings.
     pub async fn set_config_path(&self, config_path: PathBuf) -> Result<(), ClientError> {
         self.coordinator.set_config_path(config_path).await?;
         Ok(())
     }
 }
 
-/// Actor management trait using boxed futures
+/// Provides actor lifecycle management for a `RelayRLAgent`.
+///
+/// ```ignore
+/// # use relayrl::network::{RelayRLAgentActors, AgentBuilder};
+/// # use burn_ndarray::NdArray;
+/// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// let (mut agent, params) = AgentBuilder::<NdArray>::builder().build().await?;
+/// agent.start(params).await?;
+/// let ids = agent.new_actors::<2, 2>(4, DeviceType::Cpu, 1_000, None).await?;
+/// agent.remove_actors(ids).await?;
+/// # Ok(()) }
+/// ```
 #[async_trait]
 pub trait RelayRLAgentActors<B: Backend + BackendMatcher<Backend = B>> {
+    /// Creates one actor on `device` with a trajectory buffer of `max_traj_length` steps.
+    ///
+    /// `D_IN` and `D_OUT` declare the observation and action tensor ranks for this actor.
     async fn new_actor<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         device: DeviceType,
@@ -356,7 +406,8 @@ pub trait RelayRLAgentActors<B: Backend + BackendMatcher<Backend = B>> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
             AlgorithmInitArgs,
         >,
-    ) -> Result<(), ClientError>;
+    ) -> Result<ActorUuid, ClientError>;
+    /// Creates `count` actors; equivalent to calling `new_actor` that many times.
     async fn new_actors<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         count: u32,
@@ -366,10 +417,18 @@ pub trait RelayRLAgentActors<B: Backend + BackendMatcher<Backend = B>> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
             AlgorithmInitArgs,
         >,
-    ) -> Result<(), ClientError>;
+    ) -> Result<Vec<ActorUuid>, ClientError>;
+    /// Aborts an actor's task and frees all associated resources.
     async fn remove_actor(&mut self, id: Uuid) -> Result<(), ClientError>;
+    /// Removes multiple actors; equivalent to calling `remove_actor` for each.
     async fn remove_actors(&mut self, ids: Vec<Uuid>) -> Result<(), ClientError>;
-    fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError>;
+    /// Returns the UUIDs of all live actors from the namespaced registry.
+    fn get_actor_ids(&self) -> Result<Vec<ActorUuid>, ClientError>;
+    /// Returns the UUIDs of all live actors that match the specified D_IN, D_OUT qualifications
+    async fn get_actor_ids_by_rank<const D_IN: usize, const D_OUT: usize>(
+        &self,
+    ) -> Result<Vec<ActorUuid>, ClientError>;
+    /// Renames a live actor in place; its task and inbox are preserved.
     async fn set_actor_id(&mut self, current_id: Uuid, new_id: Uuid) -> Result<(), ClientError>;
 }
 
@@ -384,9 +443,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
             AlgorithmInitArgs,
         >,
-    ) -> Result<(), ClientError> {
+    ) -> Result<ActorUuid, ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let _ = self
+        let actor_id = self
             .coordinator
             .new_actor::<D_IN, D_OUT>(
                 device,
@@ -398,11 +457,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
             )
             .await?;
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        let _ = self
+        let actor_id = self
             .coordinator
             .new_actor::<D_IN, D_OUT>(device, max_traj_length, default_model)
             .await?;
-        Ok(())
+        Ok(actor_id)
     }
 
     /// Creates `n` new actor instances on the specified device with the specified model
@@ -415,23 +474,24 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
             AlgorithmInitArgs,
         >,
-    ) -> Result<(), ClientError> {
+    ) -> Result<Vec<ActorUuid>, ClientError> {
         if count == 0 {
             Err(ClientError::NoopActorCount(
                 "Noop actor count: `count` set to zero".to_string(),
             ))
         } else if count == 1 {
-            self.new_actor::<D_IN, D_OUT>(
-                device,
-                max_traj_length,
-                default_model,
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                algorithm_args,
-            )
-            .await
+            Ok(vec![
+                self.new_actor::<D_IN, D_OUT>(
+                    device,
+                    max_traj_length,
+                    default_model,
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    algorithm_args,
+                )
+                .await?,
+            ])
         } else {
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            let mut actor_ids: Vec<Uuid> = Vec::new();
+            let mut actor_ids: Vec<ActorUuid> = Vec::new();
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             let algorithm_args = algorithm_args.unwrap_or_default();
             for _ in 0..count {
@@ -449,13 +509,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
                         .await?,
                 );
                 #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-                self.coordinator
-                    .new_actor::<D_IN, D_OUT>(
-                        device.clone(),
-                        max_traj_length,
-                        default_model.clone(),
-                    )
-                    .await?;
+                actor_ids.push(
+                    self.coordinator
+                        .new_actor::<D_IN, D_OUT>(
+                            device.clone(),
+                            max_traj_length,
+                            default_model.clone(),
+                        )
+                        .await?,
+                );
             }
 
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -533,7 +595,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
                 }
             }
 
-            Ok(())
+            Ok(actor_ids)
         }
     }
 
@@ -600,7 +662,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
     }
 
     /// Retrieves the current actor instance IDs
-    fn get_actor_ids(&mut self) -> Result<Vec<ActorUuid>, ClientError> {
+    fn get_actor_ids(&self) -> Result<Vec<ActorUuid>, ClientError> {
         let client_namespace = self
             .coordinator
             .runtime_params
@@ -612,6 +674,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
             .as_ref();
         let actor_ids = list_ids(client_namespace, "actor");
         Ok(actor_ids)
+    }
+
+    /// Retrieves D_IN, D_OUT qualifying actor instance IDs
+    async fn get_actor_ids_by_rank<const D_IN: usize, const D_OUT: usize>(
+        &self,
+    ) -> Result<Vec<ActorUuid>, ClientError> {
+        self.coordinator
+            .get_actor_ids_by_rank::<D_IN, D_OUT>()
+            .await
+            .map_err(ClientError::from)
     }
 
     /// Sets the ID of the actor instance with the specified current ID to the new ID
@@ -627,54 +699,79 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgentActors<B> for RelayRL
     }
 }
 
+/// Environment-driven execution and management for a `RelayRLAgent`.
+///
+/// Bind an environment to an actor with `set_env`, then drive rollouts with `run_env_eval` or
+/// `run_env_with_ppo`. When `count` (in `set_env`) is `>= 8`, Rayon data parallelism is used
+/// across env copies; below 8 they are stepped sequentially.
+///
+/// ```ignore
+/// # async fn run(mut agent: RelayRLAgent<burn_ndarray::NdArray>, env: Box<dyn Environment>) -> Result<(), Box<dyn std::error::Error>> {
+/// use relayrl::network::RelayRLActorEnv;
+/// let ids = agent.get_actor_ids()?;
+/// agent.set_env(ids[0], env, 16).await?;
+/// agent.run_env_eval(ids[0], 1_000).await?;
+/// agent.remove_env(ids[0]).await?;
+/// # Ok(()) }
+/// ```
 #[allow(async_fn_in_trait)]
 pub trait RelayRLActorEnv<B: Backend + BackendMatcher<Backend = B>> {
+    /// Runs `loop_iters` evaluation steps on the bound environment without applying any training update.
     async fn run_env_eval(&self, actor_id: ActorUuid, loop_iters: usize)
     -> Result<(), ClientError>;
+    /// Runs a single-agent PPO training rollout on the bound environment for `loop_iters` steps.
+    ///
+    /// `max_traj_length` sets the trajectory buffer size. Only one `run_env_*` loop may be active
+    /// per actor at a time; a second call returns `ClientError::RunEnvActive`.
     async fn run_env_with_ppo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), ClientError>;
+    ) -> Result<ModelModule<B>, ClientError>;
+    /// Runs an independent PPO (IPPO) training rollout; coming soon.
     async fn run_env_with_ippo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), ClientError>;
+    ) -> Result<ModelModule<B>, ClientError>;
+    /// Runs a multi-agent PPO (MAPPO) training rollout; coming soon.
     async fn run_env_with_mappo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), ClientError>;
+    ) -> Result<ModelModule<B>, ClientError>;
+    /// Binds `env` to the actor and associates `count` logical env copies with it.
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
         env: Box<dyn Environment>,
         count: u32,
     ) -> Result<(), ClientError>;
+    /// Removes the bound environment from the actor.
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), ClientError>;
+    /// Returns the current number of env copies bound to the actor.
     async fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, ClientError>;
+    /// Adjusts the env copy count live without rebinding the environment.
     async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError>;
 }
-
 impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAgent<B> {
     async fn run_env_eval(
         &self,
@@ -697,16 +794,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAge
     }
 
     async fn run_env_with_ppo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<ModelModule<B>, ClientError> {
         if !self.run_env_active_flags.insert(actor_id) {
             return Err(ClientError::RunEnvActive(format!(
                 "run_env is already active for actor {}",
@@ -728,16 +825,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAge
     }
 
     async fn run_env_with_ippo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<ModelModule<B>, ClientError> {
         if !self.run_env_active_flags.insert(actor_id) {
             return Err(ClientError::RunEnvActive(format!(
                 "run_env is already active for actor {}",
@@ -759,16 +856,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAge
     }
 
     async fn run_env_with_mappo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<ModelModule<B>, ClientError> {
         if !self.run_env_active_flags.insert(actor_id) {
             return Err(ClientError::RunEnvActive(format!(
                 "run_env is already active for actor {}",
@@ -889,10 +986,10 @@ mod unit_tests {
     }
 
     #[test]
-    fn actor_inference_mode_default_is_local_independent() {
+    fn actor_inference_mode_default_is_client_independent() {
         assert_eq!(
             ActorInferenceMode::default(),
-            ActorInferenceMode::Local(ModelMode::Independent),
+            ActorInferenceMode::Client(ModelMode::Independent),
         );
     }
 

@@ -6,7 +6,7 @@
 //! - `runtime::router`: message routing between actors and data sinks
 //! - `runtime::data`: local file sinks plus experimental transport-backed sinks
 //!
-//! In `0.5.0-beta`, the supported path is the local/default runtime exposed through
+//! In `0.5.0`, the supported path is the local/default runtime exposed through
 //! [`agent`]. Transport-backed flows behind `zmq-transport` and `nats-transport` remain
 //! experimental.
 //!

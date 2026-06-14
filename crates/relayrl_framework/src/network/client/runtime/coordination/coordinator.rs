@@ -257,9 +257,9 @@ pub(crate) trait ClientInterface<B: Backend + BackendMatcher<Backend = B>> {
         &self,
         ids: Vec<ActorUuid>,
     ) -> Result<Vec<(ActorUuid, i64)>, CoordinatorError>;
-    async fn get_trajectory_memory(
+    async fn get_trajectory_cache(
         &self,
-    ) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, CoordinatorError>;
+    ) -> Result<Arc<DashMap<ActorUuid, Vec<Arc<RelayRLTrajectory>>>>, CoordinatorError>;
     async fn scale_out(&mut self, router_add: u32) -> Result<(), CoordinatorError>;
     async fn scale_in(&mut self, router_remove: u32) -> Result<(), CoordinatorError>;
     async fn get_config(&self) -> Result<ClientConfigLoader, CoordinatorError>;
@@ -288,6 +288,9 @@ pub(crate) trait ClientActors<B: Backend + BackendMatcher<Backend = B>> {
         current_id: ActorUuid,
         new_id: ActorUuid,
     ) -> Result<(), CoordinatorError>;
+    async fn get_actor_ids_by_rank<const D_IN: usize, const D_OUT: usize>(
+        &self,
+    ) -> Result<Vec<ActorUuid>, CoordinatorError>;
 }
 
 pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
@@ -297,42 +300,42 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
         loop_iters: usize,
     ) -> Result<(), CoordinatorError>;
     async fn run_env_with_ppo<
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), CoordinatorError>
+    ) -> Result<ModelModule<B>, CoordinatorError>
     where
         B: Default + Send + Sync + 'static;
     async fn run_env_with_ippo<
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), CoordinatorError>
+    ) -> Result<ModelModule<B>, CoordinatorError>
     where
         B: Default + Send + Sync + 'static;
     async fn run_env_with_mappo<
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), CoordinatorError>
+    ) -> Result<ModelModule<B>, CoordinatorError>
     where
         B: Default + Send + Sync + 'static;
     async fn set_env(
@@ -472,7 +475,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientCoordinator<B> {
     > {
         match &self.runtime_params {
             Some(params) => match &self.client_modes.actor_inference_mode {
-                ActorInferenceMode::Local(_) => {
+                ActorInferenceMode::Client(_) => {
                     let local_model_path = params.lifecycle.get_local_model_path();
                     let (global_dispatcher_tx, target_actor_ids) = {
                         let shared_state = params.shared_state.read().await;
@@ -489,15 +492,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientCoordinator<B> {
                     )))
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorInferenceMode::ServerOverflow(_, _) => {
+                ActorInferenceMode::ClientFallback(_, _) => {
                     // Experimental: local-client-triggered model updates are not implemented for
-                    // server overflow inference in `0.5.0-beta`.
+                    // server overflow inference in `0.5.0`.
                     Ok(None)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 ActorInferenceMode::Server(_) => {
                     // Experimental: local-client-triggered model updates are not implemented for
-                    // server inference in `0.5.0-beta`.
+                    // server inference in `0.5.0`.
                     Ok(None)
                 }
             },
@@ -640,7 +643,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
         {
             let inference_address_args =
                 if let ActorInferenceMode::Server(server_params)
-                | ActorInferenceMode::ServerOverflow(_, server_params) =
+                | ActorInferenceMode::ClientFallback(_, server_params) =
                     &shared_client_modes.actor_inference_mode
                 {
                     server_params.inference_addresses.clone()
@@ -837,7 +840,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
 
             let (inference_dispatcher, mut scaling_dispatcher) =
                 match shared_client_modes.actor_inference_mode {
-                    ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => (
+                    ActorInferenceMode::Server(_) | ActorInferenceMode::ClientFallback(_, _) => (
                         Some(Arc::new(InferenceDispatcher::<B>::new(
                             shared_transport.clone(),
                         ))),
@@ -845,7 +848,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
                             shared_transport.clone(),
                         ))),
                     ),
-                    ActorInferenceMode::Local(_) => (None, None),
+                    ActorInferenceMode::Client(_) => (None, None),
                 };
 
             let training_dispatcher = match shared_client_modes.actor_training_data_mode {
@@ -872,7 +875,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
         {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             let shared_transport_addresses = if let ActorInferenceMode::Server(_)
-            | ActorInferenceMode::ServerOverflow(_, _) =
+            | ActorInferenceMode::ClientFallback(_, _) =
                 shared_client_modes.actor_inference_mode
             {
                 Some(lifecycle.get_transport_addresses())
@@ -951,7 +954,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
         if let Some(params) = self.runtime_params.as_ref() {
             let is_local_inference = matches!(
                 self.client_modes.actor_inference_mode,
-                ActorInferenceMode::Local(_)
+                ActorInferenceMode::Client(_)
             );
 
             self.inference_path_params = Some(if is_local_inference {
@@ -1392,7 +1395,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
         }
     }
 
-    async fn get_trajectory_memory(
+    async fn get_trajectory_cache(
         &self,
     ) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, CoordinatorError> {
         match &self.runtime_params {
@@ -1823,6 +1826,36 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientActors<B> for ClientCoordin
             )),
         }
     }
+
+    async fn get_actor_ids_by_rank<const D_IN: usize, const D_OUT: usize>(
+        &self,
+    ) -> Result<Vec<ActorUuid>, CoordinatorError> {
+        match &self.runtime_params {
+            Some(params) => {
+                let actors = &params.shared_state.read().await.actor_runtime_handles;
+
+                let valid_actor_ids = actors
+                    .iter()
+                    .filter_map(|runtime| {
+                        if runtime.actor_shape().d_in == D_IN
+                            && runtime.actor_shape().d_out == D_OUT
+                        {
+                            Some(*runtime.key())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                Ok(valid_actor_ids)
+            }
+            None => Err(CoordinatorError::StateManagerError(
+                StateManagerError::GetActorsError(
+                    "[Coordinator] No runtime instance to get_actor_ids_by_rank...".to_string(),
+                ),
+            )),
+        }
+    }
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientCoordinator<B> {
@@ -1833,7 +1866,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => match self.client_modes.actor_inference_mode {
-                ActorInferenceMode::Local(_) => {
+                ActorInferenceMode::Client(_) => {
                     let (runtime, env_map) = {
                         let shared_state_guard = params.shared_state.read().await;
                         shared_state_guard
@@ -1846,7 +1879,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                     .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
+                ActorInferenceMode::Server(_) | ActorInferenceMode::ClientFallback(_, _) => {
                     unimplemented!("Not supported yet")
                 }
             },
@@ -1864,16 +1897,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), CoordinatorError>
+    ) -> Result<ModelModule<B>, CoordinatorError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         match &self.runtime_params {
             Some(params) => match self.client_modes.actor_inference_mode {
-                ActorInferenceMode::Local(_) => {
+                ActorInferenceMode::Client(_) => {
                     let (runtime, env_map, shutdown_rx) = {
                         let shared_state_guard = params.shared_state.read().await;
                         let (runtime, env_map) = shared_state_guard
@@ -1898,7 +1931,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                     .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
+                ActorInferenceMode::Server(_) | ActorInferenceMode::ClientFallback(_, _) => {
                     unimplemented!("Not supported yet")
                 }
             },
@@ -1916,16 +1949,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), CoordinatorError>
+    ) -> Result<ModelModule<B>, CoordinatorError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         match &self.runtime_params {
             Some(params) => match self.client_modes.actor_inference_mode {
-                ActorInferenceMode::Local(_) => {
+                ActorInferenceMode::Client(_) => {
                     let (runtime, env_map, shutdown_rx) = {
                         let shared_state_guard = params.shared_state.read().await;
                         let (runtime, env_map) = shared_state_guard
@@ -1950,7 +1983,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                     .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
+                ActorInferenceMode::Server(_) | ActorInferenceMode::ClientFallback(_, _) => {
                     unimplemented!("Not supported yet")
                 }
             },
@@ -1968,16 +2001,16 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), CoordinatorError>
+    ) -> Result<ModelModule<B>, CoordinatorError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         match &self.runtime_params {
             Some(params) => match self.client_modes.actor_inference_mode {
-                ActorInferenceMode::Local(_) => {
+                ActorInferenceMode::Client(_) => {
                     let (runtime, env_map, shutdown_rx) = {
                         let shared_state_guard = params.shared_state.read().await;
                         let (runtime, env_map) = shared_state_guard
@@ -2002,7 +2035,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                     .map_err(CoordinatorError::from)
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                ActorInferenceMode::Server(_) | ActorInferenceMode::ServerOverflow(_, _) => {
+                ActorInferenceMode::Server(_) | ActorInferenceMode::ClientFallback(_, _) => {
                     unimplemented!("Not supported yet")
                 }
             },
@@ -2295,7 +2328,7 @@ mod unit_tests {
     #[tokio::test]
     async fn request_action_stays_routed_through_global_dispatcher() {
         let client_modes = ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         };
         let (mut coordinator, shared_state, mut global_dispatcher_rx) =
@@ -2365,7 +2398,7 @@ mod unit_tests {
     #[tokio::test]
     async fn flag_last_action_stays_routed_through_global_dispatcher() {
         let client_modes = ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         };
         let (coordinator, _shared_state, mut global_dispatcher_rx) =
@@ -2439,7 +2472,7 @@ mod unit_tests {
     #[tokio::test]
     async fn prepare_model_update_dispatch_subset_filters_requested_actor_ids() {
         let client_modes = ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         };
         let (coordinator, shared_state, _global_dispatcher_rx) =
@@ -2483,7 +2516,7 @@ mod unit_tests {
     #[tokio::test]
     async fn dispatch_model_updates_sends_expected_targets_and_versions() {
         let client_modes = ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         };
         let (coordinator, shared_state, mut global_dispatcher_rx) =

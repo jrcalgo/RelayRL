@@ -9,9 +9,9 @@
 //! RelayRL also outperforms (expectedly) other popular, GIL-bound RL frameworks in terms of raw throughput and latency, memory consumption, and scalability.
 //! For benchmarks and other system details, visit [relayrl.dev](https://relayrl.dev).
 //!
-//! This crate is a thin facade re-exporting the **most recent stable release** of [`relayrl_framework`]. 
-//! RL algorithms, data types, and the environment trait live in [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/latest/relayrl_algorithms/),
-//! [`relayrl_types`](https://docs.rs/relayrl_types/latest/relayrl_types/), and [`relayrl_env_trait`](https://docs.rs/relayrl_env_trait/latest/relayrl_env_trait/) respectively.
+//! This crate is a thin facade re-exporting the **most recent stable release** of [`relayrl_framework`].
+//! RL algorithms, data types, and the environment trait live in [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.4.1/relayrl_algorithms/),
+//! [`relayrl_types`](https://docs.rs/relayrl_types/0.8.1/relayrl_types/), and [`relayrl_env_trait`](https://docs.rs/relayrl_env_trait/1.3.1/relayrl_env_trait/) respectively.
 //!
 //! # Prerequisites
 //!
@@ -20,12 +20,12 @@
 //! - A compatible inference runtime. Currently, only **LibTorch 2.9.0** and the **ONNX Runtime (ORT) 1.26.0** are supported.
 //!
 //! # Quick Start
-//! 
+//!
 //! ```rust
 //! use relayrl::network::client::*;
 //! use relayrl::types::model::ModelModule;
 //! use relayrl::types::tensor::relayrl::DeviceType;
-//! 
+//!
 //! use burn_ndarray::NdArray;
 //! use burn_tensor::{Float, Tensor};
 //!
@@ -59,12 +59,12 @@
 //!     // Use actions in your simulator, then mark the episode boundary.
 //!     let _ = actions;
 //!     agent.flag_last_action(actor_ids, Some(1.0)).await?;
-//! 
+//!
 //!     agent.shutdown().await?;
 //!     Ok(())
 //! }
 //! ```
-//! 
+//!
 //! # Building the Agent
 //!
 //! An agent is constructed with [`AgentBuilder<B>`](crate::network::AgentBuilder), which separates *runtime-invariant*
@@ -97,6 +97,9 @@
 //!         .config_path(std::path::PathBuf::from("client_config.json"))
 //!         .build()
 //!         .await?;
+//!
+//!     // ...
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -192,8 +195,8 @@
 //! the file's modification time changes, reloads it and applies a subset of settings to the running
 //! agent with no restart: the trajectory-file output, the resolved local model path, and the
 //! per-actor router buffer size (plus the metrics meter/endpoint under the `metrics` feature, and the
-//! transport addresses and default hyperparameters under a transport feature). 
-//! 
+//! transport addresses and default hyperparameters under a transport feature).
+//!
 //! **Note:** a live reload of `router_buffer_size_per_actor` is applied unconditionally, so it overrides whatever the
 //! builder set at startup. The active configuration can be re-read on demand with
 //! [`RelayRLAgent::get_config`](crate::network::RelayRLAgent).
@@ -299,7 +302,9 @@
 //!   external system (for example a session or player ID).
 //!
 //! ```rust
-//! async fn manage(agent: &mut RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//! async fn manage(
+//!     agent: &mut RelayRLAgent<burn_ndarray::NdArray>,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     use uuid::Uuid;
 //!
 //!     // Enumerate live actors (registry order; do not assume sorting).
@@ -330,7 +335,9 @@
 //! scales in. This lets you grow routing capacity under load without restarting the agent.
 //!
 //! ```rust
-//! async fn scale(agent: &mut RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//! async fn scale(
+//!     agent: &mut RelayRLAgent<burn_ndarray::NdArray>,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     agent.scale_throughput(2).await?;   // add two more routing workers
 //!     agent.scale_throughput(-1).await?;  // remove one
 //!     Ok(())
@@ -387,7 +394,10 @@
 //! use relayrl::network::RelayRLAgent;
 //! use burn_ndarray::NdArray;
 //!
-//! async fn swap(agent: &RelayRLAgent<NdArray>, new_model: ModelModule<NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//! async fn swap(
+//!     agent: &RelayRLAgent<NdArray>,
+//!     new_model: ModelModule<NdArray>,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     let ids = agent.get_actor_ids()?;
 //!     // Swap a new policy into actors 0 and 2 only; actor 1 keeps the old policy.
 //!     agent.update_model(new_model, Some(vec![ids[0], ids[2]])).await?;
@@ -416,7 +426,9 @@
 //! the actor begins a fresh trajectory on the next `request_action`.
 //!
 //! ```rust
-//! async fn control_loop_step(agent: &RelayRLAgent<burn_ndarray::NdArray>) -> Result<(), Box<dyn std::error::Error>> {
+//! async fn control_loop_step(
+//!     agent: &RelayRLAgent<burn_ndarray::NdArray>,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     use burn_ndarray::NdArray;
 //!     use burn_tensor::{Tensor, Float};
 //!
@@ -448,17 +460,21 @@
 //! Only one `run_env_*` loop may be active per actor at a time; attempting to start a second
 //! returns `ClientError::RunEnvActive` immediately.
 //!
-//! - `run_env_eval(actor_id, loop_iters)` — runs `loop_iters` evaluation steps on the bound
-//!   environment; no training update is applied.
-//! - `run_env_with_ppo(actor_id, loop_iters, max_traj_length, trainer_spec)` — runs a
-//!   single-agent PPO training rollout. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
+//! - `run_env_eval(actor_id, env_steps)` — runs evaluation transitions on the bound
+//!   environment; no training update is applied. Vectorized env copies are stepped as a batch,
+//!   so the final batch may exceed `env_steps` by at most `count - 1` transitions.
+//! - `run_env_with_ppo(actor_id, training_steps, max_traj_length, trainer_spec)` — runs a
+//!   single-agent PPO training rollout until `training_steps` model updates complete. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
 //!   where **Pi** is a [`NeuralNetwork<B, KindIn, KindOut>`](crate::algorithms::NeuralNetwork). See [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.4.1/relayrl_algorithms/) for details on
 //!   constructing the trainer spec.
 //! - `run_env_with_ippo` and `run_env_with_mappo` — independent and multi-agent PPO training
 //!   rollouts respectively; coming soon.
 //!
 //! ```rust
-//! async fn drive(mut agent: RelayRLAgent<burn_ndarray::NdArray>, env: Box<dyn relayrl_env_trait::traits::Environment>) -> Result<(), Box<dyn std::error::Error>> {
+//! async fn drive(
+//!     mut agent: RelayRLAgent<burn_ndarray::NdArray>,
+//!     env: Box<dyn relayrl_env_trait::traits::Environment>,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     let (actor_id1, actor_id2) = {
 //!         let ids = agent.get_actor_ids()?;
 //!         (ids[0], ids[1])
@@ -466,11 +482,11 @@
 //!
 //!     // sequential env stepping is enabled when env count < 8
 //!     agent.set_env(actor_id1, env, 7).await?;       // 7 vectorized env copies on this actor
-//!     agent.run_env_eval(actor_id1, 10_000).await?;  // run 10k loop iterations
+//!     agent.run_env_eval(actor_id1, 10_000).await?;  // run at least 10k env transitions
 //!
 //!     // rayon data parallelism is enabled when env count >= 8
 //!     agent.set_env(actor_id2, env, 1024).await?;    // 1024 vectorized env copies on this actor
-//!     agent.run_env_eval(actor_id2, 1_000).await?;   // run 1k loop iterations
+//!     agent.run_env_eval(actor_id2, 1_000).await?;   // run at least 1k env transitions
 //!
 //!     let count = agent.get_env_count(actor_id2).await?;
 //!     agent.set_env_count(actor_id2, count / 2).await?;  // halve the env count live
@@ -514,14 +530,35 @@
 //! and scaling server endpoints individually.
 //!
 //! These paths are under active development and are not covered by the 0.5.x support promise.
-//!
-//! # Want to contribute?
-//! 
-//! 
-//! 
 
 pub mod algorithms {
-    pub use relayrl_framework::prelude::algorithms::*;
+    /// The Proximal Policy Optimization family: [`PPOTrainerSpec`](PPO::PPOTrainerSpec) /
+    /// [`PPOTrainer`](PPO::PPOTrainer), the policy-value kernel, and the `PPO`/`IPPO`/`MAPPO`
+    /// algorithms and their hyperparameters.
+    #[allow(non_snake_case)]
+    pub mod PPO {
+        pub use relayrl_framework::prelude::algorithms::PPO::*;
+    }
+
+    /// Neural-network building blocks: the [`NeuralNetwork`] trait family,
+    /// [`GenericMlp`], [`ConvNetPolicy`],
+    /// [`ValueFunction`], activations, and model-export helpers.
+    pub mod nn {
+        pub use relayrl_framework::prelude::algorithms::nn::*;
+    }
+
+    /// Hand-rolled ONNX `ModelProto` builder that serializes MLP policies without an external
+    /// protobuf dependency, for loading via the ONNX Runtime.
+    pub mod onnx_builder {
+        pub use relayrl_framework::prelude::algorithms::onnx_builder::*;
+    }
+
+    pub use relayrl_framework::prelude::algorithms::{
+        ActivationKind, ArchLayer, GenericMlp, LayerSpecs, NeuralNetwork, NeuralNetworkError,
+        NeuralNetworkForward, NeuralNetworkSpec, ValueFunction, WeightProvider,
+        acquire_conv_model_module, acquire_model_module, conv_policy, convert_byte_dtype_to_f32,
+        convert_byte_dtype_to_i64, dtype_to_byte_count,
+    };
 }
 
 pub mod network {
@@ -529,9 +566,46 @@ pub mod network {
 }
 
 pub mod types {
-    pub use relayrl_framework::prelude::types::*;
+    /// Per-timestep experience: [`RelayRLAction`](action::RelayRLAction), its auxiliary
+    /// [`RelayRLData`](action::RelayRLData), and the [`EncodedAction`](action::EncodedAction) codec wrapper.
+    pub mod action {
+        pub use relayrl_framework::prelude::types::action::*;
+    }
+
+    /// Hot-reloadable inference models: [`ModelModule`](model::ModelModule),
+    /// [`HotReloadableModel`](model::HotReloadableModel), and [`ModelError`](model::ModelError).
+    pub mod model {
+        pub use relayrl_framework::prelude::types::model::*;
+    }
+
+    /// On-disk trajectory adapters for persisting episodes as Arrow IPC or CSV files.
+    pub mod records {
+        pub use relayrl_framework::prelude::types::records::*;
+    }
+
+    /// Backend-neutral tensors: the serializable `TensorData` container, dtypes/devices, and the
+    /// Burn backend bridge, exposed through the `relayrl` and `burn` views.
+    pub mod tensor {
+        pub use relayrl_framework::prelude::types::tensor::*;
+    }
+
+    /// Episodes of experience: [`RelayRLTrajectory`](trajectory::RelayRLTrajectory), its trait, and
+    /// the [`EncodedTrajectory`](trajectory::EncodedTrajectory) codec wrapper.
+    pub mod trajectory {
+        pub use relayrl_framework::prelude::types::trajectory::*;
+    }
 }
 
 pub mod utilities {
-    pub use relayrl_framework::prelude::utilities::*;
+    /// JSON configuration loaders and builders (`ClientConfigLoader`, `TransportConfigParams`, etc.),
+    /// the [`HyperparameterArgs`](config::HyperparameterArgs) input shape, and the transport-gated
+    /// `network_codec` helpers.
+    pub mod config {
+        pub use relayrl_framework::prelude::utilities::config::*;
+    }
+
+    /// Namespaced UUID types used to identify actors and environments within the runtime registry.
+    pub mod uuid {
+        pub use relayrl_framework::prelude::utilities::uuid::*;
+    }
 }

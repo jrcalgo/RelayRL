@@ -1,14 +1,16 @@
 //! Runtime actor implementation.
 //!
 //! Actors own local inference state, trajectory assembly, and the message-handling loop for the
-//! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
+//! client runtime. Transport-backed server inference paths remain experimental in `0.5.0`.
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::AlgorithmInitArgs;
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
+use crate::network::client::runtime::coordination::state_manager::{
+    ActorUuid, decode_argmax, decode_continuous_bytes, env_dtype_to_dtype,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -115,6 +117,18 @@ pub(crate) trait ErasedActorRuntime<B: Backend + BackendMatcher<Backend = B>>:
         model_module: ModelModule<B>,
         device: DeviceType,
     ) -> Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send + 'a>>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn perform_local_byte_inference_erased<'a>(
+        &'a self,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &'a DType,
+        act_dtype: &'a DType,
+        discrete: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + Send + 'a>>;
 }
 
 struct ActorTrajectoryState {
@@ -417,6 +431,39 @@ impl<
             .unwrap_or_else(|_| module.flat_batch_zeros(n_envs)))
     }
 
+    pub(crate) async fn perform_local_byte_inference(
+        &self,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &DType,
+        act_dtype: &DType,
+        discrete: bool,
+    ) -> Result<Vec<u8>, ActorError> {
+        let model_guard = self.reloadable_model.load();
+        let model = model_guard.as_ref().ok_or_else(|| {
+            ActorError::SystemError("Model not loaded/available for actor inference".to_string())
+        })?;
+        let module = model.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            obs_dtype.clone(),
+            obs_bytes.to_vec(),
+            B::get_supported_backend(),
+        );
+        let output = module
+            .flat_batch_inference(input)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
+        let action_bytes = if discrete {
+            decode_argmax(&output.data, act_dtype, n_envs, act_dim)
+        } else {
+            decode_continuous_bytes(&output.data, &output.dtype, n_envs * act_dim, act_dtype)
+        };
+        Ok(action_bytes)
+    }
+
     pub(crate) async fn flag_last_action(
         &self,
         reward: f32,
@@ -622,6 +669,24 @@ where
                 .await
         })
     }
+
+    fn perform_local_byte_inference_erased<'a>(
+        &'a self,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &'a DType,
+        act_dtype: &'a DType,
+        discrete: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.perform_local_byte_inference(
+                obs_bytes, n_envs, obs_dim, act_dim, obs_dtype, act_dtype, discrete,
+            )
+            .await
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -753,12 +818,12 @@ impl<
     #[inline(always)]
     async fn handle_inference_kind(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         match self.shared_client_modes.actor_inference_mode {
-            ActorInferenceMode::Local(_) => self.perform_local_inference(msg).await,
+            ActorInferenceMode::Client(_) => self.perform_local_inference(msg).await,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             ActorInferenceMode::Server(_) => self.request_server_inference(msg).await,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            ActorInferenceMode::ServerOverflow(_, _) => {
-                self.request_server_overflow_inference(msg).await
+            ActorInferenceMode::ClientFallback(_, _) => {
+                self.request_client_fallback_inference(msg).await
             }
         }
     }
@@ -778,7 +843,7 @@ impl<
     /// Server inference: serialize observation (and optionally mask) and send to server.
     /// Note: if obs/mask live on GPU, you will pay a device->host copy during serialization.
     ///
-    /// This path is still experimental in `0.5.0-beta`.
+    /// This path is still experimental in `0.5.0`.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn request_server_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         // Both the inference_kind and inference_dispatcher initializations are based on
@@ -821,7 +886,7 @@ impl<
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    async fn request_server_overflow_inference(
+    async fn request_client_fallback_inference(
         &mut self,
         msg: RoutedMessage,
     ) -> Result<(), ActorError> {
@@ -1217,7 +1282,7 @@ mod unit_tests {
 
     fn disabled_data_mode() -> Arc<ClientModes> {
         Arc::new(ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         })
     }

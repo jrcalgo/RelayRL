@@ -1,7 +1,7 @@
 //! Lifecycle coordination for the client runtime.
 //!
 //! This module owns config watching, shared runtime settings, and shutdown fan-out for the
-//! client runtime. The local/default path is the supported `0.5.0-beta` path; transport-backed
+//! client runtime. The local/default path is the supported `0.5.0` path; transport-backed
 //! settings exposed here remain experimental.
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

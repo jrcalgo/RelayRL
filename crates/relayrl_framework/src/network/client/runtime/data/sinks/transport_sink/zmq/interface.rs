@@ -80,8 +80,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
                     config,
                 })
             }
-            ActorInferenceMode::Local(_) => None,
-            ActorInferenceMode::ServerOverflow(_, _) => todo!(),
+            ActorInferenceMode::Client(_) => None,
+            ActorInferenceMode::ClientFallback(_, _) => todo!(),
         };
 
         let training_protocol = match shared_client_modes.actor_training_data_mode {
@@ -106,7 +106,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
             &shared_client_modes.actor_training_data_mode,
         ) {
             (
-                ActorInferenceMode::Local(_),
+                ActorInferenceMode::Client(_),
                 ActorTrainingDataMode::Disabled
                 | ActorTrainingDataMode::OfflineWithFiles(_)
                 | ActorTrainingDataMode::OfflineWithMemory

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::{fs::File, io::Read, path::PathBuf};
 
+/// Supported RL algorithm identifiers, used as keys in config and hyperparameter maps.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub enum Algorithm {
     PPO,
@@ -17,6 +18,7 @@ pub enum Algorithm {
 }
 
 impl Algorithm {
+    /// Parses a case-insensitive algorithm name, returning `None` for unknown names.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
@@ -28,6 +30,7 @@ impl Algorithm {
         }
     }
 
+    /// Returns the canonical uppercase string name for this algorithm.
     pub fn as_str(&self) -> &str {
         match self {
             Algorithm::PPO => "PPO",
@@ -37,11 +40,7 @@ impl Algorithm {
     }
 }
 
-/// Configuration parameters for various algorithms.
-///
-/// Each field is optional and holds algorithm-specific parameters.
-///
-/// In a future edition, this struct will be useful when multiple algorithm init is supported.
+/// Per-algorithm hyperparameter defaults sourced from the JSON config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HyperparameterConfig {
     #[serde(rename = "PPO")]
@@ -57,11 +56,7 @@ pub struct HyperparameterConfig {
 
 // TODO: desperate need for refactor to align with AlgorithmCfg and proper Custom setup instructions"
 impl HyperparameterConfig {
-    /// Converts the hyperparameter config to a map of algorithm names to hyperparameter arguments.
-    ///
-    /// If a specific algorithm is provided, only the hyperparameters for that algorithm are returned.
-    ///
-    /// Otherwise, all hyperparameters for all loaded algorithms are returned.
+    /// Converts to a `HashMap<Algorithm, HyperparameterArgs>`. Passing `Some` returns only that algorithm's entry.
     pub fn to_args(&self, algorithm: Option<&Algorithm>) -> HashMap<Algorithm, HyperparameterArgs> {
         match algorithm {
             Some(algo) => match algo {
@@ -253,6 +248,7 @@ impl Default for HyperparameterConfig {
     }
 }
 
+/// Custom algorithm identifier and key-value hyperparameter map for extension use.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomAlgorithmParams {
     pub algorithm: Algorithm,
@@ -268,26 +264,20 @@ impl Default for CustomAlgorithmParams {
     }
 }
 
-/// Server address parameters.
-///
-/// Each server parameter includes a prefix, host, and port.
+/// Host and port for a single network endpoint.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct NetworkParams {
     pub host: String,
     pub port: String,
 }
 
-/// Tensorboard configuration structure.
-///
-/// Contains optional tensorboard writer parameters.
+/// Optional TensorBoard writer configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TensorboardConfig {
     pub training_tensorboard: Option<TensorboardParams>,
 }
 
-/// Parameters for Training Tensorboard Writer, used for real-time plotting.
-///
-/// The scalar_tags field is deserialized from a semicolon-separated string.
+/// TensorBoard writer settings. `scalar_tags` is deserialized from a semicolon-delimited string.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TensorboardParams {
     pub launch_tb_on_startup: bool,
@@ -313,6 +303,7 @@ where
     Ok(s.split(';').map(|s| s.to_string()).collect())
 }
 
+/// OTLP exporter endpoint (`prefix://host:port`) for OpenTelemetry metrics.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OtlpEndpointParams {
     pub prefix: String,
@@ -320,6 +311,7 @@ pub struct OtlpEndpointParams {
     pub port: String,
 }
 
+/// The `client_config` section of the JSON configuration file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClientConfigParams {
     pub config_update_polling_seconds: f32,
@@ -336,6 +328,15 @@ struct ClientConfigFile {
     transport_config: TransportConfigParams,
 }
 
+/// Parsed, fully resolved client configuration loaded from the JSON config file.
+///
+/// ```ignore
+/// use relayrl::config::ClientConfigLoader;
+/// use std::path::PathBuf;
+///
+/// let loader = ClientConfigLoader::load_config(&PathBuf::from("client_config.json"));
+/// println!("{}", loader.get_metrics_meter_name());
+/// ```
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClientConfigLoader {
     pub config_path: PathBuf,
@@ -344,6 +345,7 @@ pub struct ClientConfigLoader {
 }
 
 impl ClientConfigLoader {
+    /// Creates a loader from the given path, or from the default path when `None` is passed.
     pub fn new_config(config_path: Option<PathBuf>) -> Self {
         let _config_path: PathBuf = if let Some(config_path_value) = config_path {
             config_path_value
@@ -380,6 +382,7 @@ impl ClientConfigLoader {
         }
     }
 
+    /// Reads and parses the JSON file at `config_path`; falls back to built-in defaults on malformed input.
     pub fn load_config(config_path: &PathBuf) -> Self {
         match File::open(config_path) {
             Ok(mut file) => {
@@ -416,14 +419,17 @@ impl ClientConfigLoader {
         }
     }
 
+    /// Returns the file path this loader was built from.
     pub fn get_config_path(&self) -> &PathBuf {
         &self.config_path
     }
 
+    /// Returns the algorithm hyperparameter defaults from the config.
     pub fn get_init_hyperparameters(&self) -> &HyperparameterConfig {
         &self.client_config.init_hyperparameters
     }
 
+    /// Converts the hyperparameter config to `HyperparameterArgs`, optionally scoped to one algorithm.
     pub fn get_init_hyperparameter_args(
         &self,
         algorithm: Option<&Algorithm>,
@@ -431,23 +437,28 @@ impl ClientConfigLoader {
         self.client_config.init_hyperparameters.to_args(algorithm)
     }
 
+    /// Returns the trajectory file output parameters.
     pub fn get_trajectory_file_output(&self) -> &LocalTrajectoryFileParams {
         &self.client_config.trajectory_file_output
     }
 
+    /// Returns the OpenTelemetry meter name.
     pub fn get_metrics_meter_name(&self) -> &str {
         &self.client_config.metrics_meter_name
     }
 
+    /// Returns the OTLP exporter endpoint parameters.
     pub fn get_metrics_otlp_endpoint(&self) -> &OtlpEndpointParams {
         &self.client_config.metrics_otlp_endpoint
     }
 
+    /// Returns the transport network address configuration.
     pub fn get_transport_config(&self) -> &TransportConfigParams {
         &self.transport_config
     }
 }
 
+/// Builder trait for constructing a `ClientConfigLoader` programmatically.
 pub trait ClientConfigBuildParams {
     fn set_router_buffer_size_per_actor(&mut self, router_buffer_size: usize) -> &mut Self;
     fn set_init_hyperparameters(&mut self, init_hyperparameters: HyperparameterConfig)
@@ -459,10 +470,19 @@ pub trait ClientConfigBuildParams {
         trajectory_file_output: LocalTrajectoryFileParams,
     ) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
+    /// Builds a `ClientConfigLoader` from the current builder state.
     fn build(&self) -> ClientConfigLoader;
+    /// Builds a `ClientConfigLoader` with all built-in defaults.
     fn build_default() -> ClientConfigLoader;
 }
 
+/// Concrete builder for `ClientConfigLoader`. Use `ClientConfigBuildParams` methods to configure.
+///
+/// ```ignore
+/// use relayrl::config::{ClientConfigBuilder, ClientConfigBuildParams};
+///
+/// let loader = ClientConfigBuilder::build_default();
+/// ```
 pub struct ClientConfigBuilder {
     config_update_polling_seconds: Option<f32>,
     init_hyperparameters: Option<HyperparameterConfig>,
@@ -568,6 +588,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
     }
 }
 
+/// The `training_server_config` section of the training server JSON config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrainingServerConfigParams {
     pub config_update_polling_seconds: f32,
@@ -581,7 +602,7 @@ struct TrainingServerConfigFile {
     transport_config: TransportConfigParams,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// Parsed training server configuration loaded from `training_server_config.json`.
 pub struct TrainingServerConfigLoader {
     pub config_path: PathBuf,
     pub training_server_config: TrainingServerConfigParams,
@@ -589,6 +610,7 @@ pub struct TrainingServerConfigLoader {
 }
 
 impl TrainingServerConfigLoader {
+    /// Creates a loader from the given path, or from the default path when `None` is passed.
     pub fn new_config(config_path: Option<PathBuf>) -> Self {
         let _config_path: PathBuf = if let Some(config_path_value) = config_path {
             config_path_value
@@ -618,6 +640,7 @@ impl TrainingServerConfigLoader {
         }
     }
 
+    /// Reads and parses the JSON file at `config_path`; falls back to built-in defaults on malformed input.
     pub fn load_config(config_path: &PathBuf) -> Self {
         match File::open(config_path) {
             Ok(mut file) => {
@@ -652,27 +675,33 @@ impl TrainingServerConfigLoader {
         }
     }
 
+    /// Returns the file path this loader was built from.
     pub fn get_config_path(&self) -> &PathBuf {
         &self.config_path
     }
 
+    /// Returns the config polling interval in seconds.
     pub fn get_config_update_polling_seconds(&self) -> f32 {
         self.training_server_config.config_update_polling_seconds
     }
 
+    /// Returns optional default hyperparameters from the config.
     pub fn get_hyperparameters(&self) -> &Option<HyperparameterConfig> {
         &self.training_server_config.default_hyperparameters
     }
 
+    /// Returns the TensorBoard writer parameters.
     pub fn get_training_tensorboard(&self) -> &TensorboardParams {
         &self.training_server_config.training_tensorboard
     }
 
+    /// Returns the transport network address configuration.
     pub fn get_transport_config(&self) -> &TransportConfigParams {
         &self.transport_config
     }
 }
 
+/// Builder trait for constructing a `TrainingServerConfigLoader` programmatically.
 pub trait TrainingServerConfigBuildParams {
     fn set_config_update_polling_seconds(
         &mut self,
@@ -690,10 +719,13 @@ pub trait TrainingServerConfigBuildParams {
         global_step_tag: &str,
     ) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
+    /// Builds a `TrainingServerConfigLoader` from the current builder state.
     fn build(&self) -> TrainingServerConfigLoader;
+    /// Builds a `TrainingServerConfigLoader` with all built-in defaults.
     fn build_default() -> TrainingServerConfigLoader;
 }
 
+/// Concrete builder for `TrainingServerConfigLoader`. Use `TrainingServerConfigBuildParams` methods to configure.
 pub struct TrainingServerConfigBuilder {
     config_update_polling_seconds: Option<f32>,
     default_hyperparameters: Option<HyperparameterConfig>,
@@ -938,12 +970,14 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
     }
 }
 
+/// Inference endpoint addresses for ZMQ transport.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ZmqTransportInferenceAddresses {
     pub inference_server_address: NetworkParams,
     pub inference_scaling_server_address: NetworkParams,
 }
 
+/// Training endpoint addresses for ZMQ transport.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ZmqTransportTrainingAddresses {
     pub agent_listener_address: NetworkParams,
@@ -952,12 +986,14 @@ pub struct ZmqTransportTrainingAddresses {
     pub training_scaling_server_address: NetworkParams,
 }
 
+/// Combined ZMQ inference and training endpoint addresses.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ZmqTransportAddresses {
     pub inference_addresses: ZmqTransportInferenceAddresses,
     pub training_addresses: ZmqTransportTrainingAddresses,
 }
 
+/// Endpoint addresses for NATS transport.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NatsTransportAddresses {
     pub inference_server_address: NetworkParams,
@@ -965,6 +1001,7 @@ pub struct NatsTransportAddresses {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// All transport endpoint addresses and the local model module path, from the `transport_config` section.
 pub struct TransportConfigParams {
     pub nats_addresses: NatsTransportAddresses,
     pub zmq_addresses: ZmqTransportAddresses,
@@ -972,14 +1009,17 @@ pub struct TransportConfigParams {
 }
 
 impl TransportConfigParams {
+    /// Returns the NATS inference server address.
     pub fn get_nats_inference_server_address(&self) -> &NetworkParams {
         &self.nats_addresses.inference_server_address
     }
 
+    /// Returns the NATS training server address.
     pub fn get_nats_training_server_address(&self) -> &NetworkParams {
         &self.nats_addresses.training_server_address
     }
 
+    /// Returns the ZMQ inference server address.
     pub fn get_zmq_inference_server_address(&self) -> &NetworkParams {
         &self
             .zmq_addresses
@@ -987,14 +1027,17 @@ impl TransportConfigParams {
             .inference_server_address
     }
 
+    /// Returns the ZMQ agent listener address.
     pub fn get_zmq_agent_listener_address(&self) -> &NetworkParams {
         &self.zmq_addresses.training_addresses.agent_listener_address
     }
 
+    /// Returns the ZMQ model server address.
     pub fn get_zmq_model_server_address(&self) -> &NetworkParams {
         &self.zmq_addresses.training_addresses.model_server_address
     }
 
+    /// Returns the ZMQ trajectory server address.
     pub fn get_zmq_trajectory_server_address(&self) -> &NetworkParams {
         &self
             .zmq_addresses
@@ -1002,6 +1045,7 @@ impl TransportConfigParams {
             .trajectory_server_address
     }
 
+    /// Returns the ZMQ inference scaling server address.
     pub fn get_zmq_inference_scaling_server_address(&self) -> &NetworkParams {
         &self
             .zmq_addresses
@@ -1009,6 +1053,7 @@ impl TransportConfigParams {
             .inference_scaling_server_address
     }
 
+    /// Returns the ZMQ training scaling server address.
     pub fn get_zmq_training_scaling_server_address(&self) -> &NetworkParams {
         &self
             .zmq_addresses
@@ -1017,6 +1062,7 @@ impl TransportConfigParams {
     }
 }
 
+/// Builder trait for constructing a `TransportConfigParams` programmatically.
 pub trait TransportConfigBuildParams {
     fn set_nats_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_nats_training_server_address(&mut self, host: &str, port: &str) -> &mut Self;
@@ -1027,10 +1073,13 @@ pub trait TransportConfigBuildParams {
     fn set_zmq_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_zmq_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_local_model_module(&mut self, directory_name: &str, model_name: &str) -> &mut Self;
+    /// Builds a `TransportConfigParams` from the current builder state.
     fn build(&self) -> TransportConfigParams;
+    /// Builds a `TransportConfigParams` with all default localhost addresses.
     fn build_default() -> TransportConfigParams;
 }
 
+/// Concrete builder for `TransportConfigParams`. Use `TransportConfigBuildParams` setters to configure endpoints.
 pub struct TransportConfigBuilder {
     nats_inference_server_address: Option<NetworkParams>,
     nats_training_server_address: Option<NetworkParams>,
@@ -1043,6 +1092,7 @@ pub struct TransportConfigBuilder {
     local_model_module: Option<LocalModelModuleParams>,
 }
 
+/// Directory, file name, and extension for the on-disk model module used by the transport path.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalModelModuleParams {
     pub directory: String,

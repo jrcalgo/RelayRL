@@ -12,6 +12,7 @@ use relayrl_algorithms::prelude::templates::AlgorithmError;
 use relayrl_types::data::action::{RelayRLAction, RelayRLData};
 use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
+use relayrl_types::model::ModelModule;
 use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind, backend::Backend};
 use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, DeviceType};
 
@@ -59,11 +60,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), TrainingError>
+    ) -> Result<ModelModule<B>, TrainingError>
     where
-        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         #[inline(always)]
@@ -75,9 +76,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         ) -> Result<(), TrainingError>
         where
             B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
-            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Send + 'static,
         {
             if let Some(pi_module) = trainer.acquire_pi_module() {
                 runtime
@@ -111,9 +112,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
             epoch_count: &std::sync::atomic::AtomicU64,
         ) where
             B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
-            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Send + 'static,
         {
             trainer.apply_epoch_result(output);
             trainer.log_epoch();
@@ -244,7 +245,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                     }
 
-                    Ok::<(), TrainingError>(())
+                    Ok::<ModelModule<B>, TrainingError>(trainer.acquire_pi_module().ok_or(TrainingError::TrainerError("Policy model not found".to_string()))?)
                 });
 
                 let mut per_env_trajs: Vec<RelayRLTrajectory> = (0..n_envs).map(|_| RelayRLTrajectory::new(max_traj_length)).collect();
@@ -487,10 +488,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                 drop(inference_obs_tx);
                 drop(traj_tx);
-                learner_handle.await.map_err(|e| TrainingError::TrainerError(e.to_string()))??;
+                let model_module = learner_handle.await.map_err(|e| TrainingError::TrainerError(e.to_string()))??;
                 inference_handle.await.map_err(|e| TrainingError::InferenceRequestError(e.to_string()))??;
 
-                Ok(())
+                Ok(model_module)
             }))
         })
     }
@@ -503,11 +504,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         _loop_iters: usize,
         _max_traj_length: usize,
         _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), TrainingError>
+    ) -> Result<ModelModule<B>, TrainingError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
         unimplemented!()
     }
@@ -520,11 +521,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         _loop_iters: usize,
         _max_traj_length: usize,
         _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), TrainingError>
+    ) -> Result<ModelModule<B>, TrainingError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
         unimplemented!()
     }

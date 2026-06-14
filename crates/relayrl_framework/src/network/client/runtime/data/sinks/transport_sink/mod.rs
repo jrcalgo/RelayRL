@@ -1,7 +1,7 @@
 //! Transport dispatch abstractions for experimental client networking paths.
 //!
 //! These components sit behind `zmq-transport` and `nats-transport`. They remain experimental in
-//! `0.5.0-beta`; the local/default client runtime is the supported beta path.
+//! `0.5.0`; the local/default client runtime is the supported path.
 
 use crate::network::TransportType;
 use crate::network::client::agent::AlgorithmInitArgs;

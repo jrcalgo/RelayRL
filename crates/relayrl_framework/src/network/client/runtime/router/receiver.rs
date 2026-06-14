@@ -209,14 +209,14 @@ mod unit_tests {
 
     fn independent_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         })
     }
 
     fn shared_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Shared),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Shared),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         })
     }

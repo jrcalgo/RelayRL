@@ -279,7 +279,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         device: DeviceType,
     ) -> Result<(LocalModelHandle<B>, bool), StateManagerError> {
         match &self.shared_client_modes.actor_inference_mode {
-            ActorInferenceMode::Local(ModelMode::Shared) => {
+            ActorInferenceMode::Client(ModelMode::Shared) => {
                 // Reuse existing slot for this device (if any).
                 if let Some(idx) = self
                     .shared_local_models
@@ -678,7 +678,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         sorted_actor_ids: &[ActorUuid],
     ) -> ActorUuid {
         match &self.shared_client_modes.actor_inference_mode {
-            ActorInferenceMode::Local(ModelMode::Shared) => {
+            ActorInferenceMode::Client(ModelMode::Shared) => {
                 let Some(actor_device) = self
                     .actor_devices
                     .get(&actor_id)
@@ -893,12 +893,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
                     ))
                 })?;
 
-                let obs_dtype = env_interface
-                    .obs_dtype()
-                    .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
-                let act_dtype = env_interface
-                    .act_dtype()
-                    .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                let obs_dtype = {
+                    let env_dtype = env_interface
+                        .obs_dtype()
+                        .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                    env_dtype_to_dtype(&env_dtype)?
+                };
+                let act_dtype = {
+                    let env_dtype = env_interface
+                        .act_dtype()
+                        .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                    env_dtype_to_dtype(&env_dtype)?
+                };
                 let discrete = env_interface.action_is_discrete().unwrap_or(true);
 
                 for _ in 0..loop_iters {
@@ -907,33 +913,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
                             "[StateManager] flat_observation_bytes returned None".to_string(),
                         )
                     })?;
-                    let obs_dtype_conv = env_dtype_to_dtype(&obs_dtype)?;
-                    let raw_output = runtime
-                        .perform_env_byte_inference_erased(
-                            "model",
-                            &obs_bytes,
-                            n_envs,
-                            obs_dim,
-                            &obs_dtype_conv,
+
+                    let action_bytes = runtime
+                        .perform_local_byte_inference_erased(
+                            &obs_bytes, n_envs, obs_dim, act_dim, &obs_dtype, &act_dtype, discrete,
                         )
                         .await
                         .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-
-                    let action_bytes = if discrete {
-                        decode_argmax(
-                            &raw_output.data,
-                            &env_dtype_to_dtype(&act_dtype)?,
-                            n_envs,
-                            act_dim,
-                        )
-                    } else {
-                        decode_continuous_bytes(
-                            &raw_output.data,
-                            &raw_output.dtype,
-                            n_envs * act_dim,
-                            &env_dtype_to_dtype(&act_dtype)?,
-                        )
-                    };
 
                     let _ = env_interface.step_bytes(&action_bytes).ok_or_else(|| {
                         StateManagerError::GetEnvInfoError(
@@ -954,11 +940,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), StateManagerError>
+    ) -> Result<ModelModule<B>, StateManagerError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         TrainingInterface::<B>::train_ppo(
@@ -981,11 +967,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), StateManagerError>
+    ) -> Result<ModelModule<B>, StateManagerError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         TrainingInterface::<B>::train_ippo(
@@ -1008,11 +994,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), StateManagerError>
+    ) -> Result<ModelModule<B>, StateManagerError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         TrainingInterface::<B>::train_mappo(
@@ -1061,7 +1047,7 @@ pub(crate) fn env_dtype_to_dtype(dtype: &EnvDType) -> Result<DType, ActorError> 
 }
 
 /// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
-fn decode_argmax(
+pub(crate) fn decode_argmax(
     data: &[u8],
     dtype: &relayrl_types::data::tensor::DType,
     n_envs: usize,
@@ -1128,7 +1114,7 @@ fn decode_argmax(
     }
 }
 
-fn decode_continuous_bytes(
+pub(crate) fn decode_continuous_bytes(
     data: &[u8],
     src_dtype: &DType,
     count: usize,
@@ -1309,14 +1295,14 @@ mod unit_tests {
 
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         })
     }
 
     fn shared_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Shared),
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Shared),
             actor_training_data_mode: ActorTrainingDataMode::Disabled,
         })
     }

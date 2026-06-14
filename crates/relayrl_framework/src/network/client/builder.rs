@@ -16,6 +16,10 @@ use burn_tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Hyperparameter overrides forwarded to a training server at handshake time.
+///
+/// When `config_default_init` is `true`, any `None` field is filled from the JSON config file;
+/// set a field to `Some(...)` to override a specific algorithm's params without touching the others.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DefaultHyperparameterArgs {
     pub ppo: Option<PPOParams>,
@@ -36,6 +40,7 @@ impl Default for DefaultHyperparameterArgs {
     }
 }
 
+/// Algorithm identity and optional hyperparameters sent to a training server on actor init.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AlgorithmInitArgs {
     PPO(Option<PPOParams>),
@@ -72,6 +77,7 @@ impl std::fmt::Display for DefaultHyperparameterArgs {
 }
 
 impl AlgorithmInitArgs {
+    /// Returns the algorithm name as a static string (`"PPO"`, `"IPPO"`, or `"MAPPO"`).
     pub fn as_str(&self) -> &str {
         match self {
             AlgorithmInitArgs::PPO(_) => "PPO",
@@ -138,9 +144,12 @@ pub struct TrainingParams {
     pub training_addresses: Option<TrainingAddressesArgs>,
 }
 
+/// Serialization format for locally written trajectory files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LocalTrajectoryFileType {
+    /// Comma-separated values.
     Csv,
+    /// Apache Arrow IPC format.
     Arrow,
 }
 
@@ -152,6 +161,17 @@ pub struct LocalTrajectoryFileParams {
 }
 
 impl LocalTrajectoryFileParams {
+    /// Validates `directory` and creates it if it does not exist, then returns the params.
+    ///
+    /// ```ignore
+    /// use std::path::PathBuf;
+    /// use relayrl::network::{LocalTrajectoryFileParams, LocalTrajectoryFileType};
+    ///
+    /// let params = LocalTrajectoryFileParams::new(
+    ///     PathBuf::from("experiment_data"),
+    ///     LocalTrajectoryFileType::Arrow,
+    /// )?;
+    /// ```
     pub fn new(
         directory: PathBuf,
         file_type: LocalTrajectoryFileType,
@@ -210,9 +230,18 @@ impl Default for LocalTrajectoryFileParams {
     }
 }
 
-/// Shared-model semantics are fully supported for local inference in `0.5.0-beta`.
+/// Controls whether actors on the same device each own an independent model handle or share one.
 ///
-/// Server-backed uses of `ModelMode` are still experimental.
+/// `Independent` (default) allows actors to run genuinely different policies simultaneously.
+/// `Shared` reduces memory consumption when actors on a device should always use the same weights.
+/// Server-backed uses of `ModelMode` are experimental.
+///
+/// ```ignore
+/// # use relayrl::network::{AgentBuilder, ActorInferenceMode, ModelMode};
+/// # use burn_ndarray::NdArray;
+/// let builder = AgentBuilder::<NdArray>::builder()
+///     .actor_inference_mode(ActorInferenceMode::Client(ModelMode::Shared));
+/// ```
 #[non_exhaustive]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum ModelMode {
@@ -223,14 +252,24 @@ pub enum ModelMode {
     Shared,
 }
 
-/// Inference mode used by runtime actors.
+/// Selects where actor inference occurs.
 ///
-/// The local path is the beta-supported path in `0.5.0-beta`.
+/// `Client` (default) runs inference locally inside each actor task; `Server` and `ClientFallback`
+/// route inference to an external server and are experimental, requiring a transport feature.
+///
+/// ```ignore
+/// # use relayrl::network::{AgentBuilder, ActorInferenceMode, ModelMode};
+/// # use burn_ndarray::NdArray;
+/// let (agent, params) = AgentBuilder::<NdArray>::builder()
+///     .actor_inference_mode(ActorInferenceMode::Client(ModelMode::Independent))
+///     .build()
+///     .await?;
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorInferenceMode {
     /// Inference occurs locally in the local runtime actor.
-    Local(ModelMode),
+    Client(ModelMode),
     /// Experimental: inference occurs on external inference server(s).
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
@@ -238,24 +277,34 @@ pub enum ActorInferenceMode {
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
     Server(InferenceParams),
-    /// Experimental: inference occurs locally for one actor, remote inference for others.
+    /// Experimental: inference falls back to local execution when remote inference fails, for example due to network issues.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    ServerOverflow(ModelMode, InferenceParams),
+    ClientFallback(ModelMode, InferenceParams),
 }
 
 impl Default for ActorInferenceMode {
     fn default() -> Self {
-        Self::Local(ModelMode::default())
+        Self::Client(ModelMode::default())
     }
 }
 
-/// Training mode used by runtime actors for training data collection and processing.
+/// Selects how actors record and forward trajectory data.
 ///
-/// Offline local trajectory writing is part of the beta-supported local/default path.
+/// The `Offline*` variants write to memory and/or local files and are currently the only fully supported path.
+/// The `Online*` variants stream data to a training server and require a transport feature.
+///
+/// ```ignore
+/// # use relayrl::network::{AgentBuilder, ActorTrainingDataMode};
+/// # use burn_ndarray::NdArray;
+/// let (agent, params) = AgentBuilder::<NdArray>::builder()
+///     .actor_training_data_mode(ActorTrainingDataMode::OfflineWithFilesAndMemory(None))
+///     .build()
+///     .await?;
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorTrainingDataMode {
@@ -341,6 +390,7 @@ pub(crate) fn uses_in_memory_data(training_data_mode: &ActorTrainingDataMode) ->
     );
 }
 
+/// Per-actor device, model, and hyperparameter defaults used when creating actors.
 #[derive(Clone)]
 pub struct ActorParams<B: Backend + BackendMatcher<Backend = B>> {
     pub device: DeviceType,
@@ -358,20 +408,26 @@ impl<B: Backend + BackendMatcher<Backend = B>> Default for ActorParams<B> {
     }
 }
 
-/// Runtime modes consumed by the client to enable/disable functionality.
+/// Active inference and data-collection modes applied across all runtime actors.
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ClientModes {
     pub actor_inference_mode: ActorInferenceMode,
     pub actor_training_data_mode: ActorTrainingDataMode,
 }
 
+/// Capacity of an actor's in-memory replay buffer.
 pub type ReplayBufferSize = usize;
+/// Filesystem path where a trained model is saved.
 pub type SaveModelPath = PathBuf;
 
-/// Parameters used to start a [`RelayRLAgent`].
+/// Startup parameters produced by `AgentBuilder::build` and consumed by `RelayRLAgent::start` or `restart`.
 ///
-/// Typically constructed via [`AgentBuilder::build`] and then passed to
-/// [`RelayRLAgent::start`] or [`RelayRLAgent::restart`].
+/// ```ignore
+/// # use relayrl::network::{AgentBuilder, RelayRLAgent};
+/// # use burn_ndarray::NdArray;
+/// let (mut agent, params) = AgentBuilder::<NdArray>::builder().build().await?;
+/// agent.start(params).await?;
+/// ```
 #[derive(Clone)]
 pub struct AgentStartParameters<B: Backend + BackendMatcher<Backend = B>> {
     pub router_scale: u32,
@@ -388,31 +444,28 @@ impl<B: Backend + BackendMatcher<Backend = B>> std::fmt::Debug for AgentStartPar
     }
 }
 
-/// Builder for creating a [`RelayRLAgent`] and its startup parameters.
+/// Fluent builder for constructing a `RelayRLAgent` and its startup parameters.
 ///
-/// This builder is `#[must_use]`: setters return an updated value.
+/// Each setter returns the updated builder; `build()` consumes it and yields `(RelayRLAgent<B>, AgentStartParameters<B>)`.
 ///
-/// # Examples
-///
-/// ```rust,no_run
-/// use relayrl_framework::prelude::network::{AgentBuilder, RelayRLAgentActors};
-/// use relayrl_framework::prelude::types::model::ModelModule;
-/// use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
+/// ```ignore
+/// use relayrl::network::{AgentBuilder, ActorTrainingDataMode, RelayRLAgentActors};
+/// use relayrl::types::model::ModelModule;
 /// use burn_ndarray::NdArray;
-/// use burn_tensor::Float;
 /// use std::path::PathBuf;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+/// let model = ModelModule::<NdArray>::load_from_path("model_dir")?;
 /// let (mut agent, params) = AgentBuilder::<NdArray>::builder()
-///     .default_device(DeviceType::Cpu)
-///     .default_model(default_model)
+///     .default_model(model)
+///     .router_scale(2)
+///     .actor_training_data_mode(ActorTrainingDataMode::OfflineWithMemory)
 ///     .config_path(PathBuf::from("client_config.json"))
 ///     .build()
 ///     .await?;
 ///
 /// agent.start(params).await?;
-/// let _actor_ids = agent.get_actor_ids()?;
+/// let ids = agent.get_actor_ids()?;
 /// agent.shutdown().await?;
 /// # Ok(())
 /// # }
@@ -431,11 +484,7 @@ pub struct AgentBuilder<B: Backend + BackendMatcher<Backend = B>> {
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> AgentBuilder<B> {
-    /// Create a new builder initialized with sensible default values.
-    ///
-    /// Notes:
-    /// - Modes default to local inference.
-    /// - Transport default to `ZMQ` when enabled by feature flags.
+    /// Creates a new builder with default local-inference settings.
     pub fn builder() -> Self {
         Self {
             client_modes: ClientModes::default(),
@@ -450,11 +499,27 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuilder<B> {
         }
     }
 
+    /// Sets the inference mode for all actors. Defaults to `ActorInferenceMode::Client(ModelMode::Independent)`.
+    ///
+    /// ```ignore
+    /// # use relayrl::network::{AgentBuilder, ActorInferenceMode, ModelMode};
+    /// # use burn_ndarray::NdArray;
+    /// let builder = AgentBuilder::<NdArray>::builder()
+    ///     .actor_inference_mode(ActorInferenceMode::Client(ModelMode::Shared));
+    /// ```
     pub fn actor_inference_mode(mut self, actor_inference_mode: ActorInferenceMode) -> Self {
         self.client_modes.actor_inference_mode = actor_inference_mode;
         self
     }
 
+    /// Sets the training data collection mode for all actors. Defaults to `ActorTrainingDataMode::OfflineWithMemory`.
+    ///
+    /// ```ignore
+    /// # use relayrl::network::{AgentBuilder, ActorTrainingDataMode};
+    /// # use burn_ndarray::NdArray;
+    /// let builder = AgentBuilder::<NdArray>::builder()
+    ///     .actor_training_data_mode(ActorTrainingDataMode::OfflineWithFilesAndMemory(None));
+    /// ```
     pub fn actor_training_data_mode(
         mut self,
         actor_training_data_mode: ActorTrainingDataMode,
@@ -463,54 +528,98 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuilder<B> {
         self
     }
 
+    /// Selects the network transport type for server-backed workflows. Requires `zmq-transport` or `nats-transport`.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn transport_type(mut self, transport_type: TransportType) -> Self {
         self.transport_type = Some(transport_type);
         self
     }
 
+    /// Sets the number of routing workers started alongside the coordinator. Defaults to `1`.
+    ///
+    /// ```ignore
+    /// # use relayrl::network::AgentBuilder;
+    /// # use burn_ndarray::NdArray;
+    /// let builder = AgentBuilder::<NdArray>::builder().router_scale(4);
+    /// ```
     pub fn router_scale(mut self, count: u32) -> Self {
         self.router_scale = Some(count);
         self
     }
 
+    /// Provides a default model pre-loaded into each actor at startup.
+    ///
+    /// ```ignore
+    /// # use relayrl::network::AgentBuilder;
+    /// # use relayrl::types::model::ModelModule;
+    /// # use burn_ndarray::NdArray;
+    /// let model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+    /// let builder = AgentBuilder::<NdArray>::builder().default_model(model);
+    /// ```
     pub fn default_model(mut self, model: ModelModule<B>) -> Self {
         self.default_model = Some(model);
         self
     }
 
+    /// Overrides the per-actor router channel capacity. When unset the value in the JSON config (default `1000`) is used.
+    ///
+    /// ```ignore
+    /// # use relayrl::network::AgentBuilder;
+    /// # use burn_ndarray::NdArray;
+    /// let builder = AgentBuilder::<NdArray>::builder().router_buffer_size_per_actor(2048);
+    /// ```
     pub fn router_buffer_size_per_actor(mut self, size: usize) -> Self {
         self.router_buffer_size_per_actor = Some(size);
         self
     }
 
+    /// Sets the JSON config file path. Defaults to `client_config.json` in the working directory.
+    ///
+    /// ```ignore
+    /// # use relayrl::network::AgentBuilder;
+    /// # use burn_ndarray::NdArray;
+    /// # use std::path::PathBuf;
+    /// let builder = AgentBuilder::<NdArray>::builder()
+    ///     .config_path(PathBuf::from("my_config.json"));
+    /// ```
     pub fn config_path(mut self, path: PathBuf) -> Self {
         self.config_path = Some(path);
         self
     }
 
+    /// Supplies default PPO hyperparameters forwarded to the training server. Requires a transport feature.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn default_ppo_params(mut self, ppo_params: PPOParams) -> Self {
         self.default_hyperparameters.ppo = Some(ppo_params);
         self
     }
 
+    /// Supplies default IPPO hyperparameters forwarded to the training server. Requires a transport feature.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn default_ippo_params(mut self, ippo_params: IPPOParams) -> Self {
         self.default_hyperparameters.ippo = Some(ippo_params);
         self
     }
 
+    /// Supplies default MAPPO hyperparameters forwarded to the training server. Requires a transport feature.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn default_mappo_params(mut self, mappo_params: MAPPOParams) -> Self {
         self.default_hyperparameters.mappo = Some(mappo_params);
         self
     }
 
-    /// Build the agent facade plus its startup parameters.
+    /// Consumes the builder and returns the `(RelayRLAgent, AgentStartParameters)` pair.
     ///
-    /// # Errors
-    /// Returns an error if the selected modes are internally inconsistent.
+    /// ```ignore
+    /// # use relayrl::network::AgentBuilder;
+    /// # use burn_ndarray::NdArray;
+    /// let (mut agent, params) = AgentBuilder::<NdArray>::builder()
+    ///     .router_scale(2)
+    ///     .build()
+    ///     .await?;
+    /// agent.start(params).await?;
+    /// agent.shutdown().await?;
+    /// ```
     pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), ClientError> {
         // Initialize agent object
         let agent: RelayRLAgent<B> = RelayRLAgent::<B>::new(
