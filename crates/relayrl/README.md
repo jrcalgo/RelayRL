@@ -38,9 +38,7 @@ trajectory data, and hot-swaps policies with near-zero downtime. It is:
   <a href="https://github.com/jrcalgo/relayrl">Repository</a>
 </p>
 
-<p align="center">
-  <h2 align="center">0.5.0</h2>
-</p>
+## 0.5.0
 
 This is the first major release since `0.4.52`, and a complete rewrite of the
 client runtime. Highlights of the `0.5.0` line:
@@ -64,9 +62,7 @@ implemented as **experimental** and are not covered by the `0.5.x` support
 promise. See [Feature flags](#feature-flags) and
 [Current support](#current-support).
 
-<p align="center">
-  <h2 align="center">Overview</h2>
-</p>
+ ## Overview
 
 `relayrl` is a thin facade that re-exports the most recent stable release of
 [`relayrl_framework`], the multi-actor client runtime. The rest of the stack is
