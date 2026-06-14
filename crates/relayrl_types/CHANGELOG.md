@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] - 2026-06-14
+
+### Added
+- **Public API documentation** - Added crate-level documentation and expanded item-level rustdoc for actions, tensors, trajectories, record adapters, codec utilities, model metadata, model modules, and hot-reloadable models.
+- **Comparable codec configs** - Added `PartialEq` to `CodecConfig` so codec settings can be compared directly in tests and caller-side validation.
+
+### Changed
+- **Package metadata** - Bumped `relayrl_types` from `0.8.0` to `0.8.1`.
+- **Record test fixtures** - Updated internal record-helper fixtures to include the `is_truncated` and `policy_version` trajectory fields introduced in `0.8.0`.
+
+### Fixed
+- **Reduced-feature tensor imports** - Avoided importing `half::f16` unconditionally in tensor code, keeping the half import scoped to the backend path that requires it.
+- **Model output extraction** - Avoided an unnecessary allocation when converting extracted ONNX output slices into raw tensor bytes.
+- **Batched hot-reload forwarding** - Simplified `HotReloadableModel::forward_batch()` result collection so errors propagate directly from the collected iterator.
+
 ## [0.8.0] - 2026-05-24
 
 ### Breaking
