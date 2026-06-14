@@ -2,23 +2,6 @@
   <h1 align="center">RelayRL</h1>
 </p>
 
-A Rust-native runtime for concurrent, multi-actor deep reinforcement learning.
-RelayRL runs many actors in a single process, performs local inference, collects
-trajectory data, and hot-swaps policies with near-zero downtime. It is:
-
-* **Heterogeneous**: each actor can bind its own environment and its own
-  independent (or device-shared), hot-swappable model. Run distinct policies
-  side by side, or roll a freshly trained policy into a subset of actors while
-  the rest keep serving the old one.
-
-* **Concurrent**: actors run as independent Tokio tasks. On a multi-threaded
-  runtime their inference runs in parallel with no GIL; on a current-thread
-  runtime they run concurrently.
-
-* **Embeddable**: a small builder-driven API over a layered, async runtime makes
-  it well suited for embedding RL inside a native application, simulator, game
-  engine, or control loop.
-
 <p align="center">
   <a href="https://crates.io/crates/relayrl">
     <img src="https://img.shields.io/crates/v/relayrl.svg" alt="Crates.io" />
@@ -37,6 +20,23 @@ trajectory data, and hot-swaps policies with near-zero downtime. It is:
   <a href="../relayrl_framework/README.md">Framework Runtime</a> &nbsp;|&nbsp;
   <a href="https://github.com/jrcalgo/relayrl">Repository</a>
 </p>
+
+A Rust-native runtime for concurrent, multi-actor deep reinforcement learning.
+RelayRL runs many actors in a single process, performs local inference, collects
+trajectory data, and hot-swaps policies with near-zero downtime. It is:
+
+* **Heterogeneous**: each actor can bind its own environment and its own
+  independent (or device-shared), hot-swappable model. Run distinct policies
+  side by side, or roll a freshly trained policy into a subset of actors while
+  the rest keep serving the old one.
+
+* **Concurrent**: actors run as independent Tokio tasks. On a multi-threaded
+  runtime their inference runs in parallel with no GIL; on a current-thread
+  runtime they run concurrently.
+
+* **Embeddable**: a small builder-driven API over a layered, async runtime makes
+  it well suited for embedding RL inside a native application, simulator, game
+  engine, or control loop.
 
 ## 0.5.0
 
