@@ -81,6 +81,13 @@ pub fn build_pt_mlp_temp(
         }
     }
 
+    // Freeze all VarStore parameters before tracing: the JIT tracer bakes captured
+    // tensors as constants, and PyTorch refuses tensors with requires_grad=true in
+    // that role. no_grad() only disables gradient *computation*; freeze() clears the
+    // requires_grad flag on every parameter so the tracer accepts them.
+    vs.freeze();
+
+
     // Create a temporary file for saving the model
     let temp_file = tempfile::Builder::new()
         .prefix("relayrl_pt_model_")
@@ -89,12 +96,6 @@ pub fn build_pt_mlp_temp(
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
 
     let temp_path = temp_file.path().to_path_buf();
-
-    // Freeze all VarStore parameters before tracing: the JIT tracer bakes captured
-    // tensors as constants, and PyTorch refuses tensors with requires_grad=true in
-    // that role. no_grad() only disables gradient *computation*; freeze() clears the
-    // requires_grad flag on every parameter so the tracer accepts them.
-    vs.freeze();
 
     // Trace the model to create a TorchScript module
     // We need an example input to trace - use the first layer's input dimension

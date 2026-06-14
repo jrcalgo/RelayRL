@@ -577,6 +577,7 @@ pub trait PPOKernelOps<
     fn get_pi_logprobs(&self, obs: &[TensorData], obs_dim: usize, act: &[TensorData]) -> Vec<f32>;
     fn value_forward(&self, obs: &[TensorData], obs_dim: usize) -> Vec<f32>;
     fn normalize_persistent_returns(&mut self, ret: &[f32]) -> Vec<f32>;
+    fn set_return_denorm_stats(&mut self, mean: f32, std: f32);
 }
 
 /// Factory for constructing continuous or discrete PPO kernels.
@@ -600,9 +601,11 @@ pub struct DiscretePPOKernel<
     pub pi: DiscretePPOPolicyHead<B, KindIn, KindOut, Pi>,
     pub vf: ValueFunction<B, KindIn>,
     pub trainer: Option<training::PPOActorCriticTrainer>,
-    pub returns_mean: f32,
-    pub returns_variance: f32,
+    pub returns_mean: f64,
+    pub returns_variance: f64,
     pub returns_count: u64,
+    pub ret_denorm_mean: f32,
+    pub ret_denorm_std: f32,
 }
 
 /// Concrete continuous-action PPO kernel: policy head, value function, and optional trainer with return statistics.
@@ -615,9 +618,11 @@ pub struct ContinuousPPOKernel<
     pub pi: ContinuousPPOPolicyHead<B, KindIn, KindOut, Pi>,
     pub vf: ValueFunction<B, KindIn>,
     pub trainer: Option<training::PPOActorCriticTrainer>,
-    pub returns_mean: f32,
-    pub returns_variance: f32,
+    pub returns_mean: f64,
+    pub returns_variance: f64,
     pub returns_count: u64,
+    pub ret_denorm_mean: f32,
+    pub ret_denorm_std: f32,
 }
 
 /// Active PPO kernel holding the policy head and value function along with their training state.
@@ -729,6 +734,8 @@ impl<
                         returns_mean: 0.0,
                         returns_variance: 1.0,
                         returns_count: 0,
+                        ret_denorm_mean: 0.0,
+                        ret_denorm_std: 1.0,
                     },
                 ))
             }
@@ -761,6 +768,8 @@ impl<
                         returns_mean: 0.0,
                         returns_variance: 1.0,
                         returns_count: 0,
+                        ret_denorm_mean: 0.0,
+                        ret_denorm_std: 1.0,
                     },
                 ))
             }
@@ -787,6 +796,8 @@ impl<
                 returns_mean: kernel.returns_mean,
                 returns_variance: kernel.returns_variance,
                 returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
             }),
             PPOKernel::Continuous(kernel) => PPOKernel::Continuous(ContinuousPPOKernel {
                 pi: kernel.pi.clone(),
@@ -795,6 +806,8 @@ impl<
                 returns_mean: kernel.returns_mean,
                 returns_variance: kernel.returns_variance,
                 returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
             }),
         }
     }
@@ -1050,16 +1063,25 @@ impl<
             return Vec::new();
         }
 
-        let trainer = match self {
-            PPOKernel::Discrete(k) => k.trainer.as_ref(),
-            PPOKernel::Continuous(k) => k.trainer.as_ref(),
+        let (trainer, returns_mean, returns_var, returns_count, ret_denorm_mean, ret_denorm_std) = match self {
+            PPOKernel::Discrete(k) => (k.trainer.as_ref(), k.returns_mean, k.returns_variance, k.returns_count, k.ret_denorm_mean, k.ret_denorm_std),
+            PPOKernel::Continuous(k) => (k.trainer.as_ref(), k.returns_mean, k.returns_variance, k.returns_count, k.ret_denorm_mean, k.ret_denorm_std),
         };
         if let Some(t) = trainer {
             let obs_flat = match training::obs_flat_from_tdata(obs) {
                 Ok(f) => f,
                 Err(_) => return vec![0.0; obs.len()],
             };
-            return t.value_forward_flat(&obs_flat, obs_dim);
+            let v = t.value_forward_flat(&obs_flat, obs_dim);
+
+            let persistent_std = if returns_count > 1 {
+                (returns_var / (returns_count - 1) as f64).sqrt().max(1e-8)
+            } else {
+                1.0
+            };
+            let persistent_mean = if returns_count > 0 { returns_mean } else { 0.0 };
+
+            return v.into_iter().map(|v| ((v as f64 * persistent_std + persistent_mean) * ret_denorm_std as f64 + ret_denorm_mean as f64) as f32).collect();
         }
         vec![0.0; obs.len()]
     }
@@ -1079,19 +1101,33 @@ impl<
         };
         for &r in ret {
             *count += 1;
-            let delta = r - *mean;
-            *mean += delta / *count as f32;
-            let delta2 = r - *mean;
+            let r64 = r as f64;
+            let delta = r64 - *mean;
+            *mean += delta / *count as f64;
+            let delta2 = r64 - *mean;
             *variance += delta * delta2;
         }
         let std = if *count > 1 {
-            (*variance / (*count - 1) as f32).sqrt().max(1e-8)
+            (*variance / (*count - 1) as f64).sqrt().max(1e-8)
         } else {
             1.0
         };
         ret.iter()
-            .map(|&r| ((r - *mean) / std).clamp(-5.0, 5.0))
+            .map(|&r| ((r as f64 - *mean) / std).clamp(-5.0, 5.0) as f32)
             .collect()
+    }
+
+    fn set_return_denorm_stats(&mut self, mean: f32, std: f32) {
+        match self {
+            PPOKernel::Discrete(k) => {
+                k.ret_denorm_mean = mean;
+                k.ret_denorm_std = std;
+            },
+            PPOKernel::Continuous(k) => {
+                k.ret_denorm_mean = mean;
+                k.ret_denorm_std = std;
+            },
+        }
     }
 }
 

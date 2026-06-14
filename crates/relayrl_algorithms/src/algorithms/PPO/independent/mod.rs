@@ -700,6 +700,8 @@ fn run_ppo_sgd_flat<
     // then use normalized returns for all mini-batch iterations this epoch.
     let ret_normalized = kernel.normalize_persistent_returns(&batch.ret);
 
+    kernel.set_return_denorm_stats(batch.ret_mean, batch.ret_std);
+
     let mut first_pi_loss: Option<f32> = None;
     let mut first_vf_loss: Option<f32> = None;
     let mut final_pi_loss = 0.0f32;
