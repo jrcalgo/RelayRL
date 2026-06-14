@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-06-14
+
+### Added
+- **Crate README** - Added a crate README covering the environment trait layout, scalar vs. vector execution models, implementor contracts, a minimal scalar environment example, and license information.
+
+### Changed
+- **Package metadata** - Bumped `relayrl_env_trait` from `1.3.0` to `1.3.1`.
+- **API documentation** - Expanded crate-level and item-level documentation for the existing byte-oriented environment API, including payload aliases, dtype enums, reset payloads, dynamic scalar/vector wrappers, environment handles, and trait method contracts.
+
 ## [1.3.0] - 2026-06-01
 
 ### Added
