@@ -177,10 +177,7 @@ impl<
         let n = input.shape().dims[0];
 
         // Cast to f32, reshape flat [N, OBS_DIM] → [N, C, H, W].
-        let x: Tensor<B, 2, Float> = Tensor::from_data(
-            input.into_data().convert::<f32>(),
-            &device,
-        );
+        let x: Tensor<B, 2, Float> = Tensor::from_data(input.into_data().convert::<f32>(), &device);
         let x = x.reshape([n, CONV_CHANNELS, CONV_H, CONV_W]);
 
         // Conv stack + ELU.
@@ -195,10 +192,7 @@ impl<
         let x = elu(self.fc1.forward(x));
         let x: Tensor<B, 2, Float> = self.head.forward(x);
 
-        Tensor::<B, OUT_D, KindOut>::from_data(
-            x.into_data().convert::<KindOut::Elem>(),
-            &device,
-        )
+        Tensor::<B, OUT_D, KindOut>::from_data(x.into_data().convert::<KindOut::Elem>(), &device)
     }
 }
 
@@ -222,7 +216,12 @@ impl<
         let w = CONV_W as i64;
 
         let conv_w = |layer: &Conv2d<B>| -> Vec<f32> {
-            layer.weight.val().into_data().to_vec::<f32>().unwrap_or_default()
+            layer
+                .weight
+                .val()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or_default()
         };
         let conv_b = |layer: &Conv2d<B>| -> Vec<f32> {
             layer
@@ -232,7 +231,12 @@ impl<
                 .unwrap_or_default()
         };
         let lin_w = |layer: &Linear<B>| -> Vec<f32> {
-            layer.weight.val().into_data().to_vec::<f32>().unwrap_or_default()
+            layer
+                .weight
+                .val()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or_default()
         };
         let lin_b = |layer: &Linear<B>, out: usize| -> Vec<f32> {
             layer
@@ -243,7 +247,9 @@ impl<
         };
 
         Some(vec![
-            ArchLayer::Reshape { shape: vec![-1, n_ch, h, w] },
+            ArchLayer::Reshape {
+                shape: vec![-1, n_ch, h, w],
+            },
             ArchLayer::Conv2d {
                 in_channels: CONV_CHANNELS,
                 out_channels: 32,

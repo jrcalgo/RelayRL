@@ -1,8 +1,8 @@
 use burn_tensor::backend::Backend;
 use burn_tensor::{BasicOps, Float, Tensor, TensorKind};
-use relayrl_types::data::tensor::{DType, NdArrayDType};
 #[cfg(feature = "tch-backend")]
 use relayrl_types::data::tensor::TchDType;
+use relayrl_types::data::tensor::{DType, NdArrayDType};
 use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, SupportedTensorBackend};
 
 use super::error::NeuralNetworkError;

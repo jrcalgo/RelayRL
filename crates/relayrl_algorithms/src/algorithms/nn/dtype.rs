@@ -1,6 +1,6 @@
-use relayrl_types::data::tensor::{DType, NdArrayDType};
 #[cfg(feature = "tch-backend")]
 use relayrl_types::data::tensor::TchDType;
+use relayrl_types::data::tensor::{DType, NdArrayDType};
 
 use half;
 

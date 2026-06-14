@@ -191,7 +191,11 @@ pub fn build_pt_conv_temp(
                     in_ch,
                     out_ch,
                     k,
-                    nn::ConvConfig { stride: s, padding: 0, ..Default::default() },
+                    nn::ConvConfig {
+                        stride: s,
+                        padding: 0,
+                        ..Default::default()
+                    },
                 );
                 // Load weights (OIHW: same layout as Burn and ONNX, no transpose needed).
                 let w_t = Tensor::from_slice(weights).reshape([out_ch, in_ch, k, k]);
@@ -211,12 +215,24 @@ pub fn build_pt_conv_temp(
             ArchLayer::Flatten => {
                 seq = seq.add_fn(|x| x.flatten(1, -1));
             }
-            ArchLayer::Linear { in_dim, out_dim, weights, biases } => {
+            ArchLayer::Linear {
+                in_dim,
+                out_dim,
+                weights,
+                biases,
+            } => {
                 let in_d = *in_dim as i64;
                 let out_d = *out_dim as i64;
                 let path = root.sub(&format!("fc_{fc_idx}"));
-                let mut linear =
-                    nn::linear(&path, in_d, out_d, nn::LinearConfig { bias: true, ..Default::default() });
+                let mut linear = nn::linear(
+                    &path,
+                    in_d,
+                    out_d,
+                    nn::LinearConfig {
+                        bias: true,
+                        ..Default::default()
+                    },
+                );
                 // Burn stores [in, out]; PyTorch/tch expects [out, in] for nn.Linear.
                 let w_t = Tensor::from_slice(weights.as_slice())
                     .reshape([in_d, out_d])

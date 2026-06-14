@@ -6,13 +6,13 @@ pub mod onnx_builder;
 #[cfg(feature = "tch-model")]
 pub mod torch_builder;
 
-pub use nn::{
-    acquire_conv_model_module, acquire_model_module, convert_byte_dtype_to_f32,
-    convert_byte_dtype_to_i64, dtype_to_byte_count, ActivationKind, ArchLayer, GenericMlp,
-    LayerSpecs, NeuralNetwork, NeuralNetworkError, NeuralNetworkForward, NeuralNetworkSpec,
-    ValueFunction, WeightProvider,
-};
 pub use nn::conv_policy;
+pub use nn::{
+    ActivationKind, ArchLayer, GenericMlp, LayerSpecs, NeuralNetwork, NeuralNetworkError,
+    NeuralNetworkForward, NeuralNetworkSpec, ValueFunction, WeightProvider,
+    acquire_conv_model_module, acquire_model_module, convert_byte_dtype_to_f32,
+    convert_byte_dtype_to_i64, dtype_to_byte_count,
+};
 
 #[inline(always)]
 pub(crate) fn discounted_cumsum(x: &[f32], discount: f32) -> Vec<f32> {

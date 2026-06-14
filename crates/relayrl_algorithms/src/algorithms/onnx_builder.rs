@@ -451,7 +451,12 @@ pub fn build_onnx_conv_bytes(arch: &[ArchLayer], obs_dim: usize, act_dim: usize)
                 current = out;
                 idx_flat += 1;
             }
-            ArchLayer::Linear { in_dim, out_dim, weights, biases } => {
+            ArchLayer::Linear {
+                in_dim,
+                out_dim,
+                weights,
+                biases,
+            } => {
                 let w_name = format!("fc_W{idx_fc}");
                 let b_name = format!("fc_b{idx_fc}");
                 initializers.push(build_tensor_proto(
@@ -476,8 +481,13 @@ pub fn build_onnx_conv_bytes(arch: &[ArchLayer], obs_dim: usize, act_dim: usize)
 
     let input_info = build_value_info("input", obs_dim);
     let output_info = build_value_info(&current, act_dim);
-    let graph =
-        build_graph_proto("convnet", &nodes, &initializers, &[input_info], &[output_info]);
+    let graph = build_graph_proto(
+        "convnet",
+        &nodes,
+        &initializers,
+        &[input_info],
+        &[output_info],
+    );
     build_model_proto(graph)
 }
 
