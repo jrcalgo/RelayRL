@@ -1,173 +1,195 @@
 # RelayRL Framework
 
-**Core Library for Deep Multi-Agent Reinforcement Learning**
+The multi-actor reinforcement learning client runtime that powers RelayRL.
+This crate is the top-level runtime: it composes the data model from
+`relayrl_types` and the learning logic from `relayrl_algorithms` into a
+controllable, scalable client that runs many actors, performs local inference,
+and streams trajectories to data sinks. It is:
 
----
-**Version:** 0.5.0-beta.5
+* **Heterogeneous**: each actor runs as its own task and (in `Independent`
+  mode) owns its own hot-swappable model, so different actors can serve
+  different policies on different environments at the same time.
 
-**Status:** Under active development, expect breaking changes.
+* **Concurrent**: the runtime is Tokio-based. Routers can be scaled live with
+  `scale_throughput`, and actors run concurrently with interior-mutable shared
+  state, in parallel on a multi-threaded runtime.
 
-## Changelog
-[CHANGELOG](CHANGELOG.md)
+* **Layered**: a small public API (`RelayRLAgent` + `AgentBuilder`) sits over an
+  internal coordination, routing, and data-sink stack, keeping the surface
+  ergonomic while the runtime stays modular.
+
+[![Crates.io][crates-badge]][crates-url]
+[![Docs.rs][docs-badge]][docs-url]
+[![Apache 2.0 licensed][license-badge]][license-url]
+
+[crates-badge]: https://img.shields.io/crates/v/relayrl_framework.svg
+[crates-url]: https://crates.io/crates/relayrl_framework
+[docs-badge]: https://img.shields.io/docsrs/relayrl_framework
+[docs-url]: https://docs.rs/relayrl_framework
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+[license-url]: https://github.com/jrcalgo/relayrl/blob/main/LICENSE
+
+[API Docs](https://docs.rs/relayrl_framework) |
+[relayrl crate](../relayrl/README.md) |
+[Changelog](CHANGELOG.md) |
+[Repository](https://github.com/jrcalgo/relayrl)
+
+## Most users should use the `relayrl` crate
+
+[`relayrl`](../relayrl/README.md) is the stable, higher-level facade that
+re-exports the most recent release of this runtime under a single namespace
+(`relayrl::network`, `relayrl::types`, `relayrl::algorithms`,
+`relayrl::utilities`). Prefer depending on `relayrl` unless you specifically
+need to depend on the runtime crate directly.
+
+```toml
+[dependencies]
+relayrl = "0.5.0"
+```
 
 ## Overview
 
-With v0.5.0 being a complete rewrite of v0.4.5's client implementation, the `relayrl_framework` crate now provides a **multi-actor native** client runtime for deep reinforcement learning experiments. The training server (and new inference server) are under development and remain unavailable in this update.
+`relayrl_framework` is the runtime layer of the RelayRL stack. It pulls the rest
+of the stack together:
 
-As of now, the supported beta path is the local/default client runtime. Provide your own
-`TorchScript` or `ONNX` model formatted to the framework's standardized `ModelModule` interface.
-Transport-backed and server-backed workflows remain experimental in `0.5.0-beta.5`.
+* `relayrl_types`: backend-agnostic tensors, actions, trajectories, on-disk
+  record adapters (Arrow/CSV), and the codec pipeline.
+* `relayrl_algorithms`: policy and value networks, rollout buffering, and the
+  PPO family (`PPO`, `IPPO`, `MAPPO`).
+* `relayrl_env_trait`: the `Environment`, `ScalarEnvironment`, and
+  `VectorEnvironment` contracts the runtime drives.
 
-All feature flags other than `client` are (more) **unstable** - if not entirely unimplemented - and unsuitable for RL experiment usage. Use at your own risk!
+The supported path in `0.5.0` is the local/default client runtime. Network
+transport (ZMQ/NATS) and server-backed inference/training workflows are
+implemented as **experimental** and remain experimental even when their feature
+flags are enabled. See [Feature flags](#feature-flags) and
+[Current support](#current-support).
 
-**Key Features:**
+## Architecture
 
-- **Multi-actor native architecture** with concurrent actor execution
-- Local Arrow file sink for **offline trajectory data collection** and training
-- **In-memory** trajectory retrieval for the last 1,000 trajectories collected
-- **Scalable** router-based message dispatching for actor runtimes
-- **Ergonomic builder pattern** API for agent construction
-- **Multiple device type support** via `NdArray` for CPU exclusively and `Tch` for CPU/CUDA/MPS
+The client runtime is layered, with a small public API over an internal,
+concurrency-oriented runtime:
 
-**Current Limitations:**
+```text
+Public API ......... RelayRLAgent + AgentBuilder
+       |
+Coordination ....... ClientCoordinator (orchestrator)
+       |             ScaleManager (router scaling)
+       |             StateManager (actor state)
+       |             LifecycleManager (config, shutdown)
+       |
+Routing ............ RouterDispatcher + scalable Router workers
+       |
+Actors ............. concurrent actors, local model inference, trajectory building
+       |
+Data sinks ......... file sink (Arrow/CSV), transport sink (ZMQ/NATS, experimental)
+```
 
-- **Transport Layer:** Network transport (ZMQ/NATS) is implemented as experimental, however no complementary server is available at this time
+The local/default control flow is:
+`AgentBuilder -> RelayRLAgent -> ClientCoordinator -> routers/actors -> data sinks`.
 
-**Major Changes:**
+## Module structure
 
-- **Architecture Redesign:** Monolithic design of v0.4.5 abstracted into a decoupled layered architecture, enhancing modularity, maintainability, and testability.
-- **Rust-First Design Philosophy:** Complete removal of PyO3 and its Python code dependencies from framework; all core components written entirely in Rust.
-- **Backend Independence:** Replacement of direct `Tch` crate dependency with `Burn`, enabling generic Tensor interfacing with the framework (currently supports Burn's `Tch` and `NdArray` Tensor backends, as well as `TorchScript` and `ONNX` model inference).
-- **Data Persistence:** Trajectory data can be optionally persisted in-memory and/or via `Csv` or `Arrow` file formats.
-- **Improved Error Handling:** Near complete removal of panics and replacement with proper error handling (retries, branches, etc.) and upstream propagation.
-- **Tonic/gRPC Removal:** All Tonic-related code has been removed with focus being cast on building strong `ZMQ` and `NATS` transport implementations.
-- **Type System:** Moved to a separate crate (`relayrl_types`).
-- **RL Algorithms:** Moved to a separate crate (`relayrl_algorithms`).
-- **Python Bindings:** Moved to a separate crate (`relayrl_python`), which remains unimplemented for now.
+* `network`: the runtime.
+  * `network::client`: the multi-actor client runtime (rewritten in v0.5.0). The
+    public `agent` module holds the `RelayRLAgent` facade and `AgentBuilder`
+    construction API; the internal `runtime` holds `coordination` (coordinator,
+    lifecycle, scaling, state), `router` (message routing), and `data` (file
+    sinks plus experimental transport sinks).
+  * `network::server`: optional, experimental training/inference servers behind
+    feature flags.
+* `utilities`: JSON configuration loading/builders, logging (log4rs), and
+  metrics (Prometheus/OpenTelemetry).
+* `prelude`: grouped re-exports spanning this crate plus `relayrl_types`,
+  `relayrl_algorithms`, and `relayrl_env_trait`.
 
-## Quick Start
+## Quick start
 
-### 0.5.0-beta Scope
+Add `relayrl_framework` and a Burn backend to your `Cargo.toml`:
 
-Supported in `0.5.0-beta.5`:
+```toml
+[dependencies]
+relayrl_framework = "0.5.0"
+burn-ndarray = "0.20.1"
+burn-tensor = "0.20.1"
+tokio = { version = "1", features = ["full"] }
+```
 
-- local inference
-- actor lifecycle management
-- router scaling
-- local Arrow/CSV trajectory writing
-- in-memory trajectory retrieval
-- algorithm training on PPO
-- parallelized environment batching
+Build the agent, start the runtime, request actions, and shut down. The example
+is `no_run` because it expects a model directory and config on disk:
 
-Experimental in `0.5.0-beta.5`:
-
-- `zmq-transport`
-- `nats-transport`
-- server-backed inference or training workflows
-- server-side crates and scaffolding
-
-```rust
-use relayrl_framework::prelude::network::{AgentBuilder, RelayRLAgentActors};
+```rust,no_run
+use relayrl_framework::prelude::network::*;
 use relayrl_framework::prelude::types::model::ModelModule;
-use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
 use burn_ndarray::NdArray;
 use burn_tensor::{Tensor, Float};
 use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Build and Start
-    const OBS_RANK: usize = 2;
-    const ACT_RANK: usize = 2;
+    // Construct the agent and its startup parameters (single backend type parameter).
+    let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+    let (mut agent, params) = AgentBuilder::<NdArray>::builder()
+        .router_scale(2)
+        .default_model(default_model)
+        .config_path(PathBuf::from("client_config.json"))
+        .build()
+        .await?;
 
-    let model_path = PathBuf::from("dummy_model");
-    
-    let (mut agent, params) = AgentBuilder::<NdArray, OBS_RANK, ACT_RANK, Float, Float>::builder()
-        .actor_count(4)
-        .default_model(ModelModule::<NdArray>::load_from_path(model_path)?)
-        .build().await?;
-
+    // Start the coordinator, routers, and actors.
     agent.start(params).await?;
 
-    // 2. Interact (using Burn Tensors)
-    let reward: f32 = 1.0;
-    let obs = Tensor::<NdArray, OBS_RANK, Float>::zeros([1, 4], &Default::default());
-    
-    let ids = agent.get_actor_ids()?; 
-    
-    let acts = agent.request_action(ids.clone(), obs, None, reward).await?;
-    let versions = agent.get_model_version(ids.clone()).await?;
-
-    // 3. Actor Runtime Management
-    agent.new_actor(DeviceType::Cpu, None).await?;
-    
-    let new_actor_count: u32 = 10;
-    agent.new_actors(new_actor_count, DeviceType::Mps, None).await?;
-    
+    // Request actions: const generics are the observation/action tensor ranks.
     let ids = agent.get_actor_ids()?;
-    if ids.len() >= 2 {
-        agent.set_actor_id(ids[0], uuid::Uuid::new_v4()).await?;
-        agent.remove_actor(ids[1]).await?;
-    }
+    let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+    let _actions = agent
+        .request_action::<2, 2, Float, Float>(ids, observation, None, 0.0)
+        .await?;
 
-    // 4. Agent Management and Shutdown
-    let last_reward: Option<f32> = Some(3.0);
-    let ids = agent.get_actor_ids()?;
-    agent.flag_last_action(ids.clone(), last_reward).await?;
-    
-    agent.scale_throughput(2).await?; 
-    agent.scale_throughput(-2).await?;
-    
+    // Tear everything down gracefully.
     agent.shutdown().await?;
-    
     Ok(())
 }
 ```
 
-## Usage Instructions
+## Feature flags
 
-[View this guide for agent usage :)](../../CLIENT_GUIDE.md)
+* `client` (default): core client runtime.
+* `logging` (default): log4rs logging.
+* `tch-backend`: LibTorch (`tch`) backend support via `relayrl_types`.
+* `metrics`: Prometheus/OpenTelemetry metrics.
+* `profile`: flamegraph and tokio-console profiling.
+* `zmq-transport` / `nats-transport`: experimental network transports.
+* `inference-server` / `training-server`: experimental server integrations.
 
-## Roadmap
+Note that, unlike the `relayrl` crate, the framework's default feature set is
+`["client", "logging"]` and does not enable `metrics`.
 
-- ### **v0.5.x:**
-  - Local/default client runtime beta polish
-  - Comprehensive client testing and benchmarking on common RL environments
-  - Transport-backed client workflows remain experimental during the beta period
+## Current support
 
-- ### **v0.6.0:**
-  - Training Server implementation with support for Online/Offline training workflows
-  - `relayrl_algorithms` crate integration to enable deep RL algorithmic training and Client `ModelModule` acquisition
-  - Comprehensive Training Server testing and benchmarking
-  - Comprehensive Client-Training Server network testing and benchmarking on common RL environments
-  - Momentary Training Server stabilization
+The supported `0.5.0` path is the local/default client runtime, including:
 
-- ### **v0.7.0:**
-  - Inference Server implementation to provide client with remote inference capabilities
-  - Inference Server and Training Server communication for updating Inference Server's inference model(s)
-  - Comprehensive Inference Server testing and benchmarking
-  - Comprehensive Client-Inference Server-Training Server network testing and benchmarking on common RL environments
+* local inference and actor lifecycle management
+* live router scaling
+* local Arrow/CSV trajectory writing and in-memory trajectory retrieval
+* parallelized environment batching
+* PPO training rollouts
 
-- ### **v0.8.0:**
-  - Full Client-Training Server-Inference Server integration
-  - Performance optimizations
-  - API stabilization
-  - Possibly breaking changes
+Transport-backed workflows remain experimental even when the corresponding
+feature flags are enabled:
 
-- ### **v0.9.0 / v1.0.0:**
-  - **v0.9.0** if still refining APIs and features
-  - **v1.0.0** if ready for production stability guarantees
-  - The version bump choice between these two depends on API stability and feature completeness
+* `zmq-transport` and `nats-transport`
+* server-backed inference or training workflows
 
-- ### **Beyond this crate:**
-  - `relayrl_algorithms` crate creation and publication for training workflows
-  - `relayrl_types` updates to minimize serialization overhead and to reduce tensor copy towards zero-copy (as much as possible)
-  - `relayrl_cli` for ease-of-use, deployability, and language agnostic execution via a deployable gRPC pipeline for external CLI process interfacing
+## Changelog
+
+[CHANGELOG](CHANGELOG.md)
 
 ## Contributing
 
-Contributions are welcomed! Please open issues or pull requests for bug reports, feature requests, or improvements. I'll be glad to work with you!
+Contributions are welcome. Please open issues or pull requests for bug reports,
+feature requests, or improvements.
 
 ## License
 
-[Apache License 2.0](../../LICENSE)
+This project is licensed under the [Apache License 2.0](../../LICENSE).
