@@ -1,6 +1,6 @@
 # RelayRL Algorithms
 
-**MultiAgent Deep Reinforcement Learning Algorithms**
+**Single- and Multi-Agent Deep Reinforcement Learning Algorithms**
 
 ---
 **Status:** Under active development, numerous changes and refinements in the coming updates will be made to the algorithms based on integration testing and benchmarking!
@@ -12,6 +12,8 @@
 Within the larger RelayRL project, this crate is designed to pair naturally with `relayrl_framework` when you want RelayRL's runtime and utilization story: multi-actor orchestration, data collection, and the broader client-side workflow. At the same time, `relayrl_algorithms` is not coupled to the framework crate itself. It can be used independently in custom Rust training pipelines, as long as you provide the surrounding environment loop and trajectory flow expected by the trainer APIs.
 
 This crate is still early-stage and under active development. The current `0.x.x` surface is intended to be useful for integration work, experimentation, and benchmarking, but readers should expect continued API refinement as the framework integration story matures and additional algorithms are stabilized.
+
+The only algorithm currently proven to work is PPO; results may vary with IPPO and (which is currently a stub) MAPPO.
 
 ## License
 [Apache License 2.0](../../LICENSE)
