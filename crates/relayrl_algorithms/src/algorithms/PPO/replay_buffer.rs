@@ -340,7 +340,7 @@ impl PPOReplayBuffer {
             act: fresh_acts,
             logp: fresh_logp,
             adv_norm,
-            ret: ret_flat,
+            ret,
             val: fresh_val,
             ret_mean,
             ret_std,
