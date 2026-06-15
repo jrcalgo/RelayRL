@@ -463,8 +463,8 @@
 //! - `run_env_eval(actor_id, env_steps)` — runs evaluation transitions on the bound
 //!   environment; no training update is applied. Vectorized env copies are stepped as a batch,
 //!   so the final batch may exceed `env_steps` by at most `count - 1` transitions.
-//! - `run_env_with_ppo(actor_id, training_steps, max_traj_length, trainer_spec)` — runs a
-//!   single-agent PPO training rollout until `training_steps` model updates complete. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
+//! - `run_env_with_ppo(actor_id, loop_iters, max_traj_length, trainer_spec)` — runs a
+//!   single-agent PPO training rollout until `loop_iters` complete. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
 //!   where **Pi** is a [`NeuralNetwork<B, KindIn, KindOut>`](crate::algorithms::NeuralNetwork). See [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.4.1/relayrl_algorithms/) for details on
 //!   constructing the trainer spec.
 //! - `run_env_with_ippo` and `run_env_with_mappo` — independent and multi-agent PPO training
