@@ -1,3 +1,5 @@
+<div align = "center">
+  
 # RelayRL
 
 [![RelayRL crate](https://img.shields.io/crates/v/relayrl.svg)](https://crates.io/crates/relayrl)
@@ -15,6 +17,7 @@ The top-level [`relayrl`](crates/relayrl/) crate is a facade over the runtime
 and the rest of the stack. It re-exports the agent API, data types, PPO
 training pieces, and environment traits from the focused crates in this
 workspace.
+</div>
 
 ## What RelayRL Provides
 
