@@ -6,11 +6,9 @@
   <a href="https://crates.io/crates/relayrl">
     <img src="https://img.shields.io/crates/v/relayrl.svg" alt="Crates.io" />
   </a>
-  <p></p>
   <a href="https://docs.rs/relayrl">
     <img src="https://img.shields.io/docsrs/relayrl" alt="Docs.rs" />
   </a>
-  <p></p>
   <a href="https://github.com/jrcalgo/relayrl/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache 2.0 licensed" />
   </a>
