@@ -21,7 +21,7 @@ workspace.
 
 ## What RelayRL Provides
 
-RelayRL focuses on the local/default client runtime in the `0.5` line:
+RelayRL focuses on the local/default client runtime in the `0.5.0` line:
 
 - **Heterogeneous actors**: each actor can run its own environment and its own
   independent or device-shared model.
@@ -105,7 +105,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 RelayRL also supports an environment-driven pattern where the agent owns the
-loop and drives a bound `Environment`. 
+loop and drives a bound `Environment`:
+
+```rust,no_run
+  let environment: Box<dyn Environment = ...;
+  let env1_count = 64;
+  let env2_count = 1024;
+
+  agent.set_env(actor_id1, env, env1_count).await?;
+  agent.set_env(actor_id2, env, env2_count).await?;
+
+  let ppo_trainer: PPOTrainer = ...;
+  let loop_iters = 1000;
+  let max_traj_length: 10_000;
+
+  agent.run_env_eval(actor_id1, loop_iters);
+  agent.run_env_with_ppo(actor_id2, loop_iters, max_traj_length, ppo_trainer);
+
+```
 
 ## Documentation
 
