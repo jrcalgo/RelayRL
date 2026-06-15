@@ -40,7 +40,7 @@ support promise.
 
 ## Crate Layout
 
-- [`relayrl`](crates/relayrl/): the recommended facade crate.
+- [`relayrl`](crates/relayrl/): the stable-release, recommended crate.
 - [`relayrl_framework`](crates/relayrl_framework/): the async multi-actor
   client runtime.
 - [`relayrl_types`](crates/relayrl_types/): tensors, actions, trajectories,
@@ -105,18 +105,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 RelayRL also supports an environment-driven pattern where the agent owns the
-loop and drives a bound `Environment`. See the [API documentation][api-docs]
-and the [framework README](crates/relayrl_framework/README.md) for builder
-configuration, model modes, router scaling, file sinks, trajectory caches, and
-PPO rollouts.
+loop and drives a bound `Environment`. 
+
+## Documentation
+
+ - [API documentation][api-docs]: details builder
+configuration, model modes, router scaling, file sinks, trajectory caches,
+PPO rollouts. 
+ - [Learner's guide][website-docs]: provides a high-level overview of each crate in this repository and their public API surfaces.
 
 [api-docs]: https://docs.rs/relayrl
+[website-docs]: https://relayrl.dev/learn
 
 ## Feature Flags
 
 - `client` (default): core client runtime.
 - `logging` (default): log4rs logging.
-- `metrics` (default): Prometheus/OpenTelemetry metrics.
+- `metrics`: Prometheus/OpenTelemetry metrics.
 - `tch-backend`: LibTorch-backed tensors and model support.
 - `zmq-transport` / `nats-transport`: experimental network transports.
 - `training-server` / `inference-server`: experimental server integrations.
