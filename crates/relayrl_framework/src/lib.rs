@@ -105,7 +105,7 @@
 //! ## Feature flags
 //!
 //! - `client` (default): core client runtime.
-//! - `logging` (default): log4rs logging.
+//! - `logging-init`: log4rs logging initialization.
 //! - `tch-backend`: LibTorch (`tch`) backend support via [`relayrl_types`].
 //! - `metrics`: Prometheus/OpenTelemetry metrics.
 //! - `profile`: flamegraph and tokio-console profiling.
@@ -192,6 +192,13 @@ pub mod prelude {
         pub mod tensor {
             pub mod burn {
                 pub use relayrl_types::prelude::tensor::burn::*;
+                pub mod ndarray {
+                    pub use burn_ndarray::*;
+                }
+                #[cfg(feature = "tch-backend")]
+                pub mod tch {
+                    pub use burn_tch::*;
+                }
             }
             pub mod relayrl {
                 pub use relayrl_types::prelude::tensor::relayrl::*;
