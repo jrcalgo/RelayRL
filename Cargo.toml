@@ -4,7 +4,8 @@ members = [
     "crates/relayrl_framework",
     "crates/relayrl_types",
     "crates/relayrl_algorithms",
-    "crates/relayrl_env_trait", "examples/gridworld-bench",
+    "crates/relayrl_env_trait",
+    "examples/openttd",
 ]
 resolver = "2"
 
