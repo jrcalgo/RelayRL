@@ -138,10 +138,7 @@ impl ScalarEnvironment for OpenTtdEnvironment {
         })
     }
 
-    fn step_bytes(
-        &self,
-        action: &[u8],
-    ) -> Option<(Observation, Mask, Reward, Done, Truncated)> {
+    fn step_bytes(&self, action: &[u8]) -> Option<(Observation, Mask, Reward, Done, Truncated)> {
         let action_index = decode_action_index(action, ACTION_DIM);
         let confidence = decode_action_confidence(action, action_index);
         let command = command_from_action(&self.actor, action_index, confidence);

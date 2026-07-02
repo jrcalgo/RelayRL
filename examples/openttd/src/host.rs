@@ -7,10 +7,12 @@ use crate::subsystems::{
 use crate::{ACTION_DIM, OBSERVATION_DIM};
 use burn_ndarray::NdArray;
 use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
-use relayrl::network::{ActorUuid, RelayRLAgent, RelayRLAgentActors};
+use relayrl::network::{RelayRLAgent, RelayRLAgentActors};
 use relayrl::types::tensor::relayrl::DeviceType;
 use std::collections::BTreeMap;
 use std::error::Error;
+
+type ActorUuid = uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct ActorBinding {
@@ -138,8 +140,13 @@ impl OpenTtdHost {
             }
 
             if after.done(&self.config) {
-                let ids = self.actor_bindings.iter().map(|binding| binding.id).collect();
-                agent.flag_last_action(ids, Some(after.profit_delta / 1_000.0))
+                let ids = self
+                    .actor_bindings
+                    .iter()
+                    .map(|binding| binding.id)
+                    .collect();
+                agent
+                    .flag_last_action(ids, Some(after.profit_delta / 1_000.0))
                     .await?;
                 break;
             }

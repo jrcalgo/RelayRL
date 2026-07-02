@@ -1,12 +1,10 @@
 use openttd_relayrl_example::{
     OPENTTD_LATEST_STABLE, OPENTTD_LATEST_STABLE_PUBLISHED, OPENTTD_LATEST_STABLE_URL,
     OPENTTD_NEWEST_PRERELEASE, OPENTTD_NEWEST_PRERELEASE_URL, OPENTTD_REPOSITORY,
-    host::print_system_map,
-    training::describe_training_order,
+    host::print_system_map, training::describe_training_order,
 };
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RelayRL OpenTTD system-of-systems example");
     println!("OpenTTD upstream: {OPENTTD_REPOSITORY}");
     println!(

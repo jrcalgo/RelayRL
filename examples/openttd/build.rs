@@ -20,14 +20,15 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=dylib=openttd_relayrl_shim");
-    println!("cargo:warning=Using OpenTTD source at {}", source_dir.display());
+    println!(
+        "cargo:warning=Using OpenTTD source at {}",
+        source_dir.display()
+    );
 }
 
 fn require_existing_dir(var: &str, description: &str) -> PathBuf {
     let value = env::var_os(var).unwrap_or_else(|| {
-        panic!(
-            "{var} must point to {description} when building with --features native-openttd"
-        )
+        panic!("{var} must point to {description} when building with --features native-openttd")
     });
     let path = PathBuf::from(value);
     if !path.is_dir() {

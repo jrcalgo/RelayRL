@@ -6,14 +6,15 @@ use burn_ndarray::NdArray;
 use burn_tensor::Float;
 use relayrl::algorithms::GenericMlp;
 use relayrl::algorithms::PPO::PPOTrainerSpec;
-use relayrl::network::{ActorUuid, RelayRLActorEnv, RelayRLAgent, RelayRLAgentActors};
+use relayrl::network::{RelayRLActorEnv, RelayRLAgent, RelayRLAgentActors};
 use relayrl::types::model::ModelModule;
-use relayrl::types::tensor::relayrl::{DType, DeviceType, NdArrayDType};
+use relayrl::types::tensor::relayrl::{DType, DeviceType};
+use relayrl_types::data::tensor::NdArrayDType;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-pub type OpenTtdPpoSpec =
-    PPOTrainerSpec<NdArray, Float, Float, GenericMlp<NdArray, Float, Float>>;
+pub type OpenTtdPpoSpec = PPOTrainerSpec<NdArray, Float, Float, GenericMlp<NdArray, Float, Float>>;
+type ActorUuid = uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct TrainingPhase {
@@ -37,7 +38,12 @@ pub fn build_ppo_spec(
     save_model_path: PathBuf,
     buffer_size: usize,
 ) -> Result<OpenTtdPpoSpec, Box<dyn Error>> {
-    Ok(PPOTrainerSpec::<NdArray, Float, Float, GenericMlp<NdArray, Float, Float>>::default(
+    Ok(PPOTrainerSpec::<
+        NdArray,
+        Float,
+        Float,
+        GenericMlp<NdArray, Float, Float>,
+    >::default(
         env_dir,
         save_model_path,
         OBSERVATION_DIM,

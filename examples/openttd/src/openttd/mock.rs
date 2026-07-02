@@ -82,9 +82,9 @@ impl OpenTtdBridge {
     pub fn step(&mut self) -> Result<OpenTtdSnapshot, OpenTtdBridgeError> {
         self.snapshot.tick += 1;
         let seasonal = ((self.snapshot.tick % 97) as f32 / 97.0) * 0.02;
-        self.snapshot.cargo_backlog =
-            (self.snapshot.cargo_backlog + seasonal - self.snapshot.station_throughput * 0.01)
-                .clamp(0.0, 1.0);
+        self.snapshot.cargo_backlog = (self.snapshot.cargo_backlog + seasonal
+            - self.snapshot.station_throughput * 0.01)
+            .clamp(0.0, 1.0);
         self.snapshot.bottleneck_pressure = (self.snapshot.bottleneck_pressure
             + self.snapshot.congestion_index * 0.02
             - self.snapshot.network_redundancy * 0.01)
