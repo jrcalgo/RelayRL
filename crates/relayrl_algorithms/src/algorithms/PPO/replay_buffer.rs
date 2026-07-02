@@ -110,8 +110,12 @@ impl PPOReplayBuffer {
         let advantages = discounted_cumsum(&deltas, gamma * lam);
         buffers.advantages[start..end].copy_from_slice(&advantages);
 
-        let full_returns = advantages.iter().zip(vals[..vals.len() - 1].iter()).map(|(a, v)| a + v).collect::<Vec<f32>>();
-        buffers.returns[start..end].copy_from_slice(&full_returns[..full_returns.len() - 1]);
+        let full_returns = advantages
+            .iter()
+            .zip(vals[..vals.len() - 1].iter())
+            .map(|(a, v)| a + v)
+            .collect::<Vec<f32>>();
+        buffers.returns[start..end].copy_from_slice(&full_returns);
     }
 
     /// Returns all buffered observations and their dimension for a value-function pass before GAE.
@@ -329,7 +333,11 @@ impl PPOReplayBuffer {
 
         let (ret, ret_mean, ret_std) = if normalize_returns {
             let (ret_mean, ret_std) = scalar_stats(&fresh_ret);
-            (compute_normed_advantages(&fresh_ret, ret_mean, ret_std.max(1e-8)), ret_mean, ret_std)
+            (
+                compute_normed_advantages(&fresh_ret, ret_mean, ret_std.max(1e-8)),
+                ret_mean,
+                ret_std,
+            )
         } else {
             (fresh_ret, 0.0, 1.0)
         };

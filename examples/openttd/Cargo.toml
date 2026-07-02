@@ -19,6 +19,7 @@ burn-tensor = { workspace = true }
 
 serde = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
 
 [build-dependencies]
