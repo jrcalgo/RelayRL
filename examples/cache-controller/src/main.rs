@@ -4,6 +4,10 @@ use cache_controller_example::heuristics::PolicyKind;
 use cache_controller_example::host::{
     BenchmarkConfig, compare_policies, print_results_table, run_benchmark,
 };
+use cache_controller_example::neural_training::{
+    FrozenNeuralPolicySet, default_neural_config, final_neural_comparison,
+    train_actor_sequence_with_ppo,
+};
 use cache_controller_example::staged_training::{
     StagedTrainingConfig, default_staged_training_config, evaluate_final_policy_set,
     train_actor_sequence,
@@ -11,7 +15,8 @@ use cache_controller_example::staged_training::{
 use cache_controller_example::training::run_training_smoke;
 use cache_controller_example::workload::WorkloadKind;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     match args.mode.as_str() {
         "compare" => {
@@ -78,6 +83,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             print_results_table(&results);
         }
+        "train-ppo-sequential" | "train-ppo-and-compare" => {
+            let neural_config = args.neural_config();
+            println!("Sequential PPO cache actor training");
+            println!(
+                "baseline={:?} smoke={} env_count={} loop_iters={} rollout_len={} requests={}",
+                neural_config.baseline_policy,
+                neural_config.smoke,
+                neural_config.ppo.env_count,
+                neural_config.ppo.loop_iters,
+                neural_config.ppo.rollout_len,
+                neural_config.requests
+            );
+            let report = train_actor_sequence_with_ppo(neural_config).await?;
+            println!();
+            println!(
+                "{:<22} {:>10} {:>12} {:>12} {:>12} {:>18}",
+                "Phase", "Accepted", "Baseline", "Candidate", "Improve", "Model"
+            );
+            for phase in &report.phases {
+                println!(
+                    "{:<22} {:>10} {:>12.3} {:>12.3} {:>12.3} {:>18}",
+                    phase.role,
+                    phase.accepted,
+                    phase.baseline_score,
+                    phase.candidate_score,
+                    phase.improvement,
+                    phase.model_dir.display()
+                );
+            }
+            println!();
+            println!("PPO final evaluation:");
+            print_results_table(&report.final_eval);
+            if let Some(learned) = report
+                .final_eval
+                .iter()
+                .find(|result| result.policy == "RelayRL-PPO-Learned")
+            {
+                print_actor_activity(learned);
+            }
+            if args.output_json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+        }
+        "evaluate-ppo-learned" => {
+            let neural_config = args.neural_config();
+            let empty = FrozenNeuralPolicySet::default();
+            let results = final_neural_comparison(&neural_config, &empty).await?;
+            print_results_table(&results);
+        }
         "train" => {
             println!("RelayRL cache-controller training environment smoke");
             println!("Actors use different trigger frequencies:");
@@ -122,6 +176,10 @@ struct Args {
     role: Option<CacheActorRole>,
     output_dir: String,
     min_improvement: f64,
+    ppo_smoke: bool,
+    env_count: Option<u32>,
+    loop_iters: Option<usize>,
+    rollout_len: Option<usize>,
 }
 
 impl Args {
@@ -137,6 +195,10 @@ impl Args {
             role: None,
             output_dir: "target/cache-controller".to_string(),
             min_improvement: 0.01,
+            ppo_smoke: false,
+            env_count: None,
+            loop_iters: None,
+            rollout_len: None,
         };
 
         let mut iter = std::env::args().skip(1);
@@ -148,6 +210,9 @@ impl Args {
                 "--train-sequential" => args.mode = "train-sequential".to_string(),
                 "--evaluate-learned" => args.mode = "evaluate-learned".to_string(),
                 "--train-and-compare" => args.mode = "train-and-compare".to_string(),
+                "--train-ppo-sequential" => args.mode = "train-ppo-sequential".to_string(),
+                "--evaluate-ppo-learned" => args.mode = "evaluate-ppo-learned".to_string(),
+                "--train-ppo-and-compare" => args.mode = "train-ppo-and-compare".to_string(),
                 "--policy" => {
                     if let Some(value) = iter.next() {
                         args.policy = PolicyKind::parse(&value);
@@ -174,6 +239,22 @@ impl Args {
                     }
                 }
                 "--output-json" => args.output_json = true,
+                "--ppo-smoke" => args.ppo_smoke = true,
+                "--env-count" => {
+                    if let Some(value) = iter.next() {
+                        args.env_count = value.parse().ok();
+                    }
+                }
+                "--loop-iters" => {
+                    if let Some(value) = iter.next() {
+                        args.loop_iters = value.parse().ok();
+                    }
+                }
+                "--rollout-len" => {
+                    if let Some(value) = iter.next() {
+                        args.rollout_len = value.parse().ok();
+                    }
+                }
                 "--output-dir" => {
                     if let Some(value) = iter.next() {
                         args.output_dir = value;
@@ -227,6 +308,28 @@ impl Args {
         }
         config
     }
+
+    fn neural_config(
+        &self,
+    ) -> cache_controller_example::neural_training::NeuralStagedTrainingConfig {
+        let mut config = default_neural_config(self.ppo_smoke);
+        config.baseline_policy = self.policy;
+        config.capacity_bytes = self.capacity_bytes;
+        config.requests = self.requests;
+        config.seed = self.seed;
+        config.output_dir = self.output_dir.clone().into();
+        config.min_improvement = self.min_improvement;
+        if let Some(env_count) = self.env_count {
+            config.ppo.env_count = env_count;
+        }
+        if let Some(loop_iters) = self.loop_iters {
+            config.ppo.loop_iters = loop_iters;
+        }
+        if let Some(rollout_len) = self.rollout_len {
+            config.ppo.rollout_len = rollout_len;
+        }
+        config
+    }
 }
 
 fn parse_role(value: &str) -> Option<CacheActorRole> {
@@ -248,6 +351,9 @@ fn print_help() {
     println!("  --train-sequential");
     println!("  --evaluate-learned");
     println!("  --train-and-compare");
+    println!("  --train-ppo-sequential");
+    println!("  --evaluate-ppo-learned");
+    println!("  --train-ppo-and-compare");
     println!("  --workload <uniform|zipfian|scan|bursty|phase|large|ttl>");
     println!("  --requests <n>");
     println!("  --seed <n>");
@@ -255,4 +361,8 @@ fn print_help() {
     println!("  --output-json");
     println!("  --output-dir <path>");
     println!("  --min-improvement <score>");
+    println!("  --ppo-smoke");
+    println!("  --env-count <n>");
+    println!("  --loop-iters <n>");
+    println!("  --rollout-len <n>");
 }

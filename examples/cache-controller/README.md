@@ -94,6 +94,50 @@ target/cache-controller/
 └── logs/
 ```
 
+Run the neural PPO version of the staged pipeline:
+
+```bash
+ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
+cargo run -p cache-controller-example -- \
+  --train-ppo-and-compare \
+  --ppo-smoke \
+  --requests 300 \
+  --seed 42 \
+  --loop-iters 32 \
+  --rollout-len 8 \
+  --env-count 1
+```
+
+The PPO path uses RelayRL's `PPOTrainerSpec`, `run_env_with_ppo`, and
+`GenericMlp` actor/value networks:
+
+```text
+policy: 24 -> 32 -> 6
+value:  24 -> 32 -> 1
+```
+
+PPO reports are written to:
+
+```text
+target/cache-controller/
+├── ppo-training-report.json
+├── ppo-final-eval.json
+└── ppo-models/
+```
+
+Use non-smoke settings for longer convergence runs:
+
+```bash
+ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
+cargo run -p cache-controller-example -- \
+  --train-ppo-and-compare \
+  --requests 25000 \
+  --seed 42 \
+  --env-count 8 \
+  --loop-iters 20000 \
+  --rollout-len 64
+```
+
 Emit JSON:
 
 ```bash
@@ -131,4 +175,20 @@ eviction                   10983
 ttl                        11186
 resize                        24
 prefetch-backpressure        202
+```
+
+On a short PPO smoke run:
+
+```bash
+ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.23.2/lib/libonnxruntime.so \
+cargo run -p cache-controller-example -- \
+  --train-ppo-and-compare --ppo-smoke --requests 300 --seed 42 \
+  --loop-iters 32 --rollout-len 8 --env-count 1
+```
+
+the PPO-composed policy improved over the small-sample baselines:
+
+```text
+LRU                  HitRate 0.357  AvgLat 20.73ms  Reward 13.689
+RelayRL-PPO-Learned  HitRate 0.403  AvgLat 19.69ms  Reward 14.679
 ```

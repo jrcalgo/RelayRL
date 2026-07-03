@@ -8,6 +8,7 @@ description = "Benchmarkable adaptive cache controller example for RelayRL."
 [dependencies]
 relayrl = { path = "../../crates/relayrl", default-features = false, features = ["client"] }
 relayrl_env_trait = { workspace = true }
+relayrl_types = { workspace = true }
 
 burn-ndarray = { workspace = true }
 burn-tensor = { workspace = true }

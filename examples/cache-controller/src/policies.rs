@@ -4,6 +4,7 @@ use crate::heuristics::{HeuristicController, PolicyKind};
 use crate::workload::CacheRequest;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub trait CacheControlPolicy {
     fn decide(
@@ -18,6 +19,10 @@ pub trait CacheControlPolicy {
 pub enum LearnedRolePolicy {
     Adaptive,
     Fixed(usize),
+    Neural {
+        model_dir: PathBuf,
+        role: CacheActorRole,
+    },
 }
 
 impl CacheControlPolicy for LearnedRolePolicy {
@@ -33,6 +38,7 @@ impl CacheControlPolicy for LearnedRolePolicy {
                 Some(controller.decide(world, request).get(role))
             }
             Self::Fixed(action) => Some(*action),
+            Self::Neural { .. } => None,
         }
     }
 }
@@ -103,6 +109,10 @@ impl MixedPolicySet {
 
     pub fn freeze_role(&mut self, role: CacheActorRole, policy: LearnedRolePolicy) {
         self.frozen.insert(role, policy);
+    }
+
+    pub fn reseed(&mut self, seed: u64) {
+        self.seed = seed;
     }
 
     pub fn frozen(&self) -> &FrozenActorPolicySet {

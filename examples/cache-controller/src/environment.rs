@@ -2,8 +2,9 @@ use crate::actors::{
     CacheActorRole, action_from_bytes, action_mask_bytes, f32_slice_to_bytes, observation_for,
 };
 use crate::cache::CacheWorld;
-use crate::heuristics::{HeuristicController, PolicyKind};
+use crate::heuristics::PolicyKind;
 use crate::host::BenchmarkConfig;
+use crate::policies::MixedPolicySet;
 use crate::workload::{CacheRequest, WorkloadGenerator};
 use crate::{ACTION_DIM, OBSERVATION_DIM};
 use relayrl_env_trait::{
@@ -16,15 +17,26 @@ use std::sync::{Arc, Mutex};
 pub struct CacheTrainingEnvironment {
     role: CacheActorRole,
     config: BenchmarkConfig,
+    background: MixedPolicySet,
     state: Arc<Mutex<TrainingState>>,
 }
 
 impl CacheTrainingEnvironment {
     pub fn new(role: CacheActorRole, config: BenchmarkConfig) -> Self {
+        let background = MixedPolicySet::new(PolicyKind::Lru, config.seed);
+        Self::with_background(role, config, background)
+    }
+
+    pub fn with_background(
+        role: CacheActorRole,
+        config: BenchmarkConfig,
+        background: MixedPolicySet,
+    ) -> Self {
         Self {
             role,
-            state: Arc::new(Mutex::new(TrainingState::new(&config))),
+            state: Arc::new(Mutex::new(TrainingState::new(&config, background.clone()))),
             config,
+            background,
         }
     }
 
@@ -43,7 +55,9 @@ impl Clone for CacheTrainingEnvironment {
     fn clone(&self) -> Self {
         let mut config = self.config.clone();
         config.seed = config.seed.wrapping_add(role_seed_offset(self.role));
-        Self::new(self.role, config)
+        let mut background = self.background.clone();
+        background.reseed(config.seed);
+        Self::with_background(self.role, config, background)
     }
 }
 
@@ -107,7 +121,7 @@ impl Environment for CacheTrainingEnvironment {
 impl ScalarEnvironment for CacheTrainingEnvironment {
     fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError> {
         let mut state = self.lock_state()?;
-        *state = TrainingState::new(&self.config);
+        *state = TrainingState::new(&self.config, self.background.clone());
         state.advance_to_role_trigger(self.role);
         Ok(ScalarEnvReset {
             observation: f32_slice_to_bytes(&observation_for(
@@ -131,7 +145,7 @@ impl ScalarEnvironment for CacheTrainingEnvironment {
         state.advance_to_role_trigger(self.role);
         let pending = state.pending.clone();
         let world_snapshot = state.world.clone();
-        let mut decisions = state.background.decide(&world_snapshot, &pending);
+        let mut decisions = state.background.decide_all(&world_snapshot, &pending);
         decisions.set(self.role, active_action);
         let mut active_roles = state.background.active_roles(&world_snapshot, &pending);
         if !active_roles.contains(&self.role) {
@@ -154,19 +168,19 @@ impl ScalarEnvironment for CacheTrainingEnvironment {
 struct TrainingState {
     world: CacheWorld,
     workload: WorkloadGenerator,
-    background: HeuristicController,
+    background: MixedPolicySet,
     pending: CacheRequest,
     steps: u64,
 }
 
 impl TrainingState {
-    fn new(config: &BenchmarkConfig) -> Self {
+    fn new(config: &BenchmarkConfig, background: MixedPolicySet) -> Self {
         let mut workload = WorkloadGenerator::new(config.workload, config.seed);
         let pending = workload.next_request();
         Self {
             world: CacheWorld::new(config.capacity_bytes),
             workload,
-            background: HeuristicController::new(PolicyKind::Lru, config.seed),
+            background,
             pending,
             steps: 0,
         }
@@ -177,7 +191,7 @@ impl TrainingState {
         while !crate::actors::should_trigger(role, &self.world, &self.pending) && guard < 128 {
             let pending = self.pending.clone();
             let world_snapshot = self.world.clone();
-            let decisions = self.background.decide(&world_snapshot, &pending);
+            let decisions = self.background.decide_all(&world_snapshot, &pending);
             let active_roles = self.background.active_roles(&world_snapshot, &pending);
             self.world.apply_request(&pending, decisions, &active_roles);
             self.pending = self.workload.next_request();
