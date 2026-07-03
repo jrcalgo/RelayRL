@@ -281,6 +281,12 @@ impl CacheWorld {
         self.clock
     }
 
+    pub fn force_capacity_pressure(&mut self) {
+        if self.used_bytes > 1 {
+            self.capacity_bytes = (self.used_bytes.saturating_mul(8) / 10).max(1);
+        }
+    }
+
     fn contains_stale(&self, key: Key) -> bool {
         self.entries
             .get(&key)

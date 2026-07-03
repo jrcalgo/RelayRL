@@ -189,6 +189,10 @@ impl TrainingState {
     fn advance_to_role_trigger(&mut self, role: CacheActorRole) {
         let mut guard = 0;
         while !crate::actors::should_trigger(role, &self.world, &self.pending) && guard < 128 {
+            if role == CacheActorRole::Eviction && self.world.used_bytes() > 0 {
+                self.world.force_capacity_pressure();
+                break;
+            }
             let pending = self.pending.clone();
             let world_snapshot = self.world.clone();
             let decisions = self.background.decide_all(&world_snapshot, &pending);
