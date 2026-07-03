@@ -2,6 +2,7 @@ use crate::actors::CacheActorRole;
 use crate::cache::CacheWorld;
 use crate::heuristics::{HeuristicController, PolicyKind};
 use crate::metrics::CacheMetrics;
+use crate::policies::MixedPolicySet;
 use crate::workload::{WorkloadGenerator, WorkloadKind};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -51,6 +52,31 @@ pub fn run_benchmark(config: BenchmarkConfig) -> BenchmarkResult {
 
     BenchmarkResult {
         policy: controller.policy().as_str().to_string(),
+        workload: config.workload,
+        requests: config.requests,
+        seed: config.seed,
+        metrics: world.finalize_metrics(started.elapsed()),
+    }
+}
+
+pub fn run_mixed_policy_benchmark(
+    config: BenchmarkConfig,
+    policy_name: impl Into<String>,
+    mut policy_set: MixedPolicySet,
+) -> BenchmarkResult {
+    let started = Instant::now();
+    let mut workload = WorkloadGenerator::new(config.workload, config.seed);
+    let mut world = CacheWorld::new(config.capacity_bytes);
+
+    for _ in 0..config.requests {
+        let request = workload.next_request();
+        let active_roles = policy_set.active_roles(&world, &request);
+        let decisions = policy_set.decide_all(&world, &request);
+        world.apply_request(&request, decisions, &active_roles);
+    }
+
+    BenchmarkResult {
+        policy: policy_name.into(),
         workload: config.workload,
         requests: config.requests,
         seed: config.seed,

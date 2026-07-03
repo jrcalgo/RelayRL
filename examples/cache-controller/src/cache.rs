@@ -24,10 +24,46 @@ pub struct CacheWorld {
     used_bytes: usize,
     entries: HashMap<Key, CacheEntry>,
     historical_frequency: HashMap<Key, u64>,
+    admission_credits: HashMap<Key, PendingAdmissionCredit>,
+    eviction_credits: HashMap<Key, EvictionCredit>,
+    ttl_credits: HashMap<Key, TtlCredit>,
+    prefetch_credits: HashMap<Key, PrefetchCredit>,
+    window_stats: WindowStats,
     clock: u64,
     miss_burst: u64,
     resize_count: u64,
     metrics: CacheMetrics,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAdmissionCredit {
+    inserted_at: u64,
+    backend_cost_ms: f32,
+    size_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct EvictionCredit {
+    evicted_at: u64,
+    backend_cost_ms: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TtlCredit {
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrefetchCredit {
+    prefetched_at: u64,
+    backend_cost_ms: f32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WindowStats {
+    pub hits_at_window_start: u64,
+    pub misses_at_window_start: u64,
+    pub latency_at_window_start: f32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -66,6 +102,11 @@ impl CacheWorld {
             used_bytes: 0,
             entries: HashMap::new(),
             historical_frequency: HashMap::new(),
+            admission_credits: HashMap::new(),
+            eviction_credits: HashMap::new(),
+            ttl_credits: HashMap::new(),
+            prefetch_credits: HashMap::new(),
+            window_stats: WindowStats::default(),
             clock: 0,
             miss_burst: 0,
             resize_count: 0,
@@ -81,6 +122,7 @@ impl CacheWorld {
     ) -> StepOutcome {
         self.clock += 1;
         *self.historical_frequency.entry(request.key).or_default() += 1;
+        self.apply_delayed_miss_credits(request);
 
         if active_roles.contains(&CacheActorRole::Resize) {
             self.apply_resize(decisions.resize);
@@ -93,6 +135,7 @@ impl CacheWorld {
 
         if fresh_hit && !request.is_write {
             self.touch(request.key);
+            self.apply_delayed_hit_credits(request.key);
             self.miss_burst = 0;
             outcome.hit = true;
             outcome.latency_ms = 1.0;
@@ -101,6 +144,13 @@ impl CacheWorld {
         } else {
             if stale_hit {
                 outcome.stale = true;
+                if let Some(ttl) = self.ttl_credits.remove(&request.key) {
+                    let late_by = self.clock.saturating_sub(ttl.expires_at) as f32;
+                    self.metrics.record_actor_reward(
+                        CacheActorRole::Ttl,
+                        -0.02 - late_by.min(128.0) * 0.0005,
+                    );
+                }
                 self.remove(request.key);
                 self.metrics.record_stale_hit();
             }
@@ -133,6 +183,15 @@ impl CacheWorld {
         while self.used_bytes > self.capacity_bytes && !self.entries.is_empty() {
             self.metrics.record_actor_decision(CacheActorRole::Eviction);
             if let Some(victim) = self.select_victim(decisions.eviction) {
+                if let Some(entry) = self.entries.get(&victim) {
+                    self.eviction_credits.insert(
+                        victim,
+                        EvictionCredit {
+                            evicted_at: self.clock,
+                            backend_cost_ms: entry.backend_cost_ms,
+                        },
+                    );
+                }
                 self.remove(victim);
                 self.metrics.record_eviction();
                 outcome.evictions += 1;
@@ -152,6 +211,8 @@ impl CacheWorld {
                 reward_for_role(CacheActorRole::Eviction, &outcome),
             );
         }
+        self.prune_expired_credits();
+        self.update_window_stats();
         outcome
     }
 
@@ -255,6 +316,20 @@ impl CacheWorld {
             },
         );
         self.used_bytes += request.size_bytes;
+        self.admission_credits.insert(
+            request.key,
+            PendingAdmissionCredit {
+                inserted_at: self.clock,
+                backend_cost_ms: request.backend_cost_ms,
+                size_bytes: request.size_bytes,
+            },
+        );
+        self.ttl_credits.insert(
+            request.key,
+            TtlCredit {
+                expires_at: self.clock + ttl,
+            },
+        );
     }
 
     fn remove(&mut self, key: Key) {
@@ -327,7 +402,65 @@ impl CacheWorld {
             is_write: false,
         };
         self.insert(&prefetch, self.ttl_for_action(3, &prefetch), 1);
+        self.prefetch_credits.insert(
+            related_key,
+            PrefetchCredit {
+                prefetched_at: self.clock,
+                backend_cost_ms: prefetch.backend_cost_ms,
+            },
+        );
         true
+    }
+
+    fn apply_delayed_hit_credits(&mut self, key: Key) {
+        if let Some(credit) = self.admission_credits.remove(&key) {
+            let age = self.clock.saturating_sub(credit.inserted_at).max(1) as f32;
+            let size_penalty = credit.size_bytes as f32 / self.capacity_bytes.max(1) as f32;
+            let reward =
+                credit.backend_cost_ms / 100.0 - size_penalty * 0.05 + (1.0 / age).min(0.05);
+            self.metrics
+                .record_actor_reward(CacheActorRole::Admission, reward);
+        }
+        if let Some(credit) = self.prefetch_credits.remove(&key) {
+            let age = self.clock.saturating_sub(credit.prefetched_at).max(1) as f32;
+            let reward = credit.backend_cost_ms / 120.0 + (1.0 / age).min(0.05);
+            self.metrics
+                .record_actor_reward(CacheActorRole::Prefetch, reward);
+        }
+    }
+
+    fn apply_delayed_miss_credits(&mut self, request: &CacheRequest) {
+        if let Some(credit) = self.eviction_credits.remove(&request.key) {
+            let age = self.clock.saturating_sub(credit.evicted_at);
+            if age <= 256 {
+                self.metrics.record_actor_reward(
+                    CacheActorRole::Eviction,
+                    -0.05 - credit.backend_cost_ms / 200.0,
+                );
+            }
+        }
+    }
+
+    fn prune_expired_credits(&mut self) {
+        let now = self.clock;
+        self.admission_credits
+            .retain(|_, credit| now.saturating_sub(credit.inserted_at) <= 512);
+        self.eviction_credits
+            .retain(|_, credit| now.saturating_sub(credit.evicted_at) <= 512);
+        self.prefetch_credits
+            .retain(|_, credit| now.saturating_sub(credit.prefetched_at) <= 256);
+        self.ttl_credits
+            .retain(|_, credit| credit.expires_at + 512 >= now);
+    }
+
+    fn update_window_stats(&mut self) {
+        if self.clock.is_multiple_of(1_000) {
+            self.window_stats = WindowStats {
+                hits_at_window_start: self.metrics.hits,
+                misses_at_window_start: self.metrics.misses,
+                latency_at_window_start: self.metrics.total_latency_ms,
+            };
+        }
     }
 
     fn select_victim(&self, action: usize) -> Option<Key> {

@@ -4,6 +4,10 @@ use cache_controller_example::heuristics::PolicyKind;
 use cache_controller_example::host::{
     BenchmarkConfig, compare_policies, print_results_table, run_benchmark,
 };
+use cache_controller_example::staged_training::{
+    StagedTrainingConfig, default_staged_training_config, evaluate_final_policy_set,
+    train_actor_sequence,
+};
 use cache_controller_example::training::run_training_smoke;
 use cache_controller_example::workload::WorkloadKind;
 
@@ -19,6 +23,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if args.output_json {
                 print_json(&results)?;
             }
+        }
+        "train-sequential" | "train-and-compare" => {
+            let training_config = args.staged_config();
+            println!("Sequential cache actor training");
+            println!(
+                "baseline={:?} min_improvement={:.4} requests_per_phase={}",
+                training_config.baseline_policy,
+                training_config.min_improvement,
+                training_config
+                    .phases
+                    .first()
+                    .map(|phase| phase.requests_per_episode)
+                    .unwrap_or_default()
+            );
+            let report = train_actor_sequence(training_config);
+            println!();
+            println!(
+                "{:<22} {:>10} {:>12} {:>12} {:>12} {:>10}",
+                "Phase", "Accepted", "Baseline", "Candidate", "Improve", "Policy"
+            );
+            for phase in &report.phases {
+                println!(
+                    "{:<22} {:>10} {:>12.3} {:>12.3} {:>12.3} {:>10?}",
+                    phase.role,
+                    phase.accepted,
+                    phase.baseline_score,
+                    phase.candidate_score,
+                    phase.improvement,
+                    phase.selected_policy
+                );
+            }
+            println!();
+            println!("Final evaluation:");
+            print_results_table(&report.final_eval);
+            if let Some(learned) = report
+                .final_eval
+                .iter()
+                .find(|result| result.policy == "RelayRL-Learned")
+            {
+                print_actor_activity(learned);
+            }
+            if args.output_json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+        }
+        "evaluate-learned" => {
+            let training_config = args.staged_config();
+            let frozen = Default::default();
+            let results = evaluate_final_policy_set(
+                training_config.baseline_policy,
+                training_config.capacity_bytes,
+                &frozen,
+            );
+            print_results_table(&results);
         }
         "train" => {
             println!("RelayRL cache-controller training environment smoke");
@@ -62,6 +120,8 @@ struct Args {
     capacity_bytes: usize,
     output_json: bool,
     role: Option<CacheActorRole>,
+    output_dir: String,
+    min_improvement: f64,
 }
 
 impl Args {
@@ -75,6 +135,8 @@ impl Args {
             capacity_bytes: 512 * 1024,
             output_json: false,
             role: None,
+            output_dir: "target/cache-controller".to_string(),
+            min_improvement: 0.01,
         };
 
         let mut iter = std::env::args().skip(1);
@@ -83,6 +145,9 @@ impl Args {
                 "--bench" => args.mode = "bench".to_string(),
                 "--compare" => args.mode = "compare".to_string(),
                 "--train" => args.mode = "train".to_string(),
+                "--train-sequential" => args.mode = "train-sequential".to_string(),
+                "--evaluate-learned" => args.mode = "evaluate-learned".to_string(),
+                "--train-and-compare" => args.mode = "train-and-compare".to_string(),
                 "--policy" => {
                     if let Some(value) = iter.next() {
                         args.policy = PolicyKind::parse(&value);
@@ -109,6 +174,16 @@ impl Args {
                     }
                 }
                 "--output-json" => args.output_json = true,
+                "--output-dir" => {
+                    if let Some(value) = iter.next() {
+                        args.output_dir = value;
+                    }
+                }
+                "--min-improvement" => {
+                    if let Some(value) = iter.next() {
+                        args.min_improvement = value.parse().unwrap_or(args.min_improvement);
+                    }
+                }
                 "--role" => {
                     if let Some(value) = iter.next() {
                         args.role = parse_role(&value);
@@ -134,6 +209,24 @@ impl Args {
             capacity_bytes: self.capacity_bytes,
         }
     }
+
+    fn staged_config(&self) -> StagedTrainingConfig {
+        let mut config = default_staged_training_config();
+        config.baseline_policy = self.policy;
+        config.capacity_bytes = self.capacity_bytes;
+        config.output_dir = self.output_dir.clone().into();
+        config.min_improvement = self.min_improvement;
+        for phase in &mut config.phases {
+            phase.requests_per_episode = self.requests;
+            phase.eval_seeds = vec![
+                self.seed,
+                self.seed.wrapping_add(1),
+                self.seed.wrapping_add(2),
+            ];
+            phase.train_seeds = vec![self.seed];
+        }
+        config
+    }
 }
 
 fn parse_role(value: &str) -> Option<CacheActorRole> {
@@ -152,9 +245,14 @@ fn print_help() {
     println!("  --bench --policy <lru|lfu|fifo|random|relayrl>");
     println!("  --compare");
     println!("  --train --role <admission|eviction|ttl|resize|prefetch>");
+    println!("  --train-sequential");
+    println!("  --evaluate-learned");
+    println!("  --train-and-compare");
     println!("  --workload <uniform|zipfian|scan|bursty|phase|large|ttl>");
     println!("  --requests <n>");
     println!("  --seed <n>");
     println!("  --capacity-bytes <n>");
     println!("  --output-json");
+    println!("  --output-dir <path>");
+    println!("  --min-improvement <score>");
 }

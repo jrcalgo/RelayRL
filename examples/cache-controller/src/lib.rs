@@ -5,6 +5,8 @@ pub mod environment;
 pub mod heuristics;
 pub mod host;
 pub mod metrics;
+pub mod policies;
+pub mod staged_training;
 pub mod training;
 pub mod workload;
 

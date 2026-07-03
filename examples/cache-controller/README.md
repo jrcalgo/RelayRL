@@ -67,6 +67,33 @@ Exercise the RelayRL-compatible training environment for one actor role:
 cargo run -p cache-controller-example -- --train --role admission
 ```
 
+Run sequential train/freeze/rollback over all actor roles:
+
+```bash
+cargo run -p cache-controller-example -- --train-and-compare --requests 25000 --seed 42
+```
+
+This trains candidate role policies in order:
+
+```text
+Admission -> Eviction -> TTL -> Resize -> Prefetch
+```
+
+Each candidate is evaluated against the current frozen policy set plus heuristic
+background policies. Candidates that do not clear `--min-improvement` are
+rejected and the heuristic remains active for that role.
+
+Reports are written to:
+
+```text
+target/cache-controller/
+├── training-report.json
+├── final-eval.json
+├── final-eval.csv
+├── models/
+└── logs/
+```
+
 Emit JSON:
 
 ```bash
@@ -80,3 +107,28 @@ This example intentionally separates the shared benchmark host from
 frequencies over one shared system. The training environment wraps that same
 cache simulator for one active actor role at a time, matching RelayRL's current
 strongest PPO path: sequential train-and-freeze of specialized actors.
+
+## Sample staged result
+
+On a short smoke run:
+
+```bash
+cargo run -p cache-controller-example -- --train-and-compare --requests 750 --seed 42
+```
+
+the learned composed policy improved over LRU on the final Zipfian evaluation:
+
+```text
+LRU              HitRate 0.442  AvgLat 21.11ms  Reward   -4.168
+RelayRL-Learned HitRate 0.532  AvgLat 19.33ms  Reward  597.946
+```
+
+Actor activity for that run:
+
+```text
+admission                  11186
+eviction                   10983
+ttl                        11186
+resize                        24
+prefetch-backpressure        202
+```
