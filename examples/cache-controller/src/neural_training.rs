@@ -95,9 +95,9 @@ pub fn default_neural_config(smoke: bool) -> NeuralStagedTrainingConfig {
                 traj_per_epoch: 2,
                 train_pi_iters: 4,
                 train_vf_iters: 4,
-                loop_iters: 5_000,
+                loop_iters: 20_000,
                 max_traj_length: 256,
-                env_count: 8,
+                env_count: 64,
             }
         },
     }
@@ -450,18 +450,18 @@ fn ppo_config_for_role(role: CacheActorRole, base: &ActorPpoConfig, smoke: bool)
     match role {
         CacheActorRole::Admission | CacheActorRole::Ttl => {
             cfg.rollout_len = 32;
-            cfg.loop_iters = base.loop_iters.max(5_000);
+            cfg.loop_iters = base.loop_iters;
             cfg.max_traj_length = base.max_traj_length.max(256);
         }
         CacheActorRole::Eviction => {
             cfg.rollout_len = 8;
-            cfg.loop_iters = 2_000;
+            cfg.loop_iters = base.loop_iters;
             cfg.max_traj_length = 64;
             cfg.traj_per_epoch = 2;
         }
         CacheActorRole::Resize | CacheActorRole::Prefetch => {
             cfg.rollout_len = 16;
-            cfg.loop_iters = 3_000;
+            cfg.loop_iters = base.loop_iters;
             cfg.max_traj_length = 128;
             cfg.traj_per_epoch = 2;
         }
