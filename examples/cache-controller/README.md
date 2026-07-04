@@ -134,7 +134,7 @@ cargo run -p cache-controller-example -- \
   --requests 25000 \
   --seed 42 \
   --env-count 8 \
-  --loop-iters 20000 \
+  --loop-iters 200000 \
   --rollout-len 64
 ```
 

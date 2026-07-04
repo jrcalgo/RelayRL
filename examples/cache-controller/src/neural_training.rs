@@ -95,7 +95,7 @@ pub fn default_neural_config(smoke: bool) -> NeuralStagedTrainingConfig {
                 traj_per_epoch: 2,
                 train_pi_iters: 4,
                 train_vf_iters: 4,
-                loop_iters: 20_000,
+                loop_iters: 200_000,
                 max_traj_length: 256,
                 env_count: 64,
             }
