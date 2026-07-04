@@ -224,7 +224,7 @@ pub fn reward_for_role(role: CacheActorRole, outcome: &StepOutcome) -> f32 {
         }
         CacheActorRole::Eviction => {
             if outcome.evictions > 0 {
-                0.02 - outcome.latency_ms / 1_000.0
+                0.02 - outcome.latency_ms / 1_000.0 + outcome.eviction_quality_reward
             } else {
                 0.0
             }

@@ -92,6 +92,7 @@ pub struct StepOutcome {
     pub evictions: u64,
     pub latency_ms: f32,
     pub memory_pressure_after: f32,
+    pub eviction_quality_reward: f32,
 }
 
 impl CacheWorld {
@@ -184,6 +185,7 @@ impl CacheWorld {
             self.metrics.record_actor_decision(CacheActorRole::Eviction);
             if let Some(victim) = self.select_victim(decisions.eviction) {
                 if let Some(entry) = self.entries.get(&victim) {
+                    outcome.eviction_quality_reward += eviction_victim_reward(entry, self.clock);
                     self.eviction_credits.insert(
                         victim,
                         EvictionCredit {
@@ -285,6 +287,33 @@ impl CacheWorld {
         if self.used_bytes > 1 {
             self.capacity_bytes = (self.used_bytes.saturating_mul(8) / 10).max(1);
         }
+    }
+
+    pub fn force_insert_for_training(
+        &mut self,
+        request: &CacheRequest,
+        access_count: u64,
+        ttl: u64,
+        priority: f32,
+    ) {
+        self.remove(request.key);
+        let inserted_at = self.clock.saturating_sub(access_count.saturating_mul(3));
+        let last_accessed_at = self.clock.saturating_sub(access_count.max(1));
+        self.entries.insert(
+            request.key,
+            CacheEntry {
+                key: request.key,
+                size_bytes: request.size_bytes,
+                inserted_at,
+                last_accessed_at,
+                access_count,
+                ttl_expires_at: self.clock + ttl,
+                backend_cost_ms: request.backend_cost_ms,
+                priority,
+            },
+        );
+        self.used_bytes += request.size_bytes;
+        *self.historical_frequency.entry(request.key).or_default() += access_count;
     }
 
     fn contains_stale(&self, key: Key) -> bool {
@@ -516,4 +545,16 @@ impl CacheWorld {
 
 fn entry_value(entry: &CacheEntry) -> f32 {
     entry.backend_cost_ms * entry.access_count as f32 * entry.priority / entry.size_bytes as f32
+}
+
+fn eviction_victim_reward(entry: &CacheEntry, clock: u64) -> f32 {
+    let age = clock.saturating_sub(entry.inserted_at).min(1_024) as f32 / 1_024.0;
+    let recency = clock.saturating_sub(entry.last_accessed_at).min(1_024) as f32 / 1_024.0;
+    let ttl_remaining = entry.ttl_expires_at.saturating_sub(clock).min(1_024) as f32 / 1_024.0;
+    let size_bonus = (entry.size_bytes as f32 / 65_536.0).min(1.0) * 0.04;
+    let cold_bonus = recency * 0.06 + age * 0.02;
+    let hot_penalty = (entry.access_count.min(32) as f32 / 32.0) * 0.08;
+    let cost_penalty = (entry.backend_cost_ms / 100.0).min(1.0) * 0.04;
+    let ttl_penalty = ttl_remaining * 0.02;
+    size_bonus + cold_bonus - hot_penalty - cost_penalty - ttl_penalty
 }

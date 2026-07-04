@@ -34,7 +34,11 @@ impl CacheTrainingEnvironment {
     ) -> Self {
         Self {
             role,
-            state: Arc::new(Mutex::new(TrainingState::new(&config, background.clone()))),
+            state: Arc::new(Mutex::new(TrainingState::new(
+                &config,
+                background.clone(),
+                role,
+            ))),
             config,
             background,
         }
@@ -121,7 +125,7 @@ impl Environment for CacheTrainingEnvironment {
 impl ScalarEnvironment for CacheTrainingEnvironment {
     fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError> {
         let mut state = self.lock_state()?;
-        *state = TrainingState::new(&self.config, self.background.clone());
+        *state = TrainingState::new(&self.config, self.background.clone(), self.role);
         state.advance_to_role_trigger(self.role);
         Ok(ScalarEnvReset {
             observation: f32_slice_to_bytes(&observation_for(
@@ -155,10 +159,15 @@ impl ScalarEnvironment for CacheTrainingEnvironment {
             .world
             .apply_request(&pending, decisions, &active_roles);
         state.steps += 1;
+        state.role_steps += 1;
         state.pending = state.workload.next_request();
         state.advance_to_role_trigger(self.role);
         let reward = crate::actors::reward_for_role(self.role, &outcome);
-        let done = state.steps >= self.config.requests;
+        let done = state.steps >= self.config.requests
+            || (self.role == CacheActorRole::Eviction && state.role_steps >= 8);
+        if done && self.role == CacheActorRole::Eviction {
+            state.role_steps = 0;
+        }
         let observation =
             f32_slice_to_bytes(&observation_for(&state.world, &state.pending, self.role));
         Some((observation, Some(action_mask_bytes()), reward, done, false))
@@ -171,19 +180,25 @@ struct TrainingState {
     background: MixedPolicySet,
     pending: CacheRequest,
     steps: u64,
+    role_steps: usize,
 }
 
 impl TrainingState {
-    fn new(config: &BenchmarkConfig, background: MixedPolicySet) -> Self {
+    fn new(config: &BenchmarkConfig, background: MixedPolicySet, role: CacheActorRole) -> Self {
         let mut workload = WorkloadGenerator::new(config.workload, config.seed);
         let pending = workload.next_request();
-        Self {
+        let mut state = Self {
             world: CacheWorld::new(config.capacity_bytes),
             workload,
             background,
             pending,
             steps: 0,
+            role_steps: 0,
+        };
+        if role == CacheActorRole::Eviction {
+            state.prefill_eviction_curriculum();
         }
+        state
     }
 
     fn advance_to_role_trigger(&mut self, role: CacheActorRole) {
@@ -191,6 +206,9 @@ impl TrainingState {
         while !crate::actors::should_trigger(role, &self.world, &self.pending) && guard < 128 {
             if role == CacheActorRole::Eviction && self.world.used_bytes() > 0 {
                 self.world.force_capacity_pressure();
+                break;
+            } else if role == CacheActorRole::Eviction {
+                self.prefill_eviction_curriculum();
                 break;
             }
             let pending = self.pending.clone();
@@ -201,6 +219,35 @@ impl TrainingState {
             self.pending = self.workload.next_request();
             guard += 1;
         }
+    }
+
+    fn prefill_eviction_curriculum(&mut self) {
+        let target = self.world.capacity_bytes().saturating_mul(13) / 10;
+        let mut inserted = 0_u64;
+        while self.world.used_bytes() <= target && inserted < 512 {
+            let request = self.workload.next_request();
+            let access_count = match request.popularity_class {
+                0 => 16 + inserted % 16,
+                1 => 4 + inserted % 8,
+                _ => 1 + inserted % 3,
+            };
+            let ttl = match inserted % 4 {
+                0 => 16,
+                1 => 64,
+                2 => 256,
+                _ => 1024,
+            };
+            let priority = match request.popularity_class {
+                0 => 2.0,
+                1 => 1.25,
+                _ => 0.75,
+            };
+            self.world
+                .force_insert_for_training(&request, access_count, ttl, priority);
+            inserted += 1;
+        }
+        self.world.force_capacity_pressure();
+        self.pending = self.workload.next_request();
     }
 }
 

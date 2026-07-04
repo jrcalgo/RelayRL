@@ -91,12 +91,12 @@ pub fn default_neural_config(smoke: bool) -> NeuralStagedTrainingConfig {
             }
         } else {
             ActorPpoConfig {
-                rollout_len: 64,
+                rollout_len: 32,
                 traj_per_epoch: 2,
                 train_pi_iters: 4,
                 train_vf_iters: 4,
-                loop_iters: 20_000,
-                max_traj_length: 512,
+                loop_iters: 5_000,
+                max_traj_length: 256,
                 env_count: 8,
             }
         },
@@ -120,6 +120,7 @@ pub async fn train_actor_sequence_with_ppo(
 
     let result = async {
         for role in CacheActorRole::ALL {
+            let role_ppo = ppo_config_for_role(role, &config.ppo, config.smoke);
             let model_dir = config.output_dir.join("ppo-models").join(role.as_str());
             let env_dir = config.output_dir.join("ppo-rollouts").join(role.as_str());
             std::fs::create_dir_all(&model_dir)?;
@@ -127,13 +128,13 @@ pub async fn train_actor_sequence_with_ppo(
 
             println!(
                 "[PPO staged] training role={} env_count={} loop_iters={} rollout_len={}",
-                role, config.ppo.env_count, config.ppo.loop_iters, config.ppo.rollout_len
+                role, role_ppo.env_count, role_ppo.loop_iters, role_ppo.rollout_len
             );
 
             let actor_id = agent
                 .new_actor::<2, 2>(
                     DeviceType::Cpu,
-                    config.ppo.max_traj_length,
+                    role_ppo.max_traj_length,
                     Some(bootstrap.clone()),
                 )
                 .await?;
@@ -152,15 +153,15 @@ pub async fn train_actor_sequence_with_ppo(
             );
             let env = CacheTrainingEnvironment::with_background(role, train_config, background);
             agent
-                .set_env(actor_id, Box::new(env), config.ppo.env_count)
+                .set_env(actor_id, Box::new(env), role_ppo.env_count)
                 .await?;
 
-            let spec = build_cache_ppo_spec(env_dir, model_dir.clone(), &config.ppo)?;
+            let spec = build_cache_ppo_spec(env_dir, model_dir.clone(), &role_ppo)?;
             let trained_model = agent
                 .run_env_with_ppo::<Float, Float, GenericMlp<NdArray, Float, Float>>(
                     actor_id,
-                    config.ppo.loop_iters,
-                    config.ppo.max_traj_length,
+                    role_ppo.loop_iters,
+                    role_ppo.max_traj_length,
                     spec,
                 )
                 .await?;
@@ -438,6 +439,34 @@ fn workload_for_role(role: CacheActorRole) -> WorkloadKind {
         CacheActorRole::Resize => WorkloadKind::PhaseShift,
         CacheActorRole::Prefetch => WorkloadKind::Bursty,
     }
+}
+
+fn ppo_config_for_role(role: CacheActorRole, base: &ActorPpoConfig, smoke: bool) -> ActorPpoConfig {
+    if smoke {
+        return base.clone();
+    }
+
+    let mut cfg = base.clone();
+    match role {
+        CacheActorRole::Admission | CacheActorRole::Ttl => {
+            cfg.rollout_len = 32;
+            cfg.loop_iters = base.loop_iters.max(5_000);
+            cfg.max_traj_length = base.max_traj_length.max(256);
+        }
+        CacheActorRole::Eviction => {
+            cfg.rollout_len = 8;
+            cfg.loop_iters = 2_000;
+            cfg.max_traj_length = 64;
+            cfg.traj_per_epoch = 2;
+        }
+        CacheActorRole::Resize | CacheActorRole::Prefetch => {
+            cfg.rollout_len = 16;
+            cfg.loop_iters = 3_000;
+            cfg.max_traj_length = 128;
+            cfg.traj_per_epoch = 2;
+        }
+    }
+    cfg
 }
 
 fn average_score(results: &[BenchmarkResult]) -> f64 {
