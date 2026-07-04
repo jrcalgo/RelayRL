@@ -362,7 +362,7 @@ fn build_cache_ppo_spec(
         pi_head: PPOPolicyHead::Discrete(DiscretePPOPolicyHead::new(GenericMlp::new(
             OBSERVATION_DIM,
             obs_dtype.clone(),
-            &[32],
+            &[128, 128],
             ACTION_DIM,
             act_dtype.clone(),
             ActivationKind::None,
@@ -371,7 +371,7 @@ fn build_cache_ppo_spec(
         vf_mlp: GenericMlp::new(
             OBSERVATION_DIM,
             obs_dtype.clone(),
-            &[32],
+            &[128, 128],
             1,
             DType::NdArray(NdArrayDType::F32),
             ActivationKind::None,
