@@ -16,16 +16,16 @@ pub mod agent;
 mod builder;
 pub(crate) mod runtime {
     pub(crate) mod actor;
-    pub(crate) mod coordination {
+    pub(crate) mod control {
         pub(crate) mod coordinator;
         pub(crate) mod lifecycle_manager;
         pub(crate) mod scale_manager;
         pub(crate) mod state_manager;
     }
-    pub(crate) mod router;
 
     pub(crate) mod data {
         pub(crate) mod environments;
+        pub(crate) mod router;
         pub(crate) mod sinks {
             pub(crate) mod file_sink;
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

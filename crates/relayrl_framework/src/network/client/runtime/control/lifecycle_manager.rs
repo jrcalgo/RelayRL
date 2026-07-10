@@ -7,12 +7,12 @@
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::TransportType;
+use crate::network::TransportMode;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::DefaultHyperparameterArgs;
 use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::prelude::config::TransportConfigParams;
+use crate::prelude::utilities::config::TransportConfigParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::Algorithm;
 #[cfg(feature = "metrics")]
@@ -32,8 +32,10 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tokio::sync::{Notify, RwLock, broadcast};
+use crossbeam_utils::CachePadded;
 
 use thiserror::Error;
 
@@ -59,9 +61,15 @@ pub(crate) struct SharedDefaultHyperparameters {
     ppo: CachePadded<Arc<RwLock<PPOParams>>>,
     ippo: CachePadded<Arc<RwLock<IPPOParams>>>,
     mappo: CachePadded<Arc<RwLock<MAPPOParams>>>,
-    ppo_config_init: bool,
-    ippo_config_init: bool,
-    mappo_config_init: bool,
+    ppo_config_poll: bool,
+    ippo_config_poll: bool,
+    mappo_config_poll: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LifecycleConfigPolling {
+    seconds: CachePadded<Arc<AtomicU64>>,
+    config_poll: bool,
 }
 
 /// Shared transport addresses for both NATS and ZMQ transports.
@@ -84,19 +92,19 @@ pub(crate) struct SharedTransportAddresses {
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) fn construct_transport_addresses(
     transport_config: &TransportConfigParams,
-    transport_type: &TransportType,
+    transport_mode: &TransportMode,
 ) -> SharedTransportAddresses {
     fn construct_address(
-        transport_type: &TransportType,
+        transport_mode: &TransportMode,
         network_params: &NetworkParams,
     ) -> Arc<str> {
-        match *transport_type {
+        match *transport_mode {
             #[cfg(feature = "zmq-transport")]
-            TransportType::ZMQ => Arc::<str>::from(
+            TransportMode::ZMQ => Arc::<str>::from(
                 "tcp://".to_owned() + &network_params.host + ":" + &network_params.port.to_string(),
             ),
             #[cfg(feature = "nats-transport")]
-            TransportType::NATS => Arc::<str>::from(
+            TransportMode::NATS => Arc::<str>::from(
                 "nats://".to_owned()
                     + &network_params.host
                     + ":"
@@ -105,19 +113,19 @@ pub(crate) fn construct_transport_addresses(
         }
     }
 
-    match *transport_type {
+    match *transport_mode {
         #[cfg(feature = "zmq-transport")]
-        TransportType::ZMQ => SharedTransportAddresses {
+        TransportMode::ZMQ => SharedTransportAddresses {
             zmq_inference_addresses: SharedZmqInferenceAddresses {
                 inference_server_address: construct_address(
-                    transport_type,
+                    transport_mode,
                     &transport_config
                         .zmq_addresses
                         .inference_addresses
                         .inference_server_address,
                 ),
                 inference_scaling_server_address: construct_address(
-                    transport_type,
+                    transport_mode,
                     &transport_config
                         .zmq_addresses
                         .inference_addresses
@@ -126,28 +134,28 @@ pub(crate) fn construct_transport_addresses(
             },
             zmq_training_addresses: SharedZmqTrainingAddresses {
                 agent_listener_address: construct_address(
-                    transport_type,
+                    transport_mode,
                     &transport_config
                         .zmq_addresses
                         .training_addresses
                         .agent_listener_address,
                 ),
                 model_server_address: construct_address(
-                    transport_type,
+                    transport_mode,
                     &transport_config
                         .zmq_addresses
                         .training_addresses
                         .model_server_address,
                 ),
                 trajectory_server_address: construct_address(
-                    transport_type,
+                    transport_mode,
                     &transport_config
                         .zmq_addresses
                         .training_addresses
                         .trajectory_server_address,
                 ),
                 training_scaling_server_address: construct_address(
-                    transport_type,
+                    transport_mode,
                     &transport_config
                         .zmq_addresses
                         .training_addresses
@@ -160,7 +168,7 @@ pub(crate) fn construct_transport_addresses(
             nats_training_address: Arc::<str>::from(""),
         },
         #[cfg(feature = "nats-transport")]
-        TransportType::NATS => SharedTransportAddresses {
+        TransportMode::NATS => SharedTransportAddresses {
             #[cfg(feature = "zmq-transport")]
             zmq_inference_addresses: SharedZmqInferenceAddresses {
                 inference_server_address: Arc::<str>::from(""),
@@ -174,11 +182,11 @@ pub(crate) fn construct_transport_addresses(
                 training_scaling_server_address: Arc::<str>::from(""),
             },
             nats_inference_address: construct_address(
-                transport_type,
+                transport_mode,
                 &transport_config.nats_addresses.inference_server_address,
             ),
             nats_training_address: construct_address(
-                transport_type,
+                transport_mode,
                 &transport_config.nats_addresses.training_server_address,
             ),
         },
@@ -267,10 +275,9 @@ pub(crate) struct LifecycleManager {
     local_model_path: Arc<RwLock<PathBuf>>,
     trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    transport_type: Arc<TransportType>,
+    transport_mode: Arc<TransportMode>,
     config_path: Arc<PathBuf>,
-    config_update_polling_seconds: Arc<RwLock<f32>>,
-    router_buffer_size_per_actor: Arc<RwLock<usize>>,
+    config_polling: LifecycleConfigPolling,
     last_modified: Arc<RwLock<SystemTime>>,
     shutdown_tx: broadcast::Sender<()>,
     shutdown_notifier: Arc<Notify>,
@@ -282,9 +289,9 @@ impl LifecycleManager {
         default_hyperparameters: DefaultHyperparameterArgs,
         config: &ClientConfigLoader,
         config_path: PathBuf,
-        router_buffer_size_per_actor: Option<usize>,
+        config_polling_seconds: Option<u64>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        transport_type: TransportType,
+        transport_mode: TransportMode,
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(10_000);
 
@@ -299,18 +306,26 @@ impl LifecycleManager {
                 SystemTime::now()
             });
 
-        let config_update_polling = config.client_config.config_update_polling_seconds;
-
-        let router_buffer_size = match router_buffer_size_per_actor {
-            Some(size) => size,
-            None => config.client_config.router_buffer_size_per_actor,
+        // arg init override disables value update from json file for lifetime of runtime
+        let config_polling = match config_polling_seconds {
+            Some(seconds) =>  LifecycleConfigPolling {
+                seconds: CachePadded::new(Arc::new(AtomicU64::new(seconds))),
+                config_poll: false
+            },
+            None => LifecycleConfigPolling {
+                seconds: CachePadded::new(Arc::new(AtomicU64::new(
+                    config.client_config.config_polling_seconds,
+                ))),
+                config_poll: true,
+            },
         };
 
         let transport_config = config.get_transport_config();
 
+        // 1. load args, 2. load config file, 3. load default values
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let resolved_default_hyperparameters: SharedDefaultHyperparameters = {
-            let ppo = match default_hyperparameters.ppo {
+            let ppo: (PPOParams, bool) = match default_hyperparameters.ppo {
                 Some(ppo) => (ppo, false),
                 None if default_hyperparameters.config_default_init => (
                     config
@@ -323,7 +338,7 @@ impl LifecycleManager {
                 ),
                 None => (PPOParams::default(), false),
             };
-            let ippo = match default_hyperparameters.ippo {
+            let ippo: (IPPOParams, bool) = match default_hyperparameters.ippo {
                 Some(ippo) => (ippo, false),
                 None if default_hyperparameters.config_default_init => (
                     config
@@ -336,7 +351,7 @@ impl LifecycleManager {
                 ),
                 None => (IPPOParams::default(), false),
             };
-            let mappo = match default_hyperparameters.mappo {
+            let mappo: (MAPPOParams, bool) = match default_hyperparameters.mappo {
                 Some(mappo) => (mappo, false),
                 None if default_hyperparameters.config_default_init => (
                     config
@@ -354,9 +369,9 @@ impl LifecycleManager {
                 ppo: CachePadded::new(Arc::new(RwLock::new(ppo.0))),
                 ippo: CachePadded::new(Arc::new(RwLock::new(ippo.0))),
                 mappo: CachePadded::new(Arc::new(RwLock::new(mappo.0))),
-                ppo_config_init: ppo.1,
-                ippo_config_init: ippo.1,
-                mappo_config_init: mappo.1,
+                ppo_config_poll: ppo.1,
+                ippo_config_poll: ippo.1,
+                mappo_config_poll: mappo.1,
             }
         };
 
@@ -366,26 +381,25 @@ impl LifecycleManager {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_addresses: Arc::new(RwLock::new(construct_transport_addresses(
                 transport_config,
-                &transport_type,
+                &transport_mode,
             ))),
             #[cfg(feature = "metrics")]
             metrics_args: Arc::new(RwLock::new((
-                config.client_config.metrics_meter_name.clone(),
-                construct_metrics_otlp_endpoint(&config.client_config.metrics_otlp_endpoint),
+                config.client_config.metrics.meter_name.clone(),
+                construct_metrics_otlp_endpoint(&config.client_config.metrics.otlp_endpoint),
             ))),
             local_model_path: Arc::new(RwLock::new(construct_local_model_path(
-                &transport_config.local_model_module,
+                &config.client_config.local_model_module,
             ))),
             trajectory_file_output: Arc::new(RwLock::new(construct_trajectory_file_output(
                 &config.client_config.trajectory_file_output,
             ))),
             config_path: Arc::new(config_path),
             last_modified: Arc::new(RwLock::new(last_modified)),
-            config_update_polling_seconds: Arc::new(RwLock::new(config_update_polling)),
-            router_buffer_size_per_actor: Arc::new(RwLock::new(router_buffer_size)),
+            config_polling,
             shutdown_tx,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            transport_type: Arc::new(transport_type),
+            transport_mode: Arc::new(transport_mode),
             shutdown_notifier: Arc::new(Notify::new()),
         }
     }
@@ -422,10 +436,6 @@ impl LifecycleManager {
         self.trajectory_file_output.clone()
     }
 
-    pub fn get_router_buffer_size_per_actor(&self) -> Arc<RwLock<usize>> {
-        self.router_buffer_size_per_actor.clone()
-    }
-
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub fn get_ppo_hyperparameters(&self) -> Arc<RwLock<PPOParams>> {
         self.default_hyperparameters
@@ -458,11 +468,11 @@ impl LifecycleManager {
         &self,
         transport_params: &TransportConfigParams,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        transport_type: &TransportType,
+        transport_mode: &TransportMode,
     ) -> Result<(), LifecycleManagerError> {
         let mut transport_addresses_guard = self.transport_addresses.write().await;
         *transport_addresses_guard =
-            construct_transport_addresses(transport_params, transport_type);
+            construct_transport_addresses(transport_params, transport_mode);
         Ok(())
     }
 
@@ -480,13 +490,14 @@ impl LifecycleManager {
         Ok(())
     }
 
-    pub(crate) async fn set_router_buffer_size_per_actor(
+    pub(crate) async fn set_config_polling_seconds(
         &self,
-        router_buffer_size_per_actor: usize,
+        config_polling_seconds: &u64,
     ) -> Result<(), LifecycleManagerError> {
-        let mut router_buffer_size_per_actor_guard =
-            self.router_buffer_size_per_actor.write().await;
-        *router_buffer_size_per_actor_guard = router_buffer_size_per_actor;
+        if self.config_polling.config_poll {
+            self.config_polling.seconds.clone().into_inner().swap(*config_polling_seconds, Ordering::Acquire);
+        };
+
         Ok(())
     }
 
@@ -495,15 +506,15 @@ impl LifecycleManager {
         &self,
         init_hyperparameters: &HyperparameterConfig,
     ) -> Result<(), LifecycleManagerError> {
-        if self.default_hyperparameters.ppo_config_init {
+        if self.default_hyperparameters.ppo_config_poll {
             *self.default_hyperparameters.ppo.write().await =
                 init_hyperparameters.ppo.clone().unwrap_or_default();
         }
-        if self.default_hyperparameters.ippo_config_init {
+        if self.default_hyperparameters.ippo_config_poll {
             *self.default_hyperparameters.ippo.write().await =
                 init_hyperparameters.ippo.clone().unwrap_or_default();
         }
-        if self.default_hyperparameters.mappo_config_init {
+        if self.default_hyperparameters.mappo_config_poll {
             *self.default_hyperparameters.mappo.write().await =
                 init_hyperparameters.mappo.clone().unwrap_or_default();
         }
@@ -535,14 +546,34 @@ impl LifecycleManager {
     }
 
     pub(crate) async fn watch(&self) -> Result<(), LifecycleManagerError> {
-        let mut config_update_polling_seconds =
-            *self.config_update_polling_seconds.read().await as u64;
+        let config_update_seconds = self.config_polling.seconds.clone().into_inner().load(Ordering::Acquire);
 
+        // enable config polling in general if the value is a) sourced from argument and non-zero, or b) sourced from config file
+        let polling_enabled: bool = {
+            let config_poll_flag = self.config_polling.config_poll;
+            (config_update_seconds != 0 && !config_poll_flag) || config_poll_flag
+        };
+
+        // if seconds is zero, default interval is set to 10 second
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            config_update_polling_seconds,
+            {
+                if config_update_seconds != 0 {
+                    config_update_seconds
+                } else {
+                    if polling_enabled {
+                        log::info!("[LifecycleManager] Config file currently has `config_update_polling_seconds` set to 0, defaulting to 10...");
+                    } else {
+                        log::info!("[LifecycleManager] RelayRLAgent initialized with `config_update_polling_seconds` set to 0, disabling polling...");
+                    }
+                    10
+                }
+            }
         ));
+
         loop {
             tokio::select! {
+                biased;
+
                 _ = tokio::signal::ctrl_c() => {
                     self.handle_shutdown_signal();
                     break Ok(());
@@ -551,7 +582,7 @@ impl LifecycleManager {
                     self.handle_shutdown_signal();
                     break Ok(());
                 }
-                _ = interval.tick() => {
+                _ = interval.tick(), if polling_enabled => {
                     if let Ok(metadata) = fs::metadata(&*self.config_path) &&
                         let Ok(modified) = metadata.modified() {
                             let mut last_modified = self.last_modified.write().await;
@@ -559,16 +590,24 @@ impl LifecycleManager {
                                 log::info!("[LifecycleManager] Config file changed, reloading...");
                                 *last_modified = modified;
 
-                                #[allow(irrefutable_let_patterns)]
-                                if let new_polling_seconds = *self.config_update_polling_seconds.read().await as u64
-                                    && new_polling_seconds != config_update_polling_seconds {
-                                        interval = tokio::time::interval(std::time::Duration::from_secs(
-                                            new_polling_seconds,
-                                        ));
-                                        config_update_polling_seconds = new_polling_seconds;
-                                    }
-
                                 self.handle_config_change(self.config_path.as_ref().clone()).await?;
+
+                                if self.config_polling.config_poll {
+                                    #[allow(irrefutable_let_patterns)]
+                                    if let new_polling_seconds = self.config_polling.seconds.clone().into_inner().load(Ordering::Acquire)
+                                        && new_polling_seconds != config_update_seconds {
+                                            interval = tokio::time::interval(std::time::Duration::from_secs(
+                                                {
+                                                    if new_polling_seconds != 0 {
+                                                        new_polling_seconds
+                                                    } else {
+                                                        log::info!("[LifecycleManager] Config file currently has `config_polling_seconds` set to 0, defaulting to 10 until changed...");
+                                                        10
+                                                    }
+                                                }
+                                            ));
+                                        }
+                                }
                             }
                     }
                 }
@@ -596,12 +635,12 @@ impl LifecycleManager {
             not(feature = "metrics")
         ))]
         tokio::try_join!(
-            self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
-            self.set_local_model_path(&new_config.transport_config.local_model_module),
+            self.set_transport_addresses(&new_config.transport_config, &self.transport_mode),
+            self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
             self.set_default_hyperparameters(&new_config.client_config.init_hyperparameters),
-            self.set_router_buffer_size_per_actor(
-                new_config.client_config.router_buffer_size_per_actor
+            self.set_config_polling_seconds(
+                &new_config.client_config.config_polling_seconds
             ),
         )
         .map_err(|e| {
@@ -613,16 +652,16 @@ impl LifecycleManager {
             feature = "metrics"
         ))]
         tokio::try_join!(
-            self.set_transport_addresses(&new_config.transport_config, &self.transport_type),
-            self.set_local_model_path(&new_config.transport_config.local_model_module),
+            self.set_transport_addresses(&new_config.transport_config, &self.transport_mode),
+            self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
             self.set_default_hyperparameters(&new_config.client_config.init_hyperparameters),
-            self.set_router_buffer_size_per_actor(
-                new_config.client_config.router_buffer_size_per_actor
+            self.set_config_polling_seconds(
+                &new_config.client_config.config_polling_seconds
             ),
             self.set_metrics_args(
-                &new_config.client_config.metrics_meter_name,
-                &new_config.client_config.metrics_otlp_endpoint
+                &new_config.client_config.metrics.meter_name,
+                &new_config.client_config.metrics.otlp_endpoint
             ),
         )
         .map_err(|e| {
@@ -634,10 +673,10 @@ impl LifecycleManager {
             not(feature = "metrics")
         ))]
         tokio::try_join!(
-            self.set_local_model_path(&new_config.transport_config.local_model_module),
+            self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_router_buffer_size_per_actor(
-                new_config.client_config.router_buffer_size_per_actor
+            self.set_config_polling_seconds(
+                &new_config.client_config.config_polling_seconds
             ),
         )
         .map_err(|e| {
@@ -649,14 +688,14 @@ impl LifecycleManager {
             feature = "metrics"
         ))]
         tokio::try_join!(
-            self.set_local_model_path(&new_config.transport_config.local_model_module),
+            self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_router_buffer_size_per_actor(
-                new_config.client_config.router_buffer_size_per_actor
+            self.set_config_polling_seconds(
+                &new_config.client_config.config_polling_seconds
             ),
             self.set_metrics_args(
-                &new_config.client_config.metrics_meter_name,
-                &new_config.client_config.metrics_otlp_endpoint
+                &new_config.client_config.metrics.meter_name,
+                &new_config.client_config.metrics.otlp_endpoint
             ),
         )
         .map_err(|e| {
@@ -782,33 +821,16 @@ mod unit_tests {
         let config = ClientConfigLoader::load_config(&tmp.path().to_path_buf());
         let lm = LifecycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            AlgorithmArgs::default(),
+            DefaultHyperparameterArgs::default(),
             &config,
             tmp.path().to_path_buf(),
+            Some(10),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            TransportType::default(),
-            Some(1000),
+            TransportMode::default(),
         );
         // Keep the temp file alive until LifecycleManager has loaded the config.
         drop(tmp);
         lm
-    }
-
-    #[tokio::test]
-    async fn set_router_buffer_size_per_actor_round_trip() {
-        let lm = make_lifecycle_manager();
-        lm.set_router_buffer_size_per_actor(99).await.unwrap();
-        let val = *lm.get_router_buffer_size_per_actor().read().await;
-        assert_eq!(val, 99);
-    }
-
-    #[tokio::test]
-    async fn set_router_buffer_size_per_actor_overwrites_previous_value() {
-        let lm = make_lifecycle_manager();
-        lm.set_router_buffer_size_per_actor(10).await.unwrap();
-        lm.set_router_buffer_size_per_actor(200).await.unwrap();
-        let val = *lm.get_router_buffer_size_per_actor().read().await;
-        assert_eq!(val, 200);
     }
 
     #[tokio::test]

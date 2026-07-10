@@ -1,6 +1,6 @@
-use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, SharedRouterState};
-use crate::network::client::runtime::router::{
+use crate::network::client::runtime::control::scale_manager::RouterNamespace;
+use crate::network::client::runtime::control::state_manager::{ActorUuid, SharedRouterState};
+use crate::network::client::runtime::data::router::{
     ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
 };
 #[cfg(feature = "metrics")]
@@ -145,17 +145,18 @@ impl RouterDispatcher {
 
     fn get_timeout_for_message_protocol(protocol: &RoutingProtocol) -> Duration {
         match protocol {
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             RoutingProtocol::Data(DataPayload::RequestInference(_)) => Duration::from_secs(10),
             RoutingProtocol::Control(ControlPayload::ModelVersion { reply_to: _ }) => {
                 Duration::from_secs(15)
             }
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             RoutingProtocol::Data(DataPayload::FlagLastAction {
                 reward: _,
                 env_id: _,
                 env_label: _,
             }) => Duration::from_secs(20),
-            RoutingProtocol::Control(ControlPayload::ModelHandshake)
-            | RoutingProtocol::Data(DataPayload::SendTrajectory {
+            RoutingProtocol::Data(DataPayload::SendTrajectory {
                 timestamp: _,
                 trajectory: _,
             }) => Duration::from_secs(30),
@@ -164,6 +165,8 @@ impl RouterDispatcher {
                 version: _,
             })
             | RoutingProtocol::Control(ControlPayload::Shutdown) => Duration::from_secs(60),
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            RoutingProtocol::Control(ControlPayload::ModelHandshake) => Duration::from_secs(30),
         }
     }
 
@@ -413,10 +416,12 @@ impl RouterDispatcher {
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::state_manager::{ActorRoute, StateManager};
-    use crate::network::client::runtime::router::{ControlPayload, DataPayload, RoutingProtocol};
+    use crate::network::client::runtime::control::state_manager::{ActorRoute, StateManager};
+    use crate::network::client::runtime::data::router::{
+        ControlPayload, DataPayload, RoutingProtocol,
+    };
     #[cfg(feature = "metrics")]
     use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::registry_uuid::Uuid;
@@ -432,7 +437,7 @@ mod unit_tests {
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
@@ -504,11 +509,13 @@ mod unit_tests {
 
     #[test]
     fn get_timeout_for_protocol_correct_values() {
-        use crate::network::client::runtime::router::InferenceRequest;
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        use crate::network::client::runtime::data::router::InferenceRequest;
         use relayrl_types::data::trajectory::RelayRLTrajectory;
         use tokio::sync::oneshot;
         let (tx, _rx) =
             oneshot::channel::<std::sync::Arc<relayrl_types::data::action::RelayRLAction>>();
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         assert_eq!(
             RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Data(
                 DataPayload::RequestInference(Box::new(InferenceRequest {
@@ -527,6 +534,7 @@ mod unit_tests {
             )),
             Duration::from_secs(15)
         );
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         assert_eq!(
             RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Data(
                 DataPayload::FlagLastAction {
@@ -537,6 +545,7 @@ mod unit_tests {
             )),
             Duration::from_secs(20)
         );
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         assert_eq!(
             RouterDispatcher::get_timeout_for_message_protocol(&RoutingProtocol::Control(
                 ControlPayload::ModelHandshake
@@ -594,7 +603,7 @@ mod unit_tests {
         global_tx
             .send(make_routed_message(
                 actor_id,
-                RoutingProtocol::Control(ControlPayload::ModelHandshake),
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
@@ -615,10 +624,7 @@ mod unit_tests {
 
         let actor_id = Uuid::new_v4();
         // Actor has no router assignment → dispatch_message should queue it
-        let msg = make_routed_message(
-            actor_id,
-            RoutingProtocol::Control(ControlPayload::ModelHandshake),
-        );
+        let msg = make_routed_message(actor_id, RoutingProtocol::Control(ControlPayload::Shutdown));
         let result = dispatcher.dispatch_message(msg).await;
         assert!(
             matches!(result, Err(RouterDispatcherError::ActorNotAssignedError(_))),
@@ -634,6 +640,7 @@ mod unit_tests {
     }
 
     #[tokio::test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn retries_deliver_message_after_assignment() {
         let (dispatcher, global_tx, router_channels, shared_router_state) = make_dispatcher().await;
 
@@ -713,6 +720,7 @@ mod unit_tests {
     }
 
     #[tokio::test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn closed_router_channel_does_not_panic() {
         let (dispatcher, global_tx, router_channels, shared_router_state) = make_dispatcher().await;
         let actor_id = Uuid::new_v4();

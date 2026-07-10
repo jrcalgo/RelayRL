@@ -7,29 +7,31 @@ use crate::network::client::agent::LocalTrajectoryFileParams;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{ActorInferenceMode, AlgorithmInitArgs, ModelMode};
 use crate::network::client::agent::{
-    ActorTrainingDataMode, ClientModes, uses_in_memory_data, uses_local_file_writing,
+    ActorDataMode, ClientModes, uses_trajectory_cache, uses_local_file_writing,
 };
-use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::lifecycle_manager::{
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::lifecycle_manager::{
     LifecycleManager, LifecycleManagerError,
 };
-use crate::network::client::runtime::coordination::state_manager::StateManager;
+use crate::network::client::runtime::control::state_manager::StateManager;
+use crate::network::client::runtime::data::router::buffer::{
+    TrajectoryBufferTrait, TrajectorySinkError,
+};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::runtime::data::router::receiver::{
+    ClientTransportModelReceiver, TransportReceiverError,
+};
+use crate::network::client::runtime::data::router::router_dispatcher::RouterDispatcher;
+use crate::network::client::runtime::data::router::{
+    RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     ProcessInitRequest, ScalingDispatcher, TrainingDispatcher,
-};
-use crate::network::client::runtime::router::buffer::{TrajectoryBufferTrait, TrajectorySinkError};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::router::receiver::{
-    ClientTransportModelReceiver, TransportReceiverError,
-};
-use crate::network::client::runtime::router::router_dispatcher::RouterDispatcher;
-use crate::network::client::runtime::router::{
-    RoutedMessage, buffer::ClientTrajectoryBuffer, filter::ClientCentralFilter,
 };
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
@@ -47,7 +49,9 @@ use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Receiver;
@@ -118,6 +122,40 @@ pub(crate) struct RouterRuntimeParams {
 pub type RouterNamespace = Arc<str>;
 pub type ScaleManagerUuid = Uuid;
 
+#[derive(Clone)]
+pub(crate) struct SharedTrajectoryCache {
+    pub(crate) cache: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
+    pub(crate) per_actor_size: usize
+}
+
+impl SharedTrajectoryCache {
+    pub(crate) fn drain(
+        &mut self,
+        actor_ids: Vec<Uuid>,
+    ) -> Result<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>, (Option<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, Vec<Uuid>)> {
+        let mut traj_map = HashMap::<Uuid, Vec<Arc<RelayRLTrajectory>>>::new();
+        let mut invalid_ids = Vec::new();
+
+        actor_ids.iter().for_each(|id| {
+            if let Some(mut entry) = self.cache.get_mut(&id) {
+                let traj_vec = std::mem::take(entry.value_mut());
+                traj_map.insert(id.clone(), traj_vec);
+            } else {
+                invalid_ids.push(id.clone());
+                log::error!("{}", format!("Actor ID not found in trajectory cache: {}", id));
+            }
+        });
+
+        return if invalid_ids.len() == actor_ids.len() {
+            Err((None, invalid_ids))
+        } else if invalid_ids.len() > 0 {
+            Err((Some(traj_map.clone()), invalid_ids))
+        } else {
+            Ok(traj_map.clone())
+        };
+    }
+}
+
 pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>> {
     client_namespace: Arc<str>,
     router_namespace_counter: u32,
@@ -128,7 +166,8 @@ pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
-    pub(crate) shared_trajectory_memory: Option<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>>,
+    pub(crate) shared_buffer_size: Arc<AtomicUsize>,
+    pub(crate) shared_traj_cache: Option<SharedTrajectoryCache>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     pub(crate) scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -149,6 +188,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         client_namespace: Arc<str>,
+        data_buffer_size: usize,
         shared_client_modes: Arc<ClientModes>,
         shared_state: Arc<RwLock<StateManager<B>>>,
         global_dispatcher_rx: Receiver<RoutedMessage>,
@@ -202,18 +242,31 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
         }));
 
         let shared_trajectory_file_output =
-            if uses_local_file_writing(&shared_client_modes.actor_training_data_mode) {
+            if uses_local_file_writing(&shared_client_modes.actor_data_mode) {
                 Some(lifecycle.get_trajectory_file_output())
             } else {
                 None
             };
 
-        let shared_trajectory_memory =
-            if uses_in_memory_data(&shared_client_modes.actor_training_data_mode) {
-                Some(Arc::new(DashMap::new()))
+        let shared_traj_cache = if let ActorDataMode::OfflineWithCache(size) | ActorDataMode::OfflineWithFilesAndCache(_, size) = shared_client_modes.actor_data_mode {
+            Some(SharedTrajectoryCache {
+                cache: Arc::new(DashMap::new()),
+                per_actor_size: size
+            })
+        } else {
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            if let ActorDataMode::OnlineWithCache(_, size) | ActorDataMode::OnlineWithFilesAndCache(.., size) = shared_client_modes.actor_data_mode {
+                Some(SharedTrajectoryCache {
+                    cache: Arc::new(DashMap::new()),
+                    per_actor_size: size
+                })
             } else {
                 None
-            };
+            }
+            None
+        };
+
+        let shared_buffer_size = Arc::new(AtomicUsize::new(data_buffer_size));
 
         Ok(Self {
             client_namespace,
@@ -233,7 +286,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses,
             shared_trajectory_file_output,
-            shared_trajectory_memory,
+            shared_traj_cache,
+            shared_buffer_size,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             training_codec: training_codec.unwrap_or_default(),
             lifecycle: Some(lifecycle),
@@ -248,9 +302,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
             .unwrap_or(0);
         if router_count > 0 {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.scale_in(router_count, false).await?;
+            self.scale_routers_in(router_count, false).await?;
             #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-            self.scale_in(router_count).await?;
+            self.scale_routers_in(router_count).await?;
         }
         if let Some(handle) = self.router_dispatcher.take() {
             handle.abort()
@@ -335,10 +389,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
             let built_process_init_request = match process_init_flag {
                 ProcessInitFlag::TrainingAlgorithmInit(algorithm_args) => {
                     let algorithm_model_mode =
-                        match self.shared_client_modes.actor_training_data_mode.clone() {
-                            ActorTrainingDataMode::Online(params) => params.model_mode,
-                            ActorTrainingDataMode::OnlineWithFiles(params, _) => params.model_mode,
-                            ActorTrainingDataMode::OnlineWithMemory(params) => params.model_mode,
+                        match self.shared_client_modes.actor_data_mode.clone() {
+                            ActorDataMode::Online(params) => params.model_mode,
+                            ActorDataMode::OnlineWithFiles(params, _) => params.model_mode,
+                            ActorDataMode::OnlineWithCache(params, _) => params.model_mode,
                             _ => ModelMode::Independent,
                         };
 
@@ -431,7 +485,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
         Ok(())
     }
 
-    pub(crate) async fn scale_out(
+    pub(crate) async fn scale_routers_out(
         &mut self,
         router_add: u32,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
@@ -482,7 +536,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
             let (trajectory_buffer_tx, trajectory_buffer_rx) =
                 tokio::sync::mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
-            let filter = {
+            let filter: ClientCentralFilter<B> = {
                 let shared_filter_state: Arc<RwLock<StateManager<B>>> = self.shared_state.clone();
                 let filter_init: ClientCentralFilter<B> = ClientCentralFilter::new(
                     router_namespace.clone(),
@@ -501,8 +555,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
             };
 
             let buffer: Option<ClientTrajectoryBuffer<B>> = {
-                if self.shared_client_modes.actor_training_data_mode
-                    != ActorTrainingDataMode::Disabled
+                if self.shared_client_modes.actor_data_mode
+                    != ActorDataMode::Disabled
                 {
                     let _ = reserve_id_with(
                         router_namespace.as_ref(),
@@ -515,6 +569,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
                     let mut buffer_init: ClientTrajectoryBuffer<B> = ClientTrajectoryBuffer::new(
                         router_namespace.clone(),
                         trajectory_buffer_rx,
+                        self.shared_buffer_size.clone(),
                         self.shared_client_modes.clone(),
                         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                         self.training_codec.clone(),
@@ -530,18 +585,18 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
                         );
                     }
 
-                    if uses_local_file_writing(&self.shared_client_modes.actor_training_data_mode)
+                    if uses_local_file_writing(&self.shared_client_modes.actor_data_mode)
                         && let Some(shared_trajectory_file_output) =
                             self.shared_trajectory_file_output.clone()
                     {
                         buffer_init.with_trajectory_writer(shared_trajectory_file_output);
                     }
 
-                    if uses_in_memory_data(&self.shared_client_modes.actor_training_data_mode)
-                        && let Some(shared_trajectory_memory) =
-                            self.shared_trajectory_memory.clone()
+                    if uses_trajectory_cache(&self.shared_client_modes.actor_data_mode)
+                        && let Some(shared_traj_cache) =
+                            self.shared_traj_cache.clone()
                     {
-                        buffer_init.with_trajectory_memory(shared_trajectory_memory);
+                        buffer_init.with_trajectory_cache(shared_traj_cache);
                     };
 
                     if let Some(lc) = &self.lifecycle {
@@ -551,14 +606,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
                         );
                     };
 
-                    let shared_max_traj_length = self
-                        .lifecycle
-                        .as_ref()
-                        .map(|lc| lc.get_router_buffer_size_per_actor())
-                        .unwrap_or_else(|| Arc::new(RwLock::new(1000)));
                     let shared_actor_count =
                         self.shared_state.read().await.shared_actor_count.clone();
-                    buffer_init.with_semaphore_capacity(shared_max_traj_length, shared_actor_count);
+                    buffer_init.with_semaphore_capacity(shared_actor_count);
 
                     Some(buffer_init)
                 } else {
@@ -683,7 +733,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
         Ok(())
     }
 
-    pub(crate) async fn scale_in(
+    pub(crate) async fn scale_routers_in(
         &mut self,
         router_remove: u32,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,

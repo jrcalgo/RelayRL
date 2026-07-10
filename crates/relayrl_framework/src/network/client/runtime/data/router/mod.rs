@@ -1,15 +1,15 @@
-use crate::network::client::runtime::router::buffer::TrajectorySinkError;
-use crate::network::client::runtime::router::filter::FilterError;
+use crate::network::client::runtime::data::router::buffer::TrajectorySinkError;
+use crate::network::client::runtime::data::router::filter::FilterError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::router::receiver::TransportReceiverError;
-
+use crate::network::client::runtime::data::router::receiver::TransportReceiverError;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
-use std::any::Any;
-use std::sync::Arc;
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use std::{any::Any, sync::Arc};
 use thiserror::Error;
 use tokio::sync::oneshot;
 
@@ -42,16 +42,24 @@ pub(crate) enum RoutingProtocol {
 }
 
 pub(crate) enum ControlPayload {
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     ModelHandshake,
-    ModelVersion { reply_to: oneshot::Sender<i64> },
-    ModelUpdate { model_bytes: Vec<u8>, version: i64 },
+    ModelVersion {
+        reply_to: oneshot::Sender<i64>,
+    },
+    ModelUpdate {
+        model_bytes: Vec<u8>,
+        version: i64,
+    },
     Shutdown,
 }
 
 pub(crate) enum DataPayload {
     // online inference only
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     RequestInference(Box<InferenceRequest>),
     // online inference only
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     FlagLastAction {
         reward: f32,
         env_id: Option<Uuid>,
@@ -67,6 +75,7 @@ pub(crate) enum DataPayload {
 ///
 /// Using Box<dyn Any + Send + Sync> to avoid adding generic parameters to this struct.
 /// This is (probably) safe because InferenceRequest is only sent to the actor from the coordinator layer, both of which are unavailable to the user.
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub(crate) struct InferenceRequest {
     pub(crate) observation: Box<dyn Any + Send + Sync>,
     pub(crate) mask: Box<dyn Any + Send + Sync>,

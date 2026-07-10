@@ -1,11 +1,11 @@
-use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, StateManager};
-use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
-use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::TrainingDispatcher;
-use crate::network::client::runtime::router::{
+use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::state_manager::{ActorUuid, StateManager};
+use crate::network::client::runtime::data::router::{
     ControlPayload, RoutedMessage, RouterError, RoutingProtocol,
 };
+use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
+use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::TrainingDispatcher;
 
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
@@ -191,9 +191,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::state_manager::StateManager;
+    use crate::network::client::runtime::data::router::DataPayload;
+    use crate::network::client::runtime::control::state_manager::StateManager;
     #[cfg(feature = "metrics")]
     use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::UuidPoolError;
@@ -210,14 +211,14 @@ mod unit_tests {
     fn independent_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
     fn shared_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Shared),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
@@ -235,7 +236,6 @@ mod unit_tests {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             modes,
-            Arc::new(RwLock::new(100)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
@@ -258,7 +258,7 @@ mod unit_tests {
     fn make_model_update(actor_id: Uuid, version: i64) -> RoutedMessage {
         RoutedMessage {
             actor_id,
-            protocol: RoutingProtocol::Data(DataPayload::ModelUpdate {
+            protocol: RoutingProtocol::Control(ControlPayload::ModelUpdate {
                 model_bytes: vec![1, 2, 3],
                 version,
             }),
@@ -297,12 +297,16 @@ mod unit_tests {
 
         for actor_id in &actor_ids {
             state_manager
-                .new_actor(
+                .new_actor::<1, 1>(
                     *actor_id,
                     Arc::from("router-a"),
                     DeviceType::Cpu,
+                    1000,
+                    None,
                     None,
                     tx_to_buffer.clone(),
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    crate::prelude::network::AlgorithmInitArgs::default(),
                 )
                 .await
                 .unwrap();
@@ -329,8 +333,8 @@ mod unit_tests {
 
         assert_eq!(forwarded_message.actor_id, expected_actor_id);
         assert!(matches!(
-            forwarded_message.payload,
-            RoutedPayload::ModelUpdate { version, .. } if version == 7
+            forwarded_message.protocol,
+            RoutingProtocol::Control(ControlPayload::ModelUpdate { version, .. }) if version == 7
         ));
     }
 
@@ -342,12 +346,16 @@ mod unit_tests {
 
         for actor_id in &actor_ids {
             state_manager
-                .new_actor(
+                .new_actor::<1, 1>(
                     *actor_id,
                     Arc::from("router-a"),
                     DeviceType::Cpu,
+                    1000,
+                    None,
                     None,
                     tx_to_buffer.clone(),
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    crate::prelude::network::AlgorithmInitArgs::default(),
                 )
                 .await
                 .unwrap();
@@ -392,12 +400,16 @@ mod unit_tests {
 
         for actor_id in &actor_ids {
             state_manager
-                .new_actor(
+                .new_actor::<1, 1>(
                     *actor_id,
                     Arc::from("router-a"),
                     DeviceType::Cpu,
+                    1000,
+                    None,
                     None,
                     tx_to_buffer.clone(),
+                    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                    crate::prelude::network::AlgorithmInitArgs::default(),
                 )
                 .await
                 .unwrap();

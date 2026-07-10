@@ -3,29 +3,28 @@
 //! This module tracks actor task handles, inboxes, router assignments, and local model handles for
 //! the client runtime.
 
-use crate::network::client::agent::{
-    ActorInferenceMode, AlgorithmInitArgs, ClientModes, ModelMode,
-};
-use crate::network::client::agent::{ReplayBufferSize, SaveModelPath};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::agent::AlgorithmInitArgs;
+use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{
     Actor, ActorEntity, ActorError, ActorRuntime, ErasedActorRuntime,
 };
-use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
-use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManagerError;
+use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::control::lifecycle_manager::LifecycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::scale_manager::RouterNamespace;
 use crate::network::client::runtime::data::environments::EnvironmentInterface;
 use crate::network::client::runtime::data::environments::EnvironmentInterfaceError;
+use crate::network::client::runtime::data::router::{
+    ControlPayload, RoutedMessage, RoutingProtocol,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
 use crate::network::client::runtime::data::training::{TrainingError, TrainingInterface};
-use crate::network::client::runtime::router::{
-    ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
-};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 use crossbeam_utils::CachePadded;
@@ -37,15 +36,14 @@ use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
 use relayrl_algorithms::prelude::nn::NeuralNetwork;
 use relayrl_algorithms::prelude::ppo::trainer::PPOTrainerSpec;
-use relayrl_env_trait::{EnvDType, EnvNdArrayDType, Environment, EnvironmentUuid};
+use relayrl_env_trait::{EnvDType, EnvNdArrayDType, Environment};
 use relayrl_types::data::tensor::{BackendMatcher, DType, DeviceType, NdArrayDType};
-use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -76,6 +74,8 @@ pub enum StateManagerError {
     ShutdownAllActorsError(String),
     #[error("Set actor ID failed: {0}")]
     SetActorIdError(String),
+    #[error("Set actor nametag failed: {0}")]
+    SetActorNameTagError(String),
     #[error("Get actors failed: {0}")]
     GetActorsError(String),
     #[error("New actor failed: {0}")]
@@ -121,6 +121,7 @@ pub enum StateManagerError {
 }
 
 pub type ActorUuid = Uuid;
+pub type NameTag = Option<Arc<str>>;
 
 #[derive(Clone)]
 pub(crate) struct ActorRoute {
@@ -322,6 +323,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         router_namespace: RouterNamespace,
         device: DeviceType,
         max_traj_length: usize,
+        nametag: Option<String>,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -373,6 +375,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         let runtime = Arc::new(
             ActorRuntime::<B, D_IN, D_OUT>::new(
                 actor_id,
+                nametag,
                 model_handle.clone(),
                 max_traj_length,
                 tx_to_buffer.clone(),
@@ -436,6 +439,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         router_namespace: RouterNamespace,
         device: DeviceType,
         max_traj_length: usize,
+        nametag: Option<String>,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -447,6 +451,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
             router_namespace,
             device,
             max_traj_length,
+            nametag,
             default_model,
             tx_to_buffer,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -456,7 +461,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         Ok(())
     }
 
-    pub(crate) async fn shutdown_all_actors(&self) -> Result<(), StateManagerError> {
+    pub(crate) async fn shutdown_all_actors(&self) -> Result<Vec<ActorUuid>, StateManagerError> {
+        let mut actor_ids = Vec::<ActorUuid>::new();
+
         // Send Shutdown message to every actor inbox; actors will flush and exit
         for entry in self.shared_router_state.actor_routes.iter() {
             let actor_id: ActorUuid = *entry.key();
@@ -495,6 +502,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
                 })?;
             }
 
+            actor_ids.push(actor_id);
+
             if let Ok(handle) = handle {
                 handle.abort();
             } else {
@@ -502,7 +511,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
             }
         }
 
-        Ok(())
+        Ok(actor_ids)
     }
 
     pub(crate) async fn clear_runtime_components(&mut self) -> Result<(), StateManagerError> {
@@ -546,39 +555,42 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         current_id: ActorUuid,
         new_id: ActorUuid,
     ) -> Result<(), StateManagerError> {
-        let current_id_handle = match StateManager::<B>::get_actor_handle(self, current_id) {
-            Some(handle) => handle.clone(),
-            None => {
-                return Err(StateManagerError::ActorHandleNotFoundError(format!(
-                    "[StateManager] Actor ID {} not found",
-                    current_id
-                )));
-            }
-        };
-        let current_route = match StateManager::<B>::get_actor_route(self, current_id) {
-            Some(route) => route,
-            None => {
-                return Err(StateManagerError::ActorInboxNotFoundError(format!(
-                    "[StateManager] Actor ID {} not found",
-                    current_id
-                )));
-            }
-        };
-        if StateManager::<B>::get_actor_handle(self, new_id).is_some()
-            || StateManager::<B>::get_actor_route(self, new_id).is_some()
         {
-            return Err(StateManagerError::ActorAlreadyTakenError(format!(
-                "[StateManager] Actor ID {} already taken",
-                new_id
-            )));
+            let current_id_handle = match StateManager::<B>::get_actor_handle(self, current_id) {
+                Some(handle) => handle.clone(),
+                None => {
+                    return Err(StateManagerError::ActorHandleNotFoundError(format!(
+                        "[StateManager] Actor ID {} not found",
+                        current_id
+                    )));
+                }
+            };
+            let current_route = match StateManager::<B>::get_actor_route(self, current_id) {
+                Some(route) => route,
+                None => {
+                    return Err(StateManagerError::ActorInboxNotFoundError(format!(
+                        "[StateManager] Actor ID {} not found",
+                        current_id
+                    )));
+                }
+            };
+            if StateManager::<B>::get_actor_handle(self, new_id).is_some()
+                || StateManager::<B>::get_actor_route(self, new_id).is_some()
+            {
+                return Err(StateManagerError::ActorAlreadyTakenError(format!(
+                    "[StateManager] Actor ID {} already taken",
+                    new_id
+                )));
+            }
+
+            self.actor_handles.insert(new_id, current_id_handle);
+            self.actor_handles.remove(&current_id);
+            self.shared_router_state
+                .actor_routes
+                .insert(new_id, current_route);
+            self.shared_router_state.actor_routes.remove(&current_id);
         }
 
-        self.actor_handles.insert(new_id, current_id_handle);
-        self.actor_handles.remove(&current_id);
-        self.shared_router_state
-            .actor_routes
-            .insert(new_id, current_route);
-        self.shared_router_state.actor_routes.remove(&current_id);
         if let Some((_, current_device)) = self.actor_devices.remove(&current_id) {
             self.actor_devices.insert(new_id, current_device);
         }
@@ -598,6 +610,25 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         .map_err(StateManagerError::from)?;
 
         Ok(())
+    }
+
+    pub(crate) fn set_actor_nametag(
+        &self,
+        actor_id: ActorUuid,
+        new_nametag: Option<String>,
+    ) -> Result<(), StateManagerError> {
+        if let Some(entry) = self.actor_runtime_handles.get(&actor_id) {
+            entry
+                .value()
+                .set_actor_nametag(new_nametag)
+                .map_err(StateManagerError::from)
+        } else {
+            Err(StateManagerError::SetActorNameTagError(format!(
+                "[StateManager] Failed to change actor id {} to {:?}; actor runtime could not be found",
+                actor_id,
+                new_nametag.as_slice()
+            )))
+        }
     }
 
     pub(crate) fn distribute_actors(&self, router_namespaces: Vec<RouterNamespace>) {
@@ -1274,7 +1305,7 @@ pub(crate) fn decode_continuous_bytes(
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
     };
     use active_uuid_registry::interface::{reserve_id_with, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
@@ -1296,14 +1327,14 @@ mod unit_tests {
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
     fn shared_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Shared),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
@@ -1849,61 +1880,5 @@ mod unit_tests {
             needs_handshake,
             "No model available → needs_handshake must be true"
         );
-    }
-
-    #[tokio::test]
-    async fn flag_last_action_direct_bypasses_actor_inbox() {
-        let (sm, _rx) = make_state_manager(disabled_modes());
-        let actor_id = Uuid::new_v4();
-        let env_id = Uuid::new_v4();
-        let (tx_to_actor, mut rx_from_actor) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        let (tx_to_buffer, mut rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
-        let runtime = Arc::new(
-            ActorRuntime::<TestBackend, D_IN, D_OUT>::new(
-                actor_id,
-                Arc::new(ArcSwapOption::new(None)),
-                10usize,
-                tx_to_buffer,
-                #[cfg(feature = "metrics")]
-                test_metrics(),
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                AlgorithmInitArgs::default(),
-            )
-            .await,
-        );
-        sm.shared_router_state.actor_routes.insert(
-            actor_id,
-            ActorRoute {
-                router_namespace: Some(Arc::from("router-a")),
-                inbox: tx_to_actor,
-            },
-        );
-
-        let erased_runtime: Arc<dyn ErasedActorRuntime<TestBackend>> = runtime;
-        StateManager::<TestBackend>::flag_last_action_direct(
-            &erased_runtime,
-            1.25,
-            Some(env_id),
-            Some("env-1".to_string()),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(rx_from_actor.try_recv(), Err(TryRecvError::Empty)));
-        let msg = rx_from_buffer
-            .recv()
-            .await
-            .expect("expected trajectory flush");
-        match msg.protocol {
-            RoutingProtocol::Data(DataPayload::SendTrajectory { trajectory, .. }) => {
-                assert_eq!(trajectory.get_env_id(), Some(&env_id));
-                assert_eq!(trajectory.get_env_label(), Some("env-1"));
-            }
-            other => panic!(
-                "expected SendTrajectory payload, got {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
     }
 }

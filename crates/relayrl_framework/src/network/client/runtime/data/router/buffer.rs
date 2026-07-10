@@ -3,18 +3,18 @@
 //! This module handles local file output for the supported local/default runtime and can also
 //! fan out trajectories to experimental transport-backed training sinks.
 
-use super::{ControlPayload, DataPayload, RoutedMessage, RouterError, RoutingProtocol};
+use super::{DataPayload, RoutedMessage, RouterError, RoutingProtocol};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::ActorTrainingDataMode;
+use crate::network::client::agent::ActorDataMode;
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
-    LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_in_memory_data,
+    LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_trajectory_cache,
     uses_local_file_writing,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::scale_manager::{RouterNamespace, SharedTrajectoryCache};
+use crate::network::client::runtime::control::state_manager::ActorUuid;
 use crate::network::client::runtime::data::sinks::file_sink::{
     FileSinkError, write_local_trajectory_file,
 };
@@ -99,8 +99,10 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn new(
         associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
+        shared_buffer_size: Arc<AtomicUsize>,
         shared_client_modes: Arc<ClientModes>,
-        codec: CodecConfig,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        training_codec: CodecConfig,
     ) -> Self;
     fn with_transport(
         &mut self,
@@ -111,14 +113,10 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
         &mut self,
         shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     ) -> &mut Self;
-    fn with_trajectory_memory(
-        &mut self,
-        traj_memory: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
-    ) -> &mut Self;
+    fn with_trajectory_cache(&mut self, traj_memory: SharedTrajectoryCache) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
     fn with_semaphore_capacity(
         &mut self,
-        shared_max_traj_length: Arc<RwLock<usize>>,
         shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self;
     fn spawn_loop(&mut self) -> Result<(), RouterError>;
@@ -136,21 +134,19 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     fn new(
         associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
+        shared_buffer_size: Arc<AtomicUsize>,
         shared_client_modes: Arc<ClientModes>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] codec: CodecConfig,
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] 
+        training_codec: CodecConfig,
     ) -> Self;
     fn with_trajectory_writer(
         &mut self,
         shared_trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
     ) -> &mut Self;
-    fn with_trajectory_memory(
-        &mut self,
-        traj_memory: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
-    ) -> &mut Self;
+    fn with_trajectory_cache(&mut self, traj_memory: SharedTrajectoryCache) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
     fn with_semaphore_capacity(
         &mut self,
-        shared_max_traj_length: Arc<RwLock<usize>>,
         shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self;
     fn spawn_loop(&mut self) -> Result<(), RouterError>;
@@ -195,9 +191,9 @@ pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
-    shared_traj_memory: Option<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>>,
+    shared_traj_cache: Option<SharedTrajectoryCache>,
+    shared_buffer_size: Arc<AtomicUsize>,
     shutdown: Option<broadcast::Receiver<()>>,
-    shared_router_buffer_size_per_actor: Option<Arc<RwLock<usize>>>,
     shared_actor_count: Option<Arc<CachePadded<AtomicUsize>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     training_codec: CodecConfig,
@@ -213,6 +209,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
     fn new(
         associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
+        shared_buffer_size: Arc<AtomicUsize>,
         shared_client_modes: Arc<ClientModes>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         training_codec: CodecConfig,
@@ -228,9 +225,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses: None,
             shared_trajectory_file_output: None,
-            shared_traj_memory: None,
+            shared_traj_cache: None,
+            shared_buffer_size,
             shutdown: None,
-            shared_router_buffer_size_per_actor: None,
             shared_actor_count: None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             training_codec,
@@ -258,11 +255,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         self
     }
 
-    fn with_trajectory_memory(
-        &mut self,
-        shared_traj_memory: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
-    ) -> &mut Self {
-        self.shared_traj_memory = Some(shared_traj_memory);
+    fn with_trajectory_cache(&mut self, shared_traj_cache: SharedTrajectoryCache) -> &mut Self {
+        self.shared_traj_cache = Some(shared_traj_cache);
         self
     }
 
@@ -273,10 +267,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
     fn with_semaphore_capacity(
         &mut self,
-        shared_router_buffer_size_per_actor: Arc<RwLock<usize>>,
         shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self {
-        self.shared_router_buffer_size_per_actor = Some(shared_router_buffer_size_per_actor);
         self.shared_actor_count = Some(shared_actor_count);
         self
     }
@@ -291,21 +283,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let (traj_queue_tx, mut traj_queue_rx) =
             tokio::sync::mpsc::unbounded_channel::<SinkQueueEntry>();
 
-        let (mut rx_semaphore, initial_semaphore_capacity) = match (
-            &self.shared_router_buffer_size_per_actor,
-            &self.shared_actor_count,
-        ) {
-            (Some(rbs), Some(ac)) => {
-                let cap = rbs
-                    .try_read()
-                    .map(|g| *g)
-                    .unwrap_or(1000)
-                    .saturating_mul(ac.load(Ordering::Acquire).max(1));
+        let (mut rx_semaphore, initial_semaphore_capacity) = match 
+            &self.shared_actor_count
+         {
+            Some(actor_count) => {
+                let buffer_size = self.shared_buffer_size.load(Ordering::SeqCst);
+                let cap = buffer_size.saturating_mul(actor_count.load(Ordering::Acquire).max(1));
                 (Some(Arc::new(Semaphore::new(cap.max(1)))), cap)
             }
-            _ => (None, 0),
+            None => (None, 0),
         };
-        let recv_router_buffer_size_per_actor = self.shared_router_buffer_size_per_actor.clone();
+        let recv_buffer_size = self.shared_buffer_size.clone();
         let recv_actor_count = self.shared_actor_count.clone();
 
         let actor_last_processed = self.actor_last_processed.clone();
@@ -322,7 +310,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let shared_trajectory_file_output = self.shared_trajectory_file_output.clone();
 
-        let shared_traj_memory = self.shared_traj_memory.clone();
+        let shared_traj_cache = self.shared_traj_cache.clone();
 
         let worker_priority_queue: BinaryHeap<SinkQueueEntry> = BinaryHeap::new();
 
@@ -351,9 +339,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             Some(msg) => {
                                 // Only process SendTrajectory payloads
                                 if let RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp, trajectory }) = msg.protocol {
-                                    let permit = match (&mut rx_semaphore, &recv_router_buffer_size_per_actor, &recv_actor_count) {
-                                        (Some(semaphore), Some(rbs), Some(actor_count)) => {
-                                            let new_capacity = (*rbs.read().await)
+                                    let permit = match (&mut rx_semaphore, &recv_actor_count) {
+                                        (Some(semaphore), Some(actor_count)) => {
+                                            let new_capacity = recv_buffer_size.load(Ordering::Acquire)
                                                 .saturating_mul(actor_count.load(Ordering::Acquire).max(1));
 
                                             if new_capacity > current_semaphore_capacity {
@@ -411,9 +399,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         let worker_namespace = namespace.clone();
         let worker_trajectory_file_output = shared_trajectory_file_output.clone();
-        let worker_traj_memory = shared_traj_memory.clone();
-
-        const MAX_TRAJ_MEMORY_SIZE: usize = 1_000;
+        let worker_traj_cache = shared_traj_cache.clone();
 
         let _worker_handle = tokio::spawn(async move {
             const BATCH_SIZE: usize = 10_000;
@@ -459,7 +445,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         // Dispatch each job to enabled sinks
                         for job in jobs_to_process {
                             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                            if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::OnlineWithFiles(_, _) | ActorTrainingDataMode::OnlineWithMemory(_) = &worker_modes.actor_training_data_mode &&
+                            if let ActorDataMode::Online(_) | ActorDataMode::OnlineWithFiles(..) 
+                            | ActorDataMode::OnlineWithCache(..) | ActorDataMode::OnlineWithFilesAndCache(..) = &worker_modes.actor_data_mode &&
                                 let (Some(dispatcher), Some(transport_addresses)) =
                                     (worker_training_dispatcher.clone(), worker_transport_addresses.clone())
                                 {
@@ -504,7 +491,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                     });
                                 }
 
-                            if uses_local_file_writing(&worker_modes.actor_training_data_mode) &&
+                            if uses_local_file_writing(&worker_modes.actor_data_mode) &&
                                 let Some(ref traj_output) = worker_trajectory_file_output {
                                     let local_job = job.clone();
                                     let local_actor_last = worker_actor_last_processed.clone();
@@ -528,13 +515,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                     });
                             }
 
-                            if uses_in_memory_data(&worker_modes.actor_training_data_mode) &&
-                                let Some(ref traj_memory) = worker_traj_memory {
+                            if uses_trajectory_cache(&worker_modes.actor_data_mode) &&
+                                let Some(ref traj_cache) = worker_traj_cache {
                                     let actor_id = job.actor_id;
                                     let traj_clone = job.traj_for_processing.clone();
 
-                                    if let Some(ref mut traj_vec) = traj_memory.get_mut(&actor_id) {
-                                        let room_after_push = MAX_TRAJ_MEMORY_SIZE.saturating_sub(1);
+                                    if let Some(ref mut traj_vec) = traj_cache.cache.get_mut(&actor_id) {
+                                        let room_after_push = traj_cache.per_actor_size.saturating_sub(1);
                                         // trajectory memory is guaranteed to OOM without this check
                                         if traj_vec.len() > room_after_push {
                                             let drop = traj_vec.len() - room_after_push;
@@ -543,10 +530,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                         }
                                         traj_vec.push(traj_clone);
                                     } else {
-                                        traj_memory.insert(actor_id, vec![traj_clone]);
+                                        traj_cache.cache.insert(actor_id, vec![traj_clone]);
                                     }
                                 }
-
                         }
                     }
                 }
@@ -556,10 +542,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
             while let Some(job) = worker_queue.pop() {
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let Some(transport_addresses) = &worker_transport_addresses
-                    && let ActorTrainingDataMode::Online(_)
-                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
-                    | ActorTrainingDataMode::OnlineWithMemory(_) =
-                        &worker_modes.actor_training_data_mode
+                    && let ActorDataMode::Online(_)
+                    | ActorDataMode::OnlineWithFiles(..)
+                    | ActorDataMode::OnlineWithCache(..) =
+                        &worker_modes.actor_data_mode
                 {
                     let encoded = match job.traj_for_processing.encode(&worker_codec) {
                         Ok(enc) => enc,
@@ -581,7 +567,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     .await;
                 }
 
-                if uses_local_file_writing(&worker_modes.actor_training_data_mode)
+                if uses_local_file_writing(&worker_modes.actor_data_mode)
                     && let Some(ref traj_output) = worker_trajectory_file_output
                 {
                     let params = traj_output.read().await;
@@ -589,6 +575,19 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     let _ =
                         Self::write_local_trajectory(&job, &params, &worker_actor_last_processed)
                             .await;
+                }
+
+                if uses_trajectory_cache(&worker_modes.actor_data_mode) && let Some(ref traj_cache) = worker_traj_cache {
+                    let actor_id = job.actor_id;
+                    let traj_clone = job.traj_for_processing.clone();
+
+                    if let Some(ref mut traj_vec) = traj_cache.cache.get_mut(&actor_id) {
+                        let room_after_push = traj_cache.per_actor_size.saturating_sub(1);
+                        // normally we would check for OOM here, but since the system is shutting down, we should flush all trajectories to the cache
+                        traj_vec.push(traj_clone);
+                    } else {
+                        traj_cache.cache.insert(actor_id, vec![traj_clone]);
+                    }
                 }
             }
         });
@@ -736,10 +735,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-    use crate::network::client::runtime::router::{DataPayload, RoutedMessage, RoutingProtocol};
+    use crate::network::client::runtime::control::scale_manager::RouterNamespace;
+    use crate::network::client::runtime::data::router::{
+        ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
+    };
     use active_uuid_registry::registry_uuid::Uuid;
 
     use relayrl_types::data::trajectory::RelayRLTrajectory;
@@ -757,7 +758,7 @@ mod unit_tests {
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
@@ -936,7 +937,7 @@ mod unit_tests {
     async fn spawn_loop_double_call_returns_err() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
         let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
         assert!(buf.spawn_loop().is_ok());
         // Second call: rx already taken, must return Err
         assert!(buf.spawn_loop().is_err());
@@ -948,7 +949,7 @@ mod unit_tests {
     async fn receiver_ignores_non_trajectory_payloads() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
         let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
         buf.spawn_loop().unwrap();
 
         let actor_id = Uuid::new_v4();
@@ -973,7 +974,7 @@ mod unit_tests {
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
         let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
         buf.with_shutdown(shutdown_rx);
         buf.spawn_loop().unwrap();
 
@@ -991,7 +992,7 @@ mod unit_tests {
     async fn dropped_tx_breaks_receiver_loop() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(4);
         let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
         buf.spawn_loop().unwrap();
 
         // Drop the sender — the receiver should observe channel close and exit
@@ -1007,7 +1008,7 @@ mod unit_tests {
     async fn partial_trajectory_still_forwarded() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
         let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
         buf.spawn_loop().unwrap();
 
         let actor_id = Uuid::new_v4();
@@ -1026,7 +1027,7 @@ mod unit_tests {
     async fn concurrent_actors_send_trajectories_safely() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(256);
         let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, disabled_modes());
+            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
         buf.spawn_loop().unwrap();
 
         const NUM_ACTORS: usize = 8;

@@ -1,6 +1,6 @@
 use super::{ControlPayload, RoutedMessage, RouterError, RoutingProtocol};
-use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
-use crate::network::client::runtime::coordination::state_manager::{
+use crate::network::client::runtime::control::scale_manager::RouterNamespace;
+use crate::network::client::runtime::control::state_manager::{
     ActorRoute, SharedRouterState, StateManager,
 };
 
@@ -135,10 +135,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientCentralFilter<B> {
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::state_manager::StateManager;
-    use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
+    use crate::network::client::runtime::control::state_manager::StateManager;
+    use crate::network::client::runtime::data::router::{
+        ControlPayload, RoutedMessage, RoutingProtocol,
+    };
     #[cfg(feature = "metrics")]
     use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::registry_uuid::Uuid;
@@ -154,7 +156,7 @@ mod unit_tests {
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
@@ -238,7 +240,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 actor_id,
-                RoutingProtocol::Control(ControlPayload::ModelHandshake),
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
@@ -250,7 +252,7 @@ mod unit_tests {
 
         assert!(matches!(
             received.protocol,
-            RoutingProtocol::Control(ControlPayload::ModelHandshake)
+            RoutingProtocol::Control(ControlPayload::Shutdown)
         ));
     }
 
@@ -268,7 +270,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 actor_id,
-                RoutingProtocol::Control(ControlPayload::ModelHandshake),
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
@@ -294,7 +296,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 unknown,
-                RoutingProtocol::Control(ControlPayload::ModelHandshake),
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
@@ -395,7 +397,7 @@ mod unit_tests {
         filter_tx
             .send(make_msg(
                 actor_id,
-                RoutingProtocol::Control(ControlPayload::ModelHandshake),
+                RoutingProtocol::Control(ControlPayload::Shutdown),
             ))
             .await
             .unwrap();
