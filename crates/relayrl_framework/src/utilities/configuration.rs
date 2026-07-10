@@ -54,7 +54,6 @@ pub struct HyperparameterConfig {
     // pub custom: Option<CustomAlgorithmParams>,
 }
 
-// TODO: desperate need for refactor to align with AlgorithmCfg and proper Custom setup instructions"
 impl HyperparameterConfig {
     /// Converts to a `HashMap<Algorithm, HyperparameterArgs>`. Passing `Some` returns only that algorithm's entry.
     pub fn to_args(&self, algorithm: Option<&Algorithm>) -> HashMap<Algorithm, HyperparameterArgs> {
@@ -303,6 +302,39 @@ where
     Ok(s.split(';').map(|s| s.to_string()).collect())
 }
 
+/// Directory, file name, and extension for the on-disk model module used by the transport path.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalModelModuleParams {
+    pub directory: String,
+    pub model_name: String,
+    pub format: String,
+}
+
+impl Default for LocalModelModuleParams {
+    fn default() -> Self {
+        Self {
+            directory: ".".to_string(),
+            model_name: "model".to_string(),
+            format: "onnx".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MetricsParams {
+    pub meter_name: String,
+    pub otlp_endpoint: OtlpEndpointParams,
+}
+
+impl Default for MetricsParams {
+    fn default() -> Self {
+        Self {
+            meter_name: "relayrl-client".to_string(),
+            otlp_endpoint: OtlpEndpointParams::default()
+        }
+    }
+}
+
 /// OTLP exporter endpoint (`prefix://host:port`) for OpenTelemetry metrics.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OtlpEndpointParams {
@@ -311,15 +343,22 @@ pub struct OtlpEndpointParams {
     pub port: String,
 }
 
+impl Default for OtlpEndpointParams {
+    fn default() -> Self {
+        Self {
+            prefix: "http://".to_string(), host: "127.0.0.1".to_string(), port: "4317".to_string() 
+        }
+    }
+}
+
 /// The `client_config` section of the JSON configuration file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClientConfigParams {
-    pub config_update_polling_seconds: f32,
+    pub config_polling_seconds: u64,
     pub init_hyperparameters: HyperparameterConfig,
     pub trajectory_file_output: LocalTrajectoryFileParams,
-    pub router_buffer_size_per_actor: usize,
-    pub metrics_meter_name: String,
-    pub metrics_otlp_endpoint: OtlpEndpointParams,
+    pub local_model_module: LocalModelModuleParams,
+    pub metrics: MetricsParams,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -363,12 +402,11 @@ impl ClientConfigLoader {
         Self {
             config_path: _config_path,
             client_config: ClientConfigParams {
-                config_update_polling_seconds: client_config.config_update_polling_seconds,
+                config_polling_seconds: client_config.config_polling_seconds,
                 init_hyperparameters: client_config.init_hyperparameters,
                 trajectory_file_output: client_config.trajectory_file_output,
-                router_buffer_size_per_actor: client_config.router_buffer_size_per_actor,
-                metrics_meter_name: client_config.metrics_meter_name,
-                metrics_otlp_endpoint: client_config.metrics_otlp_endpoint,
+                local_model_module: client_config.local_model_module,
+                metrics: client_config.metrics,
             },
             transport_config,
         }
@@ -393,16 +431,14 @@ impl ClientConfigLoader {
                     log::error!("[ClientConfigParams - load_config] Failed to parse configuration, loading empty defaults...");
                     ClientConfigFile {
                         client_config: ClientConfigParams {
-                            config_update_polling_seconds: 10.0,
+                            config_polling_seconds: 10,
                             init_hyperparameters: HyperparameterConfig::default(),
                             trajectory_file_output: LocalTrajectoryFileParams::default(),
-                            router_buffer_size_per_actor: 1000,
-                            metrics_meter_name: "relayrl-client".to_string(),
-                            metrics_otlp_endpoint: OtlpEndpointParams {
-                                prefix: "http://".to_string(),
-                                host: "127.0.0.1".to_string(),
-                                port: "4317".to_string(),
-                            },
+                            local_model_module: LocalModelModuleParams::default(),
+                            metrics: MetricsParams {
+                                meter_name: "relayrl-client".to_string(),
+                                otlp_endpoint: OtlpEndpointParams::default()
+                            }
                         },
                         transport_config: TransportConfigBuilder::build_default(),
                     }
@@ -444,12 +480,12 @@ impl ClientConfigLoader {
 
     /// Returns the OpenTelemetry meter name.
     pub fn get_metrics_meter_name(&self) -> &str {
-        &self.client_config.metrics_meter_name
+        &self.client_config.metrics.meter_name
     }
 
     /// Returns the OTLP exporter endpoint parameters.
     pub fn get_metrics_otlp_endpoint(&self) -> &OtlpEndpointParams {
-        &self.client_config.metrics_otlp_endpoint
+        &self.client_config.metrics.otlp_endpoint
     }
 
     /// Returns the transport network address configuration.
@@ -460,15 +496,15 @@ impl ClientConfigLoader {
 
 /// Builder trait for constructing a `ClientConfigLoader` programmatically.
 pub trait ClientConfigBuildParams {
-    fn set_router_buffer_size_per_actor(&mut self, router_buffer_size: usize) -> &mut Self;
+    fn set_config_polling_seconds(&mut self, seconds: u64) -> &mut Self;
     fn set_init_hyperparameters(&mut self, init_hyperparameters: HyperparameterConfig)
     -> &mut Self;
-    fn set_metrics_name(&mut self, metrics_name: &str) -> &mut Self;
-    fn set_otlp_endpoint(&mut self, otlp_endpoint: OtlpEndpointParams) -> &mut Self;
+    fn set_metrics(&mut self, metrics: MetricsParams) -> &mut Self;
     fn set_trajectory_file_output(
         &mut self,
         trajectory_file_output: LocalTrajectoryFileParams,
     ) -> &mut Self;
+    fn set_local_model_module(&mut self, directory_name: &str, model_name: &str, format: &str) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
     /// Builds a `ClientConfigLoader` from the current builder state.
     fn build(&self) -> ClientConfigLoader;
@@ -484,29 +520,25 @@ pub trait ClientConfigBuildParams {
 /// let loader = ClientConfigBuilder::build_default();
 /// ```
 pub struct ClientConfigBuilder {
-    config_update_polling_seconds: Option<f32>,
+    config_polling_seconds: Option<u64>,
     init_hyperparameters: Option<HyperparameterConfig>,
-    router_buffer_size_per_actor: Option<usize>,
     transport_config: Option<TransportConfigParams>,
     trajectory_file_output: Option<LocalTrajectoryFileParams>,
-    metrics_name: Option<String>,
-    otlp_endpoint: Option<OtlpEndpointParams>,
+    local_model_module: Option<LocalModelModuleParams>,
+    metrics: Option<MetricsParams>,
 }
 
 impl ClientConfigBuildParams for ClientConfigBuilder {
+    fn set_config_polling_seconds(&mut self, seconds: u64) -> &mut Self {
+        self.config_polling_seconds = Some(seconds);
+        self
+    }
+
     fn set_init_hyperparameters(
         &mut self,
         init_hyperparameters: HyperparameterConfig,
     ) -> &mut Self {
         self.init_hyperparameters = Some(init_hyperparameters);
-        self
-    }
-
-    fn set_router_buffer_size_per_actor(
-        &mut self,
-        router_buffer_size_per_actor: usize,
-    ) -> &mut Self {
-        self.router_buffer_size_per_actor = Some(router_buffer_size_per_actor);
         self
     }
 
@@ -518,13 +550,22 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         self
     }
 
-    fn set_metrics_name(&mut self, metrics_name: &str) -> &mut Self {
-        self.metrics_name = Some(metrics_name.to_string());
+    fn set_local_model_module(&mut self, directory_name: &str, model_name: &str, format: &str) -> &mut Self {
+        if !format.eq_ignore_ascii_case("pt") && !format.eq_ignore_ascii_case("onnx") {
+            log::error!("Invalid model format: {}", format);
+            return self;
+        }
+        
+        self.local_model_module = Some(LocalModelModuleParams {
+            directory: directory_name.to_string(),
+            format: format.to_string(),
+            model_name: model_name.to_string(),
+        });
         self
     }
 
-    fn set_otlp_endpoint(&mut self, otlp_endpoint: OtlpEndpointParams) -> &mut Self {
-        self.otlp_endpoint = Some(otlp_endpoint);
+    fn set_metrics(&mut self, metrics: MetricsParams) -> &mut Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -535,28 +576,17 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
 
     fn build(&self) -> ClientConfigLoader {
         let client_config: ClientConfigParams = ClientConfigParams {
-            config_update_polling_seconds: self.config_update_polling_seconds.unwrap_or(10.0),
+            config_polling_seconds: self.config_polling_seconds.clone().unwrap_or(10),
             init_hyperparameters: self.init_hyperparameters.clone().unwrap_or_default(),
             trajectory_file_output: self.trajectory_file_output.clone().unwrap_or_default(),
-            router_buffer_size_per_actor: self.router_buffer_size_per_actor.unwrap_or(1000),
-            metrics_meter_name: self
-                .metrics_name
-                .clone()
-                .unwrap_or_else(|| "relayrl-client".to_string()),
-            metrics_otlp_endpoint: self.otlp_endpoint.clone().unwrap_or_else(|| {
-                OtlpEndpointParams {
-                    prefix: "http://".to_string(),
-                    host: "127.0.0.1".to_string(),
-                    port: "4317".to_string(),
-                }
-            }),
+            local_model_module: self.local_model_module.clone().unwrap_or_default(),
+            metrics: self.metrics.clone().unwrap_or_default(),
         };
 
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
                 nats_addresses: transport_config.nats_addresses.clone(),
                 zmq_addresses: transport_config.zmq_addresses.clone(),
-                local_model_module: transport_config.local_model_module.clone(),
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -572,16 +602,11 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         ClientConfigLoader {
             config_path: PathBuf::from("client_config.json"),
             client_config: ClientConfigParams {
-                config_update_polling_seconds: 10.0,
+                config_polling_seconds: 10,
                 init_hyperparameters: HyperparameterConfig::default(),
                 trajectory_file_output: LocalTrajectoryFileParams::default(),
-                router_buffer_size_per_actor: 1000,
-                metrics_meter_name: "relayrl-client".to_string(),
-                metrics_otlp_endpoint: OtlpEndpointParams {
-                    prefix: "http://".to_string(),
-                    host: "127.0.0.1".to_string(),
-                    port: "4317".to_string(),
-                },
+                local_model_module: LocalModelModuleParams::default(),
+                metrics: MetricsParams::default(),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }
@@ -591,9 +616,10 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
 /// The `training_server_config` section of the training server JSON config file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrainingServerConfigParams {
-    pub config_update_polling_seconds: f32,
+    pub config_polling_seconds: u64,
     pub default_hyperparameters: Option<HyperparameterConfig>,
     pub training_tensorboard: TensorboardParams,
+    pub local_model_module: LocalModelModuleParams,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -652,13 +678,14 @@ impl TrainingServerConfigLoader {
                     log::error!("[TrainingServerConfigParams - load_config] Failed to parse configuration, loading empty defaults...");
                     TrainingServerConfigFile {
                         training_server_config: TrainingServerConfigParams {
-                            config_update_polling_seconds: 10.0,
+                            config_polling_seconds: 10,
                             default_hyperparameters: None,
                             training_tensorboard: TensorboardParams {
                                 launch_tb_on_startup: false,
                                 scalar_tags: vec!["AverageEpRet".to_string(), "StdEpRet".to_string()],
                                 global_step_tag: "Epoch".to_string(),
                             },
+                            local_model_module: LocalModelModuleParams::default(),
                         },
                         transport_config: TransportConfigBuilder::build_default(),
                     }
@@ -681,8 +708,8 @@ impl TrainingServerConfigLoader {
     }
 
     /// Returns the config polling interval in seconds.
-    pub fn get_config_update_polling_seconds(&self) -> f32 {
-        self.training_server_config.config_update_polling_seconds
+    pub fn get_config_polling_seconds(&self) -> u64 {
+        self.training_server_config.config_polling_seconds
     }
 
     /// Returns optional default hyperparameters from the config.
@@ -699,13 +726,18 @@ impl TrainingServerConfigLoader {
     pub fn get_transport_config(&self) -> &TransportConfigParams {
         &self.transport_config
     }
+
+    /// Returns the local model module parameters.
+    pub fn get_local_model_module(&self) -> &LocalModelModuleParams {
+        &self.training_server_config.local_model_module
+    }
 }
 
 /// Builder trait for constructing a `TrainingServerConfigLoader` programmatically.
 pub trait TrainingServerConfigBuildParams {
-    fn set_config_update_polling_seconds(
+    fn set_config_polling_seconds(
         &mut self,
-        config_update_polling_seconds: f32,
+        config_polling_seconds: u64,
     ) -> &mut Self;
     fn set_hyperparameters(
         &mut self,
@@ -719,6 +751,7 @@ pub trait TrainingServerConfigBuildParams {
         global_step_tag: &str,
     ) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
+    fn set_local_model_module(&mut self, local_model_module: LocalModelModuleParams) -> &mut Self;
     /// Builds a `TrainingServerConfigLoader` from the current builder state.
     fn build(&self) -> TrainingServerConfigLoader;
     /// Builds a `TrainingServerConfigLoader` with all built-in defaults.
@@ -727,18 +760,19 @@ pub trait TrainingServerConfigBuildParams {
 
 /// Concrete builder for `TrainingServerConfigLoader`. Use `TrainingServerConfigBuildParams` methods to configure.
 pub struct TrainingServerConfigBuilder {
-    config_update_polling_seconds: Option<f32>,
+    config_polling_seconds: Option<u64>,
     default_hyperparameters: Option<HyperparameterConfig>,
     training_tensorboard: Option<TensorboardParams>,
     transport_config: Option<TransportConfigParams>,
+    local_model_module: Option<LocalModelModuleParams>,
 }
 
 impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
-    fn set_config_update_polling_seconds(
+    fn set_config_polling_seconds(
         &mut self,
-        config_update_polling_seconds: f32,
+        config_polling_seconds: u64,
     ) -> &mut Self {
-        self.config_update_polling_seconds = Some(config_update_polling_seconds);
+        self.config_polling_seconds = Some(config_polling_seconds);
         self
     }
 
@@ -924,9 +958,14 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
         self
     }
 
+    fn set_local_model_module(&mut self, local_model_module: LocalModelModuleParams) -> &mut Self {
+        self.local_model_module = Some(local_model_module);
+        self
+    }
+
     fn build(&self) -> TrainingServerConfigLoader {
         let training_server_config: TrainingServerConfigParams = TrainingServerConfigParams {
-            config_update_polling_seconds: self.config_update_polling_seconds.unwrap_or(10.0),
+            config_polling_seconds: self.config_polling_seconds.unwrap_or(10),
             default_hyperparameters: self.default_hyperparameters.clone(),
             training_tensorboard: self.training_tensorboard.clone().unwrap_or_else(|| {
                 TensorboardParams {
@@ -935,13 +974,15 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     global_step_tag: "Epoch".to_string(),
                 }
             }),
+            local_model_module: self.local_model_module.clone().unwrap_or_else(|| {
+                LocalModelModuleParams::default()
+            }),
         };
 
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
                 nats_addresses: transport_config.nats_addresses.clone(),
                 zmq_addresses: transport_config.zmq_addresses.clone(),
-                local_model_module: transport_config.local_model_module.clone(),
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -957,13 +998,14 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
         TrainingServerConfigLoader {
             config_path: PathBuf::from("training_server_config.json"),
             training_server_config: TrainingServerConfigParams {
-                config_update_polling_seconds: 10.0,
+                config_polling_seconds: 10,
                 default_hyperparameters: None,
                 training_tensorboard: TensorboardParams {
                     launch_tb_on_startup: false,
                     scalar_tags: vec!["AverageEpRet".to_string(), "StdEpRet".to_string()],
                     global_step_tag: "Epoch".to_string(),
                 },
+                local_model_module: LocalModelModuleParams::default(),
             },
             transport_config: TransportConfigBuilder::build_default(),
         }
@@ -1005,7 +1047,6 @@ pub struct NatsTransportAddresses {
 pub struct TransportConfigParams {
     pub nats_addresses: NatsTransportAddresses,
     pub zmq_addresses: ZmqTransportAddresses,
-    pub local_model_module: LocalModelModuleParams,
 }
 
 impl TransportConfigParams {
@@ -1072,7 +1113,6 @@ pub trait TransportConfigBuildParams {
     fn set_zmq_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_zmq_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_zmq_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_local_model_module(&mut self, directory_name: &str, model_name: &str) -> &mut Self;
     /// Builds a `TransportConfigParams` from the current builder state.
     fn build(&self) -> TransportConfigParams;
     /// Builds a `TransportConfigParams` with all default localhost addresses.
@@ -1089,15 +1129,6 @@ pub struct TransportConfigBuilder {
     zmq_trajectory_server_address: Option<NetworkParams>,
     zmq_inference_scaling_server_address: Option<NetworkParams>,
     zmq_training_scaling_server_address: Option<NetworkParams>,
-    local_model_module: Option<LocalModelModuleParams>,
-}
-
-/// Directory, file name, and extension for the on-disk model module used by the transport path.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LocalModelModuleParams {
-    pub directory: String,
-    pub model_name: String,
-    pub format: String,
 }
 
 impl TransportConfigBuildParams for TransportConfigBuilder {
@@ -1161,15 +1192,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
         self.zmq_training_scaling_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
-        });
-        self
-    }
-
-    fn set_local_model_module(&mut self, directory_name: &str, model_name: &str) -> &mut Self {
-        self.local_model_module = Some(LocalModelModuleParams {
-            directory: directory_name.to_string(),
-            format: "pt".to_string(),
-            model_name: model_name.to_string(),
         });
         self
     }
@@ -1241,16 +1263,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                     host: "127.0.0.1".to_string(),
                     port: "7778".to_string(),
                 },
-            };
-
-        let local_model_module: LocalModelModuleParams = match &self.local_model_module {
-            Some(module) => module.clone(),
-            None => LocalModelModuleParams {
-                directory: "model_module".to_string(),
-                format: "pt".to_string(),
-                model_name: "model".to_string(),
-            },
-        };
+            }; 
 
         TransportConfigParams {
             nats_addresses: NatsTransportAddresses {
@@ -1268,8 +1281,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                     trajectory_server_address: zmq_trajectory_server_address,
                     training_scaling_server_address: zmq_training_scaling_server_address,
                 },
-            },
-            local_model_module,
+            }
         }
     }
 
@@ -1314,12 +1326,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                         port: "7778".to_string(),
                     },
                 },
-            },
-            local_model_module: LocalModelModuleParams {
-                directory: "model_module".to_string(),
-                format: "pt".to_string(),
-                model_name: "model".to_string(),
-            },
+            }
         }
     }
 }
@@ -1332,23 +1339,10 @@ mod unit_tests {
 
     const VALID_CLIENT_CONFIG_JSON: &str = r#"{
     "client_config": {
-        "config_update_polling_seconds": 5.0,
+        "config_polling_seconds": 5,
         "init_hyperparameters": {
-            "DDPG": {
-                "seed": 1,
-                "gamma": 0.99,
-                "tau": 1e-2,
-                "learning_rate": 3e-3,
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "learning_starts": 128,
-                "policy_frequency": 1,  
-                "noise_scale": 0.1,
-                "train_iters": 50
-            },
             "PPO": {
                 "discrete": true,
-                "seed": 0,
                 "traj_per_epoch": 1,
                 "clip_ratio": 0.1,
                 "gamma": 0.99,
@@ -1356,20 +1350,31 @@ mod unit_tests {
                 "pi_lr": 3e-4,
                 "vf_lr": 3e-4,
                 "train_pi_iters": 40,
-                "train_v_iters": 40,
-                "target_kl": 0.01
+                "train_vf_iters": 40,
+                "target_kl": 0.01,
+                "ent_coef": 0.0,
+                "vf_coef": 0.5,
+                "max_version_lag": 1,
+                "normalize_obs": false,
+                "normalize_returns": false
             }
         },
         "trajectory_file_output": {
             "directory": "experiment_data",
-            "_comment": "use `Csv` or `Arrow`",
             "file_type": "Csv"
         },
-        "metrics_meter_name": "my-custom-metric",
-        "metrics_otlp_endpoint": {
-            "prefix": "https://",
-            "host": "0.0.0.0",
-            "port": "9317"
+        "local_model_module": {
+            "directory": "model_module",
+            "model_name": "client_model",
+            "format": "pt"
+        },
+        "metrics": {
+            "meter_name": "my-custom-metric",
+            "otlp_endpoint": {
+                "prefix": "https://",
+                "host": "0.0.0.0",
+                "port": "9317"
+            }
         }
     },
     "transport_config": {
@@ -1412,34 +1417,16 @@ mod unit_tests {
                     "port": "7778"
                 }
             }
-        },
-        "local_model_module": {
-            "directory": "model_module",
-            "model_name": "client_model",
-            "format": "pt"
         }
     }
 }"#;
 
     const VALID_TRAINING_SERVER_CONFIG_JSON: &str = r#"{
     "training_server_config": {
-        "config_update_polling_seconds": 10.0,
+        "config_polling_seconds": 10,
         "default_hyperparameters": {
-            "DDPG": {
-                "seed": 1,
-                "gamma": 0.99,
-                "tau": 1e-2,
-                "learning_rate": 3e-3,
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "learning_starts": 128,
-                "policy_frequency": 1,  
-                "noise_scale": 0.1,
-                "train_iters": 50
-            },
             "PPO": {
                 "discrete": true,
-                "seed": 0,
                 "traj_per_epoch": 1,
                 "clip_ratio": 0.1,
                 "gamma": 0.99,
@@ -1447,41 +1434,24 @@ mod unit_tests {
                 "pi_lr": 3e-4,
                 "vf_lr": 3e-4,
                 "train_pi_iters": 40,
-                "train_v_iters": 40,
-                "target_kl": 0.01
-            },
-            "PPO": {
-                "discrete": true,
-                "with_vf_baseline": true,
-                "seed": 1,
-                "traj_per_epoch": 8,
-                "gamma": 0.98,
-                "lam": 0.97,
-                "pi_lr": 3e-4,
-                "vf_lr": 1e-3,
-                "train_vf_iters": 80
-            },
-            "TD3": {
-                "seed": 1,
-                "gamma": 0.99,
-                "tau": 0.005,
-                "learning_rate": 3e-4,
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "exploration_noise": 0.1,
-                "policy_noise": 0.2,
-                "noise_clip": 0.5,
-                "learning_starts": 25000,
-                "policy_frequency": 2
+                "train_vf_iters": 40,
+                "target_kl": 0.01,
+                "ent_coef": 0.0,
+                "vf_coef": 0.5,
+                "max_version_lag": 1,
+                "normalize_obs": false,
+                "normalize_returns": false
             }
         },
         "training_tensorboard": {
-            "_comment1": "Runs `tensorboard --logdir /logs` in cwd on start up of server.",
             "launch_tb_on_startup": true,
-            "_comment2": "scalar tags can be any column header from `progress.txt` files.",
-            "_comment3": "For more than one tag, separate by semi-colon (;)",
             "scalar_tags": "AverageEpRet;LossQ",
             "global_step_tag": "Epoch"
+        },
+        "local_model_module": {
+            "directory": "model_module",
+            "model_name": "some_server_model",
+            "format": "pt"
         }
     },
     "transport_config": {
@@ -1524,11 +1494,6 @@ mod unit_tests {
                     "port": "7778"
                 }
             }
-        },
-        "local_model_module": {
-            "directory": "model_module",
-            "model_name": "some_server_model",
-            "format": "pt"
         }
     }
 }"#;
@@ -1579,9 +1544,8 @@ mod unit_tests {
         assert_eq!(args.len(), 1);
         let entry = args.get(&Algorithm::PPO).expect("PPO entry missing");
         if let HyperparameterArgs::Map(map) = entry {
-            assert!(map.contains_key("seed"));
             assert!(map.contains_key("gamma"));
-            assert!(map.contains_key("lambda"));
+            assert!(map.contains_key("lam"));
             assert!(map.contains_key("pi_lr"));
             assert!(map.contains_key("vf_lr"));
         } else {
@@ -1591,10 +1555,10 @@ mod unit_tests {
 
     #[test]
     fn hyperparameter_to_args_none_returns_all_present_algorithms() {
-        // Default only populates PPO, so to_args(None) should return 1 entry.
+        // Default populates PPO, IPPO, and MAPPO, so to_args(None) returns 3 entries.
         let hp = HyperparameterConfig::default();
         let args = hp.to_args(None);
-        assert_eq!(args.len(), 1);
+        assert_eq!(args.len(), 3);
         assert!(args.contains_key(&Algorithm::PPO));
     }
 
@@ -1631,7 +1595,6 @@ mod unit_tests {
             zmq_trajectory_server_address: None,
             zmq_inference_scaling_server_address: None,
             zmq_training_scaling_server_address: None,
-            local_model_module: None,
         };
         builder.set_nats_inference_server_address("10.0.0.1", "9999");
         let transport = builder.build();
@@ -1652,7 +1615,7 @@ mod unit_tests {
     #[test]
     fn client_build_default_polling_seconds() {
         let loader = ClientConfigBuilder::build_default();
-        assert_eq!(loader.client_config.config_update_polling_seconds, 10.0_f32);
+        assert_eq!(loader.client_config.config_polling_seconds, 10);
     }
 
     #[test]
@@ -1687,15 +1650,14 @@ mod unit_tests {
     #[test]
     fn client_builder_overrides_metrics_name() {
         let mut builder = ClientConfigBuilder {
-            config_update_polling_seconds: None,
+            config_polling_seconds: None,
             init_hyperparameters: None,
             transport_config: None,
             trajectory_file_output: None,
-            router_buffer_size_per_actor: None,
-            metrics_name: None,
-            otlp_endpoint: None,
+            local_model_module: None,
+            metrics: None
         };
-        builder.set_metrics_name("my-custom-metric");
+        builder.set_metrics(MetricsParams { meter_name: "my-custom-metric".to_string(), otlp_endpoint: OtlpEndpointParams::default() });
         let loader = builder.build();
         assert_eq!(loader.get_metrics_meter_name(), "my-custom-metric");
     }
@@ -1703,18 +1665,18 @@ mod unit_tests {
     #[test]
     fn client_builder_overrides_otlp_endpoint() {
         let mut builder = ClientConfigBuilder {
-            config_update_polling_seconds: None,
+            config_polling_seconds: None,
             init_hyperparameters: None,
             transport_config: None,
             trajectory_file_output: None,
-            router_buffer_size_per_actor: None,
-            metrics_name: None,
-            otlp_endpoint: None,
+            local_model_module: None,
+            metrics: None,
         };
-        builder.set_otlp_endpoint(OtlpEndpointParams {
+        builder.set_metrics(MetricsParams { meter_name: "my-custom-metric".to_string(), otlp_endpoint: OtlpEndpointParams {
             prefix: "http://".to_string(),
-            host: "0.0.0.0".to_string(),
-            port: "9317".to_string(),
+                host: "0.0.0.0".to_string(),
+                port: "9317".to_string(),
+            }
         });
         let loader = builder.build();
         assert_eq!(
@@ -1733,7 +1695,7 @@ mod unit_tests {
         let temp = write_temp_file(VALID_CLIENT_CONFIG_JSON);
         let path = temp.path().to_path_buf();
         let loader = ClientConfigLoader::load_config(&path);
-        assert_eq!(loader.client_config.config_update_polling_seconds, 5.0_f32);
+        assert_eq!(loader.client_config.config_polling_seconds, 5);
         assert_eq!(loader.get_metrics_meter_name(), "my-custom-metric");
         assert_eq!(
             loader.get_metrics_otlp_endpoint().prefix,
@@ -1762,7 +1724,7 @@ mod unit_tests {
         let path = temp.path().to_path_buf();
         let loader = ClientConfigLoader::load_config(&path);
         // Hardcoded fallback values (from unwrap_or_else closure)
-        assert_eq!(loader.client_config.config_update_polling_seconds, 10.0_f32);
+        assert_eq!(loader.client_config.config_polling_seconds, 10);
         assert_eq!(loader.get_metrics_meter_name(), "relayrl-client");
     }
 
@@ -1800,17 +1762,18 @@ mod unit_tests {
     #[test]
     fn training_server_builder_build_default_config_path() {
         let builder = TrainingServerConfigBuilder {
-            config_update_polling_seconds: None,
+            config_polling_seconds: None,
             default_hyperparameters: None,
             training_tensorboard: None,
             transport_config: None,
+            local_model_module: None,
         };
         let loader = builder.build();
         assert_eq!(
             loader.get_config_path(),
             &PathBuf::from("training_server_config.json")
         );
-        assert_eq!(loader.get_config_update_polling_seconds(), 10.0);
+        assert_eq!(loader.get_config_polling_seconds(), 10);
         assert!(loader.get_hyperparameters().is_none());
         assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
         assert_eq!(
@@ -1828,26 +1791,27 @@ mod unit_tests {
             "7776"
         );
         assert_eq!(
-            loader.get_transport_config().local_model_module.directory,
-            "model_module"
+            loader.get_local_model_module().directory,
+            "."
         );
         assert_eq!(
-            loader.get_transport_config().local_model_module.model_name,
+            loader.get_local_model_module().model_name,
             "model"
         );
         assert_eq!(
-            loader.get_transport_config().local_model_module.format,
-            "pt"
+            loader.get_local_model_module().format,
+            "onnx"
         );
     }
 
     #[test]
     fn training_server_builder_overrides_tensorboard_params() {
         let mut builder = TrainingServerConfigBuilder {
-            config_update_polling_seconds: None,
+            config_polling_seconds: None,
             default_hyperparameters: None,
             training_tensorboard: None,
             transport_config: None,
+            local_model_module: None,
         };
         builder.set_training_tensorboard_params(true, "MetricA;MetricB", "Step");
         let loader = builder.build();
