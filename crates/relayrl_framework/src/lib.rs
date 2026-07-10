@@ -60,7 +60,7 @@
 //!   its startup parameters are separated so the runtime can be started, restarted, and
 //!   shut down without rebuilding the agent.
 //! - **Async, concurrent runtime.** The runtime is Tokio-based; routers can be scaled live
-//!   via `scale_throughput`, and actors run concurrently with interior-mutable shared state.
+//!   via `scale_data_routers`, and actors run concurrently with interior-mutable shared state.
 //! - **What lives elsewhere.** Algorithms are in [`relayrl_algorithms`]; data types, tensors,
 //!   and codecs are in [`relayrl_types`]; the environment contract is in `relayrl_env_trait`.
 //!
@@ -74,13 +74,16 @@
 //! use relayrl_framework::prelude::types::model::ModelModule;
 //! use burn_ndarray::NdArray;
 //! use burn_tensor::{Tensor, Float};
+//! use active_uuid_registry::registry_uuid::Uuid;
+//! use std::sync::Arc;
 //! use std::path::PathBuf;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Construct the agent and its startup parameters (single backend type parameter).
 //! let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
 //! let (mut agent, params) = AgentBuilder::<NdArray>::builder()
-//!     .router_scale(2)
+//!     .params()
+//!     .data_routers(2)
 //!     .default_model(default_model)
 //!     .config_path(PathBuf::from("client_config.json"))
 //!     .build()
@@ -90,10 +93,10 @@
 //! agent.start(params).await?;
 //!
 //! // Request actions: const generics are the observation/action tensor ranks.
-//! let ids = agent.get_actor_ids()?;
+//! let info: Vec<(Uuid, Option<Arc<str>>)> = agent.get_actor_info().await?;
 //! let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
 //! let _actions = agent
-//!     .request_action::<2, 2, Float, Float>(ids, observation, None, 0.0)
+//!     .request_action::<2, 2, Float, Float>(info[0].0, observation, None, 0.0)
 //!     .await?;
 //!
 //! // Tear everything down gracefully.
@@ -152,8 +155,8 @@ pub mod utilities {
 ///
 /// ```rust
 /// use relayrl_framework::prelude::network::*;  // Agent API
-/// use relayrl_framework::prelude::config::*;  // Configuration
-/// use relayrl_framework::prelude::config::network_codec::*;  // Codec types
+/// use relayrl_framework::prelude::utilities::config::*;  // Configuration
+/// use relayrl_framework::prelude::utilities::config::network_codec::*;  // Codec types
 /// use relayrl_framework::prelude::types::tensor::burn::*;  // Burn tensor types
 /// use relayrl_framework::prelude::types::tensor::relayrl::*;  // RelayRL tensor types
 /// use relayrl_framework::prelude::types::action::*;  // Action types

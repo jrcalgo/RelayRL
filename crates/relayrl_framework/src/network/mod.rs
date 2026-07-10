@@ -78,13 +78,14 @@ pub mod client;
 ///   - `transport`: Network transport implementations (gRPC, ZeroMQ)
 ///   - `router`: Message routing between workers and transport layers
 ///   - `worker`: Individual training worker implementations
-#[cfg(any(feature = "inference-server", feature = "training-server"))]
-pub mod server;
+// #[cfg(any(feature = "inference-server", feature = "training-server"))]
+// pub mod server;
 
+/// Used for setting transport (ZMQ,NATS, ...) mode across RelayRLAgent client runtimes and Training/Inference servers
 /// Extend for future utility with other transport protocols (extend transport.rs accordingly)
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 #[derive(Clone, Copy, Debug)]
-pub enum TransportType {
+pub enum TransportMode {
     #[cfg(feature = "nats-transport")]
     NATS,
     #[cfg(feature = "zmq-transport")]
@@ -92,14 +93,14 @@ pub enum TransportType {
 }
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-impl Default for TransportType {
+impl Default for TransportMode {
     fn default() -> Self {
         #[cfg(all(feature = "zmq-transport", not(feature = "nats-transport")))]
-        return TransportType::ZMQ;
+        return TransportMode::ZMQ;
         #[cfg(all(not(feature = "zmq-transport"), feature = "nats-transport"))]
-        return TransportType::NATS;
+        return TransportMode::NATS;
         #[cfg(all(feature = "zmq-transport", feature = "nats-transport"))]
-        return TransportType::NATS;
+        return TransportMode::NATS;
     }
 }
 
