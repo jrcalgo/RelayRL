@@ -12,11 +12,6 @@ reinforcement learning. It is designed for embedding RL inside native
 applications, simulators, games, and control loops: run many actors in one
 Tokio process, perform local model inference, collect trajectories, and
 hot-swap policies while the runtime is live.
-
-The top-level [`relayrl`](crates/relayrl/) crate is a facade over the runtime
-and the rest of the stack. It re-exports the agent API, data types, PPO
-training pieces, and environment traits from the focused crates in this
-workspace.
 </div>
 
 ## What RelayRL Provides
@@ -40,9 +35,9 @@ support promise.
 
 ## Crate Layout
 
-- [`relayrl`](crates/relayrl/): the stable-release, recommended crate.
+- [`relayrl`](crates/relayrl/): the recommended crate; stable-release updates.
 - [`relayrl_framework`](crates/relayrl_framework/): the async multi-actor
-  client runtime.
+  client runtime; pre-release updates.
 - [`relayrl_types`](crates/relayrl_types/): tensors, actions, trajectories,
   model modules, records, and codec utilities.
 - [`relayrl_algorithms`](crates/relayrl_algorithms/): PPO/IPPO/MAPPO trainers
@@ -50,15 +45,18 @@ support promise.
 - [`relayrl_env_trait`](crates/relayrl_env_trait/): scalar and vector
   environment contracts.
 
+The top-level [`relayrl`](crates/relayrl/) crate is a facade over the runtime
+and the rest of the stack. It re-exports the agent API, data types, PPO
+training pieces, and environment traits from the focused crates in this
+workspace.
+
 ## Using RelayRL
 
-Add `relayrl` and a Burn backend to your `Cargo.toml`:
+Add `relayrl` and `tokio` to your dependencies:
 
 ```toml
 [dependencies]
 relayrl = "0.5.0"
-burn-ndarray = "0.20.1"
-burn-tensor = "0.20.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -68,9 +66,7 @@ Build an agent, create actors, request actions, and shut down:
 use relayrl::network::*;
 use relayrl::types::model::ModelModule;
 use relayrl::types::tensor::relayrl::DeviceType;
-
-use burn_ndarray::NdArray;
-use burn_tensor::{Float, Tensor};
+use relayrl::types::tensor::burn::{Float, Tensor, ndarray::NdArray};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -82,18 +78,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    // Start the coordinator, lifecycle manager, and router workers.
+    // Start the coordinator, managers, and router workers.
     agent.start(params).await?;
 
-    // Create four actors with rank-2 observations and rank-2 actions.
+    // Create four actors with rank-2 observations and rank-1 actions.
     let actor_ids = agent
-        .new_actors::<2, 2>(4, DeviceType::Cpu, 1_000, None)
+        .new_actors::<2, 1>(4, DeviceType::Cpu, 1_000, None)
         .await?;
 
-    // Request actions. The const generics must match actor creation.
+    // Create a rank-2 observation tensor based on the relevant environment.
     let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+    // Request actions. The const generics must match actor creation.
     let _actions = agent
-        .request_action::<2, 2, Float, Float>(actor_ids.clone(), observation, None, 0.0)
+        .request_action::<2, 1, Float, Float>(actor_ids.clone(), observation, None, 0.0)
         .await?;
 
     // Mark the episode boundary, then tear everything down gracefully.
@@ -108,28 +105,27 @@ RelayRL also supports an environment-driven pattern where the agent owns the
 loop and drives a bound `Environment`:
 
 ```rust,no_run
-  let environment: Box<dyn Environment = ...;
+async fn batch_env_exec(env1: Box<dyn Environment>, env2: Box<dyn Environment>, trainer: PPOTrainer) {
   let env1_count = 64;
   let env2_count = 1024;
 
-  agent.set_env(actor_id1, env, env1_count).await?;
-  agent.set_env(actor_id2, env, env2_count).await?;
+  agent.set_env(actor_id1, env1, env1_count).await?;
+  agent.set_env(actor_id2, env2, env2_count).await?;
 
-  let ppo_trainer: PPOTrainer = ...;
   let loop_iters = 1000;
-  let max_traj_length: 10_000;
+  let max_traj_length = 10_000;
 
   agent.run_env_eval(actor_id1, loop_iters);
   agent.run_env_with_ppo(actor_id2, loop_iters, max_traj_length, ppo_trainer);
-
+}
 ```
 
 ## Documentation
 
+ - [Learner's guide][website-docs]: provides a high-level overview of each crate in this repository and their public API surfaces.
  - [API documentation][api-docs]: details builder
 configuration, model modes, router scaling, file sinks, trajectory caches,
 PPO rollouts. 
- - [Learner's guide][website-docs]: provides a high-level overview of each crate in this repository and their public API surfaces.
 
 [api-docs]: https://docs.rs/relayrl
 [website-docs]: https://relayrl.dev/learn
@@ -137,7 +133,7 @@ PPO rollouts.
 ## Feature Flags
 
 - `client` (default): core client runtime.
-- `logging` (default): log4rs logging.
+- `logging-init`: log4rs logging initialization.
 - `metrics`: Prometheus/OpenTelemetry metrics.
 - `tch-backend`: LibTorch-backed tensors and model support.
 - `zmq-transport` / `nats-transport`: experimental network transports.

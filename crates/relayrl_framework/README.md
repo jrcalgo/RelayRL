@@ -11,7 +11,7 @@ and streams trajectories to data sinks. It is:
   different policies on different environments at the same time.
 
 * **Concurrent**: the runtime is Tokio-based. Routers can be scaled live with
-  `scale_throughput`, and actors run concurrently with interior-mutable shared
+  `scale_data_routers`, and actors run concurrently with interior-mutable shared
   state, in parallel on a multi-threaded runtime.
 
 * **Layered**: a small public API (`RelayRLAgent` + `AgentBuilder`) sits over an
@@ -39,7 +39,7 @@ and streams trajectories to data sinks. It is:
 [`relayrl`](../relayrl/README.md) is the stable, higher-level facade that
 re-exports the most recent release of this runtime under a single namespace
 (`relayrl::network`, `relayrl::types`, `relayrl::algorithms`,
-`relayrl::utilities`). Prefer depending on `relayrl` unless you specifically
+`relayrl::utils`). Prefer depending on `relayrl` unless you specifically
 need to depend on the runtime crate directly.
 
 ```toml
@@ -86,7 +86,7 @@ Data sinks ......... file sink (Arrow/CSV), transport sink (ZMQ/NATS, experiment
 ```
 
 The local/default control flow is:
-`AgentBuilder -> RelayRLAgent -> ClientCoordinator -> routers/actors -> data sinks`.
+`AgentBuilder -> RelayRLAgent -> ClientCoordinator -> actors/data routers -> data sinks`.
 
 ## Module structure
 
@@ -110,8 +110,6 @@ Add `relayrl_framework` and a Burn backend to your `Cargo.toml`:
 ```toml
 [dependencies]
 relayrl_framework = "0.5.0"
-burn-ndarray = "0.20.1"
-burn-tensor = "0.20.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -121,8 +119,8 @@ is `no_run` because it expects a model directory and config on disk:
 ```rust,no_run
 use relayrl_framework::prelude::network::*;
 use relayrl_framework::prelude::types::model::ModelModule;
-use burn_ndarray::NdArray;
-use burn_tensor::{Tensor, Float};
+use relayrl_framework::prelude::types::tensor::burn::{Tensor, Float, ndarray::NdArray};
+
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -130,7 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Construct the agent and its startup parameters (single backend type parameter).
     let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
     let (mut agent, params) = AgentBuilder::<NdArray>::builder()
-        .router_scale(2)
+        .params()
+        .data_routers(2)
         .default_model(default_model)
         .config_path(PathBuf::from("client_config.json"))
         .build()
@@ -140,10 +139,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.start(params).await?;
 
     // Request actions: const generics are the observation/action tensor ranks.
-    let ids = agent.get_actor_ids()?;
+    let info = agent.get_actor_info().await?;
     let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
     let _actions = agent
-        .request_action::<2, 2, Float, Float>(ids, observation, None, 0.0)
+        .request_action::<2, 2, Float, Float>(info[0].0, observation, None, 0.0)
         .await?;
 
     // Tear everything down gracefully.
@@ -155,15 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Feature flags
 
 * `client` (default): core client runtime.
-* `logging` (default): log4rs logging.
+* `logging-init`: log4rs logging.
 * `tch-backend`: LibTorch (`tch`) backend support via `relayrl_types`.
 * `metrics`: Prometheus/OpenTelemetry metrics.
 * `profile`: flamegraph and tokio-console profiling.
 * `zmq-transport` / `nats-transport`: experimental network transports.
 * `inference-server` / `training-server`: experimental server integrations.
-
-Note that, unlike the `relayrl` crate, the framework's default feature set is
-`["client", "logging"]` and does not enable `metrics`.
 
 ## Current support
 
@@ -181,7 +177,7 @@ feature flags are enabled:
 * `zmq-transport` and `nats-transport`
 * server-backed inference or training workflows
 
-## Changelog
+## Release Notes / Changelog
 
 [CHANGELOG](CHANGELOG.md)
 

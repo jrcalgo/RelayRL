@@ -38,7 +38,7 @@ trajectory data, and hot-swaps policies with near-zero downtime. It is:
   it well suited for embedding RL inside a native application, simulator, game
   engine, or control loop.
 
-## 0.5.0
+## v0.5.x
 
 This is the first major release since `0.4.52`, and a complete rewrite of the
 client runtime. Highlights of the `0.5.0` line:
@@ -56,7 +56,7 @@ client runtime. Highlights of the `0.5.0` line:
   live in dedicated crates (`relayrl_types`, `relayrl_algorithms`,
   `relayrl_env_trait`).
 
-The supported path in `0.5.0` is the local/default client runtime. Network
+The supported path in `0.5.x` is the local/default client runtime. Network
 transport (ZMQ/NATS) and server-backed inference/training workflows are
 implemented as **experimental** and are not covered by the `0.5.x` support
 promise. See [Feature flags](#feature-flags) and
@@ -83,7 +83,7 @@ split into focused crates:
 The facade groups these behind four modules: `relayrl::network` (agent API),
 `relayrl::types` (actions, tensors, trajectories, records, models),
 `relayrl::algorithms` (PPO and neural-network building blocks), and
-`relayrl::utilities` (configuration and UUID registry types).
+`relayrl::utils` (configuration and UUID registry types).
 
 [`relayrl_framework`]: https://docs.rs/relayrl_framework
 [`relayrl_types`]: https://docs.rs/relayrl_types
@@ -94,20 +94,16 @@ The facade groups these behind four modules: `relayrl::network` (agent API),
 
 * A [Tokio](https://docs.rs/tokio) runtime. Use a multi-threaded runtime for
   parallel actor execution.
-* A compatible [Burn](https://docs.rs/burn/0.21.0/) backend. Currently `burn-ndarray`
-  (CPU) and `burn-tch` (LibTorch, CPU/CUDA/MPS) are supported.
 * A compatible inference runtime: **LibTorch 2.9.0** or the
   **ONNX Runtime (ORT) 1.26.0**.
 
 ## Quick start
 
-Add `relayrl` and a Burn backend to your `Cargo.toml`:
+Add `relayrl` and `tokio` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 relayrl = "0.5.0"
-burn-ndarray = "0.20.1"
-burn-tensor = "0.20.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -118,16 +114,15 @@ episode boundary, and shut down:
 use relayrl::network::*;
 use relayrl::types::model::ModelModule;
 use relayrl::types::tensor::relayrl::DeviceType;
-
-use burn_ndarray::NdArray;
-use burn_tensor::{Float, Tensor};
+use relayrl::types::tensor::burn::{Tensor, Float, ndarray::NdArray};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the agent handle and its startup parameters.
     let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
     let (mut agent, params) = AgentBuilder::<NdArray>::builder()
-        .router_scale(2)
+        .params()
+        .data_routers(2)
         .default_model(default_model)
         .build()
         .await?;
@@ -136,18 +131,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.start(params).await?;
 
     // Create four actors with rank-2 observations and rank-2 actions.
-    let actor_ids = agent
-        .new_actors::<2, 2>(4, DeviceType::Cpu, 1_000, None)
+    let actor_info = agent
+        .new_actors::<2, 2>(4, DeviceType::Cpu, 1_000, None, None)
         .await?;
+    let actor_ids: Vec<_> = actor_info.iter().map(|(id, _)| *id).collect();
 
-    // Request actions. The const generics must match actor creation.
+    // Create a rank-2 observation tensor based on the relevant environment.
     let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+    // Request actions for all actors. The const generics must match actor creation.
     let _actions = agent
-        .request_action::<2, 2, Float, Float>(actor_ids.clone(), observation, None, 0.0)
+        .request_actions::<2, 2, Float, Float>(actor_ids.clone(), observation, None, 0.0)
         .await?;
 
-    // Mark the episode boundary, then tear everything down gracefully.
-    agent.flag_last_action(actor_ids, Some(1.0)).await?;
+    // Mark the episode boundary for all actors, then tear everything down gracefully.
+    agent.flag_last_actions(actor_ids, Some(1.0)).await?;
     agent.shutdown().await?;
     Ok(())
 }
@@ -162,8 +159,8 @@ training-data modes, router scaling, model hot-swap, and environment binding.
 ## Feature flags
 
 * `client` (default): core client runtime.
-* `logging` (default): log4rs logging.
-* `metrics` (default): Prometheus/OpenTelemetry metrics.
+* `logging-init`: log4rs logging initialization.
+* `metrics`: Prometheus/OpenTelemetry metrics.
 * `tch-backend`: LibTorch (`tch`) backend and model support.
 * `zmq-transport` / `nats-transport`: experimental network transports.
 * `training-server` / `inference-server`: experimental server integrations.
