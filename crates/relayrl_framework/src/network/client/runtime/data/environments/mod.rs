@@ -227,6 +227,7 @@ impl EnvironmentInterface {
         self.env.as_mut().and_then(|env| env.step_bytes(actions))
     }
 
+    #[allow(unused)]
     pub(crate) fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         self.env.as_ref().and_then(|env| env.flat_env_ids())
     }
@@ -239,10 +240,12 @@ impl EnvironmentInterface {
         self.act_dtype.clone()
     }
 
+    #[allow(unused)]
     pub(crate) fn obs_dim(&self) -> Option<usize> {
         self.env.as_ref().map(|env| env.obs_dim())
     }
 
+    #[allow(unused)]
     pub(crate) fn act_dim(&self) -> Option<usize> {
         self.env.as_ref().map(|env| env.act_dim())
     }
@@ -251,6 +254,7 @@ impl EnvironmentInterface {
         self.env.as_ref().and_then(|env| env.action_is_discrete())
     }
 
+    #[allow(unused)]
     pub(crate) fn get_env_context(&self) -> Option<String> {
         self.env
             .as_ref()

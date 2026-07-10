@@ -53,11 +53,14 @@ fn dtype_bytes_per_elem_dtype(dtype: &DType) -> usize {
 
 pub(crate) trait VecEnvTrait: Send + Sync {
     fn get_env_count(&self) -> Result<usize, VecEnvError>;
+    #[allow(unused)]
     fn env_ids(&self) -> Vec<EnvironmentUuid>;
     fn resize(&mut self, count: usize) -> Result<(), VecEnvError>;
     fn reset_all(&mut self) -> Result<(), VecEnvError>;
     fn reset_where(&mut self, env_ids: &[EnvironmentUuid]) -> Result<(), VecEnvError>;
+    #[allow(unused)]
     fn obs_dim(&self) -> usize;
+    #[allow(unused)]
     fn act_dim(&self) -> usize;
 
     /// Returns `(n_envs, obs_dim, act_dim)` if the underlying env supports the flat path.
@@ -85,6 +88,7 @@ pub(crate) trait VecEnvTrait: Send + Sync {
     }
 
     /// Stable env UUIDs in flat-path order, or None if fast path unsupported.
+    #[allow(unused)]
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         None
     }
@@ -94,6 +98,7 @@ pub(crate) trait VecEnvTrait: Send + Sync {
         None
     }
 
+    #[allow(unused)]
     fn get_env_context(&self) -> ContextString;
 }
 
@@ -340,6 +345,10 @@ impl VecEnvTrait for ScalarVecEnv {
             return None;
         }
         Some(self.obs_flat.clone())
+    }
+
+    fn flat_mask_bytes(&self) -> Option<Vec<u8>> {
+        self.mask_flat.clone()
     }
 
     fn step_bytes(

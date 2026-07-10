@@ -1,5 +1,5 @@
 use crate::network::client::runtime::actor::ErasedActorRuntime;
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
+use crate::network::client::runtime::control::state_manager::{ActorUuid, env_dtype_to_dtype};
 use crate::network::client::runtime::data::environments::{
     EnvironmentInterface, EnvironmentInterfaceError,
 };
@@ -245,7 +245,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                     }
 
-                    Ok::<ModelModule<B>, TrainingError>(trainer.acquire_pi_module().ok_or(TrainingError::TrainerError("Policy model not found".to_string()))?)
+                    trainer.acquire_pi_module().ok_or(TrainingError::TrainerError("Policy model not found".to_string()))
                 });
 
                 let mut per_env_trajs: Vec<RelayRLTrajectory> = (0..n_envs).map(|_| RelayRLTrajectory::new(max_traj_length)).collect();
@@ -496,6 +496,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         })
     }
 
+    #[allow(unused)]
     pub(crate) fn train_ippo<KindIn, KindOut, Pi>(
         _actor_id: ActorUuid,
         _shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -510,9 +511,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
         Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
+        // TODO: implement this :)
         unimplemented!()
     }
 
+    #[allow(unused)]
     pub(crate) fn train_mappo<KindIn, KindOut, Pi>(
         _actor_id: ActorUuid,
         _shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -527,6 +530,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
         Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
+        // TODO: implement this :)
         unimplemented!()
     }
 }
@@ -610,11 +614,6 @@ impl ObsNormalizer {
                         )));
                     }
                 },
-                _ => {
-                    return Err(TrainingError::AlgorithmConfig(
-                        "Unsupported byte backend for Obs Normalizer".to_string(),
-                    ));
-                }
             };
 
             Ok(dtype_vec)
@@ -643,6 +642,7 @@ impl ObsNormalizer {
     fn normalize(&self, obs_bytes: &mut [u8]) -> Result<(), TrainingError> {
         enum DTypeSliceMut<'a> {
             F16(&'a mut [half::f16]),
+            #[allow(unused)]
             Bf16(&'a mut [half::bf16]),
             F32(&'a mut [f32]),
             F64(&'a mut [f64]),
@@ -719,11 +719,6 @@ impl ObsNormalizer {
                         )));
                     }
                 },
-                _ => {
-                    return Err(TrainingError::AlgorithmConfig(
-                        "Unsupported byte backend for Obs Normalizer".to_string(),
-                    ));
-                }
             };
 
             Ok(dtype_vec)

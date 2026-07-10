@@ -3,18 +3,18 @@
 //! These components sit behind `zmq-transport` and `nats-transport`. They remain experimental in
 //! `0.5.0`; the local/default client runtime is the supported path.
 
-use crate::network::TransportType;
+use crate::network::TransportMode;
 use crate::network::client::agent::AlgorithmInitArgs;
 use crate::network::client::agent::ModelMode;
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::scale_manager::ScalingOperation;
+use crate::network::client::runtime::data::router::RoutedMessage;
 #[cfg(feature = "nats-transport")]
 use crate::network::client::runtime::data::sinks::transport_sink::nats::interface::NatsInterface;
 #[cfg(feature = "zmq-transport")]
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::ZmqClientError;
 #[cfg(feature = "zmq-transport")]
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::interface::ZmqInterface;
-use crate::network::client::runtime::router::RoutedMessage;
 use crate::prelude::network::ClientModes;
 
 use relayrl_types::data::action::RelayRLAction;
@@ -319,18 +319,18 @@ pub(crate) trait SyncClientScalingTransportOps<B: Backend + BackendMatcher<Backe
 }
 
 pub(crate) async fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
-    transport_type: TransportType,
+    transport_type: TransportMode,
     client_namespace: Arc<str>,
     shared_client_modes: Arc<ClientModes>,
 ) -> Result<ClientTransportInterface<B>, TransportError> {
     match transport_type {
         #[cfg(feature = "zmq-transport")]
-        TransportType::ZMQ => Ok(ClientTransportInterface::<B>::Sync(Box::new(
+        TransportMode::ZMQ => Ok(ClientTransportInterface::<B>::Sync(Box::new(
             ZmqInterface::<B>::new(client_namespace, shared_client_modes)
                 .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,
         ))),
         #[cfg(feature = "nats-transport")]
-        TransportType::NATS => Ok(ClientTransportInterface::<B>::Async(Box::new(
+        TransportMode::NATS => Ok(ClientTransportInterface::<B>::Async(Box::new(
             NatsInterface::<B>::new(client_namespace, shared_client_modes)
                 .await
                 .map_err(|e| TransportError::TransportInitializationError(e.to_string()))?,

@@ -5,7 +5,6 @@
 // learning applications.
 
 // Re-export logging submodules
-#[cfg(feature = "logging")]
 pub mod logging;
 
 // Re-export metrics submodules

@@ -5,15 +5,17 @@
 
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
-use crate::network::client::runtime::coordination::lifecycle_manager::{
+use crate::network::client::runtime::control::lifecycle_manager::{
     SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
-use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+use crate::network::client::runtime::control::scale_manager::ScalingOperation;
+use crate::network::client::runtime::data::router::{
+    ControlPayload, RoutedMessage, RoutingProtocol,
+};
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::{
     ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
 };
-use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
 use crossbeam_utils::CachePadded;
 
@@ -2138,14 +2140,17 @@ mod tests {
         assert_eq!(routed_message.actor_id, Uuid::from_bytes([1; 16]));
         assert!(matches!(
             routed_message.protocol,
-            RoutingProtocol::ModelUpdate
-        ));
-        match routed_message.payload {
-            RoutedPayload::ModelUpdate {
-                model_bytes,
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                ref model_bytes,
                 version,
-            } => {
-                assert_eq!(model_bytes, vec![10, 20]);
+            })
+        ));
+        match routed_message.protocol {
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                ref model_bytes,
+                version,
+            }) => {
+                assert_eq!(*model_bytes, vec![10, 20]);
                 assert_eq!(version, 7);
             }
             _ => panic!("expected model update payload"),
