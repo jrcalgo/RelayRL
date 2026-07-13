@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Schema-agnostic ONNX ingestion** - `ModelModule::load_from_path` / `from_onnx_bytes` now introspect the loaded ONNX Runtime session's real input/output names, element types, and shapes instead of assuming a hard-coded `"input"` name and first-output selection. Any graph exposing exactly one tensor input and one tensor output is now supported regardless of its I/O naming.
+- **Metadata validated against the graph** - `metadata.json` remains required, but its `input_dtype`/`output_dtype`/`input_shape`/`output_shape` are now checked against the ONNX graph's discovered signature at construction time (exact element-type match; fixed dimensions must agree; dynamic dimensions accept any metadata value), with specific `ModelError`s instead of a runtime failure inside `Session::run`.
+- **Actual runtime output shape** - ONNX inference now returns ONNX Runtime's real output shape (important for graphs with a dynamic/symbolic batch dimension) instead of a shape reconstructed from metadata.
+- **Native `Bool`/`Float16`/`Bfloat16` ONNX tensors** - Enabled ORT's `half` feature so `f16`/`bf16` tensors bind to their native ONNX element types, and `Bool` RelayRL tensors now bind to ONNX's native `Bool` type instead of being reinterpreted as `Uint8`.
+- **Stricter model validation** - `validate_module` (used by `HotReloadableModel::new_from_path`/`new_from_module` and now also `reload_from_path`/`reload_from_module`) exercises the model's real forward pass and checks exact output dtype/shape instead of accepting a zero-action fallback whenever the configured inference engine is actually available.
+- **Unified ONNX runner** - Collapsed the previously duplicated Burn-tensor and `TensorData` ONNX execution paths into a single runner shared by both.
+- Removed the unused `burn-onnx` dependency stub.
+
 ## [0.8.1] - 2026-06-14
 
 ### Added

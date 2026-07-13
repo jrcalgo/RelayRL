@@ -275,6 +275,37 @@ The encoding pipeline processes data in this order:
 
 Decoding reverses this pipeline with automatic verification.
 
+## ONNX Model Ingestion
+
+`ModelModule::load_from_path` / `ModelModule::from_onnx_bytes` accept **any** ONNX graph that
+exposes exactly **one tensor input and one tensor output** — the graph is not required to name
+its input `"input"` or its output `"output"`. At load time, `relayrl_types`:
+
+1. Commits the graph with ONNX Runtime and **introspects** the real input/output names,
+   element types, and shapes directly from the loaded session (`Outlet`s), instead of assuming
+   fixed names.
+2. **Validates** the caller-supplied `ModelMetadata` against that discovered signature:
+   - `input_dtype`/`output_dtype` must map to the graph's actual ONNX element type exactly.
+   - `input_shape`/`output_shape` must have the same rank as the graph's declared shape.
+   - Every *fixed* graph dimension (i.e. not a dynamic/symbolic axis) must equal the
+     corresponding metadata dimension; dynamic axes (e.g. a symbolic batch dimension) accept
+     any concrete size at runtime.
+3. At inference time, binds the input tensor and reads the output tensor by their **discovered
+   names**, and returns the model's *actual* ONNX Runtime output shape (important for graphs
+   with a dynamic batch dimension), rather than a shape reconstructed from metadata.
+
+Graphs with more than one input/output, or with non-tensor I/O (sequences, maps, optionals),
+are rejected with a specific `ModelError` at construction time rather than failing later inside
+`Session::run`.
+
+`metadata.json` itself is unchanged and remains **required** — RelayRL still needs it for
+shapes/dtypes/device defaults and as the cross-process wire contract used by the transport
+layer (coordinator bundles, NATS `ModelFilesBundle`, and on-disk directories); it is now
+*validated against the graph* instead of being trusted blindly. See
+[`crates/relayrl_types/tests/onnx_ingestion.rs`](tests/onnx_ingestion.rs) for worked examples,
+including non-standard I/O names, dynamic batch dimensions, `bool` tensors, and each rejection
+case.
+
 ## Performance Tips
 
 - **LZ4**: Best for real-time inference (3-4 GB/s decompression)

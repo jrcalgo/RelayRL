@@ -89,19 +89,27 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
     }
 
     /// Atomically swap the model from disk and bump version.
+    ///
+    /// The replacement is validated (same checks as `new_from_path`) before it is swapped in,
+    /// so a broken or schema-mismatched model on disk cannot silently replace a working one.
     pub async fn reload_from_path(&self, path: PathBuf, version: i64) -> Result<i64, ModelError> {
-        let new_module = Arc::new(ModelModule::<B>::load_from_path(path)?);
-        self.inner.store(new_module);
+        let new_module = ModelModule::<B>::load_from_path(path)?;
+        validate_module::<B>(&new_module)?;
+        self.inner.store(Arc::new(new_module));
         self.version.store(version, Ordering::SeqCst);
         Ok(version)
     }
 
     /// Atomically replaces the current model with `module` and records `version`, returning it.
+    ///
+    /// `module` is validated (same checks as `new_from_module`) before it is swapped in, so a
+    /// broken or schema-mismatched model cannot silently replace a working one.
     pub async fn reload_from_module(
         &self,
         module: ModelModule<B>,
         version: i64,
     ) -> Result<i64, ModelError> {
+        validate_module::<B>(&module)?;
         self.inner.store(Arc::new(module));
         self.version.store(version, Ordering::SeqCst);
         Ok(version)
