@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ort::session::{Session, SessionInputValue};
-use ort::tensor::{IntoTensorElementType, PrimitiveTensorElementType, TensorElementType};
+use ort::value::{IntoTensorElementType, PrimitiveTensorElementType, TensorElementType};
 use ort::value::{DynValue, Outlet, Value as OrtValue, ValueType};
 
 #[cfg(feature = "tch-backend")]
@@ -440,7 +440,7 @@ where
     OUT: IntoTensorElementType + PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
 {
     let typed_in: Vec<IN> = bytemuck::cast_slice::<u8, IN>(data).to_vec();
-    let ort_shape = ort::tensor::Shape::from(shape);
+    let ort_shape = ort::value::Shape::from(shape);
     let ort_value = OrtValue::from_array((ort_shape, typed_in))
         .map_err(|e| ModelError::BackendError(format!("Failed to build ONNX input tensor: {e}")))?;
     let session_input = SessionInputValue::from(ort_value);
@@ -460,7 +460,7 @@ where
     OUT: IntoTensorElementType + PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
 {
     let bool_data: Vec<bool> = data.iter().map(|&b| b != 0).collect();
-    let ort_shape = ort::tensor::Shape::from(shape);
+    let ort_shape = ort::value::Shape::from(shape);
     let ort_value = OrtValue::from_array((ort_shape, bool_data))
         .map_err(|e| ModelError::BackendError(format!("Failed to build ONNX input tensor: {e}")))?;
     let session_input = SessionInputValue::from(ort_value);
@@ -480,7 +480,7 @@ where
     IN: IntoTensorElementType + PrimitiveTensorElementType + Debug + Clone + bytemuck::Pod,
 {
     let typed_in: Vec<IN> = bytemuck::cast_slice::<u8, IN>(data).to_vec();
-    let ort_shape = ort::tensor::Shape::from(shape);
+    let ort_shape = ort::value::Shape::from(shape);
     let ort_value = OrtValue::from_array((ort_shape, typed_in))
         .map_err(|e| ModelError::BackendError(format!("Failed to build ONNX input tensor: {e}")))?;
     let session_input = SessionInputValue::from(ort_value);
@@ -497,7 +497,7 @@ fn convert_bool_bool(
     signature: &OnnxSignature,
 ) -> Result<(Vec<usize>, Vec<u8>), ModelError> {
     let bool_data: Vec<bool> = data.iter().map(|&b| b != 0).collect();
-    let ort_shape = ort::tensor::Shape::from(shape);
+    let ort_shape = ort::value::Shape::from(shape);
     let ort_value = OrtValue::from_array((ort_shape, bool_data))
         .map_err(|e| ModelError::BackendError(format!("Failed to build ONNX input tensor: {e}")))?;
     let session_input = SessionInputValue::from(ort_value);
