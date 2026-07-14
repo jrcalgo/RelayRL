@@ -3,7 +3,7 @@ relayrl_types
 
 Core data types and encoding/decoding utilities for the RelayRL framework.
 
-[![Changelog](https://img.shields.io/badge/Changelog-0.8.0-blue.svg)](CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/Changelog-0.9.0-blue.svg)](CHANGELOG.md)
 
 ## Features
 
@@ -16,25 +16,32 @@ Core data types and encoding/decoding utilities for the RelayRL framework.
 
 ## Feature Flags
 
+The crate's actual `default` set is `["ndarray-backend", "onnx-model"]` — the CPU Burn
+backend plus ONNX inference. Codec features (compression, encryption, integrity,
+metadata, quantization, zerocopy) are **not** enabled by default; the codec examples
+below require opting into them explicitly (individually, or via a bundle like
+`codec-full`).
+
 ```toml
-# Backend selection (choose one)
-default = ["ndarray-backend", "codec-full", "inference-models"]
+[features]
+default = ["ndarray-backend", "onnx-model"]
 
-tch-backend = ["burn-tch"]          # GPU backend
-ndarray-backend = ["burn-ndarray"]  # CPU backend
+# Backend selection
+tch-backend = ["burn-tch", "half"]          # GPU (LibTorch) backend
+ndarray-backend = ["burn-ndarray", "half"]  # CPU backend
 
+# Inference model formats
 inference-models = ["tch-model", "onnx-model"]  # All inference models
-tch-model = ["tch", "tokio", "tempfile"]  # LibTorch Inference
-onnx-model = ["ort", "tokio", "tempfile", "ndarray"]  # ONNX Inference
+tch-model = ["tch", "tokio", "tempfile"]        # LibTorch inference
+onnx-model = ["ort", "tokio", "tempfile", "ndarray"]  # ONNX inference
 
-# Network transport utilities
-compression = ["lz4_flex", "zstd"]  # LZ4/Zstd compression
-encryption = ["chacha20poly1305"]   # ChaCha20-Poly1305 AEAD
-integrity = ["blake3"]              # BLAKE3 checksums
-metadata = ["bincode"]              # Metadata serialization
-quantization = ["half"]             # FP16/BF16 quantization
-zerocopy = ["bytes"]                # Zerocopy data conversions
-
+# Codec pipeline (opt-in)
+compression = ["lz4_flex", "zstd", "bincode"]  # LZ4/Zstd compression
+encryption = ["chacha20poly1305", "bincode"]   # ChaCha20-Poly1305 AEAD
+integrity = ["blake3"]                          # BLAKE3 checksums
+metadata = ["bincode"]                          # `encode`/`decode`/`to_bytes`/`from_bytes`
+quantization = ["half"]                         # FP16/BF16 quantization
+zerocopy = ["bytes"]                            # Zerocopy data conversions
 
 # Convenience bundles
 codec-basic = ["compression", "integrity", "zerocopy"]
@@ -42,29 +49,37 @@ codec-secure = ["codec-basic", "encryption"]
 codec-full = ["codec-secure", "metadata", "quantization"]
 ```
 
+To run the codec examples below, add `relayrl_types` with `features = ["codec-full"]`
+(or the specific features each example needs) in addition to the default backend.
+
 ## Quick Start
 
 ### Basic Usage
 
 ```rust
-use relayrl_types::prelude::*;
+use relayrl_types::prelude::action::RelayRLAction;
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+use relayrl_types::prelude::tensor::relayrl::{DType, NdArrayDType, DeviceType, TensorData};
+use relayrl_types::data::tensor::ConversionBurnTensor;
 use uuid::Uuid;
+use std::sync::Arc;
 use burn_tensor::Tensor;
 use burn_ndarray::NdArray; // enable feature: ndarray-backend
 
 // Create a Burn tensor (NdArray backend) and store as RelayRL TensorData
 let device = DeviceType::Cpu;
 
-// 1) Burn → RelayRL: Convert any Burn tensor into TensorData with a target dtype/backend
+// 1) Burn → RelayRL: Convert any Burn tensor into TensorData with a target dtype/backend.
+//    `ConversionBurnTensor` wraps the tensor in an `Arc` (it may be shared across conversions).
 let obs_burn = Tensor::<NdArray, 1>::from_floats([1.0, 2.0, 3.0, 4.0], &burn_tensor::Device::Cpu);
-let obs_td: TensorData = ConversionTensor {
-    tensor: obs_burn,
+let obs_td: TensorData = ConversionBurnTensor {
+    inner: Arc::new(obs_burn),
     conversion_dtype: DType::NdArray(NdArrayDType::F32),
 }.try_into()?;
 
 let act_burn = Tensor::<NdArray, 1>::from_floats([0.5, -0.3], &burn_tensor::Device::Cpu);
-let act_td: TensorData = ConversionTensor {
-    tensor: act_burn,
+let act_td: TensorData = ConversionBurnTensor {
+    inner: Arc::new(act_burn),
     conversion_dtype: DType::NdArray(NdArrayDType::F32),
 }.try_into()?;
 
@@ -100,13 +115,14 @@ trajectory.add_action(RelayRLAction::minimal(1.0, false));
 ### 1. Simple Serialization
 
 ```rust
-use relayrl_types::prelude::*;
+use relayrl_types::prelude::action::RelayRLAction;
 
 let action = RelayRLAction::minimal(1.0, false);
 
-// Simple serialization (requires "metadata" feature)
+// Simple serialization (requires the "metadata" feature).
+// `from_bytes` returns `(Self, usize)`: the decoded value and the number of bytes consumed.
 let bytes = action.to_bytes()?;
-let decoded = RelayRLAction::from_bytes(&bytes)?;
+let (decoded, _consumed) = RelayRLAction::from_bytes(&bytes)?;
 
 assert_eq!(decoded.get_rew(), 1.0);
 ```
@@ -114,12 +130,15 @@ assert_eq!(decoded.get_rew(), 1.0);
 ### 2. Compression
 
 ```rust
-use relayrl_types::prelude::*;
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+use relayrl_types::prelude::action::CodecConfig;
+use relayrl_types::prelude::codec::CompressionScheme;
 
 let trajectory = RelayRLTrajectory::new(100);
 // ... add actions ...
 
-// Configure codec with LZ4 compression (fast)
+// Configure codec with LZ4 compression (fast). Requires "compression", "integrity",
+// and "metadata" features (e.g. via the "codec-full" bundle).
 let config = CodecConfig {
     compression: Some(CompressionScheme::Lz4),
     encryption_key: None,
@@ -134,21 +153,24 @@ println!("Compressed from {} to {} bytes",
     encoded.data.len()
 );
 
-// Decode
-let decoded = RelayRLTrajectory::decode(&encoded, &config)?;
+// Decode. `RelayRLTrajectory::decode` returns `(Self, usize)`.
+let (decoded, _consumed) = RelayRLTrajectory::decode(&encoded, &config)?;
 ```
 
 ### 3. Compression + Encryption
 
 ```rust
-use relayrl_types::prelude::*;
+use relayrl_types::prelude::action::{RelayRLAction, CodecConfig};
+use relayrl_types::prelude::codec::CompressionScheme;
+use relayrl_types::data::utilities::encrypt::generate_key;
 
 let action = RelayRLAction::minimal(2.5, true);
 
-// Generate encryption key
-let key = crate::utilities::encrypt::generate_key();
+// Generate encryption key (requires the "encryption" feature)
+let key = generate_key();
 
-// Configure codec with compression AND encryption
+// Configure codec with compression AND encryption.
+// Requires "compression", "encryption", "integrity", and "metadata" features.
 let config = CodecConfig {
     compression: Some(CompressionScheme::Zstd(3)),  // Zstd level 3
     encryption_key: Some(key),
@@ -159,7 +181,7 @@ let config = CodecConfig {
 // Encode (compressed + encrypted)
 let encoded = action.encode(&config)?;
 
-// Decode (must use same key!)
+// Decode (must use same key!). `RelayRLAction::decode` returns `Self` directly.
 let decoded = RelayRLAction::decode(&encoded, &config)?;
 assert_eq!(decoded.get_rew(), 2.5);
 ```
@@ -167,15 +189,19 @@ assert_eq!(decoded.get_rew(), 2.5);
 ### 4. Full Pipeline with Integrity Verification
 
 ```rust
-use relayrl_types::prelude::*;
+use relayrl_types::prelude::action::{RelayRLAction, CodecConfig};
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+use relayrl_types::prelude::codec::CompressionScheme;
+use relayrl_types::data::utilities::encrypt::generate_key;
 
 let mut trajectory = RelayRLTrajectory::new(100);
 for i in 0..50 {
     trajectory.add_action(RelayRLAction::minimal(i as f32, false));
 }
 
-// Full codec configuration
-let key = crate::utilities::encrypt::generate_key();
+// Full codec configuration. Requires "codec-full" (compression + encryption +
+// integrity + metadata + quantization).
+let key = generate_key();
 let config = CodecConfig {
     compression: Some(CompressionScheme::Lz4),
     encryption_key: Some(key),
@@ -186,8 +212,9 @@ let config = CodecConfig {
 // Encode: Serialize → Compress → Encrypt → Checksum
 let encoded = trajectory.encode(&config)?;
 
-// Integrity is automatically verified during decode
-let decoded = RelayRLTrajectory::decode(&encoded, &config)?;
+// Integrity is automatically verified during decode.
+// `RelayRLTrajectory::decode` returns `(Self, usize)`.
+let (decoded, _consumed) = RelayRLTrajectory::decode(&encoded, &config)?;
 
 println!("Encoded {} actions", decoded.len());
 println!("Total reward: {}", decoded.total_reward());
@@ -196,11 +223,13 @@ println!("Total reward: {}", decoded.total_reward());
 ### 5. Chunking for Large Data
 
 ```rust
-use relayrl_types::prelude::*;
+use relayrl_types::prelude::action::CodecConfig;
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
 
 let mut trajectory = RelayRLTrajectory::new(10000);
 // ... add many actions ...
 
+// `encode_chunked`/`decode_chunked` require the "metadata" and "integrity" features.
 let config = CodecConfig::default();
 let chunk_size = 1024 * 1024; // 1MB chunks
 
@@ -217,13 +246,15 @@ let decoded = RelayRLTrajectory::decode_chunked(&chunks, &config)?;
 ### 6. Metadata Tracking
 
 ```rust
-use relayrl_types::prelude::*;
+use relayrl_types::prelude::trajectory::RelayRLTrajectory;
 use uuid::Uuid;
 
 // Create trajectory with full metadata
 let trajectory = RelayRLTrajectory::with_metadata(
     1000,                          // max_length
     Some(Uuid::new_v4()),         // agent_id
+    None,                          // env_id
+    None,                          // env_label
     Some(42),                      // episode number
     Some(1000),                    // training_step
 );
