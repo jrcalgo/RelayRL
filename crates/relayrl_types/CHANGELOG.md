@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.9.0] - 2026-07-14
 
 ### Changed
 - **Schema-agnostic ONNX ingestion** - `ModelModule::load_from_path` / `from_onnx_bytes` now introspect the loaded ONNX Runtime session's real input/output names, element types, and shapes instead of assuming a hard-coded `"input"` name and first-output selection. Any graph exposing exactly one tensor input and one tensor output is now supported regardless of its I/O naming.
