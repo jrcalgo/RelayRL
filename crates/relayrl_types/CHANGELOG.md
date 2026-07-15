@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2026-07-15
+
+### Added
+- **Prelude `tensor` exports** - `relayrl_types::prelude::tensor::relayrl::*` now contains NdArrayDType and TchDType re-exports.
+
 ## [0.9.0] - 2026-07-14
 
 ### Changed
