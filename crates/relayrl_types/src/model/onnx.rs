@@ -13,8 +13,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ort::session::{Session, SessionInputValue};
-use ort::value::{IntoTensorElementType, PrimitiveTensorElementType, TensorElementType};
 use ort::value::{DynValue, Outlet, Value as OrtValue, ValueType};
+use ort::value::{IntoTensorElementType, PrimitiveTensorElementType, TensorElementType};
 
 #[cfg(feature = "tch-backend")]
 use half::bf16;

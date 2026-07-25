@@ -108,7 +108,8 @@ pub mod prelude {
         pub mod relayrl {
             pub use crate::data::tensor::{
                 AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
-                IntBurnTensor, SupportedTensorBackend, TensorData, TensorError, NdArrayDType, TchDType
+                IntBurnTensor, NdArrayDType, SupportedTensorBackend, TchDType, TensorData,
+                TensorError,
             };
         }
 

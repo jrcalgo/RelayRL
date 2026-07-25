@@ -137,6 +137,7 @@ impl BackendMatcher for Tch {
 }
 
 /// Element dtype for tensor serialization, keyed to the active backend.
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
     #[cfg(feature = "ndarray-backend")]
