@@ -8,7 +8,11 @@
 //! 1. Construct the model in memory using `tch::nn`.
 //! 2. Freeze parameters and trace via `CModule::create_by_tracing`.
 //! 3. Save to a temp file with `CModule::save`.
-//! 4. Read the bytes back and return `(bytes, temp_path)`.
+//! 4. Read the bytes back into memory, then let the temp file clean itself up.
+//!
+//! The returned `temp_path` is informational only (e.g. for logging); by the time
+//! either function returns, the backing file has already been deleted. Callers
+//! must consume `bytes` directly and must not attempt to `CModule::load(&temp_path)`.
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -19,11 +23,9 @@ use std::path::PathBuf;
 /// layer has no activation.
 ///
 /// Returns `(bytes, temp_path)`:
-/// - `bytes`: The serialized TorchScript model for storage/transmission
-/// - `temp_path`: Path to the temporary file (needed for `CModule::load`)
-///
-/// The caller is responsible for loading the model via `CModule::load(&temp_path)`
-/// and managing the temporary file lifecycle.
+/// - `bytes`: The serialized TorchScript model for storage/transmission.
+/// - `temp_path`: The now-deleted temporary file's former path, kept only for
+///   diagnostics; the file itself is cleaned up before this function returns.
 #[cfg(feature = "tch-model")]
 pub fn build_pt_mlp_temp(
     layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)],
@@ -87,7 +89,6 @@ pub fn build_pt_mlp_temp(
     // requires_grad flag on every parameter so the tracer accepts them.
     vs.freeze();
 
-
     // Create a temporary file for saving the model
     let temp_file = tempfile::Builder::new()
         .prefix("relayrl_pt_model_")
@@ -124,8 +125,11 @@ pub fn build_pt_mlp_temp(
     file.read_to_end(&mut bytes)
         .map_err(|e| format!("Failed to read model bytes: {}", e))?;
 
-    // Keep the temp file alive by forgetting it - caller manages cleanup
-    std::mem::forget(temp_file);
+    // `temp_file` drops at the end of this function, deleting the backing
+    // file. The bytes are already read into `bytes`, and both call sites
+    // (`nn::model_module::acquire_model_module`/`acquire_conv_model_module`)
+    // only consume the returned bytes, discarding `temp_path` — so nothing
+    // depends on the file persisting past this point.
 
     Ok((bytes, temp_path))
 }
@@ -146,8 +150,9 @@ pub fn build_pt_mlp_temp(
 /// `obs_dim` — flat input size (e.g. 27 648 for VizDoom); used for the example
 ///             input during JIT tracing.
 ///
-/// Returns `(bytes, temp_path)`.  The caller is responsible for keeping the
-/// temp file alive if they need to reload via `CModule::load(&temp_path)`.
+/// Returns `(bytes, temp_path)`. As with `build_pt_mlp_temp`, the backing temp
+/// file is already deleted by the time this function returns; `temp_path` is
+/// informational only, and callers must consume `bytes` directly.
 #[cfg(feature = "tch-model")]
 pub fn build_pt_conv_temp(
     arch: &[crate::algorithms::ArchLayer],
@@ -276,7 +281,8 @@ pub fn build_pt_conv_temp(
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Failed to read model bytes: {e}"))?;
 
-    std::mem::forget(temp_file);
+    // `temp_file` drops here, deleting the backing file; see build_pt_mlp_temp
+    // for why nothing needs the file to persist past this point.
     Ok((bytes, temp_path))
 }
 
@@ -304,10 +310,13 @@ mod tests {
 
         let (bytes, path) = result.unwrap();
         assert!(!bytes.is_empty(), "PT bytes should not be empty");
-        assert!(path.exists(), "Temp file should exist");
-
-        // Cleanup
-        let _ = std::fs::remove_file(path);
+        // The backing temp file is deleted before build_pt_mlp_temp returns
+        // (bytes are read into memory first); the returned path is
+        // informational only, not a still-valid file to load from.
+        assert!(
+            !path.exists(),
+            "Temp file should already be cleaned up by the time bytes are returned"
+        );
     }
 
     #[test]
@@ -329,8 +338,6 @@ mod tests {
 
         let (bytes, path) = result.unwrap();
         assert!(bytes.len() > 100, "Expected non-trivial PT model bytes");
-
-        // Cleanup
-        let _ = std::fs::remove_file(path);
+        assert!(!path.exists(), "Temp file should already be cleaned up");
     }
 }

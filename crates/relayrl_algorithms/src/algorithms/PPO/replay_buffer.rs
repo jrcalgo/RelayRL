@@ -110,8 +110,20 @@ impl PPOReplayBuffer {
         let advantages = discounted_cumsum(&deltas, gamma * lam);
         buffers.advantages[start..end].copy_from_slice(&advantages);
 
-        let full_returns = advantages.iter().zip(vals[..vals.len() - 1].iter()).map(|(a, v)| a + v).collect::<Vec<f32>>();
-        buffers.returns[start..end].copy_from_slice(&full_returns[..full_returns.len() - 1]);
+        // Value targets = GAE advantages + V(s) (SF-style lambda-return), rather than
+        // a pure Monte-Carlo discounted return (lambda=1). This keeps the value
+        // function's regression target consistent with the same lambda used for
+        // the advantage estimator feeding the policy loss. `advantages` and
+        // `vals[..vals.len() - 1]` are both exactly `end - start` elements (one
+        // per real transition, excluding the appended bootstrap), so the full
+        // vector must be copied into `returns[start..end]` — copying `[..len-1]`
+        // (n-1 elements) into an n-slot destination panics on the first episode.
+        let returns: Vec<f32> = advantages
+            .iter()
+            .zip(vals[..vals.len() - 1].iter())
+            .map(|(a, v)| a + v)
+            .collect();
+        buffers.returns[start..end].copy_from_slice(&returns);
     }
 
     /// Returns all buffered observations and their dimension for a value-function pass before GAE.
@@ -151,8 +163,14 @@ impl PPOReplayBuffer {
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
         for (start, end, is_truncated) in boundaries {
+            // Bootstrap with V(s_end) (the state reached after the chunk's last
+            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
             let bootstrap = if is_truncated {
-                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+                values
+                    .get(end)
+                    .or_else(|| values.get(end.saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -178,10 +196,13 @@ impl PPOReplayBuffer {
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
         for (start, end, is_truncated) in boundaries {
+            // Bootstrap with V(s_end) (the state reached after the chunk's last
+            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
             let bootstrap = if is_truncated {
                 buffers
                     .values
-                    .get(end.saturating_sub(1))
+                    .get(end)
+                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
                     .copied()
                     .unwrap_or(0.0)
             } else {
@@ -256,10 +277,13 @@ impl PPOReplayBuffer {
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
+            // Bootstrap with V(s_end) (the state reached after the chunk's last
+            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
             let bootstrap = if *is_truncated {
                 buffers
                     .values
-                    .get(end.saturating_sub(1))
+                    .get(*end)
+                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
                     .copied()
                     .unwrap_or(0.0)
             } else {
@@ -327,12 +351,15 @@ impl PPOReplayBuffer {
         let (adv_mean, adv_std) = scalar_stats(&fresh_adv);
         let adv_norm = compute_normed_advantages(&fresh_adv, adv_mean, adv_std.max(1e-8));
 
-        let (ret, ret_mean, ret_std) = if normalize_returns {
-            let (ret_mean, ret_std) = scalar_stats(&fresh_ret);
-            (compute_normed_advantages(&fresh_ret, ret_mean, ret_std.max(1e-8)), ret_mean, ret_std)
-        } else {
-            (fresh_ret, 0.0, 1.0)
-        };
+        // Pass raw lambda-returns through. `normalize_persistent_returns` (run
+        // unconditionally in run_ppo_sgd_flat) is the SF-aligned RunningMeanStd
+        // normalizer; z-scoring per-batch here first would feed it an
+        // already mean=0/std=1 stream, making it a redundant no-op and
+        // recalibrating the vf's target scale from scratch (with per-batch
+        // sampling noise) every epoch instead of tracking a smoothly-evolving
+        // running statistic.
+        let _ = normalize_returns;
+        let (ret, ret_mean, ret_std) = (fresh_ret, 0.0, 1.0);
 
         Some(PPOBatch {
             obs: fresh_obs,
@@ -441,7 +468,8 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         let mut episode_return = 0.0f32;
         let mut episode_length = 0i32;
 
-        for action in &trajectory.actions {
+        let last_idx = trajectory.actions.len().saturating_sub(1);
+        for (idx, action) in trajectory.actions.iter().enumerate() {
             episode_length += 1;
             let reward = action.get_rew();
             episode_return += reward;
@@ -472,7 +500,7 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             buffers.logp.push(logp);
 
             let value = if let Some(map) = action.get_data() {
-                if let Some(RelayRLData::Tensor(val_td)) = map.get("value") {
+                if let Some(RelayRLData::Tensor(val_td)) = map.get("val") {
                     bytemuck::cast_slice::<u8, f32>(&val_td.data)
                         .first()
                         .copied()
@@ -492,7 +520,15 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             let next = self.metadata.buffer_pointer.load(Ordering::Relaxed) + 1;
             self.metadata.buffer_pointer.store(next, Ordering::Relaxed);
 
-            if action.get_done() {
+            // A trajectory chunk ends a GAE segment either because the true env
+            // episode terminated/truncated (action.get_done()) or because the
+            // collector cut it off at rollout_len steps (trajectory.is_truncated,
+            // set via set_truncated() with the episode still ongoing). Without the
+            // latter, steps from rollout-length cutoffs never get an
+            // episode_boundaries entry and sit dead in the buffer (no GAE/return)
+            // until the underlying episode eventually ends, possibly many epochs
+            // later — starving training of fresh transitions.
+            if idx == last_idx && (action.get_done() || trajectory.is_truncated) {
                 let start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
                 let end = self.metadata.buffer_pointer.load(Ordering::Relaxed);
                 buffers
@@ -512,5 +548,172 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         Err(ReplayBufferError::BufferSamplingError(
             "PPOReplayBuffer: use finalize_and_drain_blocking instead of sample_buffer".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend};
+    use relayrl_types::prelude::action::RelayRLAction;
+
+    fn scalar_tensor(value: f32) -> TensorData {
+        TensorData::new(
+            vec![1],
+            DType::NdArray(NdArrayDType::F32),
+            value.to_le_bytes().to_vec(),
+            SupportedTensorBackend::NdArray,
+        )
+    }
+
+    fn action_with(reward: f32, done: bool, value: f32, logp: f32) -> RelayRLAction {
+        let mut data = std::collections::HashMap::new();
+        data.insert("val".to_string(), RelayRLData::Tensor(scalar_tensor(value)));
+        data.insert(
+            "logp_a".to_string(),
+            RelayRLData::Tensor(scalar_tensor(logp)),
+        );
+        RelayRLAction::new(
+            Some(scalar_tensor(0.0)),
+            Some(scalar_tensor(0.0)),
+            None,
+            reward,
+            done,
+            Some(data),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn insert_trajectory_reads_val_key_for_value_estimate() {
+        let buffer = PPOReplayBuffer::new(16, 0.99, 0.97, None);
+        let mut traj = RelayRLTrajectory::new(4);
+        traj.add_action(action_with(1.0, true, 3.5, 0.1));
+
+        buffer.insert_trajectory(traj).await.unwrap();
+
+        let batch = buffer
+            .finalize_and_drain_blocking(vec![])
+            .expect("single completed episode should drain into a batch");
+        assert_eq!(
+            batch.val,
+            vec![3.5],
+            "insert_trajectory should read the framework's \"val\" key, not \"value\""
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_logp_matches_rollout_time_logp_unmodified() {
+        // The drained batch.logp must be exactly the rollout-time log-probs
+        // (from the "logp_a" key), since IndependentPPOAlgorithm::start_epoch_training
+        // now uses it directly as PPO's logp_old instead of recomputing it from
+        // the epoch-start network (which previously made the importance ratio
+        // ~1.0 at epoch start and disabled the clip).
+        let buffer = PPOReplayBuffer::new(16, 0.99, 0.97, None);
+        let mut traj = RelayRLTrajectory::new(8);
+        traj.add_action(action_with(1.0, false, 0.0, -0.1));
+        traj.add_action(action_with(1.0, false, 0.0, -0.2));
+        traj.add_action(action_with(1.0, true, 0.0, -0.3));
+
+        buffer.insert_trajectory(traj).await.unwrap();
+
+        let batch = buffer
+            .finalize_and_drain_first_n_blocking(vec![], 0, 0, 1, false)
+            .expect("3-step episode should drain");
+
+        assert_eq!(batch.logp, vec![-0.1, -0.2, -0.3]);
+    }
+
+    #[tokio::test]
+    async fn insert_trajectory_closes_boundary_on_truncation_without_done() {
+        let buffer = PPOReplayBuffer::new(16, 0.99, 0.97, None);
+        let mut traj = RelayRLTrajectory::new(4);
+        // done=false: the episode itself hasn't ended, only the rollout chunk has.
+        traj.add_action(action_with(1.0, false, 3.5, 0.1));
+        traj.set_truncated();
+
+        buffer.insert_trajectory(traj).await.unwrap();
+
+        assert_eq!(
+            buffer.get_episode_count(),
+            1,
+            "a rollout-cutoff (is_truncated) chunk must still close a GAE boundary even without a done action"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_gae_copies_full_length_returns_without_panicking() {
+        let buffer = PPOReplayBuffer::new(16, 0.99, 0.97, None);
+        let mut traj = RelayRLTrajectory::new(8);
+        traj.add_action(action_with(1.0, false, 1.0, 0.0));
+        traj.add_action(action_with(1.0, false, 1.0, 0.0));
+        traj.add_action(action_with(1.0, true, 1.0, 0.0));
+
+        buffer.insert_trajectory(traj).await.unwrap();
+
+        // Pre-fix, compute_gae_episode copied an (n-1)-length slice into an
+        // n-length destination and panicked here on the very first episode.
+        let batch = buffer
+            .finalize_and_drain_blocking(vec![])
+            .expect("3-step episode should drain into a batch");
+        assert_eq!(batch.val.len(), 3);
+        assert_eq!(batch.ret.len(), 3);
+        assert_eq!(batch.adv_norm.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn truncated_episode_bootstraps_from_v_of_s_end_not_s_end_minus_1() {
+        // gamma = lam = 1.0 keeps the expected numbers simple to hand-verify.
+        let buffer = PPOReplayBuffer::new(16, 1.0, 1.0, None);
+
+        // Episode 1: one step, truncated (not done). V(s0) = 10.0.
+        let mut traj1 = RelayRLTrajectory::new(4);
+        traj1.add_action(action_with(0.0, false, 10.0, 0.0));
+        traj1.set_truncated();
+        buffer.insert_trajectory(traj1).await.unwrap();
+
+        // A second, still-open trajectory buffers V(s_end) = V(s1) = 20.0 —
+        // the value of the state episode 1 was cut off at.
+        let mut traj2 = RelayRLTrajectory::new(4);
+        traj2.add_action(action_with(0.0, false, 20.0, 0.0));
+        buffer.insert_trajectory(traj2).await.unwrap();
+
+        let batch = buffer
+            .finalize_and_drain_first_n_blocking(vec![], 0, 0, 1, false)
+            .expect("first episode should drain");
+
+        // delta = reward + gamma*bootstrap - V(s0) = 0 + 20.0 - 10.0 = 10.0
+        // return = delta + V(s0) = 10.0 + 10.0 = 20.0 = bootstrap.
+        // A V(s_end-1) bootstrap (the pre-fix behavior) would instead give
+        // delta = 0 + 10.0 - 10.0 = 0.0 and return = 10.0.
+        assert_eq!(
+            batch.ret,
+            vec![20.0],
+            "truncated bootstrap should use V(s_end)=20.0, not V(s_end-1)=10.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_and_drain_first_n_returns_raw_returns_regardless_of_normalize_flag() {
+        let buffer = PPOReplayBuffer::new(16, 0.99, 0.97, None);
+        let mut traj = RelayRLTrajectory::new(4);
+        traj.add_action(action_with(5.0, true, 1.0, 0.0));
+        buffer.insert_trajectory(traj).await.unwrap();
+
+        // normalize_returns=true must not z-score the batch: a single-sample
+        // z-score would collapse the return to 0.0, discarding the signal that
+        // the persistent (running-stats) normalizer in run_ppo_sgd_flat expects
+        // to see in raw, reward-scale form.
+        let batch = buffer
+            .finalize_and_drain_first_n_blocking(vec![], 0, 0, 1, true)
+            .expect("single completed episode should drain");
+
+        assert_eq!(batch.ret_mean, 0.0);
+        assert_eq!(batch.ret_std, 1.0);
+        assert_eq!(
+            batch.ret,
+            vec![5.0],
+            "raw lambda-return should pass through untouched"
+        );
     }
 }

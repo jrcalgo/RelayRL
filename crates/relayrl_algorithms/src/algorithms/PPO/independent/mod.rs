@@ -110,6 +110,14 @@ pub struct IPPOParams {
     pub min_steps_per_epoch: Option<u64>,
     pub max_buffered_episodes: Option<u64>,
     pub rollout_len: Option<usize>,
+    /// When true, the learner blocks on the in-flight training job instead of racing it
+    /// against incoming trajectories (no `traj_rx` arm in the select while training is
+    /// pending). Backpressure from the bounded mpsc channel then stalls the producer loop,
+    /// yielding a synchronous collect->train->collect barrier per epoch (SF-style).
+    /// Default false preserves the overlapped collect/train behavior. `#[serde(default)]`
+    /// keeps existing config JSON without this key loading successfully.
+    #[serde(default)]
+    pub sync_epoch_boundary: bool,
 }
 
 impl Default for IPPOParams {
@@ -135,6 +143,7 @@ impl Default for IPPOParams {
             min_steps_per_epoch: None,
             max_buffered_episodes: None,
             rollout_len: None,
+            sync_epoch_boundary: false,
         }
     }
 }
@@ -527,15 +536,15 @@ where
                 n,
                 self.hyperparams.normalize_returns,
             ) {
-                Some(mut batch) => {
-                    // Recompute logp_old from the current burn model — eliminates both the
-                    // ORT/burn numerical mismatch and same-epoch staleness. Values are already
-                    // refreshed above (fresh_values); this completes the picture for log-probs.
-                    // Cost: one extra CPU forward pass per epoch (no backward).
-                    let fresh_logp = kernel.get_pi_logprobs(&batch.obs, batch.obs_dim, &batch.act);
-                    if fresh_logp.len() == batch.logp.len() {
-                        batch.logp = fresh_logp;
-                    }
+                Some(batch) => {
+                    // Use rollout-time logp as logp_old (standard PPO).
+                    // Recomputing log-probs from the epoch-start network here makes the
+                    // PPO importance ratio ≈1.0 at every epoch start, so the clip never
+                    // engages (ClipFrac stays at 0.0000) — PPO degenerates to unconstrained
+                    // policy gradient on drift-unbounded updates. Standard PPO and SF's APPO
+                    // keep logp_old fixed from rollout time so the clip bounds policy drift
+                    // relative to the data-collection policy. Values are still fresh
+                    // (fresh_values above); only logp_old stays at rollout time.
                     jobs.push((kernel, batch))
                 }
                 None => {
@@ -971,5 +980,10 @@ mod tests {
 
         assert!(params.clip_ratio > 0.0);
         assert!(params.target_kl > 0.0);
+    }
+
+    #[test]
+    fn sync_epoch_boundary_defaults_to_false() {
+        assert!(!IPPOParams::default().sync_epoch_boundary);
     }
 }

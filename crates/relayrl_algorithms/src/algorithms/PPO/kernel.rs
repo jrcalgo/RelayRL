@@ -1063,10 +1063,25 @@ impl<
             return Vec::new();
         }
 
-        let (trainer, returns_mean, returns_var, returns_count, ret_denorm_mean, ret_denorm_std) = match self {
-            PPOKernel::Discrete(k) => (k.trainer.as_ref(), k.returns_mean, k.returns_variance, k.returns_count, k.ret_denorm_mean, k.ret_denorm_std),
-            PPOKernel::Continuous(k) => (k.trainer.as_ref(), k.returns_mean, k.returns_variance, k.returns_count, k.ret_denorm_mean, k.ret_denorm_std),
-        };
+        let (trainer, returns_mean, returns_var, returns_count, ret_denorm_mean, ret_denorm_std) =
+            match self {
+                PPOKernel::Discrete(k) => (
+                    k.trainer.as_ref(),
+                    k.returns_mean,
+                    k.returns_variance,
+                    k.returns_count,
+                    k.ret_denorm_mean,
+                    k.ret_denorm_std,
+                ),
+                PPOKernel::Continuous(k) => (
+                    k.trainer.as_ref(),
+                    k.returns_mean,
+                    k.returns_variance,
+                    k.returns_count,
+                    k.ret_denorm_mean,
+                    k.ret_denorm_std,
+                ),
+            };
         if let Some(t) = trainer {
             let obs_flat = match training::obs_flat_from_tdata(obs) {
                 Ok(f) => f,
@@ -1081,7 +1096,13 @@ impl<
             };
             let persistent_mean = if returns_count > 0 { returns_mean } else { 0.0 };
 
-            return v.into_iter().map(|v| ((v as f64 * persistent_std + persistent_mean) * ret_denorm_std as f64 + ret_denorm_mean as f64) as f32).collect();
+            return v
+                .into_iter()
+                .map(|v| {
+                    ((v as f64 * persistent_std + persistent_mean) * ret_denorm_std as f64
+                        + ret_denorm_mean as f64) as f32
+                })
+                .collect();
         }
         vec![0.0; obs.len()]
     }
@@ -1122,11 +1143,11 @@ impl<
             PPOKernel::Discrete(k) => {
                 k.ret_denorm_mean = mean;
                 k.ret_denorm_std = std;
-            },
+            }
             PPOKernel::Continuous(k) => {
                 k.ret_denorm_mean = mean;
                 k.ret_denorm_std = std;
-            },
+            }
         }
     }
 }
