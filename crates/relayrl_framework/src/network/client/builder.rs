@@ -343,7 +343,11 @@ pub enum ActorDataMode {
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    OnlineWithFilesAndCache(TrainingParams, Option<LocalTrajectoryFileParams>, TrajectoryCacheSize),
+    OnlineWithFilesAndCache(
+        TrainingParams,
+        Option<LocalTrajectoryFileParams>,
+        TrajectoryCacheSize,
+    ),
     /// Training data collection and processing is disabled
     Disabled,
 }
@@ -366,8 +370,7 @@ pub(crate) fn uses_local_file_writing(training_data_mode: &ActorDataMode) -> boo
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     return matches!(
         training_data_mode,
-        ActorDataMode::OfflineWithFiles(_)
-            | ActorDataMode::OfflineWithFilesAndCache(_)
+        ActorDataMode::OfflineWithFiles(_) | ActorDataMode::OfflineWithFilesAndCache(..)
     );
 }
 
@@ -384,8 +387,7 @@ pub(crate) fn uses_trajectory_cache(training_data_mode: &ActorDataMode) -> bool 
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
     return matches!(
         training_data_mode,
-        ActorDataMode::OfflineWithCache(_)
-            | ActorDataMode::OfflineWithFilesAndCache(..)
+        ActorDataMode::OfflineWithCache(_) | ActorDataMode::OfflineWithFilesAndCache(..)
     );
 }
 
@@ -432,10 +434,6 @@ pub struct AgentBuildInvariants<B: Backend + BackendMatcher<Backend = B>> {
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildInvariants<B> {
-    /// 
-    /// 
-    /// 
-    /// 
     fn with(builder: AgentBuilder<B>) -> Self {
         Self {
             builder: builder.to_owned(),
@@ -469,10 +467,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildInvariants<B> {
     ///     .modes()
     ///     .actor_data_mode(ActorDataMode::OfflineWithFilesAndCache(None, 1000));
     /// ```
-    pub fn actor_data_mode(
-        mut self,
-        actor_data_mode: ActorDataMode,
-    ) -> Self {
+    pub fn actor_data_mode(mut self, actor_data_mode: ActorDataMode) -> Self {
         self.builder.settings.client_modes.actor_data_mode = actor_data_mode;
         self
     }
@@ -497,17 +492,15 @@ pub struct AgentBuildParameters<B: Backend + BackendMatcher<Backend = B>> {
 
 impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildParameters<B> {
     fn with(builder: AgentBuilder<B>) -> Self {
-        Self {
-            builder,
-        }
+        Self { builder }
     }
 
     /// Runtime invariants for `RelayRLAgent`
-    /// 
+    ///
     pub fn modes(self) -> AgentBuildInvariants<B> {
         AgentBuildInvariants::<B>::with(self.builder.to_owned())
     }
-    
+
     /// Sets the number of routing workers started alongside the coordinator. Defaults to `1`.
     ///
     /// ```ignore
@@ -520,8 +513,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildParameters<B> {
         self
     }
 
-    /// Sets the trajectory buffer size for each buffer in each router. Defaults to `1000`.
-    /// 
+    /// Sets the trajectory buffer size for each buffer in each router. Defaults to `1024`.
+    ///
     /// ```ignore
     /// let builder = AgentBuilder::<NdArray>::builder().params().data_buffer_size(10_000);
     /// ```
@@ -545,7 +538,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildParameters<B> {
     }
 
     /// Overrides the config updating polling frequency (secs). When unset the value in the JSON config (default `10`) is used.
-    /// 
+    ///
     /// ```ignore
     /// let builder = AgentBuilder::<NdArray>::builder().params().config_polling_seconds(3);
     /// ```

@@ -31,7 +31,7 @@ inference-server = []
 zmq-transport = ["zmq", "relayrl_types/codec-full"]
 nats-transport = ["async-nats", "tokio-stream", "relayrl_types/codec-full"]
 
-tch-backend = ["relayrl_types/tch-backend", "relayrl_types/tch-model", "burn-tch"]
+tch-backend = ["relayrl_algorithms/tch-backend", "relayrl_types/tch-backend", "relayrl_types/tch-model", "burn-tch"]
 
 logging-init = []
 metrics = ["prometheus", "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]
@@ -42,7 +42,7 @@ profile = ["flamegraph", "console-subscriber"]
 relayrl_types = { workspace = true }
 relayrl_algorithms = { workspace = true }
 relayrl_env_trait = { workspace = true }
-active-uuid-registry = { version = "0.7.1", features = ["concurrent-map"]}
+active-uuid-registry = { version = "0.8.0", features = ["concurrent-map"]}
 
 # General external crates used throughout framework
 tokio = { workspace = true, features = ["full"] }

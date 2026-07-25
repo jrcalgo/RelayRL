@@ -1643,8 +1643,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
 mod unit_tests {
     use super::*;
 
-    use tokio::sync::mpsc;
     use crate::network::client::runtime::data::router::{ControlPayload, DataPayload};
+    use tokio::sync::mpsc;
 
     fn make_model_update_payload(
         actor_id_bytes: [u8; 16],

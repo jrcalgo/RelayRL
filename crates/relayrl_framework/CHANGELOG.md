@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-rc.1] - 2026-07-20
+
+### Added
+- **`ActorInfo` struct** - Actor-targeting APIs now identify actors with `ActorInfo { id: ActorUuid, nametag: NameTag }` instead of a bare `ActorUuid`, so callers no longer have to track ids and nametags in separate collections.
+
+### Changed
+- **Actor-targeting method signatures** - `new_actor(s)`, `remove_actor(s)`, `get_actor_info()`, `get_actor_info_by_rank`, `set_actor_id`, `set_actor_nametag`, `update_models`, `get_model_versions`, `drain_trajectory_caches`, `request_action(s)`, `flag_last_action(s)`, `set_env`, `remove_env`, `get_env_count`, `set_env_count`, and `run_env_with_ppo`/`run_env_eval` now accept `&ActorInfo` / `&[ActorInfo]` and return `ActorInfo` / `Vec<ActorInfo>` instead of raw `ActorUuid` / `Vec<ActorUuid>`; `set_actor_id` and `set_actor_nametag` take `&mut ActorInfo` and update it in place after a successful rename.
+- **`ActorInfo` is now a read-only live handle** - `ActorInfo`'s `id`/`nametag` are private shared slots owned by the actor's runtime; every clone observes renames/retags immediately via `id()`/`nametag()`. `drain_trajectory_caches` and `RelayRLAgent::shutdown()` still accept/select actors via `&[ActorInfo]`, but their returned trajectory snapshots are keyed by stable `ActorUuid` instead of `ActorInfo`, since those maps are one-shot copies that must stay valid even if an actor is renamed after the snapshot is taken.
+
+### Fixed
+- **Model-update subset filtering regression** - `StateManager::sorted_actors_for_model_updates` lost its filter against live `actor_handles` during the `ActorInfo` migration, so `update_models`/`get_model_versions` calls scoped to a subset of actors would silently include unregistered/unknown actor ids as dispatch targets instead of ignoring them. The filter is restored.
+- **`metrics` feature build** - Fixed an `init_metrics`/`initialize_metrics` naming mismatch and an overlapping `#[cfg]` block that left `MetricsStart` unimplemented for `ClientCoordinator` when the `metrics` feature was enabled.
+- **`nats-transport` feature build** - Removed a duplicate `CachePadded` import in `lifecycle_manager.rs` and fixed a `shared_traj_cache` type mismatch in `scale_manager.rs` that broke compilation under `nats-transport`.
+- **`nats-transport` + `metrics` compound build** - Removed a duplicate `ClientStart` trait definition that only surfaced when both features were enabled together.
+- **`ClientCoordinator::shutdown()` unreachable code** - `shutdown()` returned from every arm of an inner `match`, so trajectory-cache teardown after the match was dead code; the match result is now captured and teardown always runs.
+- **Root `README.md` import path** - Corrected an invalid `relayrl::types::tensor::relayrl::DeviceType` import to `relayrl::types::tensor::DeviceType`.
+- **Test and doc coverage for `ActorInfo`** - Updated unit tests in `agent.rs`, `coordinator.rs`, and `state_manager.rs`, the `local_client_smoke` integration test, and the `relayrl` facade crate's doctests/prose to construct and pass `ActorInfo` values instead of bare `ActorUuid`s, matching the current API.
+- **Client namespace ownership** - `ClientCoordinator::start()` previously dropped the `OwnedNamespace` handle it reserved for the client's UUID registry namespace, so subsequent actor/scale-manager/environment writes into that namespace failed with `UnauthorizedNamespaceWriteAccessError`. The coordinator now keeps the handle alive as `ClientNamespace` for the runtime's lifetime and threads it into `StateManager`, `ScaleManager`, actors, and vectorized environments so writes present the owned signature; the namespace is released explicitly during shutdown.
+- **Experimental transport namespace writes (`nats-transport` / `zmq-transport`)** - NATS/ZMQ transport construction and the ZMQ socket pool wrote into the client's UUID registry namespace through free registry functions, which also failed once the namespace became owned; they now reserve/release transport and socket identities through the same `ClientNamespace` capability. This also fixes ZMQ shutdown cleanup, which previously removed sockets using hard-coded, mismatched namespace/context strings (`"client"` / `"zmq_dealer_socket"`, etc.) instead of the actual client namespace and `ZMQ_CLIENT_CONTEXT`.
+
+### Breaking
+- **Actor-targeting APIs use `ActorInfo`** - Any caller passing bare `ActorUuid`/`Uuid` values (or `Vec<Uuid>`) to the methods listed under Changed must switch to constructing or forwarding `ActorInfo` values; methods that previously took owned `Vec<ActorUuid>` now take borrowed `&[ActorInfo]` slices.
+
 ## [0.5.0-rc] - 2026-06-14
 
 ### Added

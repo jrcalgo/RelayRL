@@ -6,6 +6,7 @@
 use crate::network::TransportMode;
 use crate::network::client::agent::AlgorithmInitArgs;
 use crate::network::client::agent::ModelMode;
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
 use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::control::scale_manager::ScalingOperation;
 use crate::network::client::runtime::data::router::RoutedMessage;
@@ -114,7 +115,7 @@ pub(crate) trait AsyncClientTransportInterface<B: Backend + BackendMatcher<Backe
     AsyncClientInferenceTransportOps<B> + AsyncClientTrainingTransportOps<B>
 {
     async fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         shared_client_modes: Arc<ClientModes>,
     ) -> Result<Self, TransportError>
     where
@@ -127,7 +128,7 @@ pub(crate) trait SyncClientTransportInterface<B: Backend + BackendMatcher<Backen
     SyncClientInferenceTransportOps<B> + SyncClientTrainingTransportOps<B>
 {
     fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         shared_client_modes: Arc<ClientModes>,
     ) -> Result<Self, TransportError>
     where
@@ -320,7 +321,7 @@ pub(crate) trait SyncClientScalingTransportOps<B: Backend + BackendMatcher<Backe
 
 pub(crate) async fn client_transport_factory<B: Backend + BackendMatcher<Backend = B>>(
     transport_type: TransportMode,
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     shared_client_modes: Arc<ClientModes>,
 ) -> Result<ClientTransportInterface<B>, TransportError> {
     match transport_type {

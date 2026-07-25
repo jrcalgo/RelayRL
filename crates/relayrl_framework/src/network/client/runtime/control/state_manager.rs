@@ -5,12 +5,12 @@
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::AlgorithmInitArgs;
-use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
+use crate::network::client::agent::{ActorInferenceMode, ActorInfo, ClientModes, ModelMode};
 use crate::network::client::runtime::actor::LocalModelHandle;
 use crate::network::client::runtime::actor::{
     Actor, ActorEntity, ActorError, ActorRuntime, ErasedActorRuntime,
 };
-use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::control::coordinator::{CHANNEL_THROUGHPUT, ClientNamespace};
 use crate::network::client::runtime::control::lifecycle_manager::LifecycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
@@ -33,17 +33,20 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{remove_id, replace_id};
 use relayrl_algorithms::prelude::nn::NeuralNetwork;
 use relayrl_algorithms::prelude::ppo::trainer::PPOTrainerSpec;
+#[cfg(feature = "tch-backend")]
+use relayrl_env_trait::EnvTchDType;
 use relayrl_env_trait::{EnvDType, EnvNdArrayDType, Environment};
+#[cfg(feature = "tch-backend")]
+use relayrl_types::data::tensor::TchDType;
 use relayrl_types::data::tensor::{BackendMatcher, DType, DeviceType, NdArrayDType};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwapOption;
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -76,6 +79,8 @@ pub enum StateManagerError {
     SetActorIdError(String),
     #[error("Set actor nametag failed: {0}")]
     SetActorNameTagError(String),
+    #[error("Set actor model failed: {0}")]
+    SetActorModelError(String),
     #[error("Get actors failed: {0}")]
     GetActorsError(String),
     #[error("New actor failed: {0}")]
@@ -121,7 +126,23 @@ pub enum StateManagerError {
 }
 
 pub type ActorUuid = Uuid;
-pub type NameTag = Option<Arc<str>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NameTag {
+    /// Arbitrary string identifier for the actor.
+    pub tag: String,
+    /// Incremented for each new copy of the same tag.
+    pub duplicate: usize,
+}
+
+impl Default for NameTag {
+    fn default() -> Self {
+        Self {
+            tag: String::new(),
+            duplicate: 0,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ActorRoute {
@@ -135,7 +156,7 @@ pub(crate) struct SharedRouterState {
 
 /// In-memory actor state management and global channel transport
 pub(crate) struct StateManager<B: Backend + BackendMatcher<Backend = B>> {
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -163,7 +184,7 @@ pub(crate) struct StateManager<B: Backend + BackendMatcher<Backend = B>> {
 impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         shared_inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -323,7 +344,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         router_namespace: RouterNamespace,
         device: DeviceType,
         max_traj_length: usize,
-        nametag: Option<String>,
+        nametag: Option<NameTag>,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -432,36 +453,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         Ok(())
     }
 
-    #[allow(unused)]
-    pub(crate) async fn restart_actor<const D_IN: usize, const D_OUT: usize>(
-        &mut self,
-        actor_id: ActorUuid,
-        router_namespace: RouterNamespace,
-        device: DeviceType,
-        max_traj_length: usize,
-        nametag: Option<String>,
-        default_model: Option<ModelModule<B>>,
-        tx_to_buffer: Sender<RoutedMessage>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: AlgorithmInitArgs,
-    ) -> Result<(), StateManagerError> {
-        self.remove_actor(actor_id)?;
-        self.new_actor::<D_IN, D_OUT>(
-            actor_id,
-            router_namespace,
-            device,
-            max_traj_length,
-            nametag,
-            default_model,
-            tx_to_buffer,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            algorithm_args,
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn shutdown_all_actors(&self) -> Result<Vec<ActorUuid>, StateManagerError> {
+    pub(crate) async fn shutdown_all_actors(&self) -> Result<Vec<ActorInfo>, StateManagerError> {
         let mut actor_ids = Vec::<ActorUuid>::new();
 
         // Send Shutdown message to every actor inbox; actors will flush and exit
@@ -511,7 +503,19 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
             }
         }
 
-        Ok(actor_ids)
+        Ok(actor_ids
+            .iter()
+            .filter_map(|id| {
+                let runtime = self.actor_runtime_handles.get(id)?;
+                match runtime.get_actor_info() {
+                    Ok(actor_info) => Some(actor_info),
+                    Err(e) => {
+                        log::error!("{}", e);
+                        None
+                    }
+                }
+            })
+            .collect())
     }
 
     pub(crate) async fn clear_runtime_components(&mut self) -> Result<(), StateManagerError> {
@@ -540,12 +544,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         self.actor_runtime_handles.remove(&id);
         self.shared_router_state.actor_routes.remove(&id);
         self.shared_actor_count.fetch_sub(1, Ordering::Release);
-        remove_id(
-            self.client_namespace.as_ref(),
-            crate::network::ACTOR_CONTEXT,
-            id,
-        )
-        .map_err(StateManagerError::from)?;
+        self.client_namespace
+            .remove_id(crate::network::ACTOR_CONTEXT, id)
+            .map_err(StateManagerError::from)?;
 
         Ok(())
     }
@@ -598,16 +599,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
             self.actor_envs.insert(new_id, current_env);
         }
         if let Some((_, runtime)) = self.actor_runtime_handles.remove(&current_id) {
+            // Update the actor's shared identity slot so every outstanding `ActorInfo` handle
+            // for this actor observes the new id, then re-key the map by the new id.
+            runtime
+                .set_actor_id(new_id)
+                .map_err(StateManagerError::from)?;
             self.actor_runtime_handles.insert(new_id, runtime);
         }
 
-        replace_id(
-            self.client_namespace.as_ref(),
-            crate::network::ACTOR_CONTEXT,
-            current_id,
-            new_id,
-        )
-        .map_err(StateManagerError::from)?;
+        self.client_namespace
+            .replace_id(crate::network::ACTOR_CONTEXT, current_id, new_id)
+            .map_err(StateManagerError::from)?;
 
         Ok(())
     }
@@ -615,7 +617,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
     pub(crate) fn set_actor_nametag(
         &self,
         actor_id: ActorUuid,
-        new_nametag: Option<String>,
+        new_nametag: Option<NameTag>,
     ) -> Result<(), StateManagerError> {
         if let Some(entry) = self.actor_runtime_handles.get(&actor_id) {
             entry
@@ -625,8 +627,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         } else {
             Err(StateManagerError::SetActorNameTagError(format!(
                 "[StateManager] Failed to change actor id {} to {:?}; actor runtime could not be found",
-                actor_id,
-                new_nametag.as_slice()
+                actor_id, new_nametag
             )))
         }
     }
@@ -686,74 +687,86 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
             .collect()
     }
 
-    fn sorted_actor_ids_for_model_updates(
-        &self,
-        actor_ids: Option<&[ActorUuid]>,
-    ) -> Vec<ActorUuid> {
-        let mut actor_ids = match actor_ids {
-            Some(ids) => ids
+    fn sorted_actors_for_model_updates(&self, actors: Option<&[ActorInfo]>) -> Vec<ActorInfo> {
+        let mut actors: Vec<ActorInfo> = match actors {
+            Some(infos) => infos
                 .iter()
-                .copied()
-                .filter(|actor_id| self.actor_handles.contains_key(actor_id))
+                .filter(|actor| self.actor_handles.contains_key(&actor.id()))
+                .cloned()
                 .collect(),
-            None => self.get_actor_id_list(),
+            None => self
+                .get_actor_id_list()
+                .iter()
+                .map(|id| match self.actor_runtime_handles.get(id) {
+                    Some(runtime) => match runtime.get_actor_info() {
+                        Ok(actor_info) => actor_info,
+                        Err(e) => {
+                            log::error!("{}", e);
+                            ActorInfo::new(*id, None)
+                        }
+                    },
+                    // No runtime registered yet for this id: fall back to a fresh handle so the
+                    // actor is still represented (with an unknown/no nametag) in the dispatch set.
+                    None => ActorInfo::new(*id, None),
+                })
+                .collect(),
         };
-        actor_ids.sort_by_key(|actor_id| actor_id.to_string());
-        actor_ids.dedup();
-        actor_ids
+        actors.sort_by_key(|actor| actor.id().to_string());
+        actors.dedup_by(|a, b| a.id() == b.id());
+        actors
     }
 
-    fn canonical_model_update_target_from_sorted_actor_ids(
+    fn canonical_model_update_target_from_sorted_actors(
         &self,
-        actor_id: ActorUuid,
-        sorted_actor_ids: &[ActorUuid],
-    ) -> ActorUuid {
+        actor: &ActorInfo,
+        sorted_actors: &[ActorInfo],
+    ) -> ActorInfo {
         match &self.shared_client_modes.actor_inference_mode {
             ActorInferenceMode::Client(ModelMode::Shared) => {
                 let Some(actor_device) = self
                     .actor_devices
-                    .get(&actor_id)
+                    .get(&actor.id())
                     .map(|device_entry| device_entry.value().clone())
                 else {
-                    return actor_id;
+                    return actor.clone();
                 };
 
-                sorted_actor_ids
+                sorted_actors
                     .iter()
-                    .copied()
-                    .find(|candidate_actor_id| {
+                    .find(|candidate_actor| {
                         self.actor_devices
-                            .get(candidate_actor_id)
+                            .get(&candidate_actor.id())
                             .map(|device_entry| device_entry.value() == &actor_device)
                             .unwrap_or(false)
                     })
-                    .unwrap_or(actor_id)
+                    .cloned()
+                    .unwrap_or_else(|| actor.clone())
             }
-            _ => actor_id,
+            _ => actor.clone(),
         }
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    pub(crate) fn canonical_model_update_target(&self, actor_id: ActorUuid) -> ActorUuid {
-        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates(None);
-        self.canonical_model_update_target_from_sorted_actor_ids(actor_id, &sorted_actor_ids)
+    pub(crate) fn canonical_model_update_target(&self, actor: &ActorInfo) -> ActorInfo {
+        let sorted_actors = self.sorted_actors_for_model_updates(None);
+        self.canonical_model_update_target_from_sorted_actors(actor, &sorted_actors)
     }
 
     #[cfg(test)]
-    pub(crate) fn model_update_dispatch_targets(&self) -> Vec<ActorUuid> {
+    pub(crate) fn model_update_dispatch_targets(&self) -> Vec<ActorInfo> {
         self.model_update_dispatch_targets_for_subset(None)
     }
 
     pub(crate) fn model_update_dispatch_targets_for_subset(
         &self,
-        actor_ids: Option<&[ActorUuid]>,
-    ) -> Vec<ActorUuid> {
-        let sorted_actor_ids = self.sorted_actor_ids_for_model_updates(actor_ids);
+        actors: Option<&[ActorInfo]>,
+    ) -> Vec<ActorInfo> {
+        let sorted_actors = self.sorted_actors_for_model_updates(actors);
         let mut dispatch_targets = Vec::new();
 
-        for actor_id in sorted_actor_ids.iter().copied() {
-            let canonical_target = self
-                .canonical_model_update_target_from_sorted_actor_ids(actor_id, &sorted_actor_ids);
+        for actor in sorted_actors.iter() {
+            let canonical_target =
+                self.canonical_model_update_target_from_sorted_actors(actor, &sorted_actors);
             if dispatch_targets.contains(&canonical_target) {
                 continue;
             }
@@ -1305,9 +1318,8 @@ pub(crate) fn decode_continuous_bytes(
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
+        ActorDataMode, ActorInferenceMode, ClientModes, ModelMode,
     };
-    use active_uuid_registry::interface::{reserve_id_with, reserve_namespace};
     use active_uuid_registry::registry_uuid::Uuid;
     use arc_swap::ArcSwapOption;
     use burn_ndarray::NdArray;
@@ -1344,7 +1356,11 @@ mod unit_tests {
         StateManager<TestBackend>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
-        let namespace: Arc<str> = Arc::from(format!("test-sm-{}", Uuid::new_v4()));
+        let namespace_str = format!("test-sm-{}", Uuid::new_v4());
+        let namespace_handle =
+            active_uuid_registry::interface::reserve_owned_namespace(&namespace_str)
+                .expect("reserve owned test namespace");
+        let namespace = ClientNamespace::new(namespace_handle, Arc::from(namespace_str));
         StateManager::<TestBackend>::new(
             namespace,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -1377,6 +1393,10 @@ mod unit_tests {
         let mut bytes = [0_u8; 16];
         bytes[15] = last_byte;
         Uuid::from_bytes(bytes)
+    }
+
+    fn actor_info(id: Uuid) -> ActorInfo {
+        ActorInfo::new(id, None)
     }
 
     fn float_any_tensor(values: &[f32]) -> AnyBurnTensor<TestBackend, D_IN> {
@@ -1608,14 +1628,10 @@ mod unit_tests {
     #[tokio::test]
     async fn remove_actor_clears_device_and_router_metadata() {
         let (mut sm, _rx) = make_state_manager(disabled_modes());
-        reserve_namespace(sm.client_namespace.as_ref());
-        let actor_id = reserve_id_with(
-            sm.client_namespace.as_ref(),
-            crate::network::ACTOR_CONTEXT,
-            117,
-            100,
-        )
-        .unwrap();
+        let actor_id = sm
+            .client_namespace
+            .reserve_id_with(crate::network::ACTOR_CONTEXT, 117, 100)
+            .unwrap();
         let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
         sm.actor_handles
@@ -1639,14 +1655,10 @@ mod unit_tests {
     #[tokio::test]
     async fn set_actor_id_moves_device_and_router_metadata() {
         let (sm, _rx) = make_state_manager(disabled_modes());
-        reserve_namespace(sm.client_namespace.as_ref());
-        let current_id = reserve_id_with(
-            sm.client_namespace.as_ref(),
-            crate::network::ACTOR_CONTEXT,
-            117,
-            100,
-        )
-        .unwrap();
+        let current_id = sm
+            .client_namespace
+            .reserve_id_with(crate::network::ACTOR_CONTEXT, 117, 100)
+            .unwrap();
         let new_id = Uuid::new_v4();
         let (tx_to_actor, _actor_inbox_rx) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
 
@@ -1693,8 +1705,8 @@ mod unit_tests {
                 .insert(*id, Arc::new(tokio::spawn(async {})));
         }
 
-        let mut expected = ids.clone();
-        expected.sort_by_key(|actor_id| actor_id.to_string());
+        let mut expected: Vec<ActorInfo> = ids.iter().copied().map(actor_info).collect();
+        expected.sort_by_key(|actor| actor.id().to_string());
 
         assert_eq!(sm.model_update_dispatch_targets(), expected);
     }
@@ -1716,7 +1728,10 @@ mod unit_tests {
             .copied()
             .unwrap();
 
-        assert_eq!(sm.model_update_dispatch_targets(), vec![expected_target]);
+        assert_eq!(
+            sm.model_update_dispatch_targets(),
+            vec![actor_info(expected_target)]
+        );
     }
 
     #[tokio::test]
@@ -1733,10 +1748,15 @@ mod unit_tests {
                 .insert(actor_id, Arc::new(tokio::spawn(async {})));
         }
 
-        let subset = vec![id3, unknown_id, id1, id3];
+        let subset = vec![
+            actor_info(id3),
+            actor_info(unknown_id),
+            actor_info(id1),
+            actor_info(id3),
+        ];
         assert_eq!(
             sm.model_update_dispatch_targets_for_subset(Some(&subset)),
-            vec![id1, id3]
+            vec![actor_info(id1), actor_info(id3)]
         );
     }
 
@@ -1749,16 +1769,16 @@ mod unit_tests {
         sm.actor_handles
             .insert(known_id, Arc::new(tokio::spawn(async {})));
 
-        let subset = vec![unknown_id];
+        let subset = vec![actor_info(unknown_id)];
         assert!(
             sm.model_update_dispatch_targets_for_subset(Some(&subset))
                 .is_empty()
         );
 
-        let subset = vec![unknown_id, known_id];
+        let subset = vec![actor_info(unknown_id), actor_info(known_id)];
         assert_eq!(
             sm.model_update_dispatch_targets_for_subset(Some(&subset)),
-            vec![known_id]
+            vec![actor_info(known_id)]
         );
     }
 
@@ -1782,10 +1802,14 @@ mod unit_tests {
             sm.actor_devices.insert(actor_id, device);
         }
 
-        let subset = vec![cuda_large, cpu_large, cpu_small];
+        let subset = vec![
+            actor_info(cuda_large),
+            actor_info(cpu_large),
+            actor_info(cpu_small),
+        ];
         assert_eq!(
             sm.model_update_dispatch_targets_for_subset(Some(&subset)),
-            vec![cpu_small, cuda_large]
+            vec![actor_info(cpu_small), actor_info(cuda_large)]
         );
     }
 
@@ -1808,7 +1832,10 @@ mod unit_tests {
             .unwrap();
 
         for id in &ids {
-            assert_eq!(sm.canonical_model_update_target(*id), expected_target);
+            assert_eq!(
+                sm.canonical_model_update_target(&actor_info(*id)),
+                actor_info(expected_target)
+            );
         }
     }
 
@@ -1824,7 +1851,10 @@ mod unit_tests {
         }
 
         for id in &ids {
-            assert_eq!(sm.canonical_model_update_target(*id), *id);
+            assert_eq!(
+                sm.canonical_model_update_target(&actor_info(*id)),
+                actor_info(*id)
+            );
         }
     }
 

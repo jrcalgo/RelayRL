@@ -4,12 +4,12 @@
 //! inboxes and trajectory sinks.
 
 use crate::network::client::agent::LocalTrajectoryFileParams;
+use crate::network::client::agent::{
+    ActorDataMode, ActorInfo, ClientModes, uses_local_file_writing, uses_trajectory_cache,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{ActorInferenceMode, AlgorithmInitArgs, ModelMode};
-use crate::network::client::agent::{
-    ActorDataMode, ClientModes, uses_trajectory_cache, uses_local_file_writing,
-};
-use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
+use crate::network::client::runtime::control::coordinator::{CHANNEL_THROUGHPUT, ClientNamespace};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::control::lifecycle_manager::{
@@ -51,7 +51,7 @@ use relayrl_types::model::ModelModule;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Receiver;
@@ -125,39 +125,47 @@ pub type ScaleManagerUuid = Uuid;
 #[derive(Clone)]
 pub(crate) struct SharedTrajectoryCache {
     pub(crate) cache: Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
-    pub(crate) per_actor_size: usize
+    pub(crate) per_actor_size: usize,
 }
 
 impl SharedTrajectoryCache {
+    /// Drains buffered trajectories for `actors`, returning a snapshot map keyed by each actor's
+    /// stable [`Uuid`] rather than by [`ActorInfo`]. Callers select actors via live `ActorInfo`
+    /// handles, but the returned map is a one-shot copy that must remain valid even if one of
+    /// those handles' ids is renamed afterward.
     pub(crate) fn drain(
         &mut self,
-        actor_ids: Vec<Uuid>,
-    ) -> Result<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>, (Option<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, Vec<Uuid>)> {
+        actors: &[ActorInfo],
+    ) -> Result<
+        HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>,
+        (Option<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, Vec<Uuid>),
+    > {
         let mut traj_map = HashMap::<Uuid, Vec<Arc<RelayRLTrajectory>>>::new();
         let mut invalid_ids = Vec::new();
 
-        actor_ids.iter().for_each(|id| {
-            if let Some(mut entry) = self.cache.get_mut(&id) {
+        actors.iter().for_each(|actor| {
+            let actor_id = actor.id();
+            if let Some(mut entry) = self.cache.get_mut(&actor_id) {
                 let traj_vec = std::mem::take(entry.value_mut());
-                traj_map.insert(id.clone(), traj_vec);
+                traj_map.insert(actor_id, traj_vec);
             } else {
-                invalid_ids.push(id.clone());
-                log::error!("{}", format!("Actor ID not found in trajectory cache: {}", id));
+                invalid_ids.push(actor_id);
+                log::error!("Actor ID not found in trajectory cache: {}", actor_id);
             }
         });
 
-        return if invalid_ids.len() == actor_ids.len() {
+        if invalid_ids.len() == actors.len() {
             Err((None, invalid_ids))
-        } else if invalid_ids.len() > 0 {
-            Err((Some(traj_map.clone()), invalid_ids))
+        } else if !invalid_ids.is_empty() {
+            Err((Some(traj_map), invalid_ids))
         } else {
-            Ok(traj_map.clone())
-        };
+            Ok(traj_map)
+        }
     }
 }
 
 pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>> {
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     router_namespace_counter: u32,
     #[allow(unused)]
     pub(crate) scaling_id: ScaleManagerUuid,
@@ -187,7 +195,7 @@ pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>> {
 impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         data_buffer_size: usize,
         shared_client_modes: Arc<ClientModes>,
         shared_state: Arc<RwLock<StateManager<B>>>,
@@ -204,13 +212,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
         #[cfg(feature = "metrics")] metrics: MetricsManager,
         lifecycle: LifecycleManager,
     ) -> Result<Self, ScaleManagerError> {
-        let scaling_id: ScaleManagerUuid = reserve_id_with(
-            client_namespace.as_ref(),
-            crate::network::SCALE_MANAGER_CONTEXT,
-            67,
-            100,
-        )
-        .map_err(ScaleManagerError::from)?;
+        let scaling_id: ScaleManagerUuid = client_namespace
+            .reserve_id_with(crate::network::SCALE_MANAGER_CONTEXT, 67, 100)
+            .map_err(ScaleManagerError::from)?;
 
         // Spawn the RouterDispatcher
         let router_filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>> =
@@ -248,21 +252,30 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
                 None
             };
 
-        let shared_traj_cache = if let ActorDataMode::OfflineWithCache(size) | ActorDataMode::OfflineWithFilesAndCache(_, size) = shared_client_modes.actor_data_mode {
+        let shared_traj_cache = if let ActorDataMode::OfflineWithCache(size)
+        | ActorDataMode::OfflineWithFilesAndCache(_, size) =
+            shared_client_modes.actor_data_mode
+        {
             Some(SharedTrajectoryCache {
                 cache: Arc::new(DashMap::new()),
-                per_actor_size: size
+                per_actor_size: size,
             })
         } else {
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            if let ActorDataMode::OnlineWithCache(_, size) | ActorDataMode::OnlineWithFilesAndCache(.., size) = shared_client_modes.actor_data_mode {
-                Some(SharedTrajectoryCache {
-                    cache: Arc::new(DashMap::new()),
-                    per_actor_size: size
-                })
-            } else {
-                None
+            {
+                if let ActorDataMode::OnlineWithCache(_, size)
+                | ActorDataMode::OnlineWithFilesAndCache(.., size) =
+                    shared_client_modes.actor_data_mode
+                {
+                    Some(SharedTrajectoryCache {
+                        cache: Arc::new(DashMap::new()),
+                        per_actor_size: size,
+                    })
+                } else {
+                    None
+                }
             }
+            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
             None
         };
 
@@ -435,18 +448,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
 
         match (&self.training_dispatcher, &self.shared_transport_addresses) {
             (Some(training_dispatcher), Some(transport_addresses)) => {
-                let _ = reserve_id_with(
-                    self.client_namespace.as_ref(),
-                    crate::network::RECEIVER_CONTEXT,
-                    1,
-                    100,
-                )
-                .map_err(ScaleManagerError::from)?;
+                let _ = self
+                    .client_namespace
+                    .reserve_id_with(crate::network::RECEIVER_CONTEXT, 1, 100)
+                    .map_err(ScaleManagerError::from)?;
 
                 let global_dispatcher_tx =
                     self.shared_state.read().await.global_dispatcher_tx.clone();
                 let receiver = ClientTransportModelReceiver::new(
-                    self.client_namespace.clone(),
+                    self.client_namespace.as_arc(),
                     global_dispatcher_tx,
                     self.shared_state.clone(),
                     transport_addresses.clone(),
@@ -555,9 +565,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
             };
 
             let buffer: Option<ClientTrajectoryBuffer<B>> = {
-                if self.shared_client_modes.actor_data_mode
-                    != ActorDataMode::Disabled
-                {
+                if self.shared_client_modes.actor_data_mode != ActorDataMode::Disabled {
                     let _ = reserve_id_with(
                         router_namespace.as_ref(),
                         crate::network::BUFFER_CONTEXT,
@@ -593,8 +601,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
                     }
 
                     if uses_trajectory_cache(&self.shared_client_modes.actor_data_mode)
-                        && let Some(shared_traj_cache) =
-                            self.shared_traj_cache.clone()
+                        && let Some(shared_traj_cache) = self.shared_traj_cache.clone()
                     {
                         buffer_init.with_trajectory_cache(shared_traj_cache);
                     };
@@ -1063,5 +1070,82 @@ mod unit_tests {
         let err = ScaleManagerError::GetRouterRuntimeParamsError("x".into());
         let display = format!("{}", err);
         assert!(display.contains("x"));
+    }
+
+    fn shared_trajectory_cache_with(entries: &[(Uuid, usize)]) -> SharedTrajectoryCache {
+        let cache = Arc::new(DashMap::new());
+        for (actor_id, traj_len) in entries {
+            cache.insert(*actor_id, vec![Arc::new(RelayRLTrajectory::new(*traj_len))]);
+        }
+        SharedTrajectoryCache {
+            cache,
+            per_actor_size: 100,
+        }
+    }
+
+    #[test]
+    fn drain_returns_map_keyed_by_stable_actor_uuid() {
+        let actor_id = Uuid::new_v4();
+        let mut traj_cache = shared_trajectory_cache_with(&[(actor_id, 3)]);
+        let actor = ActorInfo::new(actor_id, None);
+
+        let drained = traj_cache
+            .drain(std::slice::from_ref(&actor))
+            .expect("all requested actors are present in the cache");
+
+        // The returned map is keyed by `Uuid`, so a lookup by the plain id succeeds without
+        // needing an `ActorInfo` handle at all.
+        assert!(drained.contains_key(&actor_id));
+        assert_eq!(drained.len(), 1);
+    }
+
+    #[test]
+    fn drain_lookup_is_unaffected_by_a_later_id_rename() {
+        let actor_id = Uuid::new_v4();
+        let mut traj_cache = shared_trajectory_cache_with(&[(actor_id, 3)]);
+        let actor = ActorInfo::new(actor_id, None);
+
+        let drained = traj_cache
+            .drain(std::slice::from_ref(&actor))
+            .expect("all requested actors are present in the cache");
+
+        // Renaming the live handle after the snapshot was taken must not disturb the already
+        // drained map: it is keyed by the `Uuid` copied out at drain time, not by `ActorInfo`.
+        actor.set_id(Uuid::new_v4());
+
+        assert!(drained.contains_key(&actor_id));
+        assert_eq!(drained.len(), 1);
+    }
+
+    #[test]
+    fn drain_partial_invalid_actors_returns_valid_entries_only() {
+        let known_id = Uuid::new_v4();
+        let unknown_id = Uuid::new_v4();
+        let mut traj_cache = shared_trajectory_cache_with(&[(known_id, 3)]);
+
+        let actors = vec![ActorInfo::new(known_id, None), ActorInfo::new(unknown_id, None)];
+        let (drained, invalid_ids) = traj_cache
+            .drain(&actors)
+            .expect_err("one of the two requested actors is not present in the cache");
+
+        assert_eq!(invalid_ids, vec![unknown_id]);
+        let drained = drained.expect("at least one actor was found in the cache");
+        assert!(drained.contains_key(&known_id));
+        assert!(!drained.contains_key(&unknown_id));
+        assert_eq!(drained.len(), 1);
+    }
+
+    #[test]
+    fn drain_all_invalid_actors_returns_none() {
+        let unknown_id = Uuid::new_v4();
+        let mut traj_cache = shared_trajectory_cache_with(&[]);
+
+        let actors = vec![ActorInfo::new(unknown_id, None)];
+        let (drained, invalid_ids) = traj_cache
+            .drain(&actors)
+            .expect_err("the requested actor is not present in the cache");
+
+        assert_eq!(invalid_ids, vec![unknown_id]);
+        assert!(drained.is_none());
     }
 }

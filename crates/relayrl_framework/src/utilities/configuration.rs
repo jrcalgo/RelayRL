@@ -330,7 +330,7 @@ impl Default for MetricsParams {
     fn default() -> Self {
         Self {
             meter_name: "relayrl-client".to_string(),
-            otlp_endpoint: OtlpEndpointParams::default()
+            otlp_endpoint: OtlpEndpointParams::default(),
         }
     }
 }
@@ -346,7 +346,9 @@ pub struct OtlpEndpointParams {
 impl Default for OtlpEndpointParams {
     fn default() -> Self {
         Self {
-            prefix: "http://".to_string(), host: "127.0.0.1".to_string(), port: "4317".to_string() 
+            prefix: "http://".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: "4317".to_string(),
         }
     }
 }
@@ -504,7 +506,12 @@ pub trait ClientConfigBuildParams {
         &mut self,
         trajectory_file_output: LocalTrajectoryFileParams,
     ) -> &mut Self;
-    fn set_local_model_module(&mut self, directory_name: &str, model_name: &str, format: &str) -> &mut Self;
+    fn set_local_model_module(
+        &mut self,
+        directory_name: &str,
+        model_name: &str,
+        format: &str,
+    ) -> &mut Self;
     fn set_transport_config(&mut self, transport_config: TransportConfigParams) -> &mut Self;
     /// Builds a `ClientConfigLoader` from the current builder state.
     fn build(&self) -> ClientConfigLoader;
@@ -550,12 +557,17 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         self
     }
 
-    fn set_local_model_module(&mut self, directory_name: &str, model_name: &str, format: &str) -> &mut Self {
+    fn set_local_model_module(
+        &mut self,
+        directory_name: &str,
+        model_name: &str,
+        format: &str,
+    ) -> &mut Self {
         if !format.eq_ignore_ascii_case("pt") && !format.eq_ignore_ascii_case("onnx") {
             log::error!("Invalid model format: {}", format);
             return self;
         }
-        
+
         self.local_model_module = Some(LocalModelModuleParams {
             directory: directory_name.to_string(),
             format: format.to_string(),
@@ -735,10 +747,7 @@ impl TrainingServerConfigLoader {
 
 /// Builder trait for constructing a `TrainingServerConfigLoader` programmatically.
 pub trait TrainingServerConfigBuildParams {
-    fn set_config_polling_seconds(
-        &mut self,
-        config_polling_seconds: u64,
-    ) -> &mut Self;
+    fn set_config_polling_seconds(&mut self, config_polling_seconds: u64) -> &mut Self;
     fn set_hyperparameters(
         &mut self,
         algorithm: Algorithm,
@@ -768,10 +777,7 @@ pub struct TrainingServerConfigBuilder {
 }
 
 impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
-    fn set_config_polling_seconds(
-        &mut self,
-        config_polling_seconds: u64,
-    ) -> &mut Self {
+    fn set_config_polling_seconds(&mut self, config_polling_seconds: u64) -> &mut Self {
         self.config_polling_seconds = Some(config_polling_seconds);
         self
     }
@@ -974,9 +980,10 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     global_step_tag: "Epoch".to_string(),
                 }
             }),
-            local_model_module: self.local_model_module.clone().unwrap_or_else(|| {
-                LocalModelModuleParams::default()
-            }),
+            local_model_module: self
+                .local_model_module
+                .clone()
+                .unwrap_or_else(|| LocalModelModuleParams::default()),
         };
 
         let transport_config: TransportConfigParams = match &self.transport_config {
@@ -1263,7 +1270,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                     host: "127.0.0.1".to_string(),
                     port: "7778".to_string(),
                 },
-            }; 
+            };
 
         TransportConfigParams {
             nats_addresses: NatsTransportAddresses {
@@ -1281,7 +1288,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                     trajectory_server_address: zmq_trajectory_server_address,
                     training_scaling_server_address: zmq_training_scaling_server_address,
                 },
-            }
+            },
         }
     }
 
@@ -1326,7 +1333,7 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                         port: "7778".to_string(),
                     },
                 },
-            }
+            },
         }
     }
 }
@@ -1655,9 +1662,12 @@ mod unit_tests {
             transport_config: None,
             trajectory_file_output: None,
             local_model_module: None,
-            metrics: None
+            metrics: None,
         };
-        builder.set_metrics(MetricsParams { meter_name: "my-custom-metric".to_string(), otlp_endpoint: OtlpEndpointParams::default() });
+        builder.set_metrics(MetricsParams {
+            meter_name: "my-custom-metric".to_string(),
+            otlp_endpoint: OtlpEndpointParams::default(),
+        });
         let loader = builder.build();
         assert_eq!(loader.get_metrics_meter_name(), "my-custom-metric");
     }
@@ -1672,11 +1682,13 @@ mod unit_tests {
             local_model_module: None,
             metrics: None,
         };
-        builder.set_metrics(MetricsParams { meter_name: "my-custom-metric".to_string(), otlp_endpoint: OtlpEndpointParams {
-            prefix: "http://".to_string(),
+        builder.set_metrics(MetricsParams {
+            meter_name: "my-custom-metric".to_string(),
+            otlp_endpoint: OtlpEndpointParams {
+                prefix: "http://".to_string(),
                 host: "0.0.0.0".to_string(),
                 port: "9317".to_string(),
-            }
+            },
         });
         let loader = builder.build();
         assert_eq!(
@@ -1790,18 +1802,9 @@ mod unit_tests {
                 .port,
             "7776"
         );
-        assert_eq!(
-            loader.get_local_model_module().directory,
-            "."
-        );
-        assert_eq!(
-            loader.get_local_model_module().model_name,
-            "model"
-        );
-        assert_eq!(
-            loader.get_local_model_module().format,
-            "onnx"
-        );
+        assert_eq!(loader.get_local_model_module().directory, ".");
+        assert_eq!(loader.get_local_model_module().model_name, "model");
+        assert_eq!(loader.get_local_model_module().format, "onnx");
     }
 
     #[test]

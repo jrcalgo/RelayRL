@@ -1,7 +1,8 @@
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorDataMode, AlgorithmInitArgs, ModelMode,
+    ActorDataMode, ActorInferenceMode, AlgorithmInitArgs, ModelMode,
 };
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
 use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::data::router::RoutedMessage;
 use crate::network::client::runtime::data::sinks::transport_sink::{
@@ -11,7 +12,6 @@ use crate::network::client::runtime::data::sinks::transport_sink::{
 };
 use crate::utilities::configuration::Algorithm;
 
-use active_uuid_registry::interface::reserve_id_with;
 use relayrl_types::HyperparameterArgs;
 use relayrl_types::prelude::action::RelayRLAction;
 use relayrl_types::prelude::model::ModelModule;
@@ -59,16 +59,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
     for NatsInterface<B>
 {
     async fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         shared_client_modes: Arc<ClientModes>,
     ) -> Result<Self, TransportError> {
-        let _transport_id: TransportUuid = reserve_id_with(
-            client_namespace.as_ref(),
-            crate::network::NATS_CLIENT_CONTEXT,
-            42,
-            100,
-        )
-        .map_err(TransportError::from)?;
+        let _transport_id: TransportUuid = client_namespace
+            .reserve_id_with(crate::network::NATS_CLIENT_CONTEXT, 42, 100)
+            .map_err(TransportError::from)?;
 
         let transport_entry = (
             client_namespace.to_string(),
@@ -76,7 +72,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
         );
 
         let nats_connection_manager = Arc::new(RwLock::new(NatsConnectionManager::new(
-            client_namespace.clone(),
+            client_namespace.as_arc(),
         )));
         let nats_inference_ops =
             NatsInferenceOps::new(transport_entry.clone(), nats_connection_manager.clone());

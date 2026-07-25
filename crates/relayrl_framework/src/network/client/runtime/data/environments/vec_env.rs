@@ -1,16 +1,13 @@
 use crate::network::ENVIRONMENT_CONTEXT_PREFIX;
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
 
-use active_uuid_registry::{
-    ContextString, UuidPoolError,
-    interface::{add_id, remove_id, reserve_id},
-};
+use active_uuid_registry::{ContextString, UuidPoolError};
 use relayrl_env_trait::*;
 use relayrl_types::data::tensor::NdArrayDType;
 use relayrl_types::data::tensor::{DType, DeviceType};
 
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::sync::Arc;
 use thiserror::Error;
 
 const RAYON_STEP_MIN_ENVS: usize = 8;
@@ -103,7 +100,7 @@ pub(crate) trait VecEnvTrait: Send + Sync {
 }
 
 pub(crate) struct ScalarVecEnv {
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     env_context: ContextString,
     pub(crate) prototype: Box<dyn DynScalarEnvironment>,
     envs: Vec<Box<dyn DynScalarEnvironment>>,
@@ -125,7 +122,7 @@ pub(crate) struct ScalarVecEnv {
 
 impl ScalarVecEnv {
     pub(crate) fn init_boxed(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         env: Box<dyn DynScalarEnvironment>,
         count: usize,
         device: DeviceType,
@@ -144,7 +141,7 @@ impl ScalarVecEnv {
         let mut uuid_to_idx = HashMap::with_capacity(count);
 
         for i in 0..count {
-            let env_id = reserve_id(client_namespace.as_ref(), env_context.as_ref())?;
+            let env_id = client_namespace.reserve_id(env_context.as_ref())?;
             envs.push(env.clone());
             ordered_ids.push(env_id);
             uuid_to_idx.insert(env_id, i);
@@ -233,27 +230,27 @@ impl VecEnvTrait for ScalarVecEnv {
         }
         if count > current {
             for i in 0..(count - current) {
-                let env_id = reserve_id(self.client_namespace.as_ref(), self.env_context.as_ref())?;
+                let env_id = self
+                    .client_namespace
+                    .reserve_id(self.env_context.as_ref())?;
                 let new_env = self.prototype.clone();
                 if self.obs_bytes_per_env > 0 {
                     self.obs_flat.extend_from_slice(&new_env.dyn_flat_obs());
                 }
                 self.envs.push(new_env);
                 self.ordered_ids.push(env_id);
-                self.uuid_to_idx.insert(env_id, i);
+                self.uuid_to_idx.insert(env_id, current + i);
             }
         } else {
             let removed: Vec<_> = self.ordered_ids.drain(count..).collect();
+            self.envs.truncate(count);
             if self.obs_bytes_per_env > 0 {
                 self.obs_flat.truncate(count * self.obs_bytes_per_env);
             }
             for env_id in removed {
                 self.uuid_to_idx.remove(&env_id);
-                remove_id(
-                    self.client_namespace.as_ref(),
-                    self.env_context.as_ref(),
-                    env_id,
-                )?;
+                self.client_namespace
+                    .remove_id(self.env_context.as_ref(), env_id)?;
             }
         }
         Ok(())
@@ -436,7 +433,7 @@ impl VecEnvTrait for ScalarVecEnv {
 }
 
 pub(crate) struct BatchVecEnv {
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     env_context: ContextString,
     pub(crate) env: Box<DynVectorEnv>,
     env_ids: Vec<EnvironmentUuid>,
@@ -450,7 +447,7 @@ pub(crate) struct BatchVecEnv {
 
 impl BatchVecEnv {
     pub(crate) fn init_boxed(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         env: Box<DynVectorEnv>,
         count: usize,
         device: DeviceType,
@@ -466,7 +463,7 @@ impl BatchVecEnv {
         let env_context = format!("{}:vector", ENVIRONMENT_CONTEXT_PREFIX);
         let env_ids = env.init_num_envs(count)?;
         for env_id in &env_ids {
-            add_id(client_namespace.as_ref(), env_context.as_ref(), *env_id)?;
+            client_namespace.add_id(env_context.as_ref(), *env_id)?;
         }
 
         Ok(Self {
@@ -507,21 +504,15 @@ impl VecEnvTrait for BatchVecEnv {
         if count > current {
             let new_ids = self.env.init_num_envs(count - current)?;
             for env_id in &new_ids {
-                add_id(
-                    self.client_namespace.as_ref(),
-                    self.env_context.as_ref(),
-                    *env_id,
-                )?;
+                self.client_namespace
+                    .add_id(self.env_context.as_ref(), *env_id)?;
             }
             self.env_ids.extend(new_ids);
         } else {
             let removed = self.env_ids.split_off(count);
             for env_id in removed {
-                remove_id(
-                    self.client_namespace.as_ref(),
-                    self.env_context.as_ref(),
-                    env_id,
-                )?;
+                self.client_namespace
+                    .remove_id(self.env_context.as_ref(), env_id)?;
             }
         }
         Ok(())

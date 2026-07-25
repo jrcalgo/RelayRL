@@ -8,12 +8,14 @@ use super::{DataPayload, RoutedMessage, RouterError, RoutingProtocol};
 use crate::network::client::agent::ActorDataMode;
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
-    LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_trajectory_cache,
-    uses_local_file_writing,
+    LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing,
+    uses_trajectory_cache,
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::control::scale_manager::{RouterNamespace, SharedTrajectoryCache};
+use crate::network::client::runtime::control::scale_manager::{
+    RouterNamespace, SharedTrajectoryCache,
+};
 use crate::network::client::runtime::control::state_manager::ActorUuid;
 use crate::network::client::runtime::data::sinks::file_sink::{
     FileSinkError, write_local_trajectory_file,
@@ -136,7 +138,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
         rx_from_actor: Receiver<RoutedMessage>,
         shared_buffer_size: Arc<AtomicUsize>,
         shared_client_modes: Arc<ClientModes>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] 
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         training_codec: CodecConfig,
     ) -> Self;
     fn with_trajectory_writer(
@@ -283,9 +285,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
         let (traj_queue_tx, mut traj_queue_rx) =
             tokio::sync::mpsc::unbounded_channel::<SinkQueueEntry>();
 
-        let (mut rx_semaphore, initial_semaphore_capacity) = match 
-            &self.shared_actor_count
-         {
+        let (mut rx_semaphore, initial_semaphore_capacity) = match &self.shared_actor_count {
             Some(actor_count) => {
                 let buffer_size = self.shared_buffer_size.load(Ordering::SeqCst);
                 let cap = buffer_size.saturating_mul(actor_count.load(Ordering::Acquire).max(1));
@@ -445,7 +445,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         // Dispatch each job to enabled sinks
                         for job in jobs_to_process {
                             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                            if let ActorDataMode::Online(_) | ActorDataMode::OnlineWithFiles(..) 
+                            if let ActorDataMode::Online(_) | ActorDataMode::OnlineWithFiles(..)
                             | ActorDataMode::OnlineWithCache(..) | ActorDataMode::OnlineWithFilesAndCache(..) = &worker_modes.actor_data_mode &&
                                 let (Some(dispatcher), Some(transport_addresses)) =
                                     (worker_training_dispatcher.clone(), worker_transport_addresses.clone())
@@ -544,8 +544,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                 if let Some(transport_addresses) = &worker_transport_addresses
                     && let ActorDataMode::Online(_)
                     | ActorDataMode::OnlineWithFiles(..)
-                    | ActorDataMode::OnlineWithCache(..) =
-                        &worker_modes.actor_data_mode
+                    | ActorDataMode::OnlineWithCache(..) = &worker_modes.actor_data_mode
                 {
                     let encoded = match job.traj_for_processing.encode(&worker_codec) {
                         Ok(enc) => enc,
@@ -577,7 +576,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             .await;
                 }
 
-                if uses_trajectory_cache(&worker_modes.actor_data_mode) && let Some(ref traj_cache) = worker_traj_cache {
+                if uses_trajectory_cache(&worker_modes.actor_data_mode)
+                    && let Some(ref traj_cache) = worker_traj_cache
+                {
                     let actor_id = job.actor_id;
                     let traj_clone = job.traj_for_processing.clone();
 
@@ -735,7 +736,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TransportTrajectorySinkTrait<B>
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
+        ActorDataMode, ActorInferenceMode, ClientModes, ModelMode,
     };
     use crate::network::client::runtime::control::scale_manager::RouterNamespace;
     use crate::network::client::runtime::data::router::{
@@ -936,8 +937,12 @@ mod unit_tests {
     #[tokio::test]
     async fn spawn_loop_double_call_returns_err() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            Arc::new(AtomicUsize::new(1000)),
+            disabled_modes(),
+        );
         assert!(buf.spawn_loop().is_ok());
         // Second call: rx already taken, must return Err
         assert!(buf.spawn_loop().is_err());
@@ -948,8 +953,12 @@ mod unit_tests {
     #[tokio::test]
     async fn receiver_ignores_non_trajectory_payloads() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            Arc::new(AtomicUsize::new(1000)),
+            disabled_modes(),
+        );
         buf.spawn_loop().unwrap();
 
         let actor_id = Uuid::new_v4();
@@ -973,8 +982,12 @@ mod unit_tests {
     async fn shutdown_signal_stops_receiver() {
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            Arc::new(AtomicUsize::new(1000)),
+            disabled_modes(),
+        );
         buf.with_shutdown(shutdown_rx);
         buf.spawn_loop().unwrap();
 
@@ -991,8 +1004,12 @@ mod unit_tests {
     #[tokio::test]
     async fn dropped_tx_breaks_receiver_loop() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(4);
-        let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            Arc::new(AtomicUsize::new(1000)),
+            disabled_modes(),
+        );
         buf.spawn_loop().unwrap();
 
         // Drop the sender — the receiver should observe channel close and exit
@@ -1007,8 +1024,12 @@ mod unit_tests {
     #[tokio::test]
     async fn partial_trajectory_still_forwarded() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
-        let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            Arc::new(AtomicUsize::new(1000)),
+            disabled_modes(),
+        );
         buf.spawn_loop().unwrap();
 
         let actor_id = Uuid::new_v4();
@@ -1026,8 +1047,12 @@ mod unit_tests {
     #[tokio::test]
     async fn concurrent_actors_send_trajectories_safely() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(256);
-        let mut buf =
-            ClientTrajectoryBuffer::<TestBackend>::new(test_namespace(), rx, Arc::new(AtomicUsize::new(1000)), disabled_modes());
+        let mut buf = ClientTrajectoryBuffer::<TestBackend>::new(
+            test_namespace(),
+            rx,
+            Arc::new(AtomicUsize::new(1000)),
+            disabled_modes(),
+        );
         buf.spawn_loop().unwrap();
 
         const NUM_ACTORS: usize = 8;

@@ -24,7 +24,6 @@ use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_algorithms::prelude::ppo::algorithm::{IPPOParams, MAPPOParams, PPOParams};
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crossbeam_utils::CachePadded;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use std::collections::HashMap;
@@ -35,7 +34,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tokio::sync::{Notify, RwLock, broadcast};
-use crossbeam_utils::CachePadded;
 
 use thiserror::Error;
 
@@ -308,9 +306,9 @@ impl LifecycleManager {
 
         // arg init override disables value update from json file for lifetime of runtime
         let config_polling = match config_polling_seconds {
-            Some(seconds) =>  LifecycleConfigPolling {
+            Some(seconds) => LifecycleConfigPolling {
                 seconds: CachePadded::new(Arc::new(AtomicU64::new(seconds))),
-                config_poll: false
+                config_poll: false,
             },
             None => LifecycleConfigPolling {
                 seconds: CachePadded::new(Arc::new(AtomicU64::new(
@@ -495,7 +493,11 @@ impl LifecycleManager {
         config_polling_seconds: &u64,
     ) -> Result<(), LifecycleManagerError> {
         if self.config_polling.config_poll {
-            self.config_polling.seconds.clone().into_inner().swap(*config_polling_seconds, Ordering::Acquire);
+            self.config_polling
+                .seconds
+                .clone()
+                .into_inner()
+                .swap(*config_polling_seconds, Ordering::Acquire);
         };
 
         Ok(())
@@ -546,7 +548,12 @@ impl LifecycleManager {
     }
 
     pub(crate) async fn watch(&self) -> Result<(), LifecycleManagerError> {
-        let config_update_seconds = self.config_polling.seconds.clone().into_inner().load(Ordering::Acquire);
+        let config_update_seconds = self
+            .config_polling
+            .seconds
+            .clone()
+            .into_inner()
+            .load(Ordering::Acquire);
 
         // enable config polling in general if the value is a) sourced from argument and non-zero, or b) sourced from config file
         let polling_enabled: bool = {
@@ -555,20 +562,22 @@ impl LifecycleManager {
         };
 
         // if seconds is zero, default interval is set to 10 second
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            {
-                if config_update_seconds != 0 {
-                    config_update_seconds
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs({
+            if config_update_seconds != 0 {
+                config_update_seconds
+            } else {
+                if polling_enabled {
+                    log::info!(
+                        "[LifecycleManager] Config file currently has `config_update_polling_seconds` set to 0, defaulting to 10..."
+                    );
                 } else {
-                    if polling_enabled {
-                        log::info!("[LifecycleManager] Config file currently has `config_update_polling_seconds` set to 0, defaulting to 10...");
-                    } else {
-                        log::info!("[LifecycleManager] RelayRLAgent initialized with `config_update_polling_seconds` set to 0, disabling polling...");
-                    }
-                    10
+                    log::info!(
+                        "[LifecycleManager] RelayRLAgent initialized with `config_update_polling_seconds` set to 0, disabling polling..."
+                    );
                 }
+                10
             }
-        ));
+        }));
 
         loop {
             tokio::select! {
@@ -639,9 +648,7 @@ impl LifecycleManager {
             self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
             self.set_default_hyperparameters(&new_config.client_config.init_hyperparameters),
-            self.set_config_polling_seconds(
-                &new_config.client_config.config_polling_seconds
-            ),
+            self.set_config_polling_seconds(&new_config.client_config.config_polling_seconds),
         )
         .map_err(|e| {
             LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
@@ -656,9 +663,7 @@ impl LifecycleManager {
             self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
             self.set_default_hyperparameters(&new_config.client_config.init_hyperparameters),
-            self.set_config_polling_seconds(
-                &new_config.client_config.config_polling_seconds
-            ),
+            self.set_config_polling_seconds(&new_config.client_config.config_polling_seconds),
             self.set_metrics_args(
                 &new_config.client_config.metrics.meter_name,
                 &new_config.client_config.metrics.otlp_endpoint
@@ -675,9 +680,7 @@ impl LifecycleManager {
         tokio::try_join!(
             self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_config_polling_seconds(
-                &new_config.client_config.config_polling_seconds
-            ),
+            self.set_config_polling_seconds(&new_config.client_config.config_polling_seconds),
         )
         .map_err(|e| {
             LifecycleManagerError::ConfigError(format!("Failed to reload config: {:?}", e))
@@ -690,9 +693,7 @@ impl LifecycleManager {
         tokio::try_join!(
             self.set_local_model_path(&new_config.client_config.local_model_module),
             self.set_trajectory_file_path(&new_config.client_config.trajectory_file_output),
-            self.set_config_polling_seconds(
-                &new_config.client_config.config_polling_seconds
-            ),
+            self.set_config_polling_seconds(&new_config.client_config.config_polling_seconds),
             self.set_metrics_args(
                 &new_config.client_config.metrics.meter_name,
                 &new_config.client_config.metrics.otlp_endpoint

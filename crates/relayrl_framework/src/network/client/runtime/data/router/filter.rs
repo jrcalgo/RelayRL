@@ -135,8 +135,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientCentralFilter<B> {
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
+        ActorDataMode, ActorInferenceMode, ClientModes, ModelMode,
     };
+    use crate::network::client::runtime::control::coordinator::ClientNamespace;
     use crate::network::client::runtime::control::state_manager::StateManager;
     use crate::network::client::runtime::data::router::{
         ControlPayload, RoutedMessage, RoutingProtocol,
@@ -165,8 +166,13 @@ mod unit_tests {
         StateManager<TestBackend>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
+        let namespace_str = format!("test-filter-ns-{}", Uuid::new_v4());
+        let namespace_handle =
+            active_uuid_registry::interface::reserve_owned_namespace(&namespace_str)
+                .expect("reserve owned test namespace");
+        let client_namespace = ClientNamespace::new(namespace_handle, Arc::from(namespace_str));
         StateManager::<TestBackend>::new(
-            Arc::from("test-filter-ns"),
+            client_namespace,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             None,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]

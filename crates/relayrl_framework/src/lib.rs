@@ -72,10 +72,9 @@
 //! ```rust,no_run
 //! use relayrl_framework::prelude::network::*;
 //! use relayrl_framework::prelude::types::model::ModelModule;
+//! use relayrl_framework::prelude::types::tensor::DeviceType;
 //! use burn_ndarray::NdArray;
 //! use burn_tensor::{Tensor, Float};
-//! use active_uuid_registry::registry_uuid::Uuid;
-//! use std::sync::Arc;
 //! use std::path::PathBuf;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -92,11 +91,23 @@
 //! // Start the coordinator, routers, and actors.
 //! agent.start(params).await?;
 //!
-//! // Request actions: const generics are the observation/action tensor ranks.
-//! let info: Vec<(Uuid, Option<Arc<str>>)> = agent.get_actor_info().await?;
+//! // Create new actors: const generics are the observation/action tensor ranks.
+//! let actor_info = agent
+//!     .new_actors::<2, 2>(
+//!         4,
+//!         DeviceType::Cpu,
+//!         1_000,
+//!         None,
+//!         None,
+//!         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+//!         None,
+//!     )
+//!     .await?;
+//!
+//! // Request actions for all actors.
 //! let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
 //! let _actions = agent
-//!     .request_action::<2, 2, Float, Float>(info[0].0, observation, None, 0.0)
+//!     .request_actions::<2, 2, Float, Float>(&actor_info, observation, None, 0.0)
 //!     .await?;
 //!
 //! // Tear everything down gracefully.
@@ -156,9 +167,8 @@ pub mod utilities {
 /// ```rust
 /// use relayrl_framework::prelude::network::*;  // Agent API
 /// use relayrl_framework::prelude::utilities::config::*;  // Configuration
-/// use relayrl_framework::prelude::utilities::config::network_codec::*;  // Codec types
+/// use relayrl_framework::prelude::types::tensor::*;  // RelayRL tensor types, burn-related module re-exports
 /// use relayrl_framework::prelude::types::tensor::burn::*;  // Burn tensor types
-/// use relayrl_framework::prelude::types::tensor::relayrl::*;  // RelayRL tensor types
 /// use relayrl_framework::prelude::types::action::*;  // Action types
 /// use relayrl_framework::prelude::types::trajectory::*;  // Trajectory types
 /// use relayrl_framework::prelude::types::model::*;  // Model types
@@ -203,9 +213,7 @@ pub mod prelude {
                     pub use burn_tch::*;
                 }
             }
-            pub mod relayrl {
-                pub use relayrl_types::prelude::tensor::relayrl::*;
-            }
+            pub use relayrl_types::prelude::tensor::relayrl::*;
         }
 
         pub mod trajectory {

@@ -1,3 +1,4 @@
+use crate::network::client::agent::ActorInfo;
 use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::control::state_manager::{ActorUuid, StateManager};
@@ -40,13 +41,14 @@ fn prepare_transport_model_update_for_dispatch<B: Backend + BackendMatcher<Backe
         _ => return Some(msg),
     };
 
-    let canonical_actor_id = shared_state.canonical_model_update_target(msg.actor_id);
-    if last_forwarded_model_versions.get(&canonical_actor_id) == Some(&model_version) {
+    let actor_info = ActorInfo::new(msg.actor_id, None);
+    let canonical_actor = shared_state.canonical_model_update_target(&actor_info);
+    if last_forwarded_model_versions.get(&canonical_actor.id()) == Some(&model_version) {
         return None;
     }
 
-    last_forwarded_model_versions.insert(canonical_actor_id, model_version);
-    msg.actor_id = canonical_actor_id;
+    last_forwarded_model_versions.insert(canonical_actor.id(), model_version);
+    msg.actor_id = canonical_actor.id();
 
     Some(msg)
 }
@@ -191,10 +193,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
 mod unit_tests {
     use super::*;
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorDataMode, ClientModes, ModelMode,
+        ActorDataMode, ActorInferenceMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::data::router::DataPayload;
+    use crate::network::client::runtime::control::coordinator::ClientNamespace;
     use crate::network::client::runtime::control::state_manager::StateManager;
+    use crate::network::client::runtime::data::router::DataPayload;
     #[cfg(feature = "metrics")]
     use crate::utilities::observability::metrics::MetricsManager;
     use active_uuid_registry::UuidPoolError;
@@ -228,7 +231,11 @@ mod unit_tests {
         StateManager<TestBackend>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
     ) {
-        let namespace: Arc<str> = Arc::from(format!("test-receiver-{}", Uuid::new_v4()));
+        let namespace_str = format!("test-receiver-{}", Uuid::new_v4());
+        let namespace_handle =
+            active_uuid_registry::interface::reserve_owned_namespace(&namespace_str)
+                .expect("reserve owned test namespace");
+        let namespace = ClientNamespace::new(namespace_handle, Arc::from(namespace_str));
         StateManager::<TestBackend>::new(
             namespace,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
