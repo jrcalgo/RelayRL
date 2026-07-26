@@ -138,7 +138,10 @@ impl SharedTrajectoryCache {
         actors: &[ActorInfo],
     ) -> Result<
         HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>,
-        (Option<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, Vec<Uuid>),
+        (
+            Option<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
+            Vec<Uuid>,
+        ),
     > {
         let mut traj_map = HashMap::<Uuid, Vec<Arc<RelayRLTrajectory>>>::new();
         let mut invalid_ids = Vec::new();
@@ -1123,7 +1126,10 @@ mod unit_tests {
         let unknown_id = Uuid::new_v4();
         let mut traj_cache = shared_trajectory_cache_with(&[(known_id, 3)]);
 
-        let actors = vec![ActorInfo::new(known_id, None), ActorInfo::new(unknown_id, None)];
+        let actors = vec![
+            ActorInfo::new(known_id, None),
+            ActorInfo::new(unknown_id, None),
+        ];
         let (drained, invalid_ids) = traj_cache
             .drain(&actors)
             .expect_err("one of the two requested actors is not present in the cache");

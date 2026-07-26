@@ -308,7 +308,7 @@ async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
             .run_env_eval(&long_running_actor, 200)
             .await
     });
-    
+
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let second_call = agent.run_env_eval(&actor, 5).await;

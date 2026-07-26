@@ -18,15 +18,15 @@ pub use crate::network::client::builder::{
 pub use crate::network::client::builder::{InferenceAddressesArgs, TrainingAddressesArgs};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 pub use crate::network::client::builder::{InferenceParams, TrainingParams};
-pub use crate::network::client::runtime::actor::ActorInfo;
 pub(crate) use crate::network::client::builder::{uses_local_file_writing, uses_trajectory_cache};
+pub use crate::network::client::runtime::actor::ActorInfo;
 use crate::network::client::runtime::control::coordinator::{
     ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
     ToAnyBurnTensor,
 };
+use crate::network::client::runtime::control::state_manager::ActorUuid;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::control::state_manager::StateManagerError;
-use crate::network::client::runtime::control::state_manager::ActorUuid;
 use crate::prelude::utilities::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::NetworkParams;
@@ -358,14 +358,18 @@ pub trait RelayRLActors<B: Backend + BackendMatcher<Backend = B>> {
     ) -> Result<Vec<ActorInfo>, ClientError>;
 
     /// Returns the `ActorInfo`s of all live actors that match the specified nametag.
-    async fn get_actors_by_tag(&self, nametag: Option<&str>) -> Result<Vec<ActorInfo>, ClientError>;
+    async fn get_actors_by_tag(&self, nametag: Option<&str>)
+    -> Result<Vec<ActorInfo>, ClientError>;
 
     /// Renames a live actor's ID in place; its task and inbox are preserved.
     ///
     /// `actor` observes the new id afterward (and so does every other clone of it), since the
     /// id lives in a shared slot rather than being copied into each `ActorInfo` handle.
-    async fn set_actor_id(&mut self, actor: &ActorInfo, new_id: ActorUuid)
-    -> Result<(), ClientError>;
+    async fn set_actor_id(
+        &mut self,
+        actor: &ActorInfo,
+        new_id: ActorUuid,
+    ) -> Result<(), ClientError>;
 
     /// Renames a live actor's nametag in place; useful for tracking.
     ///
@@ -702,7 +706,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActors<B> for RelayRLAgent
             .map_err(ClientError::from)
     }
 
-    async fn get_actors_by_tag(&self, nametag: Option<&str>) -> Result<Vec<ActorInfo>, ClientError> {
+    async fn get_actors_by_tag(
+        &self,
+        nametag: Option<&str>,
+    ) -> Result<Vec<ActorInfo>, ClientError> {
         self.coordinator
             .get_actors_by_tag(nametag)
             .await

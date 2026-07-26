@@ -145,7 +145,7 @@ async fn disabled_mode_never_populates_the_cache() -> Result<(), Box<dyn std::er
         .await?;
 
     complete_one_episode(&mut ctx.agent, &actor).await?;
-    
+
     // Give the router a moment to process the flagged action, then confirm no cache exists.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
