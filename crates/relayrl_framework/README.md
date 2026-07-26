@@ -36,15 +36,15 @@ and streams trajectories to data sinks. It is:
 
 ## Most users should use the `relayrl` crate
 
-[`relayrl`](../relayrl/README.md) is the stable, higher-level facade that
+[`relayrl`](../relayrl/README.md) is the higher-level facade that
 re-exports the most recent release of this runtime under a single namespace
-(`relayrl::network`, `relayrl::types`, `relayrl::algorithms`,
+(`relayrl::agent`, `relayrl::types`, `relayrl::algorithms`,
 `relayrl::utils`). Prefer depending on `relayrl` unless you specifically
 need to depend on the runtime crate directly.
 
 ```toml
 [dependencies]
-relayrl = "0.5.0"
+relayrl = "0.5.0-rc.1"
 ```
 
 ## Overview
@@ -92,10 +92,11 @@ The local/default control flow is:
 
 * `network`: the runtime.
   * `network::client`: the multi-actor client runtime (rewritten in v0.5.0). The
-    public `agent` module holds the `RelayRLAgent` facade and `AgentBuilder`
-    construction API; the internal `runtime` holds `coordination` (coordinator,
-    lifecycle, scaling, state), `router` (message routing), and `data` (file
-    sinks plus experimental transport sinks).
+    public `agent` module holds the `RelayRLAgent` facade, `AgentBuilder`
+    construction API, and the `ActorInfo` actor handle; the internal `runtime`
+    holds `control` (coordinator, lifecycle, scaling, state), `data::router`
+    (message routing), and `data` (file sinks plus experimental transport
+    sinks).
   * `network::server`: optional, experimental training/inference servers behind
     feature flags.
 * `utilities`: JSON configuration loading/builders, logging (log4rs), and
@@ -109,16 +110,18 @@ Add `relayrl_framework` and a Burn backend to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-relayrl_framework = "0.5.0"
+relayrl_framework = "0.5.0-rc.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
-Build the agent, start the runtime, request actions, and shut down. The example
-is `no_run` because it expects a model directory and config on disk:
+Build the agent, start the runtime, create actors, request actions, and shut
+down. The example is `no_run` because it expects a model directory and config
+on disk:
 
 ```rust,no_run
 use relayrl_framework::prelude::network::*;
 use relayrl_framework::prelude::types::model::ModelModule;
+use relayrl_framework::prelude::types::tensor::DeviceType;
 use relayrl_framework::prelude::types::tensor::burn::{Tensor, Float, ndarray::NdArray};
 
 use std::path::PathBuf;
@@ -135,17 +138,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    // Start the coordinator, routers, and actors.
+    // Start the coordinator and router workers.
     agent.start(params).await?;
 
-    // Request actions: const generics are the observation/action tensor ranks.
-    let info = agent.get_actor_info().await?;
-    let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
-    let _actions = agent
-        .request_action::<2, 2, Float, Float>(info[0].0, observation, None, 0.0)
+    // Create four actors with rank-2 observations and rank-2 actions.
+    let actor_info = agent
+        .new_actors::<2, 2>(4, DeviceType::Cpu, 1_000, None, None)
         .await?;
 
-    // Tear everything down gracefully.
+    // Request actions for all actors. The const generics must match actor creation.
+    let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+    let _actions = agent
+        .request_actions::<2, 2, Float, Float>(&actor_info, observation, None, 0.0)
+        .await?;
+
+    // Mark the episode boundary for all actors, then tear everything down gracefully.
+    agent.flag_last_actions(&actor_info, Some(1.0)).await?;
     agent.shutdown().await?;
     Ok(())
 }

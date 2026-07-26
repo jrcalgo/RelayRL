@@ -64,7 +64,7 @@ promise. See [Feature flags](#feature-flags) and
 
  ## Overview
 
-`relayrl` is a thin facade that re-exports the most recent stable release of
+`relayrl` is a thin facade that re-exports the most recent release of
 [`relayrl_framework`], the multi-actor client runtime. The rest of the stack is
 split into focused crates:
 
@@ -80,7 +80,7 @@ split into focused crates:
   `Environment`, `ScalarEnvironment`, and `VectorEnvironment` contracts the
   runtime drives.
 
-The facade groups these behind four modules: `relayrl::network` (agent API),
+The facade groups these behind four modules: `relayrl::agent` (RelayRLAgent API),
 `relayrl::types` (actions, tensors, trajectories, records, models),
 `relayrl::algorithms` (PPO and neural-network building blocks), and
 `relayrl::utils` (configuration and UUID registry types).
@@ -95,7 +95,7 @@ The facade groups these behind four modules: `relayrl::network` (agent API),
 * A [Tokio](https://docs.rs/tokio) runtime. Use a multi-threaded runtime for
   parallel actor execution.
 * A compatible inference runtime: **LibTorch 2.9.0** or the
-  **ONNX Runtime (ORT) 1.26.0**.
+  **ONNX Runtime (ORT) 1.24.x**.
 
 ## Quick start
 
@@ -103,7 +103,7 @@ Add `relayrl` and `tokio` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-relayrl = "0.5.0"
+relayrl = "0.5.0-rc.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -111,21 +111,27 @@ Build the agent, start the runtime, create actors, request actions, mark the
 episode boundary, and shut down:
 
 ```rust,no_run
-use relayrl::network::*;
+use relayrl::agent::*;
 use relayrl::types::model::ModelModule;
-use relayrl::types::tensor::relayrl::DeviceType;
+use relayrl::types::tensor::DeviceType;
 use relayrl::types::tensor::burn::{Tensor, Float, ndarray::NdArray};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the agent handle and its startup parameters.
-    let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
-    let (mut agent, params) = AgentBuilder::<NdArray>::builder()
-        .params()
-        .data_routers(2)
-        .default_model(default_model)
-        .build()
-        .await?;
+    let (mut agent, params) = {
+        let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+      
+        AgentBuilder::<NdArray>::builder()
+          .modes()
+          .actor_inference_mode(ActorInferenceMode::Client(ModelMode::Independent))
+          .params()
+          .data_routers(4)
+          .data_buffer_size(1000)
+          .default_model(default_model)
+          .build()
+          .await?;
+    };
 
     // Start the runtime: coordinator, lifecycle manager, and router workers.
     agent.start(params).await?;
@@ -134,17 +140,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actor_info = agent
         .new_actors::<2, 2>(4, DeviceType::Cpu, 1_000, None, None)
         .await?;
-    let actor_ids: Vec<_> = actor_info.iter().map(|(id, _)| *id).collect();
 
     // Create a rank-2 observation tensor based on the relevant environment.
     let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
     // Request actions for all actors. The const generics must match actor creation.
     let _actions = agent
-        .request_actions::<2, 2, Float, Float>(actor_ids.clone(), observation, None, 0.0)
+        .request_actions::<2, 2, Float, Float>(&actor_info, observation, None, 0.0)
         .await?;
 
     // Mark the episode boundary for all actors, then tear everything down gracefully.
-    agent.flag_last_actions(actor_ids, Some(1.0)).await?;
+    agent.flag_last_actions(&actor_info, Some(1.0)).await?;
+
+    // Perform graceful runtime shutdown.
     agent.shutdown().await?;
     Ok(())
 }
@@ -162,8 +169,6 @@ training-data modes, router scaling, model hot-swap, and environment binding.
 * `logging-init`: log4rs logging initialization.
 * `metrics`: Prometheus/OpenTelemetry metrics.
 * `tch-backend`: LibTorch (`tch`) backend and model support.
-* `zmq-transport` / `nats-transport`: experimental network transports.
-* `training-server` / `inference-server`: experimental server integrations.
 * `profile`: flamegraph and tokio-console profiling.
 
 ## Current support
@@ -171,16 +176,14 @@ training-data modes, router scaling, model hot-swap, and environment binding.
 The supported `0.5.0` path is the local/default client runtime, including:
 
 * local inference and actor lifecycle management
-* live router scaling
-* local Arrow/CSV trajectory writing and in-memory trajectory retrieval
-* parallelized environment batching
-* PPO training rollouts
+* live data routing and buffer scaling
+* local Arrow/CSV trajectory writing and cached trajectory retrieval
+* parallelized environment batching per actor
+* PPO training rollouts per actor
 
-Experimental in `0.5.0` (enabled by feature flags but not covered by the
-support promise):
+Experimental feature flags are available in the `relayrl_framework` crate:
 
 * `zmq-transport` and `nats-transport`
-* server-backed inference or training workflows
 
 ## Changelog
 

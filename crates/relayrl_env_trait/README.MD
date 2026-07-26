@@ -55,7 +55,12 @@ The framework may run **many logical environments in parallel** (one
 ## Quick start
 
 A minimal scalar environment skeleton. Note that every method takes `&self`, so any
-mutable state must use interior mutability:
+mutable state must use interior mutability. For clarity, this skeleton uses an `F32`
+observation dtype but returns `observation_dim()` raw bytes (one byte per element) —
+that only holds because the example never actually fills real `f32` data. A real `F32`
+implementation must return `observation_dim() * 4` bytes (`observation_dim() * size_of`
+the element type), since `flat_observation_bytes`/`flat_mask_bytes` are raw byte buffers
+sized by dtype, not element counts:
 
 ```rust,no_run
 use relayrl_env_trait::*;

@@ -7,8 +7,8 @@
 [![Apache 2.0 licensed](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 
-RelayRL is a Rust-native runtime for concurrent, multi-actor deep
-reinforcement learning. It is designed for embedding RL inside native
+RelayRL is a Rust-native runtime for concurrent, deep
+reinforcement learning actor system. It is designed for embedding RL inside native
 applications, simulators, games, and control loops: run many actors in one
 Tokio process, perform local model inference, collect trajectories, and
 hot-swap policies while the runtime is live.
@@ -31,13 +31,13 @@ RelayRL focuses on the local/default client runtime in the `0.5.0` line:
 
 Network transports (`zmq-transport`, `nats-transport`) and server-backed
 inference/training workflows are experimental and are not part of the current
-support promise.
+support promise in the `relayrl` crate.
 
 ## Crate Layout
 
-- [`relayrl`](crates/relayrl/): the recommended crate; stable-release updates.
+- [`relayrl`](crates/relayrl/): the recommended crate; release updates.
 - [`relayrl_framework`](crates/relayrl_framework/): the async multi-actor
-  client runtime; pre-release updates.
+  client runtime; release + development updates.
 - [`relayrl_types`](crates/relayrl_types/): tensors, actions, trajectories,
   model modules, records, and codec utilities.
 - [`relayrl_algorithms`](crates/relayrl_algorithms/): PPO/IPPO/MAPPO trainers
@@ -56,16 +56,16 @@ Add `relayrl` and `tokio` to your dependencies:
 
 ```toml
 [dependencies]
-relayrl = "0.5.0"
+relayrl = "0.5.0-rc.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
-Build an agent, create actors, request actions, and shut down:
+Build a step-driven agent by creating actors, requesting actions, and eventually shutting down:
 
 ```rust,no_run
-use relayrl::network::*;
+use relayrl::agent::*;
 use relayrl::types::model::ModelModule;
-use relayrl::types::tensor::relayrl::DeviceType;
+use relayrl::types::tensor::DeviceType;
 use relayrl::types::tensor::burn::{Float, Tensor, ndarray::NdArray};
 
 #[tokio::main]
@@ -73,7 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the agent handle and its startup parameters.
     let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
     let (mut agent, params) = AgentBuilder::<NdArray>::builder()
-        .router_scale(2)
+        .modes()
+        .actor_inference_mode(ActorInferenceMode::Client(ModelMode::Shared))
+        .actor_data_mode(ActorDataMode::OfflineWithFilesAndCache(None, 1000))
+        .params()
+        .data_routers(2)
         .default_model(default_model)
         .build()
         .await?;
@@ -81,42 +85,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start the coordinator, managers, and router workers.
     agent.start(params).await?;
 
-    // Create four actors with rank-2 observations and rank-1 actions.
-    let actor_ids = agent
-        .new_actors::<2, 1>(4, DeviceType::Cpu, 1_000, None)
+    // Create four actors with rank-2 observations and rank-1 actions, CPU device type, 
+    // a maximum trajectory length of 1000, a nametag, and no overridden default model.
+    let actor_info: Vec<ActorInfo> = agent
+        .new_actors::<2, 1>(4, DeviceType::Cpu, 1_000, Some("subsystem-actors"), None)
         .await?;
 
     // Create a rank-2 observation tensor based on the relevant environment.
     let observation = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
+
     // Request actions. The const generics must match actor creation.
     let _actions = agent
-        .request_action::<2, 1, Float, Float>(actor_ids.clone(), observation, None, 0.0)
+        .request_actions::<2, 1, Float, Float>(&actor_info, observation, None, 0.0)
         .await?;
 
     // Mark the episode boundary, then tear everything down gracefully.
-    agent.flag_last_action(actor_ids, Some(1.0)).await?;
+    agent.flag_last_actions(&actor_info, Some(1.0)).await?;
     agent.shutdown().await?;
 
     Ok(())
 }
 ```
 
-RelayRL also supports an environment-driven pattern where the agent owns the
-loop and drives a bound `Environment`:
+RelayRL also supports an environment-driven pattern where each actor can own its own loop
+ and drive a bound `Environment` trait implementation:
 
 ```rust,no_run
-async fn batch_env_exec(env1: Box<dyn Environment>, env2: Box<dyn Environment>, trainer: PPOTrainer) {
+async fn batch_env_exec(
+  mut agent: RelayRLAgent<NdArray>,
+  env1: Box<dyn Environment>,
+  env2: Box<dyn Environment>,
+  trainer: PPOTrainerSpec<NdArray, Float, Float, GenericMlp<NdArray, Float, Float>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let actor_info = agent.get_all_actors().await?;
+  let (actor1, actor2) = (&actor_info[0], &actor_info[1]);
+
   let env1_count = 64;
   let env2_count = 1024;
 
-  agent.set_env(actor_id1, env1, env1_count).await?;
-  agent.set_env(actor_id2, env2, env2_count).await?;
+  agent.set_env(actor1, env1, env1_count).await?;
+  agent.set_env(actor2, env2, env2_count).await?;
 
   let loop_iters = 1000;
   let max_traj_length = 10_000;
 
-  agent.run_env_eval(actor_id1, loop_iters);
-  agent.run_env_with_ppo(actor_id2, loop_iters, max_traj_length, ppo_trainer);
+  agent.run_env_eval(actor1, loop_iters).await?;
+  agent.run_env_with_ppo(actor2, loop_iters, max_traj_length, trainer).await?;
+
+  Ok(())
 }
 ```
 
@@ -132,12 +148,10 @@ PPO rollouts.
 
 ## Feature Flags
 
-- `client` (default): core client runtime.
+- `client` (default): core client/agent runtime.
 - `logging-init`: log4rs logging initialization.
 - `metrics`: Prometheus/OpenTelemetry metrics.
 - `tch-backend`: LibTorch-backed tensors and model support.
-- `zmq-transport` / `nats-transport`: experimental network transports.
-- `training-server` / `inference-server`: experimental server integrations.
 - `profile`: flamegraph and tokio-console profiling.
 
 ## Contributing

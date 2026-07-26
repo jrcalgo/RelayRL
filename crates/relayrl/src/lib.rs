@@ -1,35 +1,57 @@
-//! Build concurrent reinforcement learning systems from specialized actors.
+//! *Build concurrent reinforcement learning systems with composable Rust agent runtimes*
 //!
-//! A Rust-native, concurrent actor-system runtime for heterogeneous RL workloads
+//! RelayRL is an actor-oriented Rust runtime for building concurrent, heterogeneous
+//! reinforcement learning systems inside a single application. It provides the
+//! infrastructure to compose multiple independent inference workloads,
+//! environments, and data-collection pipelines through isolated runtime components
+//! coordinated by a host application.
 //!
-//! RelayRL's agent provides a full actor-system lifecycle, live router scaling, per-actor model hot-swap, trajectory data collection, and both **step-driven** and **environment-driven** inference control patterns.
+//! Rather than organizing reinforcement learning around a single training loop or
+//! monolithic agent process, RelayRL models learning systems as independent runtime
+//! components with explicit execution boundaries. Each agent runtime manages its own actors,
+//! state, lifecycle, and trajectory collection while remaining coordinated
+//! through application-level control. Each actor can operate independently
+//! while contributing experience data to larger reinforcement learning workflows.
 //!
-//! Unlike other RL frameworks that scale replicas of one policy across multiple processes, RelayRL focuses on **heterogeneous** policy execution via many actors.
-//! Each actor can bind its own environment and its own independent (or device-shared), **hot-swappable** model. This makes it well suited for embedding RL
-//! inside a native application, running distinct policies side by side, or swapping a policy into a subset of actors with **near zero downtime**.
+//! At the implementation level, RelayRL executes actors as independent Tokio tasks under
+//! a layered async control plane. A public [`RelayRLAgent`](crate::agent::RelayRLAgent)
+//! facade interfaces with a coordinator responsible for lifecycle management, actor state,
+//! live data scaling, and runtime orchestration.
+//! Each actor is an independently addressed execution unit capable of local inference,
+//! environment interaction, and trajectory assembly.
 //!
-//! RelayRL also outperforms (expectedly) other popular, GIL-bound RL frameworks in terms of raw throughput and latency, memory consumption, and horizontal scalability.
+//! Actors may optionally bind to independent environments, devices, and model handles.
+//! Model execution supports per-actor **Independent** ownership or **Shared** ownership
+//! per device with atomic hot-reload capabilities. The runtime supports both step-driven
+//! control from external loops and environment-driven actor loops where actors manage
+//! their own environment interaction.
+//!
+//! RelayRL provides a different scaling model from replica-oriented reinforcement learning
+//! systems. Instead of primarily duplicating a single policy across processes, RelayRL
+//! enables heterogeneous policies, environments, and workloads to coexist concurrently
+//! within one agent runtime while collecting experience through configurable
+//! trajectory sinks.
+//!
+//! This crate is a thin facade re-exporting the **most recent released version** of [`relayrl_framework`].
+//! RL algorithms, data types, and the environment trait live in [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.5.0/relayrl_algorithms/),
+//! [`relayrl_types`](https://docs.rs/relayrl_types/0.9.1/relayrl_types/), and [`relayrl_env_trait`](https://docs.rs/relayrl_env_trait/1.3.1/relayrl_env_trait/) respectively.
+//!
 //! For benchmarks and other system details, visit [relayrl.dev](https://relayrl.dev).
-//!
-//! This crate is a thin facade re-exporting the **most recent stable release** of [`relayrl_framework`].
-//! RL algorithms, data types, and the environment trait live in [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.4.1/relayrl_algorithms/),
-//! [`relayrl_types`](https://docs.rs/relayrl_types/0.8.1/relayrl_types/), and [`relayrl_env_trait`](https://docs.rs/relayrl_env_trait/1.3.1/relayrl_env_trait/) respectively.
 //!
 //! # Prerequisites
 //!
-//! - A [Tokio](https://docs.rs/tokio/1.52.3/tokio/) runtime. On a current-threaded runtime, actors will execute concurrently, but not in parallel. To enable parallel execution, use a multi-threaded runtime.
-//! - A compatible inference runtime. Currently, only **ONNX Runtime (ORT) 1.26.0** and the **LibTorch 2.9.0** are supported.
+//! - A [Tokio](https://docs.rs/tokio/latest/tokio/) runtime. On a current-threaded runtime, actors will execute concurrently, but not in parallel. To enable parallel execution, use a multi-threaded runtime.
+//! - A compatible inference runtime. Currently, only **ONNX Runtime (ORT) 1.24.x** and the **LibTorch 2.9.0** are supported.
 //!
 //! # Quick Start
 //!
-//! ```ignore, rust
+//! ```rust
 //! use relayrl::agent::*;
 //! use relayrl::types::model::ModelModule;
-//! use relayrl::types::tensor::relayrl::DeviceType;
+//! use relayrl::types::tensor::DeviceType;
 //! use relayrl::types::tensor::burn::{Tensor, Float, ndarray::NdArray};
 //!
-//! [tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Build the agent handle and its startup parameters.
 //!     let default_model = ModelModule::<NdArray>::load_from_path("model_dir")?;
 //!     let (mut agent, params) = AgentBuilder::<NdArray>::builder()
@@ -46,7 +68,6 @@
 //!     let actor_info = agent
 //!         .new_actors::<2, 1>(4, DeviceType::Cpu, 1_000, None, None)
 //!         .await?;
-//!     let actor_ids: Vec<_> = actor_info.iter().map(|(id, _)| *id).collect();
 //!
 //!     // Request actions for all actors. The const rank generics must match creation.
 //!     let observation = Tensor::<NdArray, 2, Float>::zeros(
@@ -54,12 +75,12 @@
 //!         &Default::default(),
 //!     );
 //!     let actions: Vec<_> = agent
-//!         .request_actions::<2, 1, Float, Float>(actor_ids.clone(), observation, None, 0.0)
+//!         .request_actions::<2, 1, Float, Float>(&actor_info, observation, None, 0.0)
 //!         .await?;
 //!
 //!     // Use actions in your simulator, then mark the episode boundary across actors.
-//!     some_env_steps(actions);
-//!     agent.flag_last_actions(actor_ids, Some(1.0)).await?;
+//!     // some_env_steps(actions);
+//!     agent.flag_last_actions(&actor_info, Some(1.0)).await?;
 //!
 //!     agent.shutdown().await?;
 //!     Ok(())
@@ -77,7 +98,7 @@
 //! tensor operations and model inference. By default, RelayRL *expects* burn_ndarray's **NdArray** for tensor operations and **ORT** for model inference. To use **LibTorch** for both,
 //! you can enable the `tch-backend` feature flag and pass burn_tch's `Tch` as the `Backend` generic type.
 //!
-//! The builder defaults to `ActorInferenceMode::Client(ModelMode::Independent)` inference, `ActorDataMode::OfflineWithCache(1000)`
+//! The builder defaults to `ActorInferenceMode::Client(ModelMode::Independent)`, `ActorDataMode::OfflineWithCache(1000)`
 //! trajectory recording, a router scale of `1`, no default model, a buffer size of `1024` per actor, and no config path.
 //!
 //! ```rust
@@ -129,8 +150,8 @@
 //! Trajectories produced by actors are recorded according to the
 //! [`ActorDataMode`](crate::agent::ActorDataMode) selected on the builder:
 //!
-//! - `OfflineWithCache(size)` *(default)*: keep trajectories in
-//!   an in-memory buffer, retrievable at any time with `RelayRLAgent::drain_trajectory_caches(actor_ids)`.
+//! - `OfflineWithCache` *(default)*: keep trajectories in
+//!   an in-memory buffer, retrievable at any time with `RelayRLAgent::drain_trajectory_caches(actors)`.
 //! - `OfflineWithFiles`: write to local files,
 //!   either `Csv` or `Arrow`,
 //!   via [`LocalTrajectoryFileParams`](crate::agent::LocalTrajectoryFileParams). `LocalTrajectoryFileParams::new` validates the target path
@@ -143,9 +164,10 @@
 //!
 //! Every agent is backed by a JSON configuration file that is used to load the runtime's operational settings while it is live. The path defaults to
 //! `client_config.json` in the current working directory and can be overridden with
-//! [`AgentBuilder::config_path`](crate::agent::AgentBuilder). If the file does not exist it is
-//! created on first use, pre-populated with defaults; if it exists it is read and parsed
-//! into a [`ClientConfigLoader`](crate::utils::config::ClientConfigLoader).
+//! [`AgentBuilder::config_path`](crate::agent::AgentBuilder). If the *default* path does not exist it is
+//! created on first use, pre-populated with defaults. A custom path supplied via `config_path` is not
+//! auto-created in the same way: it must already exist, since the loader reads it directly. If the file
+//! exists it is read and parsed into a [`ClientConfigLoader`](crate::utils::config::ClientConfigLoader).
 //!
 //! A malformed file does not abort
 //! startup, the loader logs the error and falls back to built-in defaults.
@@ -174,11 +196,14 @@
 //! (highest first):
 //!
 //! 1. **Builder and runtime arguments (highest).** Values passed programmatically win wherever they
-//!    overlap a file setting (for example, a one knob present in both is `data_buffer_size`:
-//!    [`AgentBuilder::data_buffer_size`](crate::agent::AgentBuilder) overrides the file
-//!    when set, and the file value is used when it is left unset). Per-call runtime arguments are also
-//!    in this tier - `new_actors`/`new_actor` take their `device`, `max_traj_length`, and `model`
-//!    directly, and `update_models` swaps a model explicitly; none of these are sourced from the file.
+//!    overlap a file setting. Two examples: [`AgentBuilder::data_buffer_size`](crate::agent::AgentBuilder)
+//!    overrides the file's per-actor buffer size when set (the file value is used when it is left unset),
+//!    and [`AgentBuilder::config_polling_seconds`](crate::agent::AgentBuilder) overrides the file's
+//!    `config_polling_seconds` when set - once supplied at startup, the runtime keeps that argument's
+//!    value fixed for its lifetime and ignores later file changes to the field. Per-call runtime
+//!    arguments are also in this tier - `new_actors`/`new_actor` take their `device`, `max_traj_length`,
+//!    and `model` directly, and `update_models` swaps a model explicitly; none of these are sourced
+//!    from the file.
 //! 2. **Config file values (middle).** When no argument overrides them, the file supplies the
 //!    operational settings: `config_polling_seconds`,
 //!    `trajectory_file_output` (directory + `Csv`/`Arrow`), the metrics meter/endpoint, the transport
@@ -189,8 +214,8 @@
 //!
 //! Some settings are *builder-only* and never read from the file (for example `data_routers`,
 //! `default_model`, and the inference / training-data modes), while others are *file-only* with no
-//! `AgentBuilder` equivalent on the local, offline path (for example `config_polling_seconds`, the
-//! metrics endpoint, and the transport addresses).
+//! `AgentBuilder` equivalent on the local, offline path (for example the metrics endpoint and the
+//! transport addresses).
 //!
 //! ##### Config changes at runtime
 //!
@@ -199,85 +224,93 @@
 //! agent with no restart: the trajectory-file output and the resolved local model path (plus the metrics meter/endpoint under the `metrics` feature, and the
 //! transport addresses and default hyperparameters under a transport feature).
 //!
-//! # The Agent Runtime
+//! # Running the Agent
 //!
 //! Building an agent does **not** start it. [`RelayRLAgent::start`](crate::agent::RelayRLAgent::start) spins up the coordinator, managers,
 //! routers, and supporting control/data runtime tasks designated by the `AgentStartParameters`; you then
 //! create one or more actors with [`RelayRLActors::new_actors`](crate::agent::RelayRLActors::new_actors) (each on
-//! a chosen [`DeviceType`](crate::types::tensor::relayrl::DeviceType) with its own trajectory length and optional model). Once actors
-//! exist there are two ways to [`execute`](#Heterogeneous-Actor-Execution) them, and [`RelayRLAgent::shutdown`](crate::agent::RelayRLAgent::shutdown) tears everything
+//! a chosen [`DeviceType`](crate::types::tensor::DeviceType) with its own trajectory length and optional model). Once actors
+//! exist there are two ways to [`execute`](#Heterogeneous-Actor-Execution) them.
+//!
+//! Starting the `RelayRLAgent` necessitates that the agent eventually be
+//! shutdown via [`RelayRLAgent::shutdown`](crate::agent::RelayRLAgent::shutdown), which tears everything
 //! down gracefully. [`RelayRLAgent::restart`](crate::agent::RelayRLAgent::restart) is also available to tear down and reinitialise
 //! the runtime without destroying the agent handle. This is useful when you want to reload the agent using
 //! a different set of `AgentStartParameters` without building a new agent.
 //!
-//!
+//! #### Declaring new actors
 //!
 //! Actors are created with `new_actors::<D_IN, D_OUT>(count, device, max_traj_length, nametag, model)`,
 //! where the const generics `D_IN` and `D_OUT` declare the observation tensor rank and the
 //! action/mask tensor rank respectively. These must be consistent with the environment and model
-//! that will be used with those actors. `new_actor` (singular) creates exactly one actor and
+//! that will be used with those actors.
+//!
+//! `new_actor` (singular) creates exactly one actor and
 //! accepts the same signature. Each actor is assigned to a device, given an independent
 //! trajectory buffer of `max_traj_length` steps, an optional `nametag` for tracking, and, if `model` is `Some`, pre-loads that
 //! model into its handle; otherwise the actor waits for a model to be provided via
 //! `update_models` before it can perform inference.
 //!
-//! If multiple actors are initialized with the same `nametag`, each successive actor's `nametag` will be post-fixed with `_#` where # is some number.
+//! A supplied `nametag` string is stored internally as a `{ tag, duplicate }` pair, not concatenated
+//! into a single string; `ActorInfo::nametag()` returns this pair opaquely. When a `nametag` is
+//! supplied, the runtime scans all currently live actors for the highest existing `duplicate` value
+//! under that same `tag` and assigns `duplicate` values starting one past it (`0` if the tag is unused
+//! yet). This lookup spans every live actor, not just the current call, so a batch of `new_actors` and
+//! later `new_actor`/`new_actors` calls that reuse the same tag string never collide with each other.
+//! `get_actors_by_tag` matches only on the `tag` part, ignoring `duplicate`, so it returns every actor
+//! sharing a base tag regardless of their individual `duplicate` values.
 //!
 //! ```rust
 //! use relayrl::agent::*;
 //! use relayrl::types::model::ModelModule;
-//! use relayrl::types::tensor::burn::{tch::Tch, ndarray::NdArray};
+//! use relayrl::types::tensor::burn::ndarray::NdArray;
+//! use relayrl::types::tensor::DeviceType;
 //!
-//! async fn run(
-//!     mut nd_agent: RelayRLAgent<NdArray>,
-//!     tch_agent: RelayRLAgent<Tch>,
-//!     params: AgentStartParameters<NdArray>,
+//! async fn run_simulation(
+//!     mut npc_team_1: RelayRLAgent<NdArray>,
+//!     mut npc_team_2: RelayRLAgent<NdArray>,
+//!     params_1: AgentStartParameters<NdArray>,
+//!     params_2: AgentStartParameters<NdArray>,
 //! ) -> Result<(), Box<dyn std::error::Error>> {
-//!
-//!     nd_agent.start(params).await?;
-//!     tch_agent.start(params).await?;
+//!     npc_team_1.start(params_1).await?;
+//!     npc_team_2.start(params_2).await?;
 //!
 //!     const ENV1_OBS_IN: usize = 2;
 //!     const ENV1_ACT_OUT: usize = 2;
-//!     let env1_actors = 4;
-//!     let env1_max_traj_length = 1_000;
+//!     let team1_actors = 4;
+//!     let team1_max_traj_length = 1_000;
 //!
 //!     const ENV2_OBS_IN: usize = 6;
 //!     const ENV2_ACT_OUT: usize = 1;
-//!     let env2_actors = 3;
-//!     let env2_max_traj_length = 2_000;
+//!     let team2_actors = 3;
+//!     let team2_max_traj_length = 2_000;
 //!
 //!     let no_nd_model: Option<ModelModule<NdArray>> = None;
-//!     let no_tch_model: Option<ModelModule<Tch>> = None;
 //!
 //!     // Create two groups of actors with different obs/action ranks on different devices.
-//!     let env1_actor_info = nd_agent.new_actors::<ENV1_OBS_IN, ENV1_ACT_OUT>(
-//!         env1_actors, DeviceType::Cpu, env1_max_traj_length, Some("routing_decision".to_string()), no_nd_model
+//!     // The trailing `None` is an optional `AlgorithmInitArgs`, only present when a
+//!     // transport feature (`nats-transport` / `zmq-transport`) is enabled.
+//!     let team1_actor_info = npc_team_1.new_actors::<ENV1_OBS_IN, ENV1_ACT_OUT>(
+//!         team1_actors, DeviceType::Cpu, team1_max_traj_length, Some("routing_decision"), no_nd_model.clone(),
+//!         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+//!         None,
 //!     ).await?;
-//!     let env2_actor_info = tch_agent.new_actors::<ENV2_OBS_IN, ENV2_ACT_OUT>(
-//!         env2_actors, DeviceType::Gpu(0), env2_max_traj_length, Some("compute_decision".to_string()), no_tch_model
+//!     let team2_actor_info = npc_team_2.new_actors::<ENV2_OBS_IN, ENV2_ACT_OUT>(
+//!         team2_actors, DeviceType::Cpu, team2_max_traj_length, Some("compute_decision"), no_nd_model,
+//!         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+//!         None,
 //!     ).await?;
-//!
-//!     let all_nd_actor_ids: Vec<_> = env1_actor_info.iter().map(|(id, _)| *id).collect();
-//!     let all_tch_actor_ids: Vec<_> = env2_actor_info.iter().map(|(id, _)| *id).collect();
 //!
 //!     // ... interact ...
 //!
-//!     nd_agent.remove_actors(all_nd_actor_ids).await?;
-//!     tch_agent.remove_actors(all_tch_actor_ids).await?;//!     nd_agent.shutdown().await?;
-//!     tch_agent.shutdown().await?;
+//!     npc_team_1.remove_actors(&team1_actor_info).await?;
+//!     npc_team_2.remove_actors(&team2_actor_info).await?;
+//!
+//!     npc_team_1.shutdown().await?;
+//!     npc_team_2.shutdown().await?;
 //!     Ok(())
 //! }
 //! ```
-//!
-//! #### Introspection methods after [`RelayRLAgent::start`](crate::agent::RelayRLAgent::start)
-//!
-//! - `get_model_versions(actor_ids)` - returns `(ActorUuid, version: i64)` pairs reflecting how
-//!   many times each actor's model has been hot-swapped since startup.
-//! - `drain_trajectory_caches(actor_ids)` - returns and drains the in-memory trajectory cache for the given
-//!   actor IDs (only populated under `OfflineWithCache` or `OfflineWithFilesAndCache` modes).
-//! - `get_config()` - fetches the active `ClientConfigLoader` being watched by the lifecycle manager.
-//! - `set_config_path(path)` - hot-swap the configuration file path without restarting the runtime.
 //!
 //! #### Actor Management
 //!
@@ -288,25 +321,32 @@
 //! actor to a routing worker and an inbox channel). The methods below manipulate that
 //! bookkeeping while the runtime is live, without tearing the agent down.
 //!
-//! - `get_actor_info()` - returns the UUIDs and nametags of all live actors by reading the client's slice of
-//!   the namespaced UUID registry. Because it is the registry view, callers should not rely on
-//!   any particular ordering. Returns `NoRuntimeInstanceError` if the agent has not been started.
-//! - `get_actor_info_by_rank<D_IN, D_OUT>()` - returns the UUIDs & nametags of all valid live actors that
+//! - `get_actor(id)` - returns the [`ActorInfo`](crate::agent::ActorInfo) handle for a single live
+//!   actor by its current `ActorUuid`.
+//! - `get_all_actors()` - returns the `ActorInfo` handles of all live actors by reading the client's
+//!   slice of the namespaced UUID registry. Because it is the registry view, callers should not rely on
+//!   any particular ordering. Returns an error if the agent has not been started (no runtime instance).
+//! - `get_actors_by_rank<D_IN, D_OUT>()` - returns the `ActorInfo` handles of all live actors that
 //!   match the generic `D_IN`, `D_OUT` rank inputs.
-//! - `remove_actor(actor_id)` / `remove_actors(actor_ids)` - de-register one or more actors. Under the hood
+//! - `get_actors_by_tag(nametag)` - returns the `ActorInfo` handles of all live actors whose nametag's
+//!   `tag` string matches `nametag` (or all untagged actors when `nametag` is `None`), regardless of
+//!   each actor's `duplicate` value (see [Declaring new actors](#declaring-new-actors)).
+//! - `remove_actor(actor)` / `remove_actors(actors)` - de-register one or more actors. Under the hood
 //!   each removal aborts the actor's task, drops its environment, device, model handle, runtime
 //!   handle, and router route, decrements the live-actor count, and frees the UUID back to the
-//!   registry. `remove_actors` is a convenience wrapper: an empty list is rejected with
-//!   `NoopActorCount`, a single ID delegates to `remove_actor`, and larger lists are removed
+//!   registry. `remove_actors` is a convenience wrapper: an empty slice is rejected with
+//!   `NoopActorCount`, a single actor delegates to `remove_actor`, and larger slices are removed
 //!   one by one.
-//! - `set_actor_id(current_id, new_id)` - rename a live actor's UUID in place. The runtime moves the
+//! - `set_actor_id(actor, new_id)` - rename a live actor's UUID in place. The runtime moves the
 //!   actor's task handle, inbox, router assignment, device, environment, and runtime handle from
-//!   `current_id` to `new_id` and updates the registry; the underlying task keeps running and its
-//!   inbox is preserved, so in-flight routing is not interrupted. It fails if `current_id` is not
-//!   found or if `new_id` is already taken. Useful for aligning an actor's identity with an
-//!   external system (for example a session or player ID).
-//! - `set_actor_nametag(actor_id, new_nametag)` - rename a live actor's nametag in place. The runtime
-//!   replaces the `actor_id`'s existing `nametag` with the `new_nametag` value.
+//!   `actor.id` to `new_id` and updates the registry, and `actor` is updated in place to reflect
+//!   the new ID; the underlying task keeps running and its inbox is preserved, so in-flight
+//!   routing is not interrupted. It fails if `actor.id` is not found or if `new_id` is already
+//!   taken. Useful for aligning an actor's identity with an external system (for example a
+//!   session or player ID).
+//! - `set_actor_nametag(actor, new_nametag)` - rename a live actor's nametag in place. The runtime
+//!   replaces the actor's existing `nametag` with the `new_nametag` value, and `actor` is updated
+//!   in place to reflect it.
 //!
 //! ```rust
 //! use relayrl::agent::{RelayRLAgent, RelayRLActors};
@@ -318,19 +358,21 @@
 //! ) -> Result<(), Box<dyn std::error::Error>> {
 //!
 //!     // Enumerate live actors (registry order; do not assume sorting).
-//!     let actor_info: Vec<(Uuid, Option<Arc<str>>)> = agent.get_actor_info().await?;//!
+//!     let actor_info = agent.get_all_actors().await?;
+//!
 //!     // Give the first actor a stable, externally-meaningful identity. The task keeps
-//!     // running under the new ID with its inbox intact.
+//!     // running under the new ID with its inbox intact; `actor_info[0]` observes the new
+//!     // id immediately, since it shares the same underlying slot as every other clone.
 //!     let session_id = Uuid::new_v4();
-//!     agent.set_actor_id(actor_info[0].0, session_id).await?;
+//!     agent.set_actor_id(&actor_info[0], session_id).await?;
 //!
 //!     // Retire the remaining actors; their tasks are aborted and their UUIDs freed.
-//!     agent.remove_actors(actor_info[1..].iter().map(|(id, _)| id.clone()).collect()).await?;
+//!     agent.remove_actors(&actor_info[1..]).await?;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! #### Router Scaling
+//! #### Data Scaling
 //!
 //! Between the coordinator and the actors sits a pool of data routing workers that dispatch
 //! messages to actors and drain trajectory sink buffers (see [Step-Driven Training Data Configuration](#step-driven-training-data-configuration)). The initial pool size is set with
@@ -375,7 +417,10 @@
 //! the metrics meter/endpoint under the `metrics` feature); transport addresses and default
 //! hyperparameters are additionally refreshed when a transport feature is enabled.
 //!
-//! If `config_polling_seconds` itself changes, the polling interval is rebuilt to match.
+//! If `config_polling_seconds` itself changes in the file, the polling interval is rebuilt to match -
+//! unless [`AgentBuilder::config_polling_seconds`](crate::agent::AgentBuilder) was supplied at startup,
+//! in which case that argument's value is fixed for the runtime's lifetime and further file changes to
+//! the field are ignored.
 //!
 //! The watched path can be swapped at runtime with [`RelayRLAgent::set_config_path`](crate::agent::RelayRLAgent),
 //! and the active loader is retrievable with [`RelayRLAgent::get_config`](crate::agent::RelayRLAgent).
@@ -388,14 +433,14 @@
 //! multi-threaded Tokio runtime their inference runs in parallel (no GIL); on a
 //! current-thread runtime they run concurrently.
 //!
-//! Models are hot-swappable at runtime. [`RelayRLAgent::update_models::<D_IN, D_OUT>(actor_ids, model)`](crate::agent::RelayRLAgent::update_models) can target
-//! a subset of actors by passing `Some(vec![id_a, id_b])`, letting you roll a freshly trained
+//! Models are hot-swappable at runtime. [`RelayRLActors::update_models::<D_IN, D_OUT>(actors, model)`](crate::agent::RelayRLActors::update_models) can target
+//! a subset of actors by passing `Some(&[actor_a, actor_b])`, letting you roll a freshly trained
 //! policy into specific actors while the rest keep serving the previous one, with no restart and
-//! no downtime. Passing `None` signifies no particular actor IDs for the call, thus the function updates all live actors. In `ModelMode::Shared`, the runtime
+//! no downtime. Passing `None` signifies no particular actors for the call, thus the function updates all live actors. In `ModelMode::Shared`, the runtime
 //! refreshes one representative actor per device so each shared handle is updated exactly once.
 //!
-//! After a hot-swap, `get_model_versions(actor_ids)` returns the current swap count for each
-//! actor as `(ActorUuid, i64)` pairs, which can be used to confirm that the update propagated.
+//! After a hot-swap, `get_model_versions(actors)` returns the current swap count for each
+//! actor as `(ActorInfo, i64)` pairs, which can be used to confirm that the update propagated.
 //!
 //! **Note:** `update_models` is rejected (returns `ModelUpdateNotSupported`) when the agent is
 //! configured with any `Online` training data mode, since model updates are managed server-side
@@ -411,12 +456,12 @@
 //!     agent: &RelayRLAgent<NdArray>,
 //!     new_model: ModelModule<NdArray>,
 //! ) -> Result<(), Box<dyn std::error::Error>> {
-//!     let actor_info = agent.get_actor_info().await?;
-//!     let (ids, _nametags): (Vec<_>, Vec<_>) = actor_info.into_iter().unzip();
+//!     let actor_info = agent.get_all_actors().await?;
 //!     // Swap a new policy into actors 0 and 2 only; actor 1 keeps the old policy.
-//!     agent.update_models::<2, 1>(Some(vec![ids[0], ids[2]]), new_model).await?;
+//!     let target_actors = vec![actor_info[0].clone(), actor_info[2].clone()];
+//!     agent.update_models::<2, 1>(Some(&target_actors), new_model).await?;
 //!     // Verify the swap landed.
-//!     let versions = agent.get_model_versions(vec![ids[0], ids[2]]).await?;
+//!     let versions = agent.get_model_versions(&target_actors).await?;
 //!     Ok(())
 //! }
 //! ```
@@ -424,33 +469,32 @@
 //! #### Step-driven Integration
 //!
 //! In the step-driven pattern, *your* code owns the loop. You hold the observations and
-//! ask specific actors for actions one step at a time via [`RelayRLAgent::request_action`](crate::agent::RelayRLAgent::request_action),
-//! marking episode boundaries with [`RelayRLAgent::flag_last_action`](crate::agent::RelayRLAgent::flag_last_action). This is the right
+//! ask specific actors for actions one step at a time via [`RelayRLStepDriven::request_action`](crate::agent::RelayRLStepDriven::request_action),
+//! marking episode boundaries with [`RelayRLStepDriven::flag_last_action`](crate::agent::RelayRLStepDriven::flag_last_action). This is the right
 //! fit for embedding RelayRL inside an existing simulator, game engine, or control loop.
 //!
 //! `request_action` is generic over `<D_IN, D_OUT, KindIn, KindOut>`: just as elsewhere, the two const generics
 //! must match the observation and action tensor ranks declared when the actors were created,
 //! whereas `KindIn`/`KindOut` are the tensor element kinds (e.g. `Float`). It accepts an observation
 //! tensor, an optional action mask tensor, and a `reward: f32` for the previous step, and returns
-//! `Vec<(ActorUuid, Arc<RelayRLAction>)>` - one entry per actor in the `actor_ids` list. You can
-//! target any subset of live actors by constructing the `actor_ids` vector accordingly.
+//! `Vec<(ActorInfo, Arc<RelayRLAction>)>` - one entry per actor in the `actors` slice. You can
+//! target any subset of live actors by constructing the `actors` slice accordingly.
 //!
-//! `flag_last_action(ids, reward: Option<f32>)` appends a terminal action (`done = true`) to
-//! each named actor's current trajectory, signalling the end of an episode. After calling it,
+//! `flag_last_action(actor, reward: Option<f32>)` appends a terminal action (`done = true`) to
+//! the named actor's current trajectory, signalling the end of an episode. After calling it,
 //! the actor begins a fresh trajectory on the next `request_action`.
 //!
 //! ```rust
-//! use relayrl::agent::{RelayRLAgent, RelayRLStepDriven, RelayRLActors};
+//! use relayrl::agent::{ActorInfo, RelayRLAgent, RelayRLStepDriven, RelayRLActors};
 //! use relayrl::types::tensor::burn::{Tensor, Float, ndarray::NdArray};
-//! use relayrl::utils::uuid::Uuid;
 //!
 //! async fn control_loop_step(
 //!     agent: &RelayRLAgent<NdArray>,
-//!     relevant_actor: Uuid,
+//!     relevant_actor: &ActorInfo,
 //! ) -> Result<(), Box<dyn std::error::Error>> {
 //!
 //!     let obs = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
-//!     let mask = None;
+//!     let mask: Option<Tensor<NdArray, 2, Float>> = None;
 //!     let reward = 0.0;
 //!
 //!     // Request the `relevant_actor` to perform inference and return a `RelayRLAction`.
@@ -472,17 +516,16 @@
 //!     agent: &RelayRLAgent<NdArray>,
 //! ) -> Result<(), Box<dyn std::error::Error>> {
 //!
-//!     let actor_info = agent.get_actor_info().await?;
-//!     let (all_ids, _all_nametags): (Vec<_>, Vec<_>) = actor_info.into_iter().unzip();
+//!     let actor_info = agent.get_all_actors().await?;
 //!     let obs = Tensor::<NdArray, 2, Float>::zeros([1, 4], &Default::default());
-//!     let mask = None;
+//!     let mask = Option::<Tensor<NdArray, 2, Float>>::None;
 //!     let reward = 0.0;
 //!
-//!     // Request all actor IDs to perform inference and return a `Vec<RelayRLAction`.
-//!     let _actions = agent.request_actions(all_ids.clone(), obs, mask, reward).await?;
+//!     // Request all actors to perform inference and return a `Vec<(ActorInfo, Arc<RelayRLAction>)>`.
+//!     let _actions = agent.request_actions(&actor_info, obs, mask, reward).await?;
 //!
 //!     // Mark end of episode for all actors with the terminal reward.
-//!     agent.flag_last_actions(all_ids, Some(reward + 1.0)).await?;
+//!     agent.flag_last_actions(&actor_info, Some(reward + 1.0)).await?;
 //!     Ok(())
 //! }
 //! ```
@@ -501,9 +544,10 @@
 //! use relayrl::agent::{RelayRLAgent, RelayRLStepDriven, RelayRLActors};
 //! use relayrl::algorithms::PPO::{PPOTrainer, PPOTrainerSpec};
 //! use relayrl::algorithms::GenericMlp;
-//! use relayrl::types::tensor::relayrl::{DType, NdArrayDType, DeviceType};
+//! use relayrl::types::tensor::{DType, NdArrayDType, DeviceType};
 //! use relayrl::types::tensor::burn::{Float, ndarray::NdArray};
-//! use std::path::PathBuf;
+//!
+//! # use std::path::PathBuf;
 //!
 //! async fn step_driven_training(
 //!     agent: &mut RelayRLAgent<NdArray>,
@@ -522,19 +566,19 @@
 //!     )?;
 //!     let mut trainer = PPOTrainer::new(spec)?;
 //!
-//!     // 2. Get actor ids by rank
-//!     let actor_rank_info = agent.get_actor_info_by_rank::<2, 1>().await?;
-//!     let (actor_ids, _actor_nametags): (Vec<_>, Vec<_>) = actor_rank_info.into_iter().unzip();
+//!     // 2. Get actors by rank
+//!     let actor_rank_info = agent.get_actors_by_rank::<2, 1>().await?;
 //!
 //!     // 3. Drain the trajectory cache collected during the step-driven loop.
-//!     if let Some(cache) = agent.drain_trajectory_caches(actor_ids.clone()) {
-//!         for (_, trajs) in cache.iter() {
+//!     // The returned map is keyed by each actor's stable `ActorUuid`, not by `ActorInfo`.
+//!     if let Some(cache) = agent.drain_trajectory_caches(&actor_rank_info) {
+//!         for (_actor_id, trajs) in cache.iter() {
 //!             for traj in trajs {
 //!                 trainer.receive_trajectory((**traj).clone()).await?;
 //!             }
 //!         }
 //!     }
-//! 
+//!
 //!     // 4. Run one training epoch and apply the result.
 //!     if let Some(handle) = trainer.start_epoch_training() {
 //!         let output = handle.await?;
@@ -544,7 +588,7 @@
 //!
 //!     // 5. Push the updated policy into all live actors.
 //!     if let Some(new_model) = trainer.acquire_pi_module() {
-//!         agent.update_models::<2, 1>(Some(actor_ids), new_model).await?;
+//!         agent.update_models::<2, 1>(Some(&actor_rank_info), new_model).await?;
 //!     }
 //!
 //!     Ok(())
@@ -556,7 +600,7 @@
 //! In the environment-driven pattern, the [`RelayRLAgent`](crate::agent::RelayRLAgent) owns the loop. You implement either the
 //! `ScalarEnvironment` or `VectorEnvironment` trait (both extend the base `Environment` trait
 //! from [`relayrl_env_trait`](https://docs.rs/relayrl_env_trait/1.3.1/relayrl_env_trait/)) for your environment, bind it to an actor with
-//! `RelayRLActorEnv::set_env(actor_id, Box<dyn Environment>, count)`, and let the runtime
+//! `RelayRLBatchEnv::set_env(actor, Box<dyn Environment>, count)`, and let the runtime
 //! drive the rollout. The `count` argument controls how many logical environment copies are
 //! associated with that actor: when `count < 8` the runtime steps them sequentially; when
 //! `count >= 8` rayon data parallelism is engaged across the copies. The count can be
@@ -566,103 +610,113 @@
 //! Only one `run_env_*` loop may be active per actor at a time; attempting to start a second
 //! returns `ClientError::RunEnvActive` immediately.
 //!
-//! - `run_env_eval(actor_id, env_steps)` - runs evaluation transitions on the bound
-//!   environment; no training update is applied. Vectorized env copies are stepped as a batch,
-//!   so the final batch may exceed `env_steps` by at most `count - 1` transitions.
+//! ##### Evaluation
+//!
+//! `run_env_eval(actor, loop_iters)` - runs `loop_iters` evaluation iterations on the bound
+//!   environment; no training update is applied. Each iteration steps every bound env copy once, so
+//!   the total number of transitions performed is `loop_iters * count`, not `loop_iters` itself.
 //!
 //! ```rust
-//! use relayrl::agent::{RelayRLAgent, RelayRLBatchEnv};
+//! use relayrl::agent::{RelayRLAgent, RelayRLBatchEnv, RelayRLActors};
 //! use relayrl::types::tensor::burn::ndarray::NdArray;
 //!
-//! async fn drive(
+//! async fn drive_car(
 //!     mut agent: RelayRLAgent<NdArray>,
-//!     env: Box<dyn relayrl::env::Environment>,
+//!     pedals: Box<dyn relayrl::env::Environment>,
+//!     steering_wheel: Box<dyn relayrl::env::Environment>,
 //! ) -> Result<(), Box<dyn std::error::Error>> {
-//!     let (actor_id1, actor_id2) = {
-//!         let actor_info = agent.get_actor_info().await?;
-//!         (actor_info[0].0, actor_info[1].0)
+//!     let (actor1, actor2) = {
+//!         let actor_info = agent.get_all_actors().await?;
+//!         (actor_info[0].clone(), actor_info[1].clone())
 //!     };
 //!
 //!     // sequential env stepping is enabled when env count < 8
-//!     agent.set_env(actor_id1, env, 7).await?;       // 7 vectorized env copies on this actor
-//!     agent.run_env_eval(actor_id1, 10_000).await?;  // run at least 10k env transitions
+//!     agent.set_env(&actor1, pedals, 7).await?;       // 7 vectorized env copies on this actor
+//!     agent.run_env_eval(&actor1, 10_000).await?;  // 10k loop iters -> 70k env-copy transitions
 //!
 //!     // rayon data parallelism is enabled when env count >= 8
-//!     agent.set_env(actor_id2, env, 1024).await?;    // 1024 vectorized env copies on this actor
-//!     agent.run_env_eval(actor_id2, 1_000).await?;   // run at least 1k env transitions
+//!     agent.set_env(&actor2, steering_wheel, 1024).await?;    // 1024 vectorized env copies on this actor
+//!     agent.run_env_eval(&actor2, 1_000).await?;   // 1k loop iters -> 1.024m env-copy transitions
 //!
-//!     let count = agent.get_env_count(actor_id2).await?;
-//!     agent.set_env_count(actor_id2, count / 2).await?;  // halve the env count live
-//!     agent.remove_env(actor_id1).await?;
+//!     let count = agent.get_env_count(&actor2).await?;
+//!     agent.set_env_count(&actor2, count / 2).await?;  // halve the env count live
+//!     agent.remove_env(&actor1).await?;
 //!
 //!     Ok(())
 //! }
 //! ```
 //!
-//! - `run_env_with_ppo(actor_id, loop_iters, max_traj_length, trainer_spec)` - runs a
+//! ##### Training
+//!
+//! `run_env_with_ppo(actor, loop_iters, max_traj_length, trainer_spec)` - runs a
 //!   single-agent PPO training rollout until `loop_iters` complete. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
-//!   where **Pi** is a [`NeuralNetwork<B, KindIn, KindOut>`](crate::algorithms::NeuralNetwork). See [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.4.1/relayrl_algorithms/) for details on
+//!   where **Pi** is a [`NeuralNetwork<B, KindIn, KindOut>`](crate::algorithms::NeuralNetwork). See [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.5.0/relayrl_algorithms/) for details on
 //!   constructing the trainer spec.
-//! - `run_env_with_ippo` and `run_env_with_mappo` - independent and multi-agent PPO training
+//! `run_env_with_ippo` and `run_env_with_mappo` - independent and multi-agent PPO training
 //!   rollouts respectively; coming soon (tm).
 //!
 //! ```rust
-//! use relayrl::agent::{RelayRLAgent, RelayRLBatchEnv};
-//! use relayrl::types::tensor::burn::ndarray::NdArray;
+//! use relayrl::agent::{RelayRLAgent, RelayRLBatchEnv, RelayRLActors};
+//! use relayrl::types::tensor::burn::{Float, ndarray::NdArray};
+//! use relayrl::algorithms::{PPO::PPOTrainerSpec, GenericMlp};
 //!
 //! async fn train(
 //!     mut agent: RelayRLAgent<NdArray>,
-//!     env: Box<dyn relayrl::env::Environment>,
-//!     ppo_trainer: PPOTrainer<NdArray, Float, Float, GenericMlp<NdArray, Float, Float>>,
+//!     video_game: Box<dyn relayrl::env::Environment>,
+//!     ppo_spec: PPOTrainerSpec<NdArray, Float, Float, GenericMlp<NdArray, Float, Float>>,
+//!     save_model_path: std::path::PathBuf,
 //! ) -> Result<(), Box<dyn std::error::Error>> {
-//!     let actor_id1 = {
-//!         let rank_info = agent.get_actor_info_by_rank::<3, 1>().await?;
-//!         rank_info[0].0
+//!     let actor1 = {
+//!         let rank_info = agent.get_actors_by_rank::<3, 1>().await?;
+//!         rank_info[0].clone()
 //!     };
-//!     agent.set_env(actor_id1, env, 7).await?;
+//!     agent.set_env(&actor1, video_game, 7).await?;
 //!
-//!     let new_model = agent.run_env_with_ppo(actor_id1, 10_000, 10_000, ppo_trainer).await?.export_to_path("model.mpk")?;
-//!     agent.update_models::<3, 1>(Some(vec![actor_id1]), new_model).await?;
+//!     let new_model = agent.run_env_with_ppo(&actor1, 10_000, 10_000, ppo_spec).await?;
+//!     new_model.save(save_model_path)?;
+//!     agent.update_models::<3, 1>(Some(&[actor1]), new_model).await?;
 //!
 //!     Ok(())
 //! }
 //! ```
 //!
-//! # Experimental Network Transport
-//!
-//! <div class="warning">
-//! Transport- and server-backed workflows are <strong>experimental</strong> in this 0.5.x,
-//! even when their feature flags are enabled. The current supported path is the local runtime.
-//! </div>
-//!
-//! With the `zmq-transport` and/or `nats-transport` features enabled, an agent can be configured
-//! for server-backed workflows. The following **transport-gated** surface becomes available:
-//!
-//! #### Builder setters
-//! - `transport_type(TransportMode)` - selects `TransportMode::ZMQ` or `TransportMode::NATS`; defaults to ZMQ when zmq-transport is enabled.
-//! - `default_ppo_params(PPOParams)` / `default_ippo_params(IPPOParams)` / `default_mappo_params(MAPPOParams)` - supply
-//!   hyperparameters forwarded to the training server at handshake time.
-//!
-//! #### Inference modes
-//! - `ActorInferenceMode::Server(InferenceParams)` - all actor inference is routed to a remote inference server.
-//!   `InferenceParams` holds the `ModelMode`, an optional `CodecConfig` (compression, encryption, integrity), and
-//!   the server addresses via `InferenceAddressesArgs` (`ZMQ` or `NATS` variants, wrapping `ZmqInferenceAddressesArgs`
-//!   or a NATS subject string).
-//! - `ActorInferenceMode::ClientFallback(ModelMode, InferenceParams)` - all actors performs inference locally
-//!   as a fallback while the rest route to the server.
-//!
-//! #### Training data modes
-//! - `ActorDataMode::Online(TrainingParams)` - trajectories are streamed to a training server.
-//! - `ActorDataMode::OnlineWithFiles(TrainingParams, ...)` - stream to server and write to local files.
-//! - `ActorDataMode::OnlineWithCache(TrainingParams)` - stream to server and keep in memory.
-//! - `ActorDataMode::OnlineWithFilesAndCache(TrainingParams, ...)` - all three simultaneously.
-//!
-//! `TrainingParams` mirrors `InferenceParams` with the addition of optional hyperparameter args and
-//! training-specific addresses via `TrainingAddressesArgs` (`ZMQ` wrapping `ZmqTrainingAddressesArgs`,
-//! or `NATS`). `ZmqTrainingAddressesArgs` exposes the agent listener, model server, trajectory server,
-//! and scaling server endpoints individually.
-//!
-//! These paths are under active development and are not covered by the 0.5.x support promise.
+
+// # Experimental Network Transport
+//
+// <div class="warning">
+// Transport- and server-backed workflows are <strong>experimental</strong> in this 0.5.x,
+// even when their feature flags are enabled. The current supported path is the local runtime.
+// </div>
+//
+// With the `zmq-transport` and/or `nats-transport` features enabled, an agent can be configured
+// for server-backed workflows. The following **transport-gated** surface becomes available:
+//
+// #### Builder setters
+//
+// - `transport_type(TransportMode)` - selects `TransportMode::ZMQ` or `TransportMode::NATS`; defaults to ZMQ when zmq-transport is enabled.
+// - `default_ppo_params(PPOParams)` / `default_ippo_params(IPPOParams)` / `default_mappo_params(MAPPOParams)` - supply
+//   hyperparameters forwarded to the training server at handshake time.
+//
+// #### Inference modes
+// - `ActorInferenceMode::Server(InferenceParams)` - all actor inference is routed to a remote inference server.
+//   `InferenceParams` holds the `ModelMode`, an optional `CodecConfig` (compression, encryption, integrity), and
+//   the server addresses via `InferenceAddressesArgs` (`ZMQ` or `NATS` variants, wrapping `ZmqInferenceAddressesArgs`
+//   or a NATS subject string).
+// - `ActorInferenceMode::ClientFallback(ModelMode, InferenceParams)` - all actors performs inference locally
+//   as a fallback while the rest route to the server.
+//
+// #### Training data modes
+// - `ActorDataMode::Online(TrainingParams)` - trajectories are streamed to a training server.
+// - `ActorDataMode::OnlineWithFiles(TrainingParams, ...)` - stream to server and write to local files.
+// - `ActorDataMode::OnlineWithCache(TrainingParams)` - stream to server and keep in memory.
+// - `ActorDataMode::OnlineWithFilesAndCache(TrainingParams, ...)` - all three simultaneously.
+//
+// `TrainingParams` mirrors `InferenceParams` with the addition of optional hyperparameter args and
+// training-specific addresses via `TrainingAddressesArgs` (`ZMQ` wrapping `ZmqTrainingAddressesArgs`,
+// or `NATS`). `ZmqTrainingAddressesArgs` exposes the agent listener, model server, trajectory server,
+// and scaling server endpoints individually.
+//
+// These paths are under active development and are not covered by the 0.5.x support promise.
 
 pub mod agent {
     pub use relayrl_framework::network::client::agent::*;
@@ -678,7 +732,7 @@ pub mod algorithms {
     }
 
     /// Neural-network building blocks: the [`NeuralNetwork`] trait family,
-    /// [`GenericMlp`], [`ConvNetPolicy`],
+    /// [`GenericMlp`], [`ConvNetPolicy`](nn::ConvNetPolicy),
     /// [`ValueFunction`], activations, and model-export helpers.
     pub mod nn {
         pub use relayrl_framework::prelude::algorithms::nn::*;
