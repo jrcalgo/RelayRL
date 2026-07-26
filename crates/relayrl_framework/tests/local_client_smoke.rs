@@ -89,7 +89,7 @@ async fn local_client_smoke_covers_build_start_request_and_shutdown()
         .await?;
 
     assert_eq!(action.get_rew(), 1.25);
-    assert_eq!(action.get_agent_id(), Some(&actor_info.id));
+    assert_eq!(action.get_agent_id(), Some(&actor_info.id()));
 
     agent.shutdown().await?;
     Ok(())

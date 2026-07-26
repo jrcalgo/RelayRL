@@ -361,7 +361,11 @@ pub(crate) trait ClientActors<B: Backend + BackendMatcher<Backend = B>> {
         actor: &ActorInfo,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
     ) -> Result<(), CoordinatorError>;
-    async fn resolve_new_nametag(&self, nametag: Option<&str>, actor_count: u32) -> Result<Option<Vec<NameTag>>, CoordinatorError>;
+    async fn resolve_new_nametag(
+        &self,
+        nametag: Option<&str>,
+        actor_count: u32,
+    ) -> Result<Option<Vec<NameTag>>, CoordinatorError>;
     async fn get_actor(&self, id: ActorUuid) -> Result<ActorInfo, CoordinatorError>;
     async fn get_all_actors(&self) -> Result<Vec<ActorInfo>, CoordinatorError>;
     async fn get_actors_by_rank<const D_IN: usize, const D_OUT: usize>(
@@ -1105,8 +1109,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
                             d_out: D_OUT,
                         };
                         for actor in actors {
-                            let Some(runtime) =
-                                local_runtimes.get(&actor.id()).map(|r| Arc::clone(r.value()))
+                            let Some(runtime) = local_runtimes
+                                .get(&actor.id())
+                                .map(|r| Arc::clone(r.value()))
                             else {
                                 continue;
                             };
@@ -1281,8 +1286,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
                 match inference_path {
                     InferencePathParams::Local { local_runtimes } => {
                         for actor in actors {
-                            let Some(runtime) =
-                                local_runtimes.get(&actor.id()).map(|r| Arc::clone(r.value()))
+                            let Some(runtime) = local_runtimes
+                                .get(&actor.id())
+                                .map(|r| Arc::clone(r.value()))
                             else {
                                 continue;
                             };
@@ -1727,9 +1733,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> LifecycleStart<B> for ClientCoord
     ) -> Result<(), CoordinatorError> {
         // if args are set in client mode init config, set lifecycle manager trajectory file path
         let local_trajectory_file_params = match &shared_client_modes.actor_data_mode {
-            ActorDataMode::OfflineWithFiles(Some(params)) => Some(params),
+            ActorDataMode::OfflineWithFiles(Some(params))
+            | ActorDataMode::OfflineWithFilesAndCache(Some(params), _) => Some(params),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            ActorDataMode::OnlineWithFiles(_, Some(params)) => Some(params),
+            ActorDataMode::OnlineWithFiles(_, Some(params))
+            | ActorDataMode::OnlineWithFilesAndCache(_, Some(params), _) => Some(params),
             _ => None,
         };
 
@@ -2243,16 +2251,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientActors<B> for ClientCoordin
                 let actors = &params.shared_state.read().await.actor_runtime_handles;
 
                 let runtime = actors.get(&id).ok_or_else(|| {
-                    CoordinatorError::StateManagerError(StateManagerError::GetActorsError(
-                        format!("[Coordinator] Actor {} not found", id),
-                    ))
+                    CoordinatorError::StateManagerError(StateManagerError::GetActorsError(format!(
+                        "[Coordinator] Actor {} not found",
+                        id
+                    )))
                 })?;
 
-                runtime
-                    .get_actor_info()
-                    .map_err(|e| {
-                        CoordinatorError::StateManagerError(StateManagerError::ActorError(e))
-                    })
+                runtime.get_actor_info().map_err(|e| {
+                    CoordinatorError::StateManagerError(StateManagerError::ActorError(e))
+                })
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::GetActorsError(
@@ -2587,7 +2594,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
                             .map_err(CoordinatorError::from)?
                     };
                     StateManager::<B>::run_env_eval_step_loop(
-                        actor.id(), runtime, env_map, loop_iters,
+                        actor.id(),
+                        runtime,
+                        env_map,
+                        loop_iters,
                     )
                     .map_err(CoordinatorError::from)
                 }
