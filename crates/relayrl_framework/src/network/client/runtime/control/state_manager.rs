@@ -127,21 +127,12 @@ pub enum StateManagerError {
 
 pub type ActorUuid = Uuid;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct NameTag {
     /// Arbitrary string identifier for the actor.
     pub tag: String,
     /// Incremented for each new copy of the same tag.
     pub duplicate: usize,
-}
-
-impl Default for NameTag {
-    fn default() -> Self {
-        Self {
-            tag: String::new(),
-            duplicate: 0,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -1321,20 +1312,12 @@ mod unit_tests {
         ActorDataMode, ActorInferenceMode, ClientModes, ModelMode,
     };
     use active_uuid_registry::registry_uuid::Uuid;
-    use arc_swap::ArcSwapOption;
     use burn_ndarray::NdArray;
-    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::{RwLock, mpsc};
 
-    use relayrl_types::data::tensor::{AnyBurnTensor, DType, DeviceType, NdArrayDType};
-    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
-
     type TestBackend = NdArray<f32>;
-    const D_IN: usize = 4;
-    const D_OUT: usize = 1;
 
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
@@ -1397,19 +1380,6 @@ mod unit_tests {
 
     fn actor_info(id: Uuid) -> ActorInfo {
         ActorInfo::new(id, None)
-    }
-
-    fn float_any_tensor(values: &[f32]) -> AnyBurnTensor<TestBackend, D_IN> {
-        let device = TestBackend::get_device(&DeviceType::Cpu).unwrap();
-        let tensor = Tensor::<TestBackend, D_IN, Float>::from_data(
-            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
-            &device,
-        );
-
-        AnyBurnTensor::Float(FloatBurnTensor {
-            tensor: Arc::new(tensor),
-            dtype: DType::NdArray(NdArrayDType::F32),
-        })
     }
 
     #[tokio::test]

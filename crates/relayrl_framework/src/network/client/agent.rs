@@ -219,7 +219,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
 
     /// Gracefully shuts down all runtime components without destroying the agent handle.
     ///
-    /// The returned map, if any, is keyed by each actor's stable [`ActorUuid`] rather than its
+    /// The returned map, if any, is keyed by each actor's stable UUID rather than its
     /// `ActorInfo` handle: it is a one-shot snapshot of whatever trajectories were still buffered
     /// at shutdown, taken after every actor's runtime handle is gone, so a stable id key is both
     /// sufficient and immune to any in-flight rename.
@@ -422,7 +422,7 @@ pub trait RelayRLActors<B: Backend + BackendMatcher<Backend = B>> {
     ///
     /// Only populated under `...WithMemory` or `...WithFilesAndMemory` data modes.
     ///
-    /// The returned map, if any, is keyed by each actor's stable [`ActorUuid`] rather than its
+    /// The returned map, if any, is keyed by each actor's stable UUID rather than its
     /// `ActorInfo` handle: it is a one-shot snapshot copied out of the shared cache at the moment
     /// of the call, so a stable id key keeps lookups valid even if one of the selected actors is
     /// renamed via `set_actor_id` afterward.

@@ -9,7 +9,7 @@ use active_uuid_registry::interface::get_context_entries;
 use relayrl_algorithms::prelude::ppo::algorithm::{IPPOParams, MAPPOParams, PPOParams};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
-use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
+use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::model::ModelModule;
 
 use burn_tensor::backend::Backend;
@@ -354,7 +354,7 @@ pub enum ActorDataMode {
 
 impl Default for ActorDataMode {
     fn default() -> Self {
-        return Self::OfflineWithCache(1000);
+        Self::OfflineWithCache(1000)
     }
 }
 
@@ -481,7 +481,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildInvariants<B> {
 
     /// Runs build on the internal `AgentBuilder`
     pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), ClientError> {
-        return self.builder.build().await;
+        self.builder.build().await
     }
 }
 
@@ -585,7 +585,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildParameters<B> {
 
     /// Runs build on the internal `AgentBuilder<B>`
     pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), ClientError> {
-        return self.builder.build().await;
+        self.builder.build().await
     }
 }
 

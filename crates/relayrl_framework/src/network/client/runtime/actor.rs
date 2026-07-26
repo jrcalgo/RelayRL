@@ -65,7 +65,7 @@ pub(crate) type LocalModelHandle<B> = Arc<ArcSwapOption<HotReloadableModel<B>>>;
 /// Identification information for an actor in the runtime.
 ///
 /// This is a read-only handle: every clone shares the same underlying id and nametag slots
-/// with the [`ActorRuntime`] that owns them, so a rename or retag performed through the agent
+/// with the actor runtime that owns them, so a rename or retag performed through the agent
 /// API is immediately visible to every outstanding `ActorInfo` for that actor.
 #[derive(Clone)]
 pub struct ActorInfo {
@@ -531,9 +531,11 @@ impl<
             obs_bytes.to_vec(),
             B::get_supported_backend(),
         );
-        let output = module
-            .flat_batch_inference(input)
-            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
+        let output = match module.flat_batch_inference(input) {
+            Ok(output) => output,
+            Err(ModelError::UnsupportedModelType(_)) => module.try_flat_batch_zeros(n_envs)?,
+            Err(error) => return Err(ActorError::from(error)),
+        };
         let action_bytes = if discrete {
             decode_argmax(&output.data, act_dtype, n_envs, act_dim)
         } else {
@@ -1358,15 +1360,13 @@ mod unit_tests {
     use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
 
     use active_uuid_registry::registry_uuid::Uuid;
-    use relayrl_types::data::tensor::{DType, DeviceType, NdArrayDType};
+    use relayrl_types::data::tensor::DeviceType;
 
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{RwLock, mpsc, oneshot};
 
     use burn_ndarray::NdArray;
-    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
-    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
     type NdArrayBackend = NdArray<f32>;
 
@@ -1441,6 +1441,8 @@ mod unit_tests {
         // nametags differ and they do not share an underlying slot.
         assert_eq!(a, b);
 
+        // ActorInfo equality/hashing is by id; interior mutability in the handle is intentional.
+        #[allow(clippy::mutable_key_type)]
         let mut set = HashSet::new();
         set.insert(a.clone());
         assert!(set.contains(&b));
@@ -1455,19 +1457,6 @@ mod unit_tests {
 
     fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
         Arc::new(ArcSwapOption::new(None))
-    }
-
-    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArrayBackend, D_IN>> {
-        let device = NdArrayBackend::get_device(&DeviceType::Cpu).unwrap();
-        let tensor = Tensor::<NdArrayBackend, D_IN, Float>::from_data(
-            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
-            &device,
-        );
-
-        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
-            tensor: Arc::new(tensor),
-            dtype: DType::NdArray(NdArrayDType::F32),
-        }))
     }
 
     async fn create_ndarray_actor(

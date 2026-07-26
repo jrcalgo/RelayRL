@@ -151,8 +151,6 @@ mod unit_tests {
     use tokio::sync::{RwLock, broadcast, mpsc};
 
     type TestBackend = NdArray<f32>;
-    const D_IN: usize = 4;
-    const D_OUT: usize = 1;
 
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {

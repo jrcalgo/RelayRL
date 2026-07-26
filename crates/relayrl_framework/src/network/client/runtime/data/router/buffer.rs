@@ -583,7 +583,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                     let traj_clone = job.traj_for_processing.clone();
 
                     if let Some(ref mut traj_vec) = traj_cache.cache.get_mut(&actor_id) {
-                        let room_after_push = traj_cache.per_actor_size.saturating_sub(1);
+                        let _room_after_push = traj_cache.per_actor_size.saturating_sub(1);
                         // normally we would check for OOM here, but since the system is shutting down, we should flush all trajectories to the cache
                         traj_vec.push(traj_clone);
                     } else {

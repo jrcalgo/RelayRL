@@ -1,14 +1,14 @@
 //! RelayRL client runtime.
 //!
 //! This module is split into a small public API surface and a larger internal runtime:
-//! - [`agent`]: public construction and control APIs for client applications
-//! - `runtime::coordination`: coordinator, lifecycle, scaling, and state management
-//! - `runtime::router`: message routing between actors and data sinks
+//! - [`agent`](crate::network::client::agent): public construction and control APIs for client applications
+//! - `runtime::control`: coordinator, lifecycle, scaling, and state management
+//! - `runtime::data::router`: message routing between actors and data sinks
 //! - `runtime::data`: local file sinks plus experimental transport-backed sinks
 //!
 //! In `0.5.0`, the supported path is the local/default runtime exposed through
-//! [`agent`]. Transport-backed flows behind `zmq-transport` and `nats-transport` remain
-//! experimental.
+//! [`agent`](crate::network::client::agent). Transport-backed flows behind `zmq-transport` and
+//! `nats-transport` remain experimental.
 //!
 //! The local/default runtime follows this flow:
 //! `AgentBuilder` -> `RelayRLAgent` -> coordinator -> router/actors -> local file sink.

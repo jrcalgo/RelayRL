@@ -432,8 +432,6 @@ mod unit_tests {
     use tokio::sync::{RwLock, broadcast, mpsc};
 
     type TestBackend = NdArray<f32>;
-    const D_IN: usize = 4;
-    const D_OUT: usize = 1;
 
     fn disabled_modes() -> Arc<ClientModes> {
         Arc::new(ClientModes {
@@ -519,7 +517,7 @@ mod unit_tests {
         use crate::network::client::runtime::data::router::InferenceRequest;
         use relayrl_types::data::trajectory::RelayRLTrajectory;
         use tokio::sync::oneshot;
-        let (tx, _rx) =
+        let (_tx, _rx) =
             oneshot::channel::<std::sync::Arc<relayrl_types::data::action::RelayRLAction>>();
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         assert_eq!(
