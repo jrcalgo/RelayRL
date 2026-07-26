@@ -11,8 +11,12 @@ pub use multiagent::{MAPPOParams, MultiAgentPPOAlgorithm};
 
 use crate::TrainerArgs;
 
-use crate::algorithms::PPO::kernel::{DiscretePPOPolicyHead, PPOKernel, PPOPolicyHead};
-use crate::algorithms::{GenericMlp, NeuralNetwork, NeuralNetworkError, NeuralNetworkSpec};
+use crate::algorithms::PPO::kernel::{
+    ContinuousPPOPolicyHead, DiscretePPOPolicyHead, PPOKernel, PPOPolicyHead,
+};
+use crate::algorithms::{
+    GenericMlp, NeuralNetwork, NeuralNetworkError, NeuralNetworkSpec, dtype_is_float,
+};
 
 use crate::templates::base_algorithm::AlgorithmError;
 
@@ -50,7 +54,19 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
-    /// Builds default policy and value networks for the given observation/action dims and dtypes.
+    fn backend_f32_dtype() -> DType {
+        match B::get_supported_backend() {
+            SupportedTensorBackend::NdArray => DType::NdArray(NdArrayDType::F32),
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(TchDType::F32),
+            _ => DType::NdArray(NdArrayDType::F32),
+        }
+    }
+
+    /// Builds default discrete (categorical) policy and value networks.
+    ///
+    /// The value MLP always has output dim `1` and an f32 backend dtype, independent of
+    /// `act_dim` / `act_dtype`.
     pub fn default(
         obs_dim: usize,
         obs_dtype: DType,
@@ -67,10 +83,46 @@ where
                 obs_dim,
                 obs_dtype.clone(),
                 act_dim,
-                act_dtype.clone(),
+                act_dtype,
                 &device,
             ))?),
-            vf_mlp: GenericMlp::default(obs_dim, obs_dtype, act_dim, act_dtype, &device),
+            vf_mlp: GenericMlp::default(obs_dim, obs_dtype, 1, Self::backend_f32_dtype(), &device),
+        })
+    }
+
+    /// Builds default continuous (diagonal-Gaussian) policy and value networks.
+    ///
+    /// The policy network emits `2 * act_dim` floats laid out as
+    /// `[mean_0..mean_{A-1}, log_std_0..log_std_{A-1}]`. `act_dtype` must be floating.
+    pub fn default_continuous(
+        obs_dim: usize,
+        obs_dtype: DType,
+        act_dim: usize,
+        act_dtype: DType,
+        device: B::Device,
+    ) -> Result<Self, NeuralNetworkError> {
+        if !dtype_is_float(&act_dtype) {
+            return Err(NeuralNetworkError::InvalidContinuousActionDType(
+                act_dtype.to_string(),
+            ));
+        }
+        let policy_out =
+            act_dim
+                .checked_mul(2)
+                .ok_or(NeuralNetworkError::InvalidContinuousOutputDim {
+                    output_dim: act_dim,
+                })?;
+        Ok(Self {
+            pi_head: PPOPolicyHead::Continuous(ContinuousPPOPolicyHead::new(
+                <Pi as NeuralNetwork<B, KindIn, KindOut>>::default(
+                    obs_dim,
+                    obs_dtype.clone(),
+                    policy_out,
+                    act_dtype,
+                    &device,
+                ),
+            )?),
+            vf_mlp: GenericMlp::default(obs_dim, obs_dtype, 1, Self::backend_f32_dtype(), &device),
         })
     }
 }
@@ -140,6 +192,48 @@ where
             let burn_device = B::get_device(&device)
                 .map_err(|e| NeuralNetworkError::UnsupportedDevice(e.to_string()))?;
             PPONetworkArgs::default(
+                obs_dim,
+                obs_dtype.clone(),
+                act_dim,
+                act_dtype.clone(),
+                burn_device,
+            )?
+        };
+
+        Ok(Self::PPO {
+            args: TrainerArgs {
+                env_dir,
+                save_model_path,
+                obs_dim,
+                obs_dtype,
+                act_dim,
+                act_dtype,
+                buffer_size,
+                device,
+            },
+            hyperparams: None,
+            networks,
+        })
+    }
+
+    /// Builds a `PPO` spec with default continuous (diagonal-Gaussian) networks.
+    ///
+    /// `act_dim` is the environment action dimension; the policy network width is `2 * act_dim`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn default_continuous(
+        env_dir: PathBuf,
+        save_model_path: PathBuf,
+        obs_dim: usize,
+        obs_dtype: DType,
+        act_dim: usize,
+        act_dtype: DType,
+        buffer_size: usize,
+        device: DeviceType,
+    ) -> Result<Self, NeuralNetworkError> {
+        let networks = {
+            let burn_device = B::get_device(&device)
+                .map_err(|e| NeuralNetworkError::UnsupportedDevice(e.to_string()))?;
+            PPONetworkArgs::default_continuous(
                 obs_dim,
                 obs_dtype.clone(),
                 act_dim,
@@ -298,6 +392,15 @@ where
     }
 }
 
+fn dtype_matches_backend_family<B: Backend + BackendMatcher<Backend = B>>(dtype: &DType) -> bool {
+    match B::get_supported_backend() {
+        SupportedTensorBackend::NdArray => matches!(dtype, DType::NdArray(_)),
+        #[cfg(feature = "tch-backend")]
+        SupportedTensorBackend::Tch => matches!(dtype, DType::Tch(_)),
+        _ => false,
+    }
+}
+
 fn validate_ppo_spec<
     B: Backend + BackendMatcher<Backend = B> + Default,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -317,67 +420,56 @@ fn validate_ppo_spec<
                 || *pi.pi.input_dtype() != args.obs_dtype
                 || *pi.pi.output_dtype() != args.act_dtype
             {
-                return Err(AlgorithmError::InvalidSpec("PPO policy head input/output dimensions or dtypes do not match the trainer arguments".to_string()));
+                return Err(AlgorithmError::InvalidSpec(
+                    "PPO policy head input/output dimensions or dtypes do not match the trainer arguments"
+                        .to_string(),
+                ));
             }
-
-            match B::get_supported_backend() {
-                SupportedTensorBackend::NdArray => {
-                    match *pi.pi.input_dtype() {
-                        DType::NdArray(_) => {}
-                        #[cfg(feature = "tch-backend")]
-                        _ => {
-                            return Err(AlgorithmError::InvalidSpec(
-                                "PPO policy head input dtype does not match the trainer arguments"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    match *pi.pi.output_dtype() {
-                        DType::NdArray(_) => {}
-                        #[cfg(feature = "tch-backend")]
-                        _ => {
-                            return Err(AlgorithmError::InvalidSpec(
-                                "PPO policy head output dtype does not match the trainer arguments"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                }
-                #[cfg(feature = "tch-backend")]
-                SupportedTensorBackend::Tch => {
-                    match *pi.pi.input_dtype() {
-                        DType::Tch(_) => {}
-                        _ => {
-                            return Err(AlgorithmError::InvalidSpec(
-                                "PPO policy head input dtype does not match the trainer arguments"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    match *pi.pi.output_dtype() {
-                        DType::Tch(_) => {}
-                        _ => {
-                            return Err(AlgorithmError::InvalidSpec(
-                                "PPO policy head output dtype does not match the trainer arguments"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                }
-                _ => {
-                    return Err(AlgorithmError::InvalidSpec(
-                        "Unsupported backend".to_string(),
-                    ));
-                }
+            if !dtype_matches_backend_family::<B>(pi.pi.input_dtype())
+                || !dtype_matches_backend_family::<B>(pi.pi.output_dtype())
+            {
+                return Err(AlgorithmError::InvalidSpec(
+                    "PPO policy head dtype does not match the trainer backend".to_string(),
+                ));
             }
         }
         PPOPolicyHead::Continuous(pi) => {
+            let expected_policy_output_dim = args.act_dim.checked_mul(2).ok_or_else(|| {
+                AlgorithmError::InvalidSpec(
+                    "Continuous PPO act_dim overflowed when computing 2 * act_dim".to_string(),
+                )
+            })?;
+            if expected_policy_output_dim == 0 || expected_policy_output_dim % 2 != 0 {
+                return Err(AlgorithmError::InvalidSpec(format!(
+                    "Continuous PPO policy output dim must be a positive even width; expected {}",
+                    expected_policy_output_dim
+                )));
+            }
+            if !dtype_is_float(&args.act_dtype) {
+                return Err(AlgorithmError::InvalidSpec(format!(
+                    "Continuous PPO action dtype must be floating; got {}",
+                    args.act_dtype
+                )));
+            }
             if *pi.pi.input_dim() != args.obs_dim
-                || *pi.pi.output_dim() != args.act_dim
+                || *pi.pi.output_dim() != expected_policy_output_dim
                 || *pi.pi.input_dtype() != args.obs_dtype
                 || *pi.pi.output_dtype() != args.act_dtype
             {
-                return Err(AlgorithmError::InvalidSpec("PPO policy head input/output dimensions or dtypes do not match the trainer arguments".to_string()));
+                return Err(AlgorithmError::InvalidSpec(format!(
+                    "Continuous PPO policy head must have input_dim={}, output_dim={} (2*act_dim), and matching dtypes; got input_dim={}, output_dim={}",
+                    args.obs_dim,
+                    expected_policy_output_dim,
+                    pi.pi.input_dim(),
+                    pi.pi.output_dim()
+                )));
+            }
+            if !dtype_matches_backend_family::<B>(pi.pi.input_dtype())
+                || !dtype_matches_backend_family::<B>(pi.pi.output_dtype())
+            {
+                return Err(AlgorithmError::InvalidSpec(
+                    "PPO policy head dtype does not match the trainer backend".to_string(),
+                ));
             }
         }
     }
@@ -386,55 +478,28 @@ fn validate_ppo_spec<
         || *vf_mlp.output_dim() != 1
         || *vf_mlp.input_dtype() != args.obs_dtype
     {
-        return Err(AlgorithmError::InvalidSpec("PPO value function MLP input/output dimensions or input dtype do not match the trainer arguments".to_string()));
+        return Err(AlgorithmError::InvalidSpec(
+            "PPO value function MLP input/output dimensions or input dtype do not match the trainer arguments"
+                .to_string(),
+        ));
     }
 
-    match B::get_supported_backend() {
-        SupportedTensorBackend::NdArray => {
-            match *vf_mlp.input_dtype() {
-                DType::NdArray(_) => {}
-                #[cfg(feature = "tch-backend")]
-                _ => {
-                    return Err(AlgorithmError::InvalidSpec(
-                        "PPO value function MLP input dtype does not match the trainer arguments"
-                            .to_string(),
-                    ));
-                }
-            }
-            match *vf_mlp.output_dtype() {
-                DType::NdArray(NdArrayDType::F32) => {}
-                _ => {
-                    return Err(AlgorithmError::InvalidSpec(
-                        "PPO value function MLP output dtype is not f32".to_string(),
-                    ));
-                }
-            }
-        }
+    if !dtype_matches_backend_family::<B>(vf_mlp.input_dtype()) {
+        return Err(AlgorithmError::InvalidSpec(
+            "PPO value function MLP input dtype does not match the trainer backend".to_string(),
+        ));
+    }
+
+    let vf_out_ok = match vf_mlp.output_dtype() {
+        DType::NdArray(NdArrayDType::F32) => true,
         #[cfg(feature = "tch-backend")]
-        SupportedTensorBackend::Tch => {
-            match *vf_mlp.input_dtype() {
-                DType::Tch(_) => {}
-                _ => {
-                    return Err(AlgorithmError::InvalidSpec(
-                        "PPO value function MLP input dtype does not match the trainer arguments"
-                            .to_string(),
-                    ));
-                }
-            }
-            match *vf_mlp.output_dtype() {
-                DType::Tch(TchDType::F32) => {}
-                _ => {
-                    return Err(AlgorithmError::InvalidSpec(
-                        "PPO value function MLP output dtype is not f32".to_string(),
-                    ));
-                }
-            }
-        }
-        _ => {
-            return Err(AlgorithmError::InvalidSpec(
-                "Unsupported backend".to_string(),
-            ));
-        }
+        DType::Tch(TchDType::F32) => true,
+        _ => false,
+    };
+    if !vf_out_ok {
+        return Err(AlgorithmError::InvalidSpec(
+            "PPO value function MLP output dtype is not f32".to_string(),
+        ));
     }
 
     Ok(())
@@ -533,6 +598,24 @@ where
         }
     }
 
+    /// Saves the current policy model into `output_dir`.
+    ///
+    /// The directory will contain `metadata.json` and the backend-specific model artifact.
+    /// MAPPO is not yet supported and returns [`AlgorithmError::InvalidSpec`].
+    pub fn save_model(&self, output_dir: &str) -> Result<(), AlgorithmError> {
+        use crate::templates::base_algorithm::AlgorithmTrait;
+        match self {
+            PPOTrainer::PPO(inner) | PPOTrainer::IPPO(inner) => {
+                AlgorithmTrait::<relayrl_types::data::trajectory::RelayRLTrajectory>::save_model(
+                    inner, output_dir,
+                )
+            }
+            PPOTrainer::MAPPO(_) => Err(AlgorithmError::InvalidSpec(
+                "MAPPO save_model not yet implemented".to_string(),
+            )),
+        }
+    }
+
     /// Returns the single-agent PPO inference kernel.
     pub fn get_ppo_actor_kernel(
         &self,
@@ -554,5 +637,209 @@ where
             }
             PPOTrainer::MAPPO(_) => unimplemented!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod continuous_spec_tests {
+    use super::*;
+    use crate::algorithms::{ActivationKind, GenericMlp};
+    use burn_ndarray::NdArray;
+    use burn_nn::activation::Relu;
+    use burn_tensor::Float;
+    use std::path::PathBuf;
+
+    type B = NdArray;
+    type Pi = GenericMlp<B, Float, Float>;
+
+    fn f32() -> DType {
+        DType::NdArray(NdArrayDType::F32)
+    }
+
+    fn i64_dtype() -> DType {
+        DType::NdArray(NdArrayDType::I64)
+    }
+
+    fn trainer_args(act_dim: usize, act_dtype: DType) -> TrainerArgs {
+        TrainerArgs {
+            env_dir: PathBuf::from("env"),
+            save_model_path: PathBuf::from("model.mpk"),
+            obs_dim: 3,
+            obs_dtype: f32(),
+            act_dim,
+            act_dtype,
+            buffer_size: 64,
+            device: DeviceType::Cpu,
+        }
+    }
+
+    fn mlp(out_dim: usize, out_dtype: DType) -> Pi {
+        let device = <B as Backend>::Device::default();
+        GenericMlp::new(
+            3,
+            f32(),
+            &[8],
+            out_dim,
+            out_dtype,
+            ActivationKind::ReLU(Relu::new()),
+            &device,
+        )
+    }
+
+    fn vf() -> GenericMlp<B, Float, Float> {
+        let device = <B as Backend>::Device::default();
+        GenericMlp::new(
+            3,
+            f32(),
+            &[8],
+            1,
+            f32(),
+            ActivationKind::ReLU(Relu::new()),
+            &device,
+        )
+    }
+
+    #[test]
+    fn default_spec_stays_discrete() {
+        let spec = PPOTrainerSpec::<B, Float, Float, Pi>::default(
+            PathBuf::from("env"),
+            PathBuf::from("model.mpk"),
+            3,
+            f32(),
+            2,
+            f32(),
+            64,
+            DeviceType::Cpu,
+        )
+        .expect("default discrete");
+        let PPOTrainerSpec::PPO { networks, .. } = spec else {
+            panic!("expected PPO variant");
+        };
+        assert!(matches!(networks.pi_head, PPOPolicyHead::Discrete(_)));
+        assert_eq!(*networks.vf_mlp.output_dim(), 1);
+        assert_eq!(*networks.vf_mlp.output_dtype(), f32());
+    }
+
+    #[test]
+    fn default_continuous_spec_builds_width_two_times_action_dim() {
+        let spec = PPOTrainerSpec::<B, Float, Float, Pi>::default_continuous(
+            PathBuf::from("env"),
+            PathBuf::from("model.mpk"),
+            3,
+            f32(),
+            2,
+            f32(),
+            64,
+            DeviceType::Cpu,
+        )
+        .expect("default continuous");
+        let PPOTrainerSpec::PPO { args, networks, .. } = spec else {
+            panic!("expected PPO variant");
+        };
+        assert_eq!(args.act_dim, 2);
+        match networks.pi_head {
+            PPOPolicyHead::Continuous(head) => assert_eq!(*head.pi.output_dim(), 4),
+            _ => panic!("expected continuous head"),
+        }
+        assert_eq!(*networks.vf_mlp.output_dim(), 1);
+    }
+
+    #[test]
+    fn continuous_spec_accepts_policy_width_two_times_action_dim() {
+        let networks = PPONetworkArgs {
+            pi_head: PPOPolicyHead::Continuous(
+                ContinuousPPOPolicyHead::new(mlp(4, f32())).expect("head"),
+            ),
+            vf_mlp: vf(),
+        };
+        let trainer = PPOTrainer::<B, Float, Float, Pi>::new(PPOTrainerSpec::ppo(
+            trainer_args(2, f32()),
+            None,
+            networks,
+        ));
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn continuous_spec_rejects_policy_width_equal_action_dim() {
+        let networks = PPONetworkArgs {
+            pi_head: PPOPolicyHead::Continuous(
+                ContinuousPPOPolicyHead::new(mlp(2, f32())).expect("even width head"),
+            ),
+            vf_mlp: vf(),
+        };
+        match PPOTrainer::<B, Float, Float, Pi>::new(PPOTrainerSpec::ppo(
+            trainer_args(2, f32()),
+            None,
+            networks,
+        )) {
+            Err(AlgorithmError::InvalidSpec(_)) => {}
+            Ok(_) => panic!("expected InvalidSpec for output_dim == act_dim"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continuous_spec_rejects_odd_policy_width() {
+        let device = <B as Backend>::Device::default();
+        let pi: Pi = GenericMlp::new(
+            3,
+            f32(),
+            &[8],
+            3,
+            f32(),
+            ActivationKind::ReLU(Relu::new()),
+            &device,
+        );
+        match ContinuousPPOPolicyHead::new(pi) {
+            Err(NeuralNetworkError::InvalidContinuousOutputDim { output_dim: 3 }) => {}
+            other => panic!("expected InvalidContinuousOutputDim, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continuous_spec_rejects_integer_action_dtype() {
+        let err = PPONetworkArgs::<B, Float, Float, Pi>::default_continuous(
+            3,
+            f32(),
+            2,
+            i64_dtype(),
+            <B as Backend>::Device::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            NeuralNetworkError::InvalidContinuousActionDType(_)
+        ));
+    }
+
+    #[test]
+    fn continuous_spec_rejects_bool_action_dtype() {
+        let err = PPONetworkArgs::<B, Float, Float, Pi>::default_continuous(
+            3,
+            f32(),
+            2,
+            DType::NdArray(NdArrayDType::Bool),
+            <B as Backend>::Device::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            NeuralNetworkError::InvalidContinuousActionDType(_)
+        ));
+    }
+
+    #[test]
+    fn vf_default_output_is_one_f32() {
+        let networks = PPONetworkArgs::<B, Float, Float, Pi>::default(
+            3,
+            f32(),
+            4,
+            f32(),
+            <B as Backend>::Device::default(),
+        )
+        .expect("default networks");
+        assert_eq!(*networks.vf_mlp.output_dim(), 1);
+        assert_eq!(*networks.vf_mlp.output_dtype(), f32());
     }
 }

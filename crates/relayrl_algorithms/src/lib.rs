@@ -23,7 +23,10 @@
 //!     [`PPOParams`](algorithms::PPO::PPOParams)) and
 //!     [`MAPPOParams`](algorithms::PPO::MAPPOParams).
 //!   - The PPO kernel (`algorithms::PPO::kernel`) holds the policy/value heads
-//!     (`PPOPolicyHead`, discrete and continuous) and the inner training step.
+//!     (`PPOPolicyHead`, discrete categorical and continuous diagonal-Gaussian
+//!     mean‖log_std) and the inner training step. Continuous policies use
+//!     `PPOTrainerSpec::default_continuous` / `PPONetworkArgs::default_continuous`
+//!     and emit `2 * act_dim` raw outputs.
 //!   - `algorithms::PPO::replay_buffer`: the per-agent PPO rollout buffer.
 //!   - Network primitives: [`GenericMlp`](algorithms::GenericMlp),
 //!     [`ValueFunction`](algorithms::ValueFunction), the

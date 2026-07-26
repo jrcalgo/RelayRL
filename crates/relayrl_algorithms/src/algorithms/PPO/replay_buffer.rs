@@ -602,6 +602,49 @@ mod unit_tests {
         );
     }
 
+    fn vector_tensor(values: &[f32]) -> TensorData {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        TensorData::new(
+            vec![values.len()],
+            DType::NdArray(NdArrayDType::F32),
+            bytes,
+            SupportedTensorBackend::NdArray,
+        )
+    }
+
+    #[tokio::test]
+    async fn continuous_action_tensor_shape_survives_drain() {
+        let buffer = PPOReplayBuffer::new(16, 0.99, 0.97, None);
+        let mut traj = RelayRLTrajectory::new(8);
+        let mut data = std::collections::HashMap::new();
+        data.insert("val".to_string(), RelayRLData::Tensor(scalar_tensor(0.5)));
+        data.insert(
+            "logp_a".to_string(),
+            RelayRLData::Tensor(scalar_tensor(-1.25)),
+        );
+        traj.add_action(RelayRLAction::new(
+            Some(vector_tensor(&[0.1, 0.2, 0.3])),
+            Some(vector_tensor(&[0.5, -0.25])),
+            None,
+            1.0,
+            true,
+            Some(data),
+            None,
+        ));
+        buffer.insert_trajectory(traj).await.unwrap();
+        let batch = buffer
+            .finalize_and_drain_first_n_blocking(vec![], 0, 0, 1, false)
+            .expect("drain");
+        assert_eq!(batch.act.len(), 1);
+        assert_eq!(batch.act[0].shape, vec![2]);
+        assert_eq!(batch.act[0].data.len(), 8);
+        assert_eq!(batch.logp, vec![-1.25]);
+        assert_eq!(batch.obs.len(), batch.logp.len());
+    }
+
     #[tokio::test]
     async fn batch_logp_matches_rollout_time_logp_unmodified() {
         // The drained batch.logp must be exactly the rollout-time log-probs

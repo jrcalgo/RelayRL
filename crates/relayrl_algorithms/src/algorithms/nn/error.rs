@@ -13,4 +13,12 @@ pub enum NeuralNetworkError {
     InputDimMismatch(usize, usize),
     #[error("Invalid distribution")]
     InvalidDistribution,
+    #[error("Invalid continuous policy output dim (must be even and positive): {output_dim}")]
+    InvalidContinuousOutputDim { output_dim: usize },
+    #[error("Continuous policy output dim mismatch: expected {expected}, got {actual}")]
+    ContinuousOutputDimMismatch { expected: usize, actual: usize },
+    #[error("Invalid continuous action dtype (must be floating): {0}")]
+    InvalidContinuousActionDType(String),
+    #[error("Model output too short: expected at least {expected} elements, got {actual}")]
+    ModelOutputTooShort { expected: usize, actual: usize },
 }

@@ -6,6 +6,22 @@ use half;
 
 use super::error::NeuralNetworkError;
 
+/// Returns `true` when `dtype` is a floating-point element type suitable for continuous actions.
+#[inline(always)]
+pub fn dtype_is_float(dtype: &DType) -> bool {
+    match dtype {
+        DType::NdArray(nd) => matches!(
+            nd,
+            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64
+        ),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch) => matches!(
+            tch,
+            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64
+        ),
+    }
+}
+
 /// Returns the size in bytes of one element of the given dtype.
 #[inline(always)]
 pub fn dtype_to_byte_count(dtype: DType) -> usize {

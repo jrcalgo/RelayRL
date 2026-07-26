@@ -638,9 +638,14 @@ where
     }
 
     /// Exports the first agent slot's trained policy as a `ModelModule` for inference or hot-swap.
+    ///
+    /// Output shape is `[1, A]` for discrete policies and `[1, 2A]` for continuous
+    /// (mean‖log_std) policies.
     pub fn acquire_pi_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         let slot = self.runtime.components.agent_slots.first()?;
-        let layer_specs = slot.kernel.as_ref()?.get_pi_layer_specs()?;
+        let kernel = slot.kernel.as_ref()?;
+        let layer_specs = kernel.get_pi_layer_specs()?;
+        let policy_out = kernel.policy_output_dim();
         let input_dtype = self.runtime.args.obs_dtype.clone();
         let output_dtype = self.runtime.args.act_dtype.clone();
         crate::algorithms::acquire_model_module::<B>(
@@ -649,7 +654,7 @@ where
             input_dtype,
             output_dtype,
             vec![1, self.runtime.args.obs_dim],
-            vec![1, self.runtime.args.act_dim],
+            vec![1, policy_out],
             None,
         )
     }
@@ -925,7 +930,22 @@ where
         self.runtime.components.epoch_logger.dump_tabular();
     }
 
-    fn save_model(&self, _filename: &str) {}
+    fn save_model(&self, output_dir: &str) -> Result<(), AlgorithmError> {
+        if output_dir.trim().is_empty() {
+            return Err(AlgorithmError::InvalidSavePath(
+                "save_model output directory cannot be empty".to_string(),
+            ));
+        }
+
+        let model = <Self as AlgorithmTrait<T>>::acquire_model(self).ok_or_else(|| {
+            AlgorithmError::ModelExportError(
+                "no exportable PPO policy model is available".to_string(),
+            )
+        })?;
+
+        model.save(output_dir)?;
+        Ok(())
+    }
 
     fn acquire_model(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         self.acquire_pi_module()
@@ -965,5 +985,422 @@ mod tests {
     #[test]
     fn sync_epoch_boundary_defaults_to_false() {
         assert!(!IPPOParams::default().sync_epoch_boundary);
+    }
+}
+
+#[cfg(test)]
+mod continuous_pipeline_tests {
+    use super::*;
+    use crate::algorithms::PPO::kernel::{
+        ContinuousPPOPolicyHead, PPOKernel, PPOKernelFactory, PPOKernelTrainingArgs, PPOPolicyHead,
+    };
+    use crate::algorithms::PPO::replay_buffer::PPOBatch;
+    use crate::algorithms::{ActivationKind, GenericMlp};
+    use burn_ndarray::NdArray;
+    use burn_nn::activation::Relu;
+    use burn_tensor::Float;
+    use burn_tensor::backend::Backend;
+    use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend};
+    use std::path::PathBuf;
+
+    type B = NdArray;
+    type Pi = GenericMlp<B, Float, Float>;
+
+    fn f32() -> DType {
+        DType::NdArray(NdArrayDType::F32)
+    }
+
+    fn f32_tdata(values: &[f32], shape: Vec<usize>) -> TensorData {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        TensorData::new(shape, f32(), bytes, SupportedTensorBackend::NdArray)
+    }
+
+    fn continuous_kernel(obs_dim: usize, act_dim: usize) -> PPOKernel<B, Float, Float, Pi> {
+        let device = <B as Backend>::Device::default();
+        let pi = GenericMlp::new(
+            obs_dim,
+            f32(),
+            &[8],
+            act_dim * 2,
+            f32(),
+            ActivationKind::ReLU(Relu::new()),
+            &device,
+        );
+        let vf = GenericMlp::new(
+            obs_dim,
+            f32(),
+            &[8],
+            1,
+            f32(),
+            ActivationKind::ReLU(Relu::new()),
+            &device,
+        );
+        PPOKernelFactory::new(
+            PPOPolicyHead::Continuous(ContinuousPPOPolicyHead::new(pi).unwrap()),
+            vf,
+            PPOKernelTrainingArgs {
+                pi_lr: 3e-4,
+                vf_coef: 0.5,
+                lr_schedule_steps: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn synthetic_batch(n: usize, obs_dim: usize, act_dim: usize) -> PPOBatch {
+        let mut obs = Vec::with_capacity(n);
+        let mut act = Vec::with_capacity(n);
+        let mut logp = Vec::with_capacity(n);
+        let mut adv_norm = Vec::with_capacity(n);
+        let mut ret = Vec::with_capacity(n);
+        let mut val = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut o = vec![0.0f32; obs_dim];
+            o[0] = i as f32 * 0.1;
+            obs.push(f32_tdata(&o, vec![obs_dim]));
+            let mut a = vec![0.0f32; act_dim];
+            a[0] = (i as f32) * 0.05 - 0.1;
+            act.push(f32_tdata(&a, vec![act_dim]));
+            logp.push(-1.0 - 0.05 * i as f32);
+            adv_norm.push(if i % 2 == 0 { 1.0 } else { -0.5 });
+            ret.push(0.5 * i as f32);
+            val.push(0.1 * i as f32);
+        }
+        PPOBatch {
+            obs,
+            obs_dim,
+            act,
+            logp,
+            adv_norm,
+            ret,
+            val,
+            ret_mean: 0.0,
+            ret_std: 1.0,
+        }
+    }
+
+    #[test]
+    fn run_ppo_sgd_flat_continuous_updates_kernel() {
+        let kernel = continuous_kernel(3, 2);
+        let before = kernel.get_pi_layer_specs().unwrap();
+        let batch = synthetic_batch(8, 3, 2);
+        let result = run_ppo_sgd_flat(kernel, batch, 0.2, 0.01, 0.05, 3, None);
+        assert!(result.pi_loss.is_finite());
+        assert!(result.vf_loss.is_finite());
+        assert!(result.kl.is_finite());
+        assert!(result.entropy.is_finite());
+        assert!(result.clipfrac.is_finite());
+        assert!(result.stop_iter >= 1.0 && result.stop_iter <= 3.0);
+        let after = result.kernel.get_pi_layer_specs().unwrap();
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn run_ppo_sgd_flat_continuous_minibatch_path() {
+        let kernel = continuous_kernel(3, 2);
+        let batch = synthetic_batch(8, 3, 2);
+        let result = run_ppo_sgd_flat(kernel, batch, 0.2, 0.01, 0.05, 2, Some(4));
+        assert!(result.pi_loss.is_finite());
+        assert!(result.vf_loss.is_finite());
+        assert!(result.stop_iter >= 1.0);
+    }
+
+    #[test]
+    fn continuous_acquire_pi_module_exports_double_width() {
+        let mut algo = IndependentPPOAlgorithm::<B, Float, Float, Pi>::new(
+            Some(IPPOParams {
+                traj_per_epoch: 1,
+                train_pi_iters: 1,
+                ..IPPOParams::default()
+            }),
+            Path::new("env"),
+            Path::new("model.mpk"),
+            &3,
+            &f32(),
+            &2,
+            &f32(),
+            &64,
+            PPOPolicyHead::Continuous(
+                ContinuousPPOPolicyHead::new({
+                    let device = <B as Backend>::Device::default();
+                    GenericMlp::new(
+                        3,
+                        f32(),
+                        &[8],
+                        4,
+                        f32(),
+                        ActivationKind::ReLU(Relu::new()),
+                        &device,
+                    )
+                })
+                .unwrap(),
+            ),
+            {
+                let device = <B as Backend>::Device::default();
+                GenericMlp::new(
+                    3,
+                    f32(),
+                    &[8],
+                    1,
+                    f32(),
+                    ActivationKind::ReLU(Relu::new()),
+                    &device,
+                )
+            },
+        )
+        .expect("construct continuous algorithm");
+
+        algo.register_first_slot_with_key("agent".into())
+            .expect("register");
+        let module = algo.acquire_pi_module().expect("export pi");
+        assert_eq!(module.metadata.output_shape, vec![1, 4]);
+        assert_eq!(module.metadata.input_shape, vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn continuous_start_epoch_training_apply_epoch_result() {
+        use crate::templates::base_algorithm::AlgorithmTrait;
+        use relayrl_types::prelude::action::{RelayRLAction, RelayRLData};
+        use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+
+        let params = IPPOParams {
+            traj_per_epoch: 1,
+            train_pi_iters: 2,
+            discrete: false,
+            ..IPPOParams::default()
+        };
+
+        let mut algo = IndependentPPOAlgorithm::<B, Float, Float, Pi>::new(
+            Some(params),
+            Path::new("env"),
+            Path::new("model.mpk"),
+            &3,
+            &f32(),
+            &2,
+            &f32(),
+            &64,
+            PPOPolicyHead::Continuous(
+                ContinuousPPOPolicyHead::new({
+                    let device = <B as Backend>::Device::default();
+                    GenericMlp::new(
+                        3,
+                        f32(),
+                        &[8],
+                        4,
+                        f32(),
+                        ActivationKind::ReLU(Relu::new()),
+                        &device,
+                    )
+                })
+                .unwrap(),
+            ),
+            {
+                let device = <B as Backend>::Device::default();
+                GenericMlp::new(
+                    3,
+                    f32(),
+                    &[8],
+                    1,
+                    f32(),
+                    ActivationKind::ReLU(Relu::new()),
+                    &device,
+                )
+            },
+        )
+        .unwrap();
+
+        let mut traj = RelayRLTrajectory::new(8);
+        for i in 0..4 {
+            let mut data = std::collections::HashMap::new();
+            data.insert(
+                "val".to_string(),
+                RelayRLData::Tensor(f32_tdata(&[0.1], vec![1])),
+            );
+            data.insert(
+                "logp_a".to_string(),
+                RelayRLData::Tensor(f32_tdata(&[-1.0], vec![1])),
+            );
+            traj.add_action(RelayRLAction::new(
+                Some(f32_tdata(&[0.0, 0.1, -0.1], vec![3])),
+                Some(f32_tdata(&[0.05 * i as f32, -0.05], vec![2])),
+                None,
+                1.0,
+                i == 3,
+                Some(data),
+                None,
+            ));
+        }
+
+        let ready = AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(&mut algo, traj)
+            .await
+            .expect("receive");
+        assert!(ready);
+        let version_before = algo.runtime.components.model_version;
+        let handle = algo
+            .start_epoch_training()
+            .expect("epoch training should start");
+        let output = handle.await.expect("join");
+        assert!(!output.slot_results.is_empty());
+        assert!(output.slot_results[0].pi_loss.is_finite());
+        algo.apply_epoch_result(output);
+        assert_eq!(algo.runtime.components.model_version, version_before + 1);
+        assert!(algo.runtime.components.agent_slots[0].kernel.is_some());
+        let _ = PathBuf::from("unused");
+    }
+}
+
+#[cfg(test)]
+mod save_model_tests {
+    use super::*;
+    use crate::algorithms::PPO::kernel::{DiscretePPOPolicyHead, PPOPolicyHead};
+    use crate::algorithms::PPO::{PPOTrainer, PPOTrainerSpec};
+    use crate::algorithms::{ActivationKind, GenericMlp};
+    use crate::templates::base_algorithm::{AlgorithmError, AlgorithmTrait};
+    use burn_ndarray::NdArray;
+    use burn_nn::activation::Relu;
+    use burn_tensor::Float;
+    use burn_tensor::backend::Backend;
+    use relayrl_types::data::tensor::{DType, NdArrayDType};
+    use relayrl_types::model::{ModelMetadata, ModelModule};
+    use relayrl_types::prelude::tensor::relayrl::DeviceType;
+    use relayrl_types::prelude::trajectory::RelayRLTrajectory;
+    use std::path::{Path, PathBuf};
+    use tempfile::tempdir;
+
+    type B = NdArray;
+    type Pi = GenericMlp<B, Float, Float>;
+
+    const OBS_DIM: usize = 3;
+    const ACT_DIM: usize = 2;
+
+    fn f32() -> DType {
+        DType::NdArray(NdArrayDType::F32)
+    }
+
+    fn discrete_algo() -> IndependentPPOAlgorithm<B, Float, Float, Pi> {
+        let device = <B as Backend>::Device::default();
+        IndependentPPOAlgorithm::<B, Float, Float, Pi>::new(
+            Some(IPPOParams {
+                traj_per_epoch: 1,
+                train_pi_iters: 1,
+                ..IPPOParams::default()
+            }),
+            Path::new("env"),
+            Path::new("model.mpk"),
+            &OBS_DIM,
+            &f32(),
+            &ACT_DIM,
+            &f32(),
+            &64,
+            PPOPolicyHead::Discrete(
+                DiscretePPOPolicyHead::new(GenericMlp::new(
+                    OBS_DIM,
+                    f32(),
+                    &[8],
+                    ACT_DIM,
+                    f32(),
+                    ActivationKind::ReLU(Relu::new()),
+                    &device,
+                ))
+                .unwrap(),
+            ),
+            GenericMlp::new(
+                OBS_DIM,
+                f32(),
+                &[8],
+                1,
+                f32(),
+                ActivationKind::ReLU(Relu::new()),
+                &device,
+            ),
+        )
+        .expect("construct discrete algorithm")
+    }
+
+    #[test]
+    fn save_model_writes_metadata_and_policy_file() {
+        let mut algo = discrete_algo();
+        algo.register_first_slot_with_key("agent".into())
+            .expect("register");
+
+        let dir = tempdir().expect("tempdir");
+        let output_dir = dir.path().join("saved_policy");
+        AlgorithmTrait::<RelayRLTrajectory>::save_model(
+            &algo,
+            output_dir.to_str().expect("utf8 temp path"),
+        )
+        .expect("save model");
+
+        assert!(output_dir.join("metadata.json").exists());
+        let metadata = ModelMetadata::load_from_dir(&output_dir).expect("load metadata");
+        assert_eq!(metadata.model_file, "ppo_pi.onnx");
+        assert!(output_dir.join(&metadata.model_file).exists());
+
+        let loaded = ModelModule::<B>::load_from_path(&output_dir).expect("reload module");
+        assert_eq!(loaded.metadata.input_shape, vec![1, OBS_DIM]);
+        assert_eq!(loaded.metadata.output_shape, vec![1, ACT_DIM]);
+        assert_eq!(loaded.metadata.input_dtype, f32());
+        assert_eq!(loaded.metadata.output_dtype, f32());
+    }
+
+    #[test]
+    fn save_model_errors_without_exportable_model() {
+        let algo = discrete_algo();
+        let dir = tempdir().expect("tempdir");
+        let output_dir = dir.path().join("saved_policy");
+        let result = AlgorithmTrait::<RelayRLTrajectory>::save_model(
+            &algo,
+            output_dir.to_str().expect("utf8 temp path"),
+        );
+        assert!(matches!(result, Err(AlgorithmError::ModelExportError(_))));
+    }
+
+    #[test]
+    fn save_model_rejects_empty_output_dir() {
+        let mut algo = discrete_algo();
+        algo.register_first_slot_with_key("agent".into())
+            .expect("register");
+
+        for empty in ["", "   "] {
+            let result = AlgorithmTrait::<RelayRLTrajectory>::save_model(&algo, empty);
+            assert!(matches!(result, Err(AlgorithmError::InvalidSavePath(_))));
+        }
+    }
+
+    #[test]
+    fn ppo_trainer_save_model_delegates_to_inner_algorithm() {
+        let spec = PPOTrainerSpec::<B, Float, Float, Pi>::default(
+            PathBuf::from("env"),
+            PathBuf::from("model.mpk"),
+            OBS_DIM,
+            f32(),
+            ACT_DIM,
+            f32(),
+            64,
+            DeviceType::Cpu,
+        )
+        .expect("default discrete spec");
+        let mut trainer = PPOTrainer::new(spec).expect("construct trainer");
+        trainer
+            .register_first_slot_with_key("agent".into())
+            .expect("register");
+
+        let dir = tempdir().expect("tempdir");
+        let output_dir = dir.path().join("saved_policy");
+        trainer
+            .save_model(output_dir.to_str().expect("utf8 temp path"))
+            .expect("trainer save_model");
+
+        assert!(output_dir.join("metadata.json").exists());
+        let metadata = ModelMetadata::load_from_dir(&output_dir).expect("load metadata");
+        assert_eq!(metadata.model_file, "ppo_pi.onnx");
+        assert!(output_dir.join(&metadata.model_file).exists());
+
+        let loaded = ModelModule::<B>::load_from_path(&output_dir).expect("reload module");
+        assert_eq!(loaded.metadata.input_shape, vec![1, OBS_DIM]);
+        assert_eq!(loaded.metadata.output_shape, vec![1, ACT_DIM]);
     }
 }
