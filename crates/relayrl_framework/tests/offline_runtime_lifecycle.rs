@@ -297,3 +297,41 @@ async fn scale_data_buffers_resizes_without_disrupting_requests()
     agent.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn get_config_returns_error_when_config_path_is_missing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_model_dir, default_model) = match load_test_model_module() {
+        Ok(pair) => pair,
+        Err(err) => {
+            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
+            return Ok(());
+        }
+    };
+
+    let config_dir = tempdir()?;
+    let config_path = config_dir.path().join("client_config.json");
+    std::fs::write(&config_path, "{}")?;
+
+    let (mut agent, params) = AgentBuilder::<TestBackend>::builder()
+        .modes()
+        .actor_data_mode(ActorDataMode::Disabled)
+        .params()
+        .default_model(default_model)
+        .config_path(config_path.clone())
+        .build()
+        .await?;
+    agent.start(params).await?;
+
+    // Remove the watched config so a subsequent get_config open fails.
+    std::fs::remove_file(&config_path)?;
+
+    let result = agent.get_config().await;
+    assert!(
+        matches!(result, Err(ClientError::CoordinatorError(_))),
+        "missing config path should surface as a coordinator/config load error, got: {result:?}"
+    );
+
+    agent.shutdown().await?;
+    Ok(())
+}

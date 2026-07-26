@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{TestBackend, load_test_model_module, start_offline_agent};
+use common::{TestBackend, load_batched_test_model_module, start_offline_agent};
 use relayrl_framework::prelude::network::{
     ActorDataMode, ClientError, RelayRLActors, RelayRLBatchEnv,
 };
@@ -21,9 +21,10 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A minimal continuous scalar environment double: rank-1 `f32` observation/action of size 2,
-/// matching the shared identity ONNX model's declared shape. Never terminates on its own, so
-/// `loop_iters` fully controls how long a rollout runs.
+/// A minimal continuous scalar environment double: rank-1 `f32` observation/action of size 2.
+/// Env-driven rollouts batch those into `[n_envs, 2]` and therefore need
+/// [`load_batched_test_model_module`]. Never terminates on its own, so `loop_iters` fully
+/// controls how long a rollout runs.
 #[derive(Clone)]
 struct ContinuousTestEnv;
 
@@ -232,12 +233,32 @@ async fn remove_env_makes_the_actor_report_no_bound_environment()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_env_eval_completes_a_small_rollout() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(mut ctx) = start_offline_agent(ActorDataMode::Disabled).await? else {
-        return Ok(());
+    // Env-driven inference feeds `[n_envs, obs_dim]`, so the default model must accept a
+    // dynamic batch axis (not the rank-1 identity used by step-driven tests).
+    let (_model_dir, default_model) = match load_batched_test_model_module() {
+        Ok(pair) => pair,
+        Err(err) => {
+            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
+            return Ok(());
+        }
     };
 
-    let actor = ctx
-        .agent
+    let config_dir = tempfile::tempdir()?;
+    let config_path = config_dir.path().join("client_config.json");
+    std::fs::write(&config_path, "{}")?;
+
+    let (mut agent, params) =
+        relayrl_framework::prelude::network::AgentBuilder::<TestBackend>::builder()
+            .modes()
+            .actor_data_mode(ActorDataMode::Disabled)
+            .params()
+            .default_model(default_model)
+            .config_path(config_path)
+            .build()
+            .await?;
+    agent.start(params).await?;
+
+    let actor = agent
         .new_actor::<1, 1>(
             DeviceType::Cpu,
             1_000,
@@ -247,23 +268,23 @@ async fn run_env_eval_completes_a_small_rollout() -> Result<(), Box<dyn std::err
             None,
         )
         .await?;
-    ctx.agent
+    agent
         .set_env(&actor, Box::new(ContinuousTestEnv), 1)
         .await?;
 
-    ctx.agent.run_env_eval(&actor, 5).await?;
+    agent.run_env_eval(&actor, 5).await?;
 
     // The actor stays usable for a second rollout once the first completes.
-    ctx.agent.run_env_eval(&actor, 5).await?;
+    agent.run_env_eval(&actor, 5).await?;
 
-    ctx.agent.shutdown().await?;
+    agent.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_test_model_module() {
+    let (_model_dir, default_model) = match load_batched_test_model_module() {
         Ok(pair) => pair,
         Err(err) => {
             eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
