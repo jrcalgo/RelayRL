@@ -2,8 +2,6 @@
   
 # RelayRL
 
-[![RelayRL crate](https://img.shields.io/crates/v/relayrl.svg)](https://crates.io/crates/relayrl)
-[![RelayRL documentation](https://docs.rs/relayrl/badge.svg)](https://docs.rs/relayrl)
 [![Apache 2.0 licensed](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 
@@ -29,13 +27,14 @@ RelayRL focuses on the local/default client runtime in the `0.5.0` line:
 - **Environment-driven rollouts**: bind scalar or vector environments and let
   the runtime drive evaluation or PPO rollouts.
 
-Network transports (`zmq-transport`, `nats-transport`) and server-backed
-inference/training workflows are experimental and are not part of the current
-support promise in the `relayrl` crate.
+Client network transports (`zmq-transport`, `nats-transport`) are experimental.
+Server-backed inference/training runtimes are not shipped in this branch
+(`training-server` / `inference-server` are reserved/no-op feature flags).
 
 ## Crate Layout
 
-- [`relayrl`](crates/relayrl/): the recommended crate; release updates.
+- [`relayrl`](crates/relayrl/): workspace facade crate (pending crates.io /
+  docs.rs publication).
 - [`relayrl_framework`](crates/relayrl_framework/): the async multi-actor
   client runtime; release + development updates.
 - [`relayrl_types`](crates/relayrl_types/): tensors, actions, trajectories,
@@ -138,12 +137,14 @@ async fn batch_env_exec(
 
 ## Documentation
 
- - [Learner's guide][website-docs]: provides a high-level overview of each crate in this repository and their public API surfaces.
- - [API documentation][api-docs]: details builder
-configuration, model modes, router scaling, file sinks, trajectory caches,
-PPO rollouts. 
+ - [Learner's guide][website-docs]: high-level overview of each crate and its
+   public API surface.
+ - [Framework API docs][api-docs]: builder configuration, model modes, router
+   scaling, file sinks, trajectory caches, and PPO rollouts. docs.rs may lag
+   until the next `relayrl_framework` publish; the `relayrl` facade docs become
+   available after that crate is published.
 
-[api-docs]: https://docs.rs/relayrl
+[api-docs]: https://docs.rs/relayrl_framework
 [website-docs]: https://relayrl.dev/learn
 
 ## Feature Flags

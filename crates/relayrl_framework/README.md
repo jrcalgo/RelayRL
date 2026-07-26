@@ -36,11 +36,11 @@ and streams trajectories to data sinks. It is:
 
 ## Most users should use the `relayrl` crate
 
-[`relayrl`](../relayrl/README.md) is the higher-level facade that
-re-exports the most recent release of this runtime under a single namespace
-(`relayrl::agent`, `relayrl::types`, `relayrl::algorithms`,
-`relayrl::utils`). Prefer depending on `relayrl` unless you specifically
-need to depend on the runtime crate directly.
+[`relayrl`](../relayrl/README.md) is the higher-level workspace facade that
+re-exports this runtime under a single namespace (`relayrl::agent`,
+`relayrl::types`, `relayrl::algorithms`, `relayrl::utils`). Prefer depending
+on `relayrl` once published unless you specifically need the runtime crate
+directly.
 
 ```toml
 [dependencies]
@@ -59,11 +59,10 @@ of the stack together:
 * `relayrl_env_trait`: the `Environment`, `ScalarEnvironment`, and
   `VectorEnvironment` contracts the runtime drives.
 
-The supported path in `0.5.0` is the local/default client runtime. Network
-transport (ZMQ/NATS) and server-backed inference/training workflows are
-implemented as **experimental** and remain experimental even when their feature
-flags are enabled. See [Feature flags](#feature-flags) and
-[Current support](#current-support).
+The supported path in `0.5.0` is the local/default client runtime. Client
+network transport (ZMQ/NATS) is **experimental**. Server-backed
+inference/training runtimes are **not shipped** in this branch. See
+[Feature flags](#feature-flags) and [Current support](#current-support).
 
 ## Architecture
 
@@ -97,8 +96,8 @@ The local/default control flow is:
     holds `control` (coordinator, lifecycle, scaling, state), `data::router`
     (message routing), and `data` (file sinks plus experimental transport
     sinks).
-  * `network::server`: optional, experimental training/inference servers behind
-    feature flags.
+  * Server runtime is not shipped; `training-server` / `inference-server`
+    feature flags are reserved/no-op in this branch.
 * `utilities`: JSON configuration loading/builders, logging (log4rs), and
   metrics (Prometheus/OpenTelemetry).
 * `prelude`: grouped re-exports spanning this crate plus `relayrl_types`,
@@ -166,24 +165,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 * `tch-backend`: LibTorch (`tch`) backend support via `relayrl_types`.
 * `metrics`: Prometheus/OpenTelemetry metrics.
 * `profile`: flamegraph and tokio-console profiling.
-* `zmq-transport` / `nats-transport`: experimental network transports.
-* `inference-server` / `training-server`: experimental server integrations.
+* `zmq-transport` / `nats-transport`: experimental client network transports.
+* `inference-server` / `training-server`: reserved/no-op feature flags; no
+  server runtime ships in this branch.
 
 ## Current support
 
-The supported `0.5.0` path is the local/default client runtime, including:
-
-* local inference and actor lifecycle management
-* live router scaling
-* local Arrow/CSV trajectory writing and in-memory trajectory retrieval
-* parallelized environment batching
-* PPO training rollouts
-
-Transport-backed workflows remain experimental even when the corresponding
-feature flags are enabled:
-
-* `zmq-transport` and `nats-transport`
-* server-backed inference or training workflows
+* **Supported:** the local/default client runtime, including local inference and
+  actor lifecycle management, live router scaling, local Arrow/CSV trajectory
+  writing, in-memory trajectory retrieval, parallelized environment batching,
+  and PPO training rollouts.
+* **Experimental:** client ZMQ/NATS transport paths, even when their feature
+  flags are enabled.
+* **Not shipped:** server-backed inference or training runtimes.
 
 ## Release Notes / Changelog
 

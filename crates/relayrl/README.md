@@ -3,21 +3,21 @@
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/relayrl">
-    <img src="https://img.shields.io/crates/v/relayrl.svg" alt="Crates.io" />
-  </a>
-  <a href="https://docs.rs/relayrl">
-    <img src="https://img.shields.io/docsrs/relayrl" alt="Docs.rs" />
-  </a>
   <a href="https://github.com/jrcalgo/relayrl/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache 2.0 licensed" />
   </a>
+  <img src="https://img.shields.io/badge/status-workspace%20facade-lightgrey.svg" alt="Workspace facade pending publication" />
+</p>
+
+<p align="center">
+  Facade crate in this workspace; crates.io/docs.rs links become live after
+  publication.
 </p>
 
 <p align="center">
   <a href="https://relayrl.dev">Website</a> &nbsp;|&nbsp;
-  <a href="https://docs.rs/relayrl">API Docs</a> &nbsp;|&nbsp;
   <a href="../relayrl_framework/README.md">Framework Runtime</a> &nbsp;|&nbsp;
+  <a href="https://docs.rs/relayrl_framework">Framework API Docs</a> &nbsp;|&nbsp;
   <a href="https://github.com/jrcalgo/relayrl">Repository</a>
 </p>
 
@@ -56,11 +56,10 @@ client runtime. Highlights of the `0.5.0` line:
   live in dedicated crates (`relayrl_types`, `relayrl_algorithms`,
   `relayrl_env_trait`).
 
-The supported path in `0.5.x` is the local/default client runtime. Network
-transport (ZMQ/NATS) and server-backed inference/training workflows are
-implemented as **experimental** and are not covered by the `0.5.x` support
-promise. See [Feature flags](#feature-flags) and
-[Current support](#current-support).
+The supported path in `0.5.x` is the local/default client runtime. Client
+network transport (ZMQ/NATS) is **experimental**. Server-backed
+inference/training runtimes are **not shipped** in this branch. See
+[Feature flags](#feature-flags) and [Current support](#current-support).
 
  ## Overview
 
@@ -85,10 +84,10 @@ The facade groups these behind four modules: `relayrl::agent` (RelayRLAgent API)
 `relayrl::algorithms` (PPO and neural-network building blocks), and
 `relayrl::utils` (configuration and UUID registry types).
 
-[`relayrl_framework`]: https://docs.rs/relayrl_framework
-[`relayrl_types`]: https://docs.rs/relayrl_types
-[`relayrl_algorithms`]: https://docs.rs/relayrl_algorithms
-[`relayrl_env_trait`]: https://docs.rs/relayrl_env_trait
+[`relayrl_framework`]: ../relayrl_framework/README.md
+[`relayrl_types`]: ../relayrl_types/README.md
+[`relayrl_algorithms`]: ../relayrl_algorithms/README.md
+[`relayrl_env_trait`]: ../relayrl_env_trait/README.MD
 
 ## Prerequisites
 
@@ -160,8 +159,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 RelayRL supports two integration patterns: **step-driven** (your code owns the
 loop and calls `request_action` per step) and **environment-driven** (the agent
 owns the loop and drives a bound `Environment`). See the
-[API docs](https://docs.rs/relayrl) for builder configuration, inference and
-training-data modes, router scaling, model hot-swap, and environment binding.
+[framework API docs](https://docs.rs/relayrl_framework) for builder
+configuration, inference and training-data modes, router scaling, model
+hot-swap, and environment binding. docs.rs may lag until the next publish;
+facade-crate docs become available after `relayrl` is published.
 
 ## Feature flags
 
@@ -181,9 +182,11 @@ The supported `0.5.0` path is the local/default client runtime, including:
 * parallelized environment batching per actor
 * PPO training rollouts per actor
 
-Experimental feature flags are available in the `relayrl_framework` crate:
+In the `relayrl_framework` crate:
 
-* `zmq-transport` and `nats-transport`
+* Experimental client transports: `zmq-transport` and `nats-transport`
+* Reserved/no-op server flags: `training-server` and `inference-server`
+  (no server runtime ships in this branch)
 
 ## Changelog
 

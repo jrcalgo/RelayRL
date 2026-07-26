@@ -25,6 +25,7 @@ crate-type = ["rlib"]
 default = ["client"]
 
 client = []
+# Reserved for future server runtimes; no `network::server` module ships in this branch.
 training-server = []
 inference-server = []
 
