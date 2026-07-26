@@ -80,6 +80,12 @@ impl TrajectoryData for ArrowTrajectory {
 ///   Log the training status or results for the current epoch. This may include metrics such as loss,
 ///   reward averages, etc.
 pub trait AlgorithmTrait<T: TrajectoryData> {
+    /// The Burn backend this algorithm implementation trains and exports models on (e.g.
+    /// `NdArray` or `LibTorch`). Tying the backend to the implementor instead of to
+    /// `acquire_model` lets that method return `ModelModule<Self::Backend>` directly, with no
+    /// need to reconcile two independently-chosen backend types at runtime.
+    type Backend: Backend + BackendMatcher<Backend = Self::Backend>;
+
     /// Receives a trajectory of actions and incorporates it into the training process.
     ///
     /// # Arguments
@@ -109,11 +115,5 @@ pub trait AlgorithmTrait<T: TrajectoryData> {
     ///
     /// Returns `None` if no model has been trained yet, if weight export is not supported,
     /// or if the required feature flags are not enabled.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `B` - The Burn backend type (e.g., NdArray or LibTorch)
-    fn acquire_model<B: Backend + BackendMatcher<Backend = B>>(
-        &self,
-    ) -> Option<relayrl_types::model::ModelModule<B>>;
+    fn acquire_model(&self) -> Option<relayrl_types::model::ModelModule<Self::Backend>>;
 }

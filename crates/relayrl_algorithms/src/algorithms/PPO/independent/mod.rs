@@ -819,6 +819,8 @@ where
     Pi: NeuralNetwork<B, KindIn, KindOut>,
     T: TrajectoryData,
 {
+    type Backend = B;
+
     async fn receive_trajectory(&mut self, trajectory: T) -> Result<bool, AlgorithmError> {
         let mut extracted_traj: RelayRLTrajectory = trajectory.into_relayrl().ok_or_else(|| {
             AlgorithmError::TrajectoryInsertionError("Missing RelayRL trajectory".to_string())
@@ -925,30 +927,8 @@ where
 
     fn save_model(&self, _filename: &str) {}
 
-    fn acquire_model<B2: Backend + BackendMatcher<Backend = B2> + 'static>(
-        &self,
-    ) -> Option<relayrl_types::model::ModelModule<B2>>
-    where
-        B: 'static,
-    {
-        use std::any::TypeId;
-
-        // Return None if B and B2 don't match
-        if TypeId::of::<B>() != TypeId::of::<B2>() {
-            return None;
-        }
-
-        // acquire_pi_module returns ModelModule<B> with the current pi weights
-        let module_b = self.acquire_pi_module()?;
-
-        // SAFETY: TypeId check ensures B == B2
-        // transmute from ModelModule<B> to ModelModule<B2>
-        unsafe {
-            let module_b2: relayrl_types::model::ModelModule<B2> =
-                std::mem::transmute_copy(&module_b);
-            std::mem::forget(module_b);
-            Some(module_b2)
-        }
+    fn acquire_model(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        self.acquire_pi_module()
     }
 }
 
