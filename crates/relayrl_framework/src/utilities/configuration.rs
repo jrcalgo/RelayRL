@@ -7,6 +7,31 @@ use relayrl_types::HyperparameterArgs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::{fs::File, io::Read, path::PathBuf};
+use thiserror::Error;
+
+/// Errors from fallible JSON config loading (`try_new_config` / `try_load_config`).
+///
+/// Parse failures are intentionally excluded: malformed JSON continues to fall back to
+/// built-in defaults and is not treated as a hard load error.
+#[derive(Debug, Error)]
+pub enum ConfigLoadError {
+    #[error("default config path is unavailable for {kind}")]
+    MissingDefaultPath { kind: &'static str },
+
+    #[error("failed to open {kind} config at {path}: {source}")]
+    Open {
+        kind: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("failed to read {kind} config at {path}: {source}")]
+    Read {
+        kind: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
 
 /// Supported RL algorithm identifiers, used as keys in config and hyperparameter maps.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -386,31 +411,47 @@ pub struct ClientConfigLoader {
 }
 
 impl ClientConfigLoader {
-    /// Creates a loader from the given path, or from the default path when `None` is passed.
-    pub fn new_config(config_path: Option<PathBuf>) -> Self {
-        let _config_path: PathBuf = if let Some(config_path_value) = config_path {
-            config_path_value
-        } else {
-            DEFAULT_CLIENT_CONFIG_PATH
-                .clone()
-                .expect("[ClientConfigParams - new] Invalid config path")
-        };
-
-        let config: ClientConfigLoader = Self::load_config(&_config_path);
-
-        let client_config: ClientConfigParams = config.client_config;
-        let transport_config: TransportConfigParams = config.transport_config;
-
+    /// Built-in defaults for `config_path` (used by builders, parse fallback, and lossy loaders).
+    pub(crate) fn default_for_path(config_path: PathBuf) -> Self {
         Self {
-            config_path: _config_path,
+            config_path,
             client_config: ClientConfigParams {
-                config_polling_seconds: client_config.config_polling_seconds,
-                init_hyperparameters: client_config.init_hyperparameters,
-                trajectory_file_output: client_config.trajectory_file_output,
-                local_model_module: client_config.local_model_module,
-                metrics: client_config.metrics,
+                config_polling_seconds: 10,
+                init_hyperparameters: HyperparameterConfig::default(),
+                trajectory_file_output: LocalTrajectoryFileParams::default(),
+                local_model_module: LocalModelModuleParams::default(),
+                metrics: MetricsParams::default(),
             },
-            transport_config,
+            transport_config: TransportConfigBuilder::build_default(),
+        }
+    }
+
+    /// Fallible constructor: resolves `config_path` (or the default path) and loads it.
+    pub fn try_new_config(config_path: Option<PathBuf>) -> Result<Self, ConfigLoadError> {
+        let path = match config_path {
+            Some(path) => path,
+            None => DEFAULT_CLIENT_CONFIG_PATH
+                .clone()
+                .ok_or(ConfigLoadError::MissingDefaultPath { kind: "client" })?,
+        };
+        Self::try_load_config(&path)
+    }
+
+    /// Creates a loader from the given path, or from the default path when `None` is passed.
+    ///
+    /// On open/read/default-path failures, logs the error and returns built-in defaults for
+    /// the requested or fallback path. Prefer [`Self::try_new_config`] in runtime paths that
+    /// already return `Result`.
+    pub fn new_config(config_path: Option<PathBuf>) -> Self {
+        match Self::try_new_config(config_path.clone()) {
+            Ok(loader) => loader,
+            Err(err) => {
+                log::error!("[ClientConfigLoader - new_config] {err}; loading empty defaults...");
+                let fallback_path = config_path
+                    .or_else(|| DEFAULT_CLIENT_CONFIG_PATH.clone())
+                    .unwrap_or_else(|| PathBuf::from("client_config.json"));
+                Self::default_for_path(fallback_path)
+            }
         }
     }
 
@@ -422,37 +463,46 @@ impl ClientConfigLoader {
         }
     }
 
-    /// Reads and parses the JSON file at `config_path`; falls back to built-in defaults on malformed input.
-    pub fn load_config(config_path: &PathBuf) -> Self {
-        match File::open(config_path) {
-            Ok(mut file) => {
-                let mut contents: String = String::new();
-                file.read_to_string(&mut contents)
-                    .expect("[ClientConfigParams - load_config] Failed to read configuration file");
-                let file_config: ClientConfigFile = serde_json::from_str(&contents).unwrap_or_else(|_| {
-                    log::error!("[ClientConfigParams - load_config] Failed to parse configuration, loading empty defaults...");
-                    ClientConfigFile {
-                        client_config: ClientConfigParams {
-                            config_polling_seconds: 10,
-                            init_hyperparameters: HyperparameterConfig::default(),
-                            trajectory_file_output: LocalTrajectoryFileParams::default(),
-                            local_model_module: LocalModelModuleParams::default(),
-                            metrics: MetricsParams {
-                                meter_name: "relayrl-client".to_string(),
-                                otlp_endpoint: OtlpEndpointParams::default()
-                            }
-                        },
-                        transport_config: TransportConfigBuilder::build_default(),
-                    }
-                });
-
-                Self::from_file(config_path.clone(), file_config)
-            }
-            Err(e) => {
-                panic!(
-                    "[ClientConfigParams - load_config] Failed to open configuration file: {}",
-                    e
+    fn parse_or_default(config_path: PathBuf, contents: &str) -> Self {
+        match serde_json::from_str::<ClientConfigFile>(contents) {
+            Ok(file) => Self::from_file(config_path, file),
+            Err(_) => {
+                log::error!(
+                    "[ClientConfigLoader - load_config] Failed to parse configuration, loading empty defaults..."
                 );
+                Self::default_for_path(config_path)
+            }
+        }
+    }
+
+    /// Fallible load: open/read failures return [`ConfigLoadError`]; malformed JSON falls back
+    /// to built-in defaults.
+    pub fn try_load_config(config_path: &PathBuf) -> Result<Self, ConfigLoadError> {
+        let mut file = File::open(config_path).map_err(|source| ConfigLoadError::Open {
+            kind: "client",
+            path: config_path.clone(),
+            source,
+        })?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .map_err(|source| ConfigLoadError::Read {
+                kind: "client",
+                path: config_path.clone(),
+                source,
+            })?;
+        Ok(Self::parse_or_default(config_path.clone(), &contents))
+    }
+
+    /// Reads and parses the JSON file at `config_path`; falls back to built-in defaults on
+    /// malformed input or open/read failures (logged, never panics).
+    ///
+    /// Prefer [`Self::try_load_config`] in runtime paths that already return `Result`.
+    pub fn load_config(config_path: &PathBuf) -> Self {
+        match Self::try_load_config(config_path) {
+            Ok(loader) => loader,
+            Err(err) => {
+                log::error!("[ClientConfigLoader - load_config] {err}; loading empty defaults...");
+                Self::default_for_path(config_path.clone())
             }
         }
     }
@@ -588,7 +638,7 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
 
     fn build(&self) -> ClientConfigLoader {
         let client_config: ClientConfigParams = ClientConfigParams {
-            config_polling_seconds: self.config_polling_seconds.clone().unwrap_or(10),
+            config_polling_seconds: self.config_polling_seconds.unwrap_or(10),
             init_hyperparameters: self.init_hyperparameters.clone().unwrap_or_default(),
             trajectory_file_output: self.trajectory_file_output.clone().unwrap_or_default(),
             local_model_module: self.local_model_module.clone().unwrap_or_default(),
@@ -611,21 +661,13 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
     }
 
     fn build_default() -> ClientConfigLoader {
-        ClientConfigLoader {
-            config_path: PathBuf::from("client_config.json"),
-            client_config: ClientConfigParams {
-                config_polling_seconds: 10,
-                init_hyperparameters: HyperparameterConfig::default(),
-                trajectory_file_output: LocalTrajectoryFileParams::default(),
-                local_model_module: LocalModelModuleParams::default(),
-                metrics: MetricsParams::default(),
-            },
-            transport_config: TransportConfigBuilder::build_default(),
-        }
+        ClientConfigLoader::default_for_path(PathBuf::from("client_config.json"))
     }
 }
 
 /// The `training_server_config` section of the training server JSON config file.
+///
+/// Reserved scaffolding: no server runtime consumes this config in the current branch.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrainingServerConfigParams {
     pub config_polling_seconds: u64,
@@ -641,6 +683,9 @@ struct TrainingServerConfigFile {
 }
 
 /// Parsed training server configuration loaded from `training_server_config.json`.
+///
+/// Reserved scaffolding: no server runtime consumes this loader in the current branch.
+#[derive(Debug)]
 pub struct TrainingServerConfigLoader {
     pub config_path: PathBuf,
     pub training_server_config: TrainingServerConfigParams,
@@ -648,25 +693,53 @@ pub struct TrainingServerConfigLoader {
 }
 
 impl TrainingServerConfigLoader {
-    /// Creates a loader from the given path, or from the default path when `None` is passed.
-    pub fn new_config(config_path: Option<PathBuf>) -> Self {
-        let _config_path: PathBuf = if let Some(config_path_value) = config_path {
-            config_path_value
-        } else {
-            DEFAULT_TRAINING_SERVER_CONFIG_PATH
-                .clone()
-                .expect("[TrainingServerConfigParams - new] Invalid config path")
-        };
-
-        let config: TrainingServerConfigLoader = Self::load_config(&_config_path);
-
-        let training_server_config: TrainingServerConfigParams = config.training_server_config;
-        let transport_config: TransportConfigParams = config.transport_config;
-
+    /// Built-in defaults for `config_path` (used by builders, parse fallback, and lossy loaders).
+    pub(crate) fn default_for_path(config_path: PathBuf) -> Self {
         Self {
-            config_path: _config_path,
-            training_server_config,
-            transport_config,
+            config_path,
+            training_server_config: TrainingServerConfigParams {
+                config_polling_seconds: 10,
+                default_hyperparameters: None,
+                training_tensorboard: TensorboardParams {
+                    launch_tb_on_startup: false,
+                    scalar_tags: vec!["AverageEpRet".to_string(), "StdEpRet".to_string()],
+                    global_step_tag: "Epoch".to_string(),
+                },
+                local_model_module: LocalModelModuleParams::default(),
+            },
+            transport_config: TransportConfigBuilder::build_default(),
+        }
+    }
+
+    /// Fallible constructor: resolves `config_path` (or the default path) and loads it.
+    pub fn try_new_config(config_path: Option<PathBuf>) -> Result<Self, ConfigLoadError> {
+        let path = match config_path {
+            Some(path) => path,
+            None => DEFAULT_TRAINING_SERVER_CONFIG_PATH.clone().ok_or(
+                ConfigLoadError::MissingDefaultPath {
+                    kind: "training server",
+                },
+            )?,
+        };
+        Self::try_load_config(&path)
+    }
+
+    /// Creates a loader from the given path, or from the default path when `None` is passed.
+    ///
+    /// On open/read/default-path failures, logs the error and returns built-in defaults.
+    /// Prefer [`Self::try_new_config`] in runtime paths that already return `Result`.
+    pub fn new_config(config_path: Option<PathBuf>) -> Self {
+        match Self::try_new_config(config_path.clone()) {
+            Ok(loader) => loader,
+            Err(err) => {
+                log::error!(
+                    "[TrainingServerConfigLoader - new_config] {err}; loading empty defaults..."
+                );
+                let fallback_path = config_path
+                    .or_else(|| DEFAULT_TRAINING_SERVER_CONFIG_PATH.clone())
+                    .unwrap_or_else(|| PathBuf::from("training_server_config.json"));
+                Self::default_for_path(fallback_path)
+            }
         }
     }
 
@@ -678,38 +751,48 @@ impl TrainingServerConfigLoader {
         }
     }
 
-    /// Reads and parses the JSON file at `config_path`; falls back to built-in defaults on malformed input.
-    pub fn load_config(config_path: &PathBuf) -> Self {
-        match File::open(config_path) {
-            Ok(mut file) => {
-                let mut contents: String = String::new();
-                file.read_to_string(&mut contents).expect(
-                    "[TrainingServerConfigParams - load_config] Failed to read configuration file",
+    fn parse_or_default(config_path: PathBuf, contents: &str) -> Self {
+        match serde_json::from_str::<TrainingServerConfigFile>(contents) {
+            Ok(file) => Self::from_file(config_path, file),
+            Err(_) => {
+                log::error!(
+                    "[TrainingServerConfigLoader - load_config] Failed to parse configuration, loading empty defaults..."
                 );
-                let file_config: TrainingServerConfigFile = serde_json::from_str(&contents).unwrap_or_else(|_| {
-                    log::error!("[TrainingServerConfigParams - load_config] Failed to parse configuration, loading empty defaults...");
-                    TrainingServerConfigFile {
-                        training_server_config: TrainingServerConfigParams {
-                            config_polling_seconds: 10,
-                            default_hyperparameters: None,
-                            training_tensorboard: TensorboardParams {
-                                launch_tb_on_startup: false,
-                                scalar_tags: vec!["AverageEpRet".to_string(), "StdEpRet".to_string()],
-                                global_step_tag: "Epoch".to_string(),
-                            },
-                            local_model_module: LocalModelModuleParams::default(),
-                        },
-                        transport_config: TransportConfigBuilder::build_default(),
-                    }
-                });
-
-                Self::from_file(config_path.clone(), file_config)
+                Self::default_for_path(config_path)
             }
-            Err(e) => {
-                panic!(
-                    "[TrainingServerConfigParams - load_config] Failed to open configuration file: {}",
-                    e
+        }
+    }
+
+    /// Fallible load: open/read failures return [`ConfigLoadError`]; malformed JSON falls back
+    /// to built-in defaults.
+    pub fn try_load_config(config_path: &PathBuf) -> Result<Self, ConfigLoadError> {
+        let mut file = File::open(config_path).map_err(|source| ConfigLoadError::Open {
+            kind: "training server",
+            path: config_path.clone(),
+            source,
+        })?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .map_err(|source| ConfigLoadError::Read {
+                kind: "training server",
+                path: config_path.clone(),
+                source,
+            })?;
+        Ok(Self::parse_or_default(config_path.clone(), &contents))
+    }
+
+    /// Reads and parses the JSON file at `config_path`; falls back to built-in defaults on
+    /// malformed input or open/read failures (logged, never panics).
+    ///
+    /// Prefer [`Self::try_load_config`] in runtime paths that already return `Result`.
+    pub fn load_config(config_path: &PathBuf) -> Self {
+        match Self::try_load_config(config_path) {
+            Ok(loader) => loader,
+            Err(err) => {
+                log::error!(
+                    "[TrainingServerConfigLoader - load_config] {err}; loading empty defaults..."
                 );
+                Self::default_for_path(config_path.clone())
             }
         }
     }
@@ -746,6 +829,8 @@ impl TrainingServerConfigLoader {
 }
 
 /// Builder trait for constructing a `TrainingServerConfigLoader` programmatically.
+///
+/// Reserved scaffolding: no server runtime consumes this builder in the current branch.
 pub trait TrainingServerConfigBuildParams {
     fn set_config_polling_seconds(&mut self, config_polling_seconds: u64) -> &mut Self;
     fn set_hyperparameters(
@@ -767,7 +852,10 @@ pub trait TrainingServerConfigBuildParams {
     fn build_default() -> TrainingServerConfigLoader;
 }
 
-/// Concrete builder for `TrainingServerConfigLoader`. Use `TrainingServerConfigBuildParams` methods to configure.
+/// Concrete builder for `TrainingServerConfigLoader`.
+///
+/// Reserved scaffolding: no server runtime consumes this builder in the current branch.
+/// Use `TrainingServerConfigBuildParams` methods to configure.
 pub struct TrainingServerConfigBuilder {
     config_polling_seconds: Option<u64>,
     default_hyperparameters: Option<HyperparameterConfig>,
@@ -980,10 +1068,7 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
                     global_step_tag: "Epoch".to_string(),
                 }
             }),
-            local_model_module: self
-                .local_model_module
-                .clone()
-                .unwrap_or_else(|| LocalModelModuleParams::default()),
+            local_model_module: self.local_model_module.clone().unwrap_or_default(),
         };
 
         let transport_config: TransportConfigParams = match &self.transport_config {
@@ -1002,20 +1087,7 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
     }
 
     fn build_default() -> TrainingServerConfigLoader {
-        TrainingServerConfigLoader {
-            config_path: PathBuf::from("training_server_config.json"),
-            training_server_config: TrainingServerConfigParams {
-                config_polling_seconds: 10,
-                default_hyperparameters: None,
-                training_tensorboard: TensorboardParams {
-                    launch_tb_on_startup: false,
-                    scalar_tags: vec!["AverageEpRet".to_string(), "StdEpRet".to_string()],
-                    global_step_tag: "Epoch".to_string(),
-                },
-                local_model_module: LocalModelModuleParams::default(),
-            },
-            transport_config: TransportConfigBuilder::build_default(),
-        }
+        TrainingServerConfigLoader::default_for_path(PathBuf::from("training_server_config.json"))
     }
 }
 
@@ -1859,5 +1931,102 @@ mod unit_tests {
         assert_eq!(loader.get_config_path(), &path);
         assert!(loader.get_hyperparameters().is_none());
         assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
+    }
+
+    #[test]
+    fn client_try_load_config_returns_err_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing_client_config.json");
+        let err = ClientConfigLoader::try_load_config(&path)
+            .expect_err("missing file should return Open error");
+        assert!(matches!(err, ConfigLoadError::Open { kind: "client", .. }));
+    }
+
+    #[test]
+    fn client_load_config_falls_back_for_missing_file_without_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing_client_config.json");
+        let loader = ClientConfigLoader::load_config(&path);
+        assert_eq!(loader.get_config_path(), &path);
+        assert_eq!(loader.client_config.config_polling_seconds, 10);
+        assert_eq!(loader.get_metrics_meter_name(), "relayrl-client");
+    }
+
+    #[test]
+    fn client_try_load_config_falls_back_on_malformed_json() {
+        let temp = write_temp_file("NOT VALID JSON {{{{");
+        let path = temp.path().to_path_buf();
+        let loader = ClientConfigLoader::try_load_config(&path)
+            .expect("malformed JSON should fall back to defaults, not Err");
+        assert_eq!(loader.get_config_path(), &path);
+        assert_eq!(loader.client_config.config_polling_seconds, 10);
+        assert_eq!(loader.get_metrics_meter_name(), "relayrl-client");
+    }
+
+    #[test]
+    fn training_try_load_config_returns_err_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing_training_config.json");
+        let err = TrainingServerConfigLoader::try_load_config(&path)
+            .expect_err("missing file should return Open error");
+        assert!(matches!(
+            err,
+            ConfigLoadError::Open {
+                kind: "training server",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn training_load_config_falls_back_for_missing_file_without_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing_training_config.json");
+        let loader = TrainingServerConfigLoader::load_config(&path);
+        assert_eq!(loader.get_config_path(), &path);
+        assert_eq!(loader.get_config_polling_seconds(), 10);
+        assert!(loader.get_hyperparameters().is_none());
+        assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
+    }
+
+    #[test]
+    fn training_try_load_config_falls_back_on_malformed_json() {
+        let temp = write_temp_file("NOT VALID JSON {{{{");
+        let path = temp.path().to_path_buf();
+        let loader = TrainingServerConfigLoader::try_load_config(&path)
+            .expect("malformed JSON should fall back to defaults, not Err");
+        assert_eq!(loader.get_config_path(), &path);
+        assert!(loader.get_hyperparameters().is_none());
+        assert!(!loader.get_training_tensorboard().launch_tb_on_startup);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_try_load_config_returns_err_for_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = write_temp_file(VALID_CLIENT_CONFIG_JSON);
+        let path = temp.path().to_path_buf();
+        let original = std::fs::metadata(&path).expect("metadata").permissions();
+        let mut unreadable = original.clone();
+        unreadable.set_mode(0o000);
+        std::fs::set_permissions(&path, unreadable).expect("chmod");
+
+        // Root (and some sandboxes) can still open mode-0 files; skip rather than flake.
+        if File::open(&path).is_ok() {
+            std::fs::set_permissions(&path, original).expect("restore chmod");
+            return;
+        }
+
+        let result = ClientConfigLoader::try_load_config(&path);
+
+        // Restore before temp cleanup so the file can be removed.
+        std::fs::set_permissions(&path, original).expect("restore chmod");
+
+        let err = result.expect_err("unreadable file should return an open/read error");
+        assert!(matches!(
+            err,
+            ConfigLoadError::Open { .. } | ConfigLoadError::Read { .. }
+        ));
     }
 }

@@ -40,10 +40,11 @@
 //!   - [`network::client`]: the multi-actor client runtime (rewritten in v0.5.0).
 //!     - [`agent`](network::client::agent): the public [`RelayRLAgent`](network::client::agent)
 //!       facade and [`AgentBuilder`](network::client::agent) construction API.
-//!     - The internal `runtime` holds `coordination` (coordinator, lifecycle, scaling, state),
-//!       `router` (message routing), and `data` (file sinks plus experimental transport sinks).
-//!   - `network::server`: optional, experimental training/inference servers behind feature
-//!     flags.
+//!     - The internal `runtime` holds `control` (coordinator, lifecycle, scaling, state),
+//!       `data::router` (message routing), and `data` (file sinks plus experimental
+//!       transport sinks).
+//!   - Server runtime support is reserved: the `training-server` and `inference-server`
+//!     feature flags do not compile a `network::server` module in this branch.
 //! - [`utilities`]: JSON configuration loading/builders, logging (log4rs), metrics
 //!   (Prometheus/OpenTelemetry), and Tokio helpers.
 //! - [`prelude`]: grouped re-exports spanning this crate plus [`relayrl_types`],
@@ -123,12 +124,14 @@
 //! - `tch-backend`: LibTorch (`tch`) backend support via [`relayrl_types`].
 //! - `metrics`: Prometheus/OpenTelemetry metrics.
 //! - `profile`: flamegraph and tokio-console profiling.
-//! - `zmq-transport` / `nats-transport`: experimental network transports.
-//! - `inference-server` / `training-server`: experimental server integrations.
+//! - `zmq-transport` / `nats-transport`: experimental client network transports.
+//! - `inference-server` / `training-server`: reserved/no-op feature flags; no server
+//!   runtime ships in this branch.
 
 /// Core networking functionality for RelayRL.
 ///
-/// This module provides the multi-actor client runtime and optional server implementations.
+/// This module provides the multi-actor client runtime. Server runtime support is
+/// reserved for a future implementation and is not compiled in this branch.
 ///
 /// ## Client Runtime
 ///
@@ -137,14 +140,14 @@
 ///
 /// In `0.5.0`, the supported path is the local/default client runtime, including:
 /// - Public [`agent`](network::client::agent) API for agent construction and control
-/// - Internal runtime coordination (scaling, lifecycle, state management)
+/// - Internal runtime control (scaling, lifecycle, state management)
 /// - Router-based message dispatching
 /// - Actor execution with local inference
 /// - Vectorized environment execution per actor
-/// - Data collection via Arrow/CSV file sinks
+/// - Data collection via Arrow/CSV file sinks and in-memory trajectory cache
 ///
-/// Transport-backed workflows remain experimental even when the corresponding feature flags are
-/// enabled.
+/// Client transport-backed workflows remain experimental even when the corresponding
+/// feature flags are enabled.
 ///
 pub mod network;
 
@@ -182,8 +185,6 @@ pub mod prelude {
 
     pub mod network {
         pub use crate::network::client::agent::*;
-        // pub use crate::network::server::inference_server::*;
-        // pub use crate::network::server::training_server::*;
     }
 
     pub mod templates {
@@ -232,7 +233,7 @@ pub mod prelude {
     pub mod utilities {
         pub mod config {
             pub use crate::utilities::configuration::{
-                ClientConfigBuilder, ClientConfigLoader, ClientConfigParams,
+                ClientConfigBuilder, ClientConfigLoader, ClientConfigParams, ConfigLoadError,
                 TrainingServerConfigBuilder, TrainingServerConfigLoader,
                 TrainingServerConfigParams, TransportConfigBuilder, TransportConfigParams,
             };

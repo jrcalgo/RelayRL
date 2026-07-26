@@ -229,7 +229,7 @@ pub(crate) fn construct_local_model_path(local_model_module: &LocalModelModulePa
     }
 
     cwd.join(&directory)
-        .join(format!("{}.{}", &model_name, &module_format))
+        .join(format!("{}.{}", model_name, module_format))
 }
 
 pub(crate) fn construct_trajectory_file_output(
@@ -318,7 +318,7 @@ impl LifecycleManager {
             },
         };
 
-        let transport_config = config.get_transport_config();
+        let _transport_config = config.get_transport_config();
 
         // 1. load args, 2. load config file, 3. load default values
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -637,7 +637,9 @@ impl LifecycleManager {
         &self,
         path: PathBuf,
     ) -> Result<(), LifecycleManagerError> {
-        let new_config = ClientConfigLoader::load_config(&path);
+        let new_config = ClientConfigLoader::try_load_config(&path).map_err(|error| {
+            LifecycleManagerError::ConfigError(format!("Failed to reload config: {error}"))
+        })?;
 
         #[cfg(all(
             any(feature = "nats-transport", feature = "zmq-transport"),
