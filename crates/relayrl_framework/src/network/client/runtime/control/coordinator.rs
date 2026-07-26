@@ -11,9 +11,7 @@ use crate::network::client::agent::{ActorDataMode, ActorInferenceMode, ActorInfo
 use crate::network::client::agent::{
     AlgorithmInitArgs, DefaultHyperparameterArgs, InferenceAddressesArgs, TrainingAddressesArgs,
 };
-use crate::network::client::runtime::actor::{
-    ActorDTypes, ActorError, ActorShape, ErasedActorRuntime,
-};
+use crate::network::client::runtime::actor::{ActorDTypes, ActorShape, ErasedActorRuntime};
 use crate::network::client::runtime::control::lifecycle_manager::{
     LifecycleManager, LifecycleManagerError,
 };
@@ -40,8 +38,11 @@ use crate::network::client::runtime::data::sinks::transport_sink::{
 };
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::TransportConfigParams;
-use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
-use crate::utilities::observability::logging::*;
+use crate::utilities::configuration::{
+    ClientConfigLoader, ConfigLoadError, DEFAULT_CLIENT_CONFIG_PATH,
+};
+#[cfg(feature = "logging-init")]
+use crate::utilities::observability::logging::init_logging;
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::*;
 
@@ -77,7 +78,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 #[cfg(feature = "metrics")]
 use std::time::Instant;
 
@@ -115,11 +116,19 @@ pub enum ClientConfigError {
     ParseError(String),
     #[error("Invalid config value: {0}")]
     InvalidValue(String),
+    #[error("Config load failed: {0}")]
+    LoadError(String),
 }
 
 impl From<String> for ClientConfigError {
     fn from(e: String) -> Self {
         ClientConfigError::InvalidValue(e)
+    }
+}
+
+impl From<ConfigLoadError> for ClientConfigError {
+    fn from(error: ConfigLoadError) -> Self {
+        ClientConfigError::LoadError(error.to_string())
     }
 }
 
@@ -167,6 +176,43 @@ pub enum CoordinatorError {
         actual_d_in: usize,
         actual_d_out: usize,
     },
+    /// Returned by `shutdown()` when the runtime was fully invalidated (`runtime_params` is
+    /// `None` regardless of this error) but one or more individual teardown steps failed.
+    /// `drained_cache` still carries whatever trajectory snapshot was recovered before/around
+    /// the failing step(s), so callers do not lose already-drained data on partial failure.
+    #[error("shutdown completed with cleanup failures: {failures:?}")]
+    ShutdownPartialFailure {
+        failures: Vec<ShutdownStepFailure>,
+        drained_cache: Option<HashMap<ActorUuid, Vec<Arc<RelayRLTrajectory>>>>,
+    },
+}
+
+/// A single teardown step's failure recorded during [`ClientCoordinator::shutdown`]'s
+/// best-effort cleanup, so callers observing [`CoordinatorError::ShutdownPartialFailure`] can
+/// see every step that failed instead of only the first one.
+#[derive(Debug, Clone)]
+pub struct ShutdownStepFailure {
+    pub step: &'static str,
+    pub error: String,
+}
+
+impl std::fmt::Display for ShutdownStepFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.step, self.error)
+    }
+}
+
+/// Logs and records a shutdown teardown step's failure without aborting the remaining cleanup.
+fn record_shutdown_failure(
+    failures: &mut Vec<ShutdownStepFailure>,
+    step: &'static str,
+    error: impl std::fmt::Display,
+) {
+    log::error!("[Coordinator] Shutdown step '{}' failed: {}", step, error);
+    failures.push(ShutdownStepFailure {
+        step,
+        error: error.to_string(),
+    });
 }
 
 pub trait ToAnyBurnTensor<B: Backend + BackendMatcher<Backend = B>, const D: usize> {
@@ -489,17 +535,70 @@ pub struct CoordinatorParams<B: Backend + BackendMatcher<Backend = B>> {
     pub(crate) scaling: ScaleManager<B>,
 }
 
+/// Identifies a single fallible step inside [`ClientCoordinator::shutdown`] for deterministic
+/// failure-injection in tests. Real callers never construct this; production code paths are
+/// exercised unconditionally regardless of this type's existence.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownFailpoint {
+    ShutdownAllActors,
+    ScalingClearRuntimeComponents,
+    StateClearRuntimeComponents,
+}
+
 pub struct ClientCoordinator<B: Backend + BackendMatcher<Backend = B>> {
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     transport_type: TransportMode,
     pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B>>,
     inference_path_params: Option<InferencePathParams<B>>,
+    /// Test-only fault injection points consulted by `shutdown()` to deterministically exercise
+    /// its best-effort partial-teardown-on-error handling without depending on real, hard to
+    /// trigger transport/state failures. Always empty in non-test builds.
+    #[cfg(test)]
+    pub(crate) shutdown_failpoints: Vec<ShutdownFailpoint>,
 }
 
 // ===== Internal helpers =====
 
 impl<B: Backend + BackendMatcher<Backend = B>> ClientCoordinator<B> {
+    /// Snapshots live actor identities before `shutdown()` mutates or clears actor state.
+    /// `StateManager::shutdown_all_actors` can abort actor handles, and
+    /// `StateManager::clear_runtime_components` clears `actor_runtime_handles` outright, so this
+    /// snapshot is the only reliable actor list left if actor shutdown itself fails partway
+    /// through: trajectory-cache draining then falls back to it instead of an empty list.
+    async fn snapshot_actor_infos(params: &CoordinatorParams<B>) -> Vec<ActorInfo> {
+        params
+            .shared_state
+            .read()
+            .await
+            .actor_runtime_handles
+            .iter()
+            .filter_map(|entry| match entry.value().get_actor_info() {
+                Ok(actor_info) => Some(actor_info),
+                Err(e) => {
+                    log::error!(
+                        "[Coordinator] Failed to snapshot actor info for {}: {}",
+                        entry.key(),
+                        e
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Returns a synthetic error message when a test has requested fault injection at `point`,
+    /// so `shutdown()`'s partial-teardown-on-error handling can be exercised deterministically.
+    #[cfg(test)]
+    fn shutdown_failpoint_error(&self, point: ShutdownFailpoint) -> Option<String> {
+        if self.shutdown_failpoints.contains(&point) {
+            Some(format!("injected test failure at {:?}", point))
+        } else {
+            None
+        }
+    }
+
     async fn request_model_versions(
         global_dispatcher_tx: Sender<RoutedMessage>,
         actors: &[ActorInfo],
@@ -782,6 +881,10 @@ impl ClientNamespace {
     }
 
     /// Returns a cheap clone of the underlying namespace string for read-only/logging APIs.
+    #[cfg_attr(
+        not(any(feature = "nats-transport", feature = "zmq-transport")),
+        allow(dead_code)
+    )]
     pub(crate) fn as_arc(&self) -> Arc<str> {
         self.namespace.clone()
     }
@@ -857,6 +960,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
             client_modes: Arc::new(client_modes),
             runtime_params: None,
             inference_path_params: None,
+            #[cfg(test)]
+            shutdown_failpoints: Vec::new(),
         }
     }
 
@@ -971,80 +1076,132 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
     }
 
     async fn shutdown(&mut self) -> DrainedCacheResult {
-        let shutdown_result = match &mut self.runtime_params {
-            Some(params) => {
-                // Sends a shutdown RoutedMessage to all actors, which flushes current trajectory to the buffers and then aborts the actor's message loop task
-                let actor_ids = params
-                    .shared_state
-                    .write()
-                    .await
-                    .shutdown_all_actors()
-                    .await?;
-
-                // inform server(s) that the client is being shutdown and to remove all actor-related data from server runtime
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                params.scaling.send_shutdown_signal_to_server().await?;
-
-                // shutdown transport client components (sockets, etc.)
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                if let Some(dispatcher) = &params.scaling.scaling_dispatcher {
-                    dispatcher.shutdown_transport().await?;
-                }
-
-                // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (the receiver, filters, and buffers)
-                // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes)
-                params.lifecycle.shutdown();
-
-                let maybe_traj_cache =
-                    if let Some(traj_cache) = &mut params.scaling.shared_traj_cache {
-                        match traj_cache.drain(&actor_ids) {
-                            Ok(traj_map) => Some(traj_map),
-                            Err((traj_map, invalid_ids)) => {
-                                log::error!(
-                                    "[Coordinator] Failed to drain trajectory cache: {:?}",
-                                    invalid_ids
-                                );
-                                traj_map
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                // Ensure all scalable router tasks are drained before state teardown completes.
-                params.scaling.clear_runtime_components().await?;
-
-                // drain the UUID pool to ensure all UUIDs are removed from the pool for the client namespace.
-                // uses a clone of the owned handle: StateManager/ScaleManager still hold their own
-                // clones at this point, but only local caches (no registry writes) are touched below.
-                if let Err(e) = params.client_namespace.clone().remove() {
-                    log::error!(
-                        "[Coordinator] Failed to remove owned client namespace: {}",
-                        e
-                    );
-                }
-
-                // removes all actor-related
-                params
-                    .shared_state
-                    .write()
-                    .await
-                    .clear_runtime_components()
-                    .await?;
-
-                // by this point, `RelayRLAgent` should be reset back to default
-
-                Ok(maybe_traj_cache)
-            }
-            None => Err(CoordinatorError::NoRuntimeInstanceError),
+        // Take `runtime_params` up front rather than matching on a mutable borrow
+        let Some(mut params) = self.runtime_params.take() else {
+            return Err(CoordinatorError::NoRuntimeInstanceError);
         };
 
-        // if the above shutdown operations were successful, remove the runtime parameters from memory
-        if self.runtime_params.is_some() {
-            let _ = self.runtime_params.take(); // sets the runtime parameters to None
+        // The runtime is being invalidated below: any cached local-inference/network routing
+        // handles are about to point at a dead runtime, so drop them alongside `runtime_params`.
+        self.inference_path_params = None;
+
+        let mut failures: Vec<ShutdownStepFailure> = Vec::new();
+
+        // Snapshot actor identities up front, before actor shutdown can abort handles or state
+        // teardown clears `actor_runtime_handles`: this is the fallback source of actor ids for
+        // trajectory-cache draining if `shutdown_all_actors` itself fails partway through.
+        let actor_snapshot = Self::snapshot_actor_infos(&params).await;
+
+        // Sends a shutdown RoutedMessage to all actors, which flushes current trajectory to the buffers and then aborts the actor's message loop task.
+        #[cfg(test)]
+        let shutdown_all_actors_failpoint =
+            self.shutdown_failpoint_error(ShutdownFailpoint::ShutdownAllActors);
+        #[cfg(not(test))]
+        let shutdown_all_actors_failpoint: Option<String> = None;
+
+        let actor_ids = if let Some(injected) = shutdown_all_actors_failpoint {
+            record_shutdown_failure(&mut failures, "shutdown_all_actors", injected);
+            actor_snapshot
+        } else {
+            match params.shared_state.write().await.shutdown_all_actors().await {
+                Ok(actor_ids) => actor_ids,
+                Err(e) => {
+                    record_shutdown_failure(&mut failures, "shutdown_all_actors", e);
+                    actor_snapshot
+                }
+            }
+        };
+
+        // inform server(s) that the client is being shutdown and to remove all actor-related data from server runtime
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        if let Err(e) = params.scaling.send_shutdown_signal_to_server().await {
+            record_shutdown_failure(&mut failures, "send_shutdown_signal_to_server", e);
         }
 
-        shutdown_result
+        // shutdown transport client components (sockets, etc.)
+        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        if let Some(dispatcher) = &params.scaling.scaling_dispatcher {
+            if let Err(e) = dispatcher.shutdown_transport().await {
+                record_shutdown_failure(&mut failures, "shutdown_transport", e);
+            }
+        }
+
+        // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (the receiver, filters, and buffers)
+        // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes).
+        // Infallible, and always runs regardless of earlier failures so later steps still
+        // observe the shutdown broadcast.
+        params.lifecycle.shutdown();
+
+        let maybe_traj_cache = if let Some(traj_cache) = &mut params.scaling.shared_traj_cache {
+            match traj_cache.drain(&actor_ids) {
+                Ok(traj_map) => Some(traj_map),
+                Err((traj_map, invalid_ids)) => {
+                    log::error!(
+                        "[Coordinator] Failed to drain trajectory cache: {:?}",
+                        invalid_ids
+                    );
+                    traj_map
+                }
+            }
+        } else {
+            None
+        };
+
+        // Ensure all scalable router tasks are drained before state teardown completes.
+        #[cfg(test)]
+        let scaling_clear_failpoint =
+            self.shutdown_failpoint_error(ShutdownFailpoint::ScalingClearRuntimeComponents);
+        #[cfg(not(test))]
+        let scaling_clear_failpoint: Option<String> = None;
+
+        if let Some(injected) = scaling_clear_failpoint {
+            record_shutdown_failure(&mut failures, "scaling.clear_runtime_components", injected);
+        } else if let Err(e) = params.scaling.clear_runtime_components().await {
+            record_shutdown_failure(&mut failures, "scaling.clear_runtime_components", e);
+        }
+
+        // drain the UUID pool to ensure all UUIDs are removed from the pool for the client namespace.
+        // uses a clone of the owned handle: StateManager/ScaleManager still hold their own
+        // clones at this point, but only local caches (no registry writes) are touched below.
+        if let Err(e) = params.client_namespace.clone().remove() {
+            record_shutdown_failure(&mut failures, "client_namespace.remove", e);
+        }
+
+        // removes all actor-related state
+        #[cfg(test)]
+        let state_clear_failpoint =
+            self.shutdown_failpoint_error(ShutdownFailpoint::StateClearRuntimeComponents);
+        #[cfg(not(test))]
+        let state_clear_failpoint: Option<String> = None;
+
+        if let Some(injected) = state_clear_failpoint {
+            record_shutdown_failure(
+                &mut failures,
+                "shared_state.clear_runtime_components",
+                injected,
+            );
+        } else if let Err(e) = params
+            .shared_state
+            .write()
+            .await
+            .clear_runtime_components()
+            .await
+        {
+            record_shutdown_failure(&mut failures, "shared_state.clear_runtime_components", e);
+        }
+
+        // by this point, `RelayRLAgent` should be reset back to default: `runtime_params` was
+        // already taken at the top of this function, so that holds regardless of any failure
+        // recorded above.
+
+        if failures.is_empty() {
+            Ok(maybe_traj_cache)
+        } else {
+            Err(CoordinatorError::ShutdownPartialFailure {
+                failures,
+                drained_cache: maybe_traj_cache,
+            })
+        }
     }
 
     async fn restart(
@@ -1496,9 +1653,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
 
     async fn get_config(&self) -> Result<ClientConfigLoader, CoordinatorError> {
         match &self.runtime_params {
-            Some(params) => Ok(ClientConfigLoader::load_config(
-                &params.lifecycle.get_config_path(),
-            )),
+            Some(params) => {
+                ClientConfigLoader::try_load_config(&params.lifecycle.get_config_path())
+                    .map_err(ClientConfigError::from)
+                    .map_err(CoordinatorError::ConfigError)
+            }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::GetConfigError(
                     "[Coordinator] No runtime instance to get_config...".to_string(),
@@ -1545,9 +1704,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> LifecycleStart<B> for ClientCoord
             },
         };
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        let mut config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
+        let mut config_loader: ClientConfigLoader =
+            ClientConfigLoader::try_load_config(&config_path).map_err(ClientConfigError::from)?;
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        let config_loader: ClientConfigLoader = ClientConfigLoader::load_config(&config_path);
+        let config_loader: ClientConfigLoader =
+            ClientConfigLoader::try_load_config(&config_path).map_err(ClientConfigError::from)?;
         let lifecycle: LifecycleManager = LifecycleManager::new(
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             default_hyperparameters,
@@ -2477,10 +2638,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientActors<B> for ClientCoordin
         match self.runtime_params {
             Some(_) => {
                 let Some((global_dispatcher_tx, target_actors, local_model_path)) = self
-                    .prepare_model_update_dispatch::<D_IN, D_OUT>(
-                        specific_actors.as_deref(),
-                        &model.metadata,
-                    )
+                    .prepare_model_update_dispatch::<D_IN, D_OUT>(specific_actors, &model.metadata)
                     .await?
                 else {
                     return Ok(());
@@ -2877,20 +3035,19 @@ mod unit_tests {
         ActorDataMode, ActorInferenceMode, ClientModes, ModelMode,
     };
     use crate::network::client::runtime::control::lifecycle_manager::LifecycleManager;
-    use crate::network::client::runtime::control::state_manager::ActorRoute;
+
     use crate::utilities::configuration::ClientConfigLoader;
     use active_uuid_registry::registry_uuid::Uuid;
     use burn_ndarray::NdArray;
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
-    use relayrl_types::data::action::RelayRLAction;
+
     use relayrl_types::data::tensor::{DType, DeviceType, NdArrayDType};
     use relayrl_types::model::{ModelFileType, ModelMetadata};
-    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
     use std::path::PathBuf;
-    use tokio::sync::mpsc::{self, error::TryRecvError};
+    use tokio::sync::mpsc::{self};
 
     type TestBackend = NdArray<f32>;
-    type TestKind = Float;
 
     fn make_coordinator() -> ClientCoordinator<TestBackend> {
         ClientCoordinator::<TestBackend>::new(
@@ -2942,19 +3099,6 @@ mod unit_tests {
             ("test-coordinator".to_string(), String::new()),
             None,
         )
-    }
-
-    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<TestBackend, 4>> {
-        let device = TestBackend::get_device(&DeviceType::Cpu).unwrap();
-        let tensor = Tensor::<TestBackend, 4, Float>::from_data(
-            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
-            &device,
-        );
-
-        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
-            tensor: Arc::new(tensor),
-            dtype: DType::NdArray(NdArrayDType::F32),
-        }))
     }
 
     async fn make_runtime_coordinator(
@@ -3321,7 +3465,7 @@ mod unit_tests {
         let (coordinator, shared_state, mut global_dispatcher_rx) =
             make_runtime_coordinator(client_modes).await;
         let actor_ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
-        let current_versions = vec![
+        let current_versions = [
             (actor_ids[0], 0_i64),
             (actor_ids[1], 4_i64),
             (actor_ids[2], -1_i64),
@@ -3394,7 +3538,7 @@ mod unit_tests {
         let mut captured_updates = captured_updates_rx.await.unwrap();
         captured_updates.sort_by_key(|(actor_id, _, _)| actor_id.to_string());
 
-        let mut expected_updates = vec![
+        let mut expected_updates = [
             (actor_ids[0], 1_i64),
             (actor_ids[1], 5_i64),
             (actor_ids[2], 0_i64),
@@ -3447,6 +3591,175 @@ mod unit_tests {
         let mut c = make_coordinator();
         let result = c.shutdown().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_success_takes_runtime_params_and_is_idempotent() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
+            actor_data_mode: ActorDataMode::Disabled,
+        };
+        let (mut coordinator, _shared_state, _rx) = make_runtime_coordinator(client_modes).await;
+
+        let result = coordinator.shutdown().await;
+
+        assert!(
+            matches!(result, Ok(None)),
+            "expected a clean shutdown with no drained cache, got {:?}",
+            result
+        );
+        assert!(coordinator.runtime_params.is_none());
+
+        // A second call against the already-shut-down coordinator must report
+        // `NoRuntimeInstanceError`, not a partial failure: `shutdown()` must not be callable
+        // twice against the same live runtime state.
+        let second = coordinator.shutdown().await;
+        assert!(matches!(
+            second,
+            Err(CoordinatorError::NoRuntimeInstanceError)
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_partial_failure_still_takes_runtime_params() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
+            actor_data_mode: ActorDataMode::Disabled,
+        };
+        let (mut coordinator, _shared_state, _rx) = make_runtime_coordinator(client_modes).await;
+        coordinator
+            .shutdown_failpoints
+            .push(ShutdownFailpoint::ScalingClearRuntimeComponents);
+
+        let result = coordinator.shutdown().await;
+
+        match result {
+            Err(CoordinatorError::ShutdownPartialFailure { failures, .. }) => {
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].step, "scaling.clear_runtime_components");
+            }
+            other => panic!("expected ShutdownPartialFailure, got {:?}", other),
+        }
+        // This is the core fix for the partial-teardown-on-error gap: the runtime must be fully
+        // invalidated even though a cleanup step failed, so a half-torn-down runtime is never
+        // left advertised as live.
+        assert!(coordinator.runtime_params.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_partial_failure_preserves_drained_cache() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
+            actor_data_mode: ActorDataMode::OfflineWithCache(10),
+        };
+        let (mut coordinator, shared_state, _rx) = make_runtime_coordinator(client_modes).await;
+        let actor_id = Uuid::new_v4();
+        new_actor_with_nametag(&shared_state, actor_id, None).await;
+        coordinator
+            .runtime_params
+            .as_ref()
+            .expect("runtime params should exist")
+            .scaling
+            .shared_traj_cache
+            .as_ref()
+            .expect("cache mode should provision a shared trajectory cache")
+            .cache
+            .insert(actor_id, vec![Arc::new(RelayRLTrajectory::new(3))]);
+
+        // Inject the failure after cache draining occurs in the shutdown sequence, so the
+        // already-drained snapshot must survive this later cleanup failure rather than being
+        // silently discarded.
+        coordinator
+            .shutdown_failpoints
+            .push(ShutdownFailpoint::StateClearRuntimeComponents);
+
+        let result = coordinator.shutdown().await;
+
+        match result {
+            Err(CoordinatorError::ShutdownPartialFailure {
+                failures,
+                drained_cache,
+            }) => {
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].step, "shared_state.clear_runtime_components");
+                let drained_cache = drained_cache.expect("drained cache should be Some");
+                assert!(drained_cache.contains_key(&actor_id));
+            }
+            other => panic!("expected ShutdownPartialFailure, got {:?}", other),
+        }
+        assert!(coordinator.runtime_params.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_uses_actor_snapshot_when_actor_shutdown_fails() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
+            actor_data_mode: ActorDataMode::OfflineWithCache(10),
+        };
+        let (mut coordinator, shared_state, _rx) = make_runtime_coordinator(client_modes).await;
+        let actor_id = Uuid::new_v4();
+        new_actor_with_nametag(&shared_state, actor_id, None).await;
+        coordinator
+            .runtime_params
+            .as_ref()
+            .expect("runtime params should exist")
+            .scaling
+            .shared_traj_cache
+            .as_ref()
+            .expect("cache mode should provision a shared trajectory cache")
+            .cache
+            .insert(actor_id, vec![Arc::new(RelayRLTrajectory::new(3))]);
+
+        coordinator
+            .shutdown_failpoints
+            .push(ShutdownFailpoint::ShutdownAllActors);
+
+        let result = coordinator.shutdown().await;
+
+        match result {
+            Err(CoordinatorError::ShutdownPartialFailure {
+                failures,
+                drained_cache,
+            }) => {
+                assert_eq!(failures[0].step, "shutdown_all_actors");
+                // Even though `shutdown_all_actors` "failed", the pre-shutdown actor snapshot
+                // lets trajectory draining still find and return this actor's buffered
+                // trajectory instead of silently dropping it.
+                let drained_cache = drained_cache.expect("drained cache should be Some");
+                assert!(drained_cache.contains_key(&actor_id));
+            }
+            other => panic!("expected ShutdownPartialFailure, got {:?}", other),
+        }
+        assert!(coordinator.runtime_params.is_none());
+    }
+
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[tokio::test]
+    async fn shutdown_without_transport_dispatcher_reports_partial_failure() {
+        let client_modes = ClientModes {
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
+            actor_data_mode: ActorDataMode::Disabled,
+        };
+        let (mut coordinator, _shared_state, _rx) = make_runtime_coordinator(client_modes).await;
+
+        // `make_runtime_coordinator` builds the scale manager with no scaling dispatcher or
+        // transport addresses configured, so `send_shutdown_signal_to_server` fails organically
+        // here -- this exercises a real (not injected) cleanup failure under transport features.
+        let result = coordinator.shutdown().await;
+
+        match result {
+            Err(CoordinatorError::ShutdownPartialFailure { failures, .. }) => {
+                assert!(
+                    failures
+                        .iter()
+                        .any(|f| f.step == "send_shutdown_signal_to_server"),
+                    "expected a send_shutdown_signal_to_server failure, got {:?}",
+                    failures
+                );
+            }
+            other => panic!("expected ShutdownPartialFailure, got {:?}", other),
+        }
+        assert!(coordinator.runtime_params.is_none());
     }
 
     async fn new_actor_with_nametag(

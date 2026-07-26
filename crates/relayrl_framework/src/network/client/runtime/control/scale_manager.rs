@@ -121,6 +121,8 @@ pub(crate) struct RouterRuntimeParams {
 
 pub type RouterNamespace = Arc<str>;
 pub type ScaleManagerUuid = Uuid;
+type DrainedTrajectoryMap = HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>;
+type DrainPartialFailure = (Option<DrainedTrajectoryMap>, Vec<Uuid>);
 
 #[derive(Clone)]
 pub(crate) struct SharedTrajectoryCache {
@@ -136,13 +138,7 @@ impl SharedTrajectoryCache {
     pub(crate) fn drain(
         &mut self,
         actors: &[ActorInfo],
-    ) -> Result<
-        HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>,
-        (
-            Option<HashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>,
-            Vec<Uuid>,
-        ),
-    > {
+    ) -> Result<DrainedTrajectoryMap, DrainPartialFailure> {
         let mut traj_map = HashMap::<Uuid, Vec<Arc<RelayRLTrajectory>>>::new();
         let mut invalid_ids = Vec::new();
 
