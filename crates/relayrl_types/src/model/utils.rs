@@ -43,7 +43,7 @@ pub fn convert_generic_dict(
 pub fn validate_module<B: Backend + BackendMatcher<Backend = B> + 'static>(
     module: &ModelModule<B>,
 ) -> Result<(), ModelError> {
-    let device = module.resolve_device();
+    let device = module.try_resolve_device()?;
 
     let input_shape = &module.metadata.input_shape;
     let output_shape = &module.metadata.output_shape;
@@ -192,8 +192,9 @@ fn validate_model_shapes<
 
     // Uses the fallible runner (not `step()`) so a genuine engine error (dtype/shape
     // mismatch, ORT/LibTorch failure) is reported instead of silently "validating" against
-    // a zero-filled fallback action.
-    let action_tensor = module.try_step::<D_IN, D_OUT>(obs)?;
+    // a zero-filled fallback action. `UnsupportedModelType` still falls back to zeros inside
+    // `try_step` so structural validation can run without an inference engine.
+    let (action_tensor, _, _) = module.try_step::<D_IN, D_OUT>(obs, None)?;
 
     if action_tensor.dtype != module.metadata.output_dtype {
         return Err(ModelError::DTypeError(format!(

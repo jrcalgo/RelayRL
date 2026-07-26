@@ -401,7 +401,42 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         Self::finish(model, metadata)
     }
 
-    /// Generic forward; dispatches to ONNX or LibTorch paths based on metadata.
+    /// Fallible single-step inference. Prefer this over [`Self::step`] in runtime paths.
+    ///
+    /// Falls back to a zero action only for [`ModelError::UnsupportedModelType`] (no inference
+    /// engine compiled in). Genuine engine/conversion failures are propagated.
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    #[allow(clippy::type_complexity)]
+    pub fn try_step<const D_IN: usize, const D_OUT: usize>(
+        &self,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
+    ) -> Result<(TensorData, Option<TensorData>, HashMap<String, RelayRLData>), ModelError> {
+        let base_action = match self.run_inference::<D_IN, D_OUT>(observation) {
+            Ok(action) => action,
+            Err(ModelError::UnsupportedModelType(_)) => self.zeros_action::<D_OUT>()?,
+            Err(error) => return Err(error),
+        };
+
+        let mask_td = mask
+            .map(|mask_tensor| self.mask_to_tensor_data(mask_tensor))
+            .transpose()?;
+
+        let act_td = match mask_td.as_ref() {
+            Some(mask) => Self::apply_mask_to_action(base_action, mask),
+            None => base_action,
+        };
+
+        Ok((act_td, mask_td, HashMap::new()))
+    }
+
+    /// Compatibility wrapper around [`Self::try_step`]. Prefer `try_step` in new code.
+    ///
+    /// On error, logs and returns a zero action (or an empty tensor if zero construction also
+    /// fails) rather than panicking.
     #[cfg(all(
         any(feature = "tch-model", feature = "onnx-model"),
         any(feature = "ndarray-backend", feature = "tch-backend")
@@ -411,59 +446,32 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         observation: Arc<AnyBurnTensor<B, D_IN>>,
         mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
     ) -> (TensorData, Option<TensorData>, HashMap<String, RelayRLData>) {
-        let base_action = self
-            .run_inference::<D_IN, D_OUT>(observation)
-            .unwrap_or_else(|_| {
-                self.zeros_action::<D_OUT>()
-                    .expect("Failed to create zeros action")
-            });
-
-        let mask_td: Option<TensorData> = match mask {
-            Some(mask_tensor) => match mask_tensor.as_ref() {
-                AnyBurnTensor::Float(wrapper) => Some(
-                    TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor.clone(),
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    })
-                    .expect("Failed to convert mask tensor to TensorData"),
-                ),
-                AnyBurnTensor::Int(wrapper) => Some(
-                    TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor.clone(),
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    })
-                    .expect("Failed to convert mask tensor to TensorData"),
-                ),
-                AnyBurnTensor::Bool(wrapper) => Some(
-                    TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor.clone(),
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    })
-                    .expect("Failed to convert mask tensor to TensorData"),
-                ),
-            },
-            None => None,
-        };
-
-        let act_td: TensorData = match mask_td {
-            Some(ref mask) => {
-                let action_data: Vec<u8> = base_action
-                    .data
-                    .iter()
-                    .zip(mask.data.iter())
-                    .map(|(a, m)| a * m)
-                    .collect();
-                TensorData {
-                    shape: base_action.shape.clone(),
-                    dtype: base_action.dtype.clone(),
-                    data: action_data,
-                    supported_backend: base_action.supported_backend.clone(),
+        match self.try_step::<D_IN, D_OUT>(observation, mask) {
+            Ok(result) => result,
+            Err(error) => {
+                log::error!(
+                    "[ModelModule::step] inference failed, returning zero-action fallback: {error}"
+                );
+                match self.zeros_action::<D_OUT>() {
+                    Ok(action) => (action, None, HashMap::new()),
+                    Err(fallback_error) => {
+                        log::error!(
+                            "[ModelModule::step] zero-action fallback failed: {fallback_error}"
+                        );
+                        (
+                            TensorData::new(
+                                self.metadata.output_shape.clone(),
+                                self.metadata.output_dtype.clone(),
+                                Vec::new(),
+                                TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
+                            ),
+                            None,
+                            HashMap::new(),
+                        )
+                    }
                 }
             }
-            None => base_action,
-        };
-
-        (act_td, mask_td, HashMap::new())
+        }
     }
 
     #[cfg(all(
@@ -504,9 +512,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             .collect::<Result<_, _>>()?;
 
         let batched_input = Self::stack_tensor_data(&observation_data)?;
-        let batched_output = self
-            .run_inference_tensor_data(batched_input)
-            .unwrap_or_else(|_| self.zeros_batch_action(observations.len()));
+        let batched_output = match self.run_inference_tensor_data(batched_input) {
+            Ok(output) => output,
+            Err(ModelError::UnsupportedModelType(_)) => {
+                self.try_zeros_batch_action(observations.len())?
+            }
+            Err(error) => return Err(error),
+        };
         let split_actions = Self::split_tensor_data_rows(batched_output, observations.len())?;
 
         Ok(split_actions
@@ -658,25 +670,31 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         Ok(result)
     }
 
-    fn resolve_device(&self) -> <B as Backend>::Device {
+    /// Resolves the Burn device for this model's preferred/default device.
+    pub(crate) fn try_resolve_device(&self) -> Result<<B as Backend>::Device, ModelError> {
         let preferred = self.metadata.default_device.clone().unwrap_or_default();
         <B as BackendMatcher>::get_device(&preferred)
             .or_else(|_| <B as BackendMatcher>::get_device(&DeviceType::default()))
-            .expect("Failed to resolve backend device")
+            .map_err(|error| {
+                ModelError::BackendError(format!("Failed to resolve backend device: {error}"))
+            })
     }
 
-    fn zeros_batch_action(&self, rows: usize) -> TensorData {
+    fn try_zeros_batch_action(&self, rows: usize) -> Result<TensorData, ModelError> {
         let mut shape = Vec::with_capacity(self.metadata.output_shape.len() + 1);
         shape.push(rows);
         shape.extend(self.metadata.output_shape.iter().copied());
-        let row_zero = self
-            .zeros_action::<1>()
-            .expect("Failed to create zeros action for batch fallback");
+        let row_zero = self.zeros_action::<1>()?;
         let mut data = Vec::with_capacity(row_zero.data.len() * rows);
         for _ in 0..rows {
             data.extend_from_slice(&row_zero.data);
         }
-        TensorData::new(shape, row_zero.dtype, data, row_zero.supported_backend)
+        Ok(TensorData::new(
+            shape,
+            row_zero.dtype,
+            data,
+            row_zero.supported_backend,
+        ))
     }
 
     fn zeros_action<const D_OUT: usize>(&self) -> Result<TensorData, ModelError> {
@@ -911,37 +929,38 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         }
     }
 
-    /// Runs inference and surfaces genuine engine errors (dtype/shape mismatches, ORT/LibTorch
-    /// failures) instead of `step()`'s silent zero-action fallback. The only error swallowed
-    /// here is `UnsupportedModelType`, which means no inference engine is compiled in at all
-    /// (e.g. the `onnx-model`/`tch-model` feature is disabled) rather than a genuine model
-    /// defect; in that case a zero action is returned so structural validation can still run.
-    ///
-    /// Used by [`crate::model::utils::validate_module`] and hot-reload validation so a broken
-    /// or schema-mismatched model is rejected instead of silently "passing" validation.
-    #[cfg(all(
-        any(feature = "tch-model", feature = "onnx-model"),
-        any(feature = "ndarray-backend", feature = "tch-backend")
-    ))]
-    pub(crate) fn try_step<const D_IN: usize, const D_OUT: usize>(
-        &self,
-        observation: Arc<AnyBurnTensor<B, D_IN>>,
-    ) -> Result<TensorData, ModelError> {
-        match self.run_inference::<D_IN, D_OUT>(observation) {
-            Ok(action) => Ok(action),
-            Err(ModelError::UnsupportedModelType(_)) => self.zeros_action::<D_OUT>(),
-            Err(other) => Err(other),
-        }
-    }
-
     /// Runs inference over a pre-stacked flat `TensorData` batch and returns the output `TensorData`.
     pub fn flat_batch_inference(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
         self.run_inference_tensor_data(input_data)
     }
 
+    /// Fallible zero-filled batch output with the model's output shape, repeated `rows` times.
+    pub fn try_flat_batch_zeros(&self, rows: usize) -> Result<TensorData, ModelError> {
+        self.try_zeros_batch_action(rows)
+    }
+
     /// Returns a zero-filled output `TensorData` with the model's output shape, repeated `rows` times.
+    ///
+    /// Prefer [`Self::try_flat_batch_zeros`] in runtime paths. On failure this logs and returns an
+    /// empty tensor rather than panicking.
     pub fn flat_batch_zeros(&self, rows: usize) -> TensorData {
-        self.zeros_batch_action(rows)
+        match self.try_flat_batch_zeros(rows) {
+            Ok(data) => data,
+            Err(error) => {
+                log::error!(
+                    "[ModelModule::flat_batch_zeros] {error}; returning empty tensor fallback"
+                );
+                let mut shape = Vec::with_capacity(self.metadata.output_shape.len() + 1);
+                shape.push(rows);
+                shape.extend(self.metadata.output_shape.iter().copied());
+                TensorData::new(
+                    shape,
+                    self.metadata.output_dtype.clone(),
+                    Vec::new(),
+                    TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
+                )
+            }
+        }
     }
 
     fn run_inference_tensor_data(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
@@ -978,6 +997,178 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             &input_data.shape,
             &input_data.data,
         )
+    }
+
+    #[cfg(all(
+        feature = "tch-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn run_tch_forward(
+        module: &Arc<CModule>,
+        obs_tensor: &TchTensor,
+    ) -> Result<TchTensor, ModelError> {
+        no_grad(|| module.forward_ts(&[obs_tensor])).map_err(|error| {
+            ModelError::BackendError(format!("LibTorch forward pass failed: {error}"))
+        })
+    }
+
+    #[cfg(all(
+        feature = "tch-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn tch_flattened_to_bytes(flattened: TchTensor, dtype: &DType) -> Result<Vec<u8>, ModelError> {
+        match dtype {
+            #[cfg(feature = "ndarray-backend")]
+            DType::NdArray(dtype) => match dtype {
+                NdArrayDType::F16 => {
+                    let vec = Vec::<f16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::F32 => {
+                    let vec = Vec::<f32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::F64 => {
+                    let vec = Vec::<f64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I8 => {
+                    let vec = Vec::<i8>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i8: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I16 => {
+                    let vec = Vec::<i16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I32 => {
+                    let vec = Vec::<i32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I64 => {
+                    let vec = Vec::<i64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::Bool => {
+                    let vec = Vec::<bool>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to bool: {error}"
+                        ))
+                    })?;
+                    Ok(vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect())
+                }
+            },
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(dtype) => match dtype {
+                TchDType::F16 => {
+                    let vec = Vec::<f16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::Bf16 => {
+                    let vec = Vec::<bf16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to bf16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::F32 => {
+                    let vec = Vec::<f32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::F64 => {
+                    let vec = Vec::<f64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I8 => {
+                    let vec = Vec::<i8>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i8: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I16 => {
+                    let vec = Vec::<i16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I32 => {
+                    let vec = Vec::<i32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I64 => {
+                    let vec = Vec::<i64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::U8 => {
+                    let vec = Vec::<u8>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to u8: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::Bool => {
+                    let vec = Vec::<bool>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to bool: {error}"
+                        ))
+                    })?;
+                    Ok(vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect())
+                }
+            },
+        }
     }
 
     #[cfg(all(
@@ -1067,113 +1258,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             },
         };
 
-        let act_tensor: TchTensor =
-            no_grad(|| module.forward_ts(&[&obs_tensor])).expect("Failed to run forward pass");
+        let act_tensor = Self::run_tch_forward(module, &obs_tensor)?;
         let output_shape: Vec<usize> = act_tensor
             .size()
             .into_iter()
             .map(|dim| dim as usize)
             .collect();
         let flattened_act: TchTensor = act_tensor.flatten(0, -1);
-
-        let act_bytes: Vec<u8> = match &self.metadata.output_dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 => bytemuck::cast_slice(
-                    &Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16"),
-                )
-                .to_vec(),
-                NdArrayDType::F32 => bytemuck::cast_slice(
-                    &Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32"),
-                )
-                .to_vec(),
-                NdArrayDType::F64 => bytemuck::cast_slice(
-                    &Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64"),
-                )
-                .to_vec(),
-                NdArrayDType::I8 => bytemuck::cast_slice(
-                    &Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8"),
-                )
-                .to_vec(),
-                NdArrayDType::I16 => bytemuck::cast_slice(
-                    &Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16"),
-                )
-                .to_vec(),
-                NdArrayDType::I32 => bytemuck::cast_slice(
-                    &Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32"),
-                )
-                .to_vec(),
-                NdArrayDType::I64 => bytemuck::cast_slice(
-                    &Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64"),
-                )
-                .to_vec(),
-                NdArrayDType::Bool => Vec::<bool>::try_from(flattened_act)
-                    .expect("Failed to convert flattened_act to bool")
-                    .into_iter()
-                    .map(|b| if b { 1u8 } else { 0u8 })
-                    .collect(),
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(dtype) => match dtype {
-                TchDType::F16 => bytemuck::cast_slice(
-                    &Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16"),
-                )
-                .to_vec(),
-                TchDType::Bf16 => bytemuck::cast_slice(
-                    &Vec::<bf16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bf16"),
-                )
-                .to_vec(),
-                TchDType::F32 => bytemuck::cast_slice(
-                    &Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32"),
-                )
-                .to_vec(),
-                TchDType::F64 => bytemuck::cast_slice(
-                    &Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64"),
-                )
-                .to_vec(),
-                TchDType::I8 => bytemuck::cast_slice(
-                    &Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8"),
-                )
-                .to_vec(),
-                TchDType::I16 => bytemuck::cast_slice(
-                    &Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16"),
-                )
-                .to_vec(),
-                TchDType::I32 => bytemuck::cast_slice(
-                    &Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32"),
-                )
-                .to_vec(),
-                TchDType::I64 => bytemuck::cast_slice(
-                    &Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64"),
-                )
-                .to_vec(),
-                TchDType::U8 => bytemuck::cast_slice(
-                    &Vec::<u8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to u8"),
-                )
-                .to_vec(),
-                TchDType::Bool => Vec::<bool>::try_from(flattened_act)
-                    .expect("Failed to convert flattened_act to bool")
-                    .into_iter()
-                    .map(|b| if b { 1u8 } else { 0u8 })
-                    .collect(),
-            },
-        };
+        let act_bytes = Self::tch_flattened_to_bytes(flattened_act, &self.metadata.output_dtype)?;
 
         Ok(TensorData::new(
             output_shape,
@@ -1424,112 +1516,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             },
         };
 
-        // Step 3
-        let act_tensor: TchTensor =
-            no_grad(|| module.forward_ts(&[&obs_tensor])).expect("Failed to run forward pass");
-
-        // Step 4
+        // Step 3-5: forward, flatten, and convert without panicking.
+        let act_tensor = Self::run_tch_forward(module, &obs_tensor)?;
         let flattened_act: TchTensor = act_tensor.flatten(0, -1);
-
-        // Steps 5
-        let act_bytes: Vec<u8> = match &self.metadata.output_dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 => {
-                    let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::F32 => {
-                    let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::F64 => {
-                    let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I8 => {
-                    let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I16 => {
-                    let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I32 => {
-                    let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I64 => {
-                    let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::Bool => {
-                    let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bool");
-                    vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
-                }
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(dtype) => match dtype {
-                TchDType::F16 => {
-                    let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::Bf16 => {
-                    let vec: Vec<bf16> = Vec::<bf16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bf16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::F32 => {
-                    let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::F64 => {
-                    let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I8 => {
-                    let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I16 => {
-                    let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I32 => {
-                    let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I64 => {
-                    let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::U8 => {
-                    let vec: Vec<u8> = Vec::<u8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to u8");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::Bool => {
-                    let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bool");
-                    vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
-                }
-            },
-        };
+        let act_bytes = Self::tch_flattened_to_bytes(flattened_act, &self.metadata.output_dtype)?;
 
         // Step 6
         Ok(TensorData::new(
@@ -1697,7 +1687,7 @@ mod unit_tests {
     fn resolve_device_returns_cpu_for_ndarray_models() {
         let module = stub_module(vec![2]);
         assert!(matches!(
-            module.resolve_device(),
+            module.try_resolve_device().expect("device should resolve"),
             burn_tensor::Device::<NdArray>::Cpu
         ));
     }
@@ -1742,5 +1732,83 @@ mod unit_tests {
                 .flat_map(|value| value.to_le_bytes())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn try_step_falls_back_to_zero_actions_when_inference_is_unavailable() {
+        let module = stub_module(vec![2]);
+        let observation = float_any_tensor(&[1.0, 2.0]);
+        let mask = float_any_tensor(&[1.0, 0.0]);
+
+        let (action, mask_data, aux) = module
+            .try_step::<1, 1>(observation, Some(mask))
+            .expect("UnsupportedModelType should fall back to zeros");
+
+        assert!(aux.is_empty());
+        assert_eq!(action.shape, vec![2]);
+        assert_eq!(action.data, vec![0; 8]);
+        assert_eq!(
+            mask_data.expect("mask data should be preserved").data,
+            [1.0f32, 0.0]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn step_batch_falls_back_only_for_unsupported_model_type() {
+        let module = stub_module(vec![2]);
+        let observations = vec![float_any_tensor(&[1.0, 2.0]), float_any_tensor(&[3.0, 4.0])];
+        let masks = vec![None, None];
+
+        let steps = module
+            .step_batch::<1, 1>(&observations, &masks)
+            .expect("UnsupportedModelType should fall back to zeros");
+
+        assert_eq!(steps.len(), 2);
+        for (action, mask, aux) in steps {
+            assert!(mask.is_none());
+            assert!(aux.is_empty());
+            assert_eq!(action.shape, vec![2]);
+            assert_eq!(action.data, vec![0; 8]);
+        }
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn try_flat_batch_zeros_returns_result() {
+        let module = stub_module(vec![2]);
+        let zeros = module
+            .try_flat_batch_zeros(3)
+            .expect("zeros batch should succeed");
+        assert_eq!(zeros.shape, vec![3, 2]);
+        assert_eq!(zeros.data, vec![0; 24]);
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn step_batch_rejects_observation_mask_length_mismatch() {
+        let module = stub_module(vec![2]);
+        let observations = vec![float_any_tensor(&[1.0, 2.0])];
+        let masks = vec![None, None];
+        let err = module
+            .step_batch::<1, 1>(&observations, &masks)
+            .expect_err("mismatched lengths should fail");
+        assert!(matches!(err, ModelError::InvalidInputDimension(_)));
     }
 }

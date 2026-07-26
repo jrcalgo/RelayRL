@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] - 2026-07-26
+
+### Changed
+- **Fallible model stepping** - `ModelModule::try_step` is now the primary inference path. It surfaces genuine engine errors (dtype/shape mismatches, ORT/LibTorch failures) and falls back to a zero action only for `ModelError::UnsupportedModelType` when no inference engine is available.
+- **`step` as compatibility wrapper** - `ModelModule::step` wraps `try_step` and, on non-`UnsupportedModelType` failures, logs the error and returns a zero-action fallback so existing callers keep working. Prefer `try_step` in new code.
+- **Batched inference error policy** - `step_batch` / `flat_batch_inference` fall back to zeros only for `UnsupportedModelType`; other inference errors propagate.
+- **Hot-reload and validation** - `HotReloadableModel` and `validate_module` call `try_step` / `try_resolve_device` so schema-mismatched or failing models are rejected instead of silently validating against zero-filled fallbacks when an engine is present.
+- **Package metadata** - Bumped `relayrl_types` from `0.9.1` to `0.9.2`.
+- **Logging dependency** - Added workspace `log` so model fallback paths can report inference failures.
+
+### Fixed
+- **Reduced-feature test warnings** - Quieted unused-variable / assertion style warnings in codec and tensor unit tests under sparse feature sets.
+
 ## [0.9.1] - 2026-07-15
 
 ### Added

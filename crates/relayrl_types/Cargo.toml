@@ -1,6 +1,6 @@
 [package]
 name = "relayrl_types"
-version = "0.9.1"
+version = "0.9.2"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "Data types for the RelayRL framework."
@@ -37,6 +37,7 @@ serde = { workspace = true, features = ["derive"]}
 serde_json = { workspace = true }
 
 thiserror = { workspace = true }
+log = { workspace = true }
 
 bytemuck = { workspace = true}
 dashmap = { workspace = true}

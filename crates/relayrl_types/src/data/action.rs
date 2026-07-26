@@ -642,6 +642,8 @@ mod unit_tests {
 
     #[test]
     fn codec_config_defaults_match_enabled_features() {
+        // Unused when none of the codec feature asserts below are compiled in.
+        #[allow(unused_variables)]
         let config = CodecConfig::default();
 
         #[cfg(feature = "compression")]

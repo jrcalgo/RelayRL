@@ -1004,7 +1004,7 @@ mod unit_tests {
             NdArray::get_supported_backend(),
             SupportedTensorBackend::NdArray
         );
-        assert!(matches!(NdArray::get_device(&DeviceType::Cpu), Ok(_)));
+        assert!(NdArray::get_device(&DeviceType::Cpu).is_ok());
     }
 
     #[test]

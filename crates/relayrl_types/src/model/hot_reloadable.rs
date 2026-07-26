@@ -124,7 +124,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         actor_id: Uuid,
     ) -> Result<RelayRLAction, ModelError> {
         let model_module = self.current_module();
-        let (act_td, mask_td, aux) = model_module.step(observation.clone(), mask);
+        let (act_td, mask_td, aux) = model_module.try_step(observation.clone(), mask)?;
 
         // Build RelayRLAction by converting tensors → TensorData
         let obs_td = match observation.as_ref() {
