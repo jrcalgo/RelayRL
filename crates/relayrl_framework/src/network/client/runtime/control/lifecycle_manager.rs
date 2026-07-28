@@ -378,7 +378,7 @@ impl LifecycleManager {
             default_hyperparameters: resolved_default_hyperparameters,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             transport_addresses: Arc::new(RwLock::new(construct_transport_addresses(
-                transport_config,
+                _transport_config,
                 &transport_mode,
             ))),
             #[cfg(feature = "metrics")]
