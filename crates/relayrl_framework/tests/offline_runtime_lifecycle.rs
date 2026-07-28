@@ -7,7 +7,7 @@ mod common;
 
 use burn_ndarray::NdArrayDevice;
 use burn_tensor::{Float, Tensor, TensorData};
-use common::{TestBackend, load_test_model_module};
+use common::{TestBackend, try_load_test_model_module};
 use relayrl_framework::prelude::network::{
     ActorDataMode, AgentBuilder, ClientError, RelayRLActors, RelayRLStepDriven,
 };
@@ -23,12 +23,8 @@ fn zero_obs() -> Tensor<TestBackend, 1, Float> {
 
 #[tokio::test]
 async fn shutdown_returns_still_buffered_trajectories() -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempdir()?;
@@ -81,12 +77,8 @@ async fn shutdown_returns_still_buffered_trajectories() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn restart_tears_down_and_reinitializes_with_an_empty_actor_list()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempdir()?;
@@ -149,12 +141,8 @@ async fn restart_tears_down_and_reinitializes_with_an_empty_actor_list()
 #[tokio::test]
 async fn scale_data_routers_out_and_in_keeps_actors_usable()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempdir()?;
@@ -211,12 +199,8 @@ async fn scale_data_routers_out_and_in_keeps_actors_usable()
 
 #[tokio::test]
 async fn scale_data_routers_zero_is_rejected_as_a_noop() -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempdir()?;
@@ -243,12 +227,8 @@ async fn scale_data_routers_zero_is_rejected_as_a_noop() -> Result<(), Box<dyn s
 #[tokio::test]
 async fn scale_data_buffers_resizes_without_disrupting_requests()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempdir()?;
@@ -301,12 +281,8 @@ async fn scale_data_buffers_resizes_without_disrupting_requests()
 #[tokio::test]
 async fn get_config_returns_error_when_config_path_is_missing()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempdir()?;

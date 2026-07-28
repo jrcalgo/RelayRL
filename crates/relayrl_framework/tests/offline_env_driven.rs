@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{TestBackend, load_batched_test_model_module, start_offline_agent};
+use common::{TestBackend, start_offline_agent, try_load_batched_test_model_module};
 use relayrl_framework::prelude::network::{
     ActorDataMode, ClientError, RelayRLActors, RelayRLBatchEnv,
 };
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// A minimal continuous scalar environment double: rank-1 `f32` observation/action of size 2.
 /// Env-driven rollouts batch those into `[n_envs, 2]` and therefore need
-/// [`load_batched_test_model_module`]. Never terminates on its own, so `loop_iters` fully
+/// [`try_load_batched_test_model_module`]. Never terminates on its own, so `loop_iters` fully
 /// controls how long a rollout runs.
 #[derive(Clone)]
 struct ContinuousTestEnv;
@@ -235,12 +235,8 @@ async fn remove_env_makes_the_actor_report_no_bound_environment()
 async fn run_env_eval_completes_a_small_rollout() -> Result<(), Box<dyn std::error::Error>> {
     // Env-driven inference feeds `[n_envs, obs_dim]`, so the default model must accept a
     // dynamic batch axis (not the rank-1 identity used by step-driven tests).
-    let (_model_dir, default_model) = match load_batched_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_batched_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempfile::tempdir()?;
@@ -284,12 +280,8 @@ async fn run_env_eval_completes_a_small_rollout() -> Result<(), Box<dyn std::err
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_model_dir, default_model) = match load_batched_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_model_dir, default_model)) = try_load_batched_test_model_module() else {
+        return Ok(());
     };
 
     let config_dir = tempfile::tempdir()?;

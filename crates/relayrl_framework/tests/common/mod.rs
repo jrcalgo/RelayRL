@@ -86,6 +86,30 @@ pub fn load_batched_test_model_module() -> Result<(TempDir, ModelModule<TestBack
     Ok((model_dir, model_module))
 }
 
+/// Like [`load_test_model_module`], but prints a skip message and returns `None` when ONNX
+/// Runtime is unavailable
+pub fn try_load_test_model_module() -> Option<(TempDir, ModelModule<TestBackend>)> {
+    match load_test_model_module() {
+        Ok(pair) => Some(pair),
+        Err(err) => {
+            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
+            None
+        }
+    }
+}
+
+/// Like [`load_batched_test_model_module`], but prints a skip message and returns `None` when
+/// ONNX Runtime is unavailable
+pub fn try_load_batched_test_model_module() -> Option<(TempDir, ModelModule<TestBackend>)> {
+    match load_batched_test_model_module() {
+        Ok(pair) => Some(pair),
+        Err(err) => {
+            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
+            None
+        }
+    }
+}
+
 /// A started `RelayRLAgent` plus the temp-dir guards that must outlive it.
 pub struct AgentCtx {
     pub agent: RelayRLAgent<TestBackend>,
@@ -109,12 +133,8 @@ pub async fn start_offline_agent_with_modes(
     inference_mode: ActorInferenceMode,
     data_mode: ActorDataMode,
 ) -> Result<Option<AgentCtx>, Box<dyn std::error::Error>> {
-    let (model_dir, default_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(None);
-        }
+    let Some((model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(None);
     };
 
     let config_dir = tempdir()?;

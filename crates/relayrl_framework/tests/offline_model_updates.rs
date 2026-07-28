@@ -6,8 +6,8 @@
 mod common;
 
 use common::{
-    DEFAULT_POLL_TIMEOUT, load_test_model_module, start_offline_agent,
-    start_offline_agent_with_modes, wait_for_model_version_change,
+    DEFAULT_POLL_TIMEOUT, start_offline_agent, start_offline_agent_with_modes,
+    try_load_test_model_module, wait_for_model_version_change,
 };
 use relayrl_framework::prelude::network::{
     ActorDataMode, ActorInferenceMode, ClientError, ModelMode, RelayRLActors,
@@ -21,12 +21,8 @@ async fn update_models_targets_only_the_specified_actor_in_independent_mode()
         return Ok(());
     };
 
-    let (_swap_model_dir, swap_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_swap_model_dir, swap_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let actors = ctx
@@ -93,12 +89,8 @@ async fn update_models_shared_mode_bumps_every_actor_on_the_device()
         return Ok(());
     };
 
-    let (_swap_model_dir, swap_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_swap_model_dir, swap_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let actors = ctx
@@ -154,12 +146,8 @@ async fn update_models_rejects_a_rank_mismatched_model() -> Result<(), Box<dyn s
         return Ok(());
     };
 
-    let (_swap_model_dir, swap_model) = match load_test_model_module() {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping test because ONNX Runtime is unavailable: {err}");
-            return Ok(());
-        }
+    let Some((_swap_model_dir, swap_model)) = try_load_test_model_module() else {
+        return Ok(());
     };
 
     let actor = ctx
