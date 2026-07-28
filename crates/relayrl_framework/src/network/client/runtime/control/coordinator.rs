@@ -1085,110 +1085,124 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientInterface<B> for ClientCoor
         // handles are about to point at a dead runtime, so drop them alongside `runtime_params`.
         self.inference_path_params = None;
 
-        let mut failures: Vec<ShutdownStepFailure> = Vec::new();
+        let (maybe_traj_cache, failures) = {
+            let mut _failures = Vec::new();
 
-        // Snapshot actor identities up front, before actor shutdown can abort handles or state
-        // teardown clears `actor_runtime_handles`: this is the fallback source of actor ids for
-        // trajectory-cache draining if `shutdown_all_actors` itself fails partway through.
-        let actor_snapshot = Self::snapshot_actor_infos(&params).await;
+            // Snapshot actor identities up front, before actor shutdown can abort handles or state
+            // teardown clears `actor_runtime_handles`: this is the fallback source of actor ids for
+            // trajectory-cache draining if `shutdown_all_actors` itself fails partway through.
+            let actor_snapshot = Self::snapshot_actor_infos(&params).await;
 
-        // Sends a shutdown RoutedMessage to all actors, which flushes current trajectory to the buffers and then aborts the actor's message loop task.
-        #[cfg(test)]
-        let shutdown_all_actors_failpoint =
-            self.shutdown_failpoint_error(ShutdownFailpoint::ShutdownAllActors);
-        #[cfg(not(test))]
-        let shutdown_all_actors_failpoint: Option<String> = None;
+            // Sends a shutdown RoutedMessage to all actors, which flushes current trajectory to the buffers and then aborts the actor's message loop task.
+            #[cfg(test)]
+            let shutdown_all_actors_failpoint =
+                self.shutdown_failpoint_error(ShutdownFailpoint::ShutdownAllActors);
+            #[cfg(not(test))]
+            let shutdown_all_actors_failpoint: Option<String> = None;
 
-        let actor_ids = if let Some(injected) = shutdown_all_actors_failpoint {
-            record_shutdown_failure(&mut failures, "shutdown_all_actors", injected);
-            actor_snapshot
-        } else {
-            match params.shared_state.write().await.shutdown_all_actors().await {
-                Ok(actor_ids) => actor_ids,
-                Err(e) => {
-                    record_shutdown_failure(&mut failures, "shutdown_all_actors", e);
-                    actor_snapshot
+            let actor_ids = if let Some(injected) = shutdown_all_actors_failpoint {
+                record_shutdown_failure(&mut _failures, "shutdown_all_actors", injected);
+                actor_snapshot
+            } else {
+                match params
+                    .shared_state
+                    .write()
+                    .await
+                    .shutdown_all_actors()
+                    .await
+                {
+                    Ok(actor_ids) => actor_ids,
+                    Err(e) => {
+                        record_shutdown_failure(&mut _failures, "shutdown_all_actors", e);
+                        actor_snapshot
+                    }
+                }
+            };
+
+            // inform server(s) that the client is being shutdown and to remove all actor-related data from server runtime
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            if let Err(e) = params.scaling.send_shutdown_signal_to_server().await {
+                record_shutdown_failure(&mut _failures, "send_shutdown_signal_to_server", e);
+            }
+
+            // shutdown transport client components (sockets, etc.)
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            if let Some(dispatcher) = &params.scaling.scaling_dispatcher {
+                if let Err(e) = dispatcher.shutdown_transport().await {
+                    record_shutdown_failure(&mut _failures, "shutdown_transport", e);
                 }
             }
-        };
 
-        // inform server(s) that the client is being shutdown and to remove all actor-related data from server runtime
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let Err(e) = params.scaling.send_shutdown_signal_to_server().await {
-            record_shutdown_failure(&mut failures, "send_shutdown_signal_to_server", e);
-        }
+            // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (the receiver, filters, and buffers)
+            // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes).
+            // Infallible, and always runs regardless of earlier failures so later steps still
+            // observe the shutdown broadcast.
+            params.lifecycle.shutdown();
 
-        // shutdown transport client components (sockets, etc.)
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let Some(dispatcher) = &params.scaling.scaling_dispatcher {
-            if let Err(e) = dispatcher.shutdown_transport().await {
-                record_shutdown_failure(&mut failures, "shutdown_transport", e);
-            }
-        }
-
-        // the following will trigger shutdown tx/rx for all scalable router nodes in the runtime (the receiver, filters, and buffers)
-        // + the single router dispatcher task (the dispatcher informs the actors to shutdown via their inboxes).
-        // Infallible, and always runs regardless of earlier failures so later steps still
-        // observe the shutdown broadcast.
-        params.lifecycle.shutdown();
-
-        let maybe_traj_cache = if let Some(traj_cache) = &mut params.scaling.shared_traj_cache {
-            match traj_cache.drain(&actor_ids) {
-                Ok(traj_map) => Some(traj_map),
-                Err((traj_map, invalid_ids)) => {
-                    log::error!(
-                        "[Coordinator] Failed to drain trajectory cache: {:?}",
-                        invalid_ids
-                    );
-                    traj_map
+            let maybe_traj_cache = if let Some(traj_cache) = &mut params.scaling.shared_traj_cache {
+                match traj_cache.drain(&actor_ids) {
+                    Ok(traj_map) => Some(traj_map),
+                    Err((traj_map, invalid_ids)) => {
+                        log::error!(
+                            "[Coordinator] Failed to drain trajectory cache: {:?}",
+                            invalid_ids
+                        );
+                        traj_map
+                    }
                 }
+            } else {
+                None
+            };
+
+            // Ensure all scalable router tasks are drained before state teardown completes.
+            #[cfg(test)]
+            let scaling_clear_failpoint =
+                self.shutdown_failpoint_error(ShutdownFailpoint::ScalingClearRuntimeComponents);
+            #[cfg(not(test))]
+            let scaling_clear_failpoint: Option<String> = None;
+
+            if let Some(injected) = scaling_clear_failpoint {
+                record_shutdown_failure(
+                    &mut _failures,
+                    "scaling.clear_runtime_components",
+                    injected,
+                );
+            } else if let Err(e) = params.scaling.clear_runtime_components().await {
+                record_shutdown_failure(&mut _failures, "scaling.clear_runtime_components", e);
             }
-        } else {
-            None
+
+            // drain the UUID pool to ensure all UUIDs are removed from the pool for the client namespace.
+            // uses a clone of the owned handle: StateManager/ScaleManager still hold their own
+            // clones at this point, but only local caches (no registry writes) are touched below.
+            if let Err(e) = params.client_namespace.clone().remove() {
+                record_shutdown_failure(&mut _failures, "client_namespace.remove", e);
+            }
+
+            // removes all actor-related state
+            #[cfg(test)]
+            let state_clear_failpoint =
+                self.shutdown_failpoint_error(ShutdownFailpoint::StateClearRuntimeComponents);
+            #[cfg(not(test))]
+            let state_clear_failpoint: Option<String> = None;
+
+            if let Some(injected) = state_clear_failpoint {
+                record_shutdown_failure(
+                    &mut _failures,
+                    "shared_state.clear_runtime_components",
+                    injected,
+                );
+            } else if let Err(e) = params
+                .shared_state
+                .write()
+                .await
+                .clear_runtime_components()
+                .await
+            {
+                record_shutdown_failure(&mut _failures, "shared_state.clear_runtime_components", e);
+            }
+
+            (maybe_traj_cache, _failures)
         };
-
-        // Ensure all scalable router tasks are drained before state teardown completes.
-        #[cfg(test)]
-        let scaling_clear_failpoint =
-            self.shutdown_failpoint_error(ShutdownFailpoint::ScalingClearRuntimeComponents);
-        #[cfg(not(test))]
-        let scaling_clear_failpoint: Option<String> = None;
-
-        if let Some(injected) = scaling_clear_failpoint {
-            record_shutdown_failure(&mut failures, "scaling.clear_runtime_components", injected);
-        } else if let Err(e) = params.scaling.clear_runtime_components().await {
-            record_shutdown_failure(&mut failures, "scaling.clear_runtime_components", e);
-        }
-
-        // drain the UUID pool to ensure all UUIDs are removed from the pool for the client namespace.
-        // uses a clone of the owned handle: StateManager/ScaleManager still hold their own
-        // clones at this point, but only local caches (no registry writes) are touched below.
-        if let Err(e) = params.client_namespace.clone().remove() {
-            record_shutdown_failure(&mut failures, "client_namespace.remove", e);
-        }
-
-        // removes all actor-related state
-        #[cfg(test)]
-        let state_clear_failpoint =
-            self.shutdown_failpoint_error(ShutdownFailpoint::StateClearRuntimeComponents);
-        #[cfg(not(test))]
-        let state_clear_failpoint: Option<String> = None;
-
-        if let Some(injected) = state_clear_failpoint {
-            record_shutdown_failure(
-                &mut failures,
-                "shared_state.clear_runtime_components",
-                injected,
-            );
-        } else if let Err(e) = params
-            .shared_state
-            .write()
-            .await
-            .clear_runtime_components()
-            .await
-        {
-            record_shutdown_failure(&mut failures, "shared_state.clear_runtime_components", e);
-        }
 
         // by this point, `RelayRLAgent` should be reset back to default: `runtime_params` was
         // already taken at the top of this function, so that holds regardless of any failure
