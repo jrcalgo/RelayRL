@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-07-27
+
+### Added
+- **Continuous diagonal-Gaussian PPO training** - `PPOKernel::Continuous` now runs clipped PPO SGD via `train_step_continuous` (mean‖log_std Gaussian log-prob, entropy bonus, value loss, KL / clipfrac stats) instead of returning zero losses.
+- **Continuous constructors** - `PPONetworkArgs::default_continuous` and `PPOTrainerSpec::default_continuous` build policy networks with width `2 * act_dim`.
+- **Continuous helpers** - `PPOKernel::policy_output_dim`, `action_dim`, and `is_continuous`; shared `gaussian_logp_scalar` / action flattening helpers; `dtype_is_float`.
+- **Validation errors** - `NeuralNetworkError::{InvalidContinuousOutputDim, ContinuousOutputDimMismatch, InvalidContinuousActionDType, ModelOutputTooShort}`.
+
+### Changed
+- **Continuous policy width contract** - Continuous policy networks must emit `2 * TrainerArgs.act_dim` floats (`mean` then `log_std`). Validation, sampling, training, and export all use this layout.
+- **Continuous model export** - `acquire_pi_module` exports output shape `[1, policy_output_dim()]` (`2A` for continuous, `A` for discrete).
+- **Default value MLP** - `PPONetworkArgs::default` / `default_continuous` always build a 1-wide f32 value head, independent of action dim/dtype.
+- **Continuous log-prob recomputation** - `get_pi_logprobs` uses float action vectors and Gaussian log-prob for continuous kernels (no longer the discrete index path).
+- **Documentation** - README documents discrete vs continuous support, the mean‖log_std contract, and a continuous quick start.
+
+### Fixed
+- Continuous `policy_forward_bytes` no longer treats raw policy width as the environment action dimension (which double-counted `2A`).
+- Continuous sampling rejects undersized model outputs instead of panicking on slice bounds.
+- Continuous `log_std` is clamped before `exp()` during sampling and training to avoid NaN/Inf.
+
+## [0.5.0] - 2026-07-26
+
+### Added
+- **Synchronous epoch boundary** - `IPPOParams` / `PPOParams` now include `sync_epoch_boundary` (`#[serde(default)]`, default `false`). When `true`, the learner waits for the in-flight training job instead of overlapping collection, so the bounded trajectory channel backpressures the producer into a collect → train → collect barrier (SF-style). Existing config JSON without the key continues to load.
+
+### Changed
+- **Rollout-time `logp_old`** - Epoch training no longer recomputes policy log-probs from the epoch-start network before SGD. `logp_old` stays at the rollout-time values so the PPO importance ratio can leave 1.0 and clipping can engage (recomputing made ClipFrac stay ~0 and degenerated PPO into unconstrained policy gradient). Fresh value estimates are still recomputed before GAE.
+- **Persistent return normalization** - `finalize_and_drain_first_n_blocking` always returns raw lambda-returns. Per-batch z-scoring was removed so `normalize_persistent_returns` in `run_ppo_sgd_flat` remains the sole SF-aligned RunningMeanStd path instead of being fed an already normalized stream.
+- **Package metadata** - Bumped `relayrl_algorithms` from `0.4.1` to `0.5.0`.
+- **Documentation** - README quick start expanded with a full `PPOTrainerSpec` → `PPOTrainer` example and notes on the epoch cycle / model export APIs. TorchScript builders clarify that returned temp paths are diagnostic only after cleanup.
+
+### Fixed
+- **GAE return copy length** - `compute_gae_episode` now copies the full `end - start` returns vector into the buffer. The previous `[..len-1]` slice into an `n`-slot destination panicked on the first episode.
+- **Truncation bootstrap index** - Truncated chunks bootstrap from `V(s_end)` (the post-chunk state), falling back to `V(s_{end-1})` only when `s_end` is not buffered yet.
+- **Rollout-length truncation boundaries** - Trajectory insertion closes a GAE episode boundary when `trajectory.is_truncated` is set (rollout-length cutoff) even if `done` is false, so cut-off chunks get GAE/returns instead of sitting dead in the buffer until the underlying episode ends.
+
+## [0.4.1] - 2026-06-14
+
+### Added
+- **Convolutional policy support** - Added `ConvNetPolicy` and architecture-level network export support for convolutional policies, including `ArchLayer`, `WeightProvider::get_arch_spec()`, and `acquire_conv_model_module()`.
+- **Convolutional model builders** - Added ONNX and TorchScript builders for architecture-aware conv/dense networks via `build_onnx_conv_bytes()` and `build_pt_conv_temp()`.
+
+### Changed
+- **Neural-network module layout** - Split neural-network traits, errors, dtypes, MLPs, value functions, model export helpers, and ConvNet support into the new `algorithms::nn` module while preserving top-level re-exports.
+- **PPO trainer bounds** - Removed unnecessary `Default` bounds from `KindIn`, `KindOut`, and `Pi` in `PPOTrainer` and spec validation paths, allowing explicitly supplied network instances without requiring default construction.
+- **Package metadata** - Bumped `relayrl_algorithms` from `0.4.0` to `0.4.1`.
+- **Documentation** - Expanded crate-level, public API, PPO, neural-network, ONNX, TorchScript, and README documentation for the current PPO-focused surface.
+
+### Fixed
+- **PPO return targets** - PPO replay-buffer GAE now computes returns as advantage plus value estimates, and training batches retain return mean/std metadata for normalized-return workflows.
+- **Value prediction scale** - PPO kernels now track return denormalization stats so `value_forward()` can map normalized value predictions back to the environment reward scale.
+- **TorchScript tracing** - TorchScript builders freeze VarStore parameters before tracing so captured weights can be serialized without `requires_grad` tracing failures.
+
 ## [0.4.0] - 2026-06-01
 
 ### Added

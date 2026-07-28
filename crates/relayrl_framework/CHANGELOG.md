@@ -2,6 +2,83 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-rc.1] - 2026-07-28
+
+### Added
+- **`ActorInfo` live actor handle** - Actor-targeting APIs now identify actors with `ActorInfo` (stable `ActorUuid` + `NameTag`) instead of a bare `ActorUuid`. `id`/`nametag` live in shared slots owned by the actor runtime, so every clone observes renames/retags immediately via `id()`/`nametag()`.
+- **Actor lookup helpers** - `get_actor`, `get_all_actors`, `get_actors_by_rank`, and `get_actors_by_tag` return `ActorInfo` handles from the live namespaced registry.
+- **`RelayRLStepDriven` trait** - Splits step-driven control into singular/plural `request_action(s)` and `flag_last_action(s)` methods that target `&ActorInfo` / `&[ActorInfo]`.
+- **Fallible config loading** - New public `ConfigLoadError` plus `ClientConfigLoader::try_new_config` / `try_load_config` (and the training-server loader equivalents). Open/read failures return `Result`; malformed JSON still falls back to logged defaults. Exported from `prelude::utilities::config`.
+- **Shutdown partial-failure reporting** - `CoordinatorError::ShutdownPartialFailure { failures, drained_cache }` and `ShutdownStepFailure` surface every failed teardown step while still returning whatever trajectory snapshot was already drained.
+- **Live data-buffer scaling** - `RelayRLAgent::scale_data_buffers(new_size)` resizes per-actor router channel capacity without restarting the agent.
+- **Staged `AgentBuilder` construction** - Builder setters are split across `modes()` (`AgentBuildInvariants`) and `params()` (`AgentBuildParameters`) so runtime-invariant modes and startup parameters are configured separately.
+- **Backend re-exports** - `prelude::types::tensor::burn::ndarray` always re-exports `burn_ndarray`; `prelude::types::tensor::burn::tch` is available under `tch-backend`. RelayRL tensor types are re-exported flatly from `prelude::types::tensor` (the nested `tensor::relayrl` module path is no longer required).
+- **Offline/local integration test suite** - Added coverage for actor lifecycle, step-driven inference, offline data modes (cache/CSV/Arrow/combined/disabled), environment binding and eval rollouts, model hot-swap targeting, runtime lifecycle (shutdown/restart/router+buffer scaling), and PPO training vs `run_env_eval` bandit convergence under `tests/offline_*.rs` plus shared helpers in `tests/common/mod.rs`.
+
+### Changed
+- **Actor-targeting method signatures** - `new_actor(s)`, `remove_actor(s)`, `set_actor_id`, `set_actor_nametag`, `update_models`, `get_model_versions`, `drain_trajectory_caches`, `request_action(s)`, `flag_last_action(s)`, `set_env`, `remove_env`, `get_env_count`, `set_env_count`, and `run_env_with_ppo`/`run_env_eval` now accept `&ActorInfo` / `&[ActorInfo]` and return `ActorInfo` / `Vec<ActorInfo>` instead of raw `ActorUuid` values. `set_actor_id` / `set_actor_nametag` take `&ActorInfo` and update the shared live handle in place. Trajectory snapshots from `drain_trajectory_caches` and `shutdown()` remain keyed by stable `ActorUuid`.
+- **Public trait and method renames** - `RelayRLAgentActors` → `RelayRLActors`; `RelayRLActorEnv` → `RelayRLBatchEnv`; `RelayRLAgent::new` → `RelayRLAgent::init`; `update_model` → `update_models`; `get_model_version` → `get_model_versions`; `get_trajectory_cache` → `drain_trajectory_caches`; `scale_throughput` → `scale_data_routers`; builder `router_scale` → `data_routers` and `router_buffer_size_per_actor` → `data_buffer_size`.
+- **Training-data mode API** - `ActorTrainingDataMode` renamed to `ActorDataMode`. In-memory variants use `Cache` terminology and carry an explicit cache size: `OfflineWithMemory` → `OfflineWithCache(size)`, `OfflineWithFilesAndMemory(...)` → `OfflineWithFilesAndCache(..., size)`, and the corresponding online variants. Default mode is `OfflineWithCache(1000)`. Builder setter is now `actor_data_mode(...)`.
+- **Transport mode naming** - `TransportType` renamed to `TransportMode`; builder setter is `transport_mode(...)`.
+- **Client runtime module layout** - Internal runtime coordination moved from `runtime/coordination` to `runtime/control`; router workers moved under `runtime/data/router`. Docs and crate overview now describe the `control` / `data::router` / `data::sinks` layout.
+- **Package features and defaults** - Version bumped to `0.5.0-rc.1`. Default features are now `["client"]` only. `logging` was renamed to `logging-init` (log4rs is always available; the feature only gates initialization helpers). Docs.rs feature coverage narrowed to `client`. `tch-backend` now also enables `relayrl_algorithms/tch-backend` and `burn-tch`. `training-server` / `inference-server` remain reserved no-op flags and no longer compile a `network::server` module.
+- **Support-contract documentation** - README and crate docs now state clearly that only the local/default client runtime is supported in this branch; ZMQ/NATS client transports remain experimental, and server-backed workflows are not shipped.
+- **Config schema** - Client JSON uses `config_polling_seconds`, nested `local_model_module` / `metrics` blocks, PPO/IPPO/MAPPO hyperparameter defaults, and `*_address` transport keys. `router_buffer_size_per_actor` was removed from `ClientConfigParams` in favor of the builder/runtime `data_buffer_size` path.
+- **Dependency pins** - `active-uuid-registry` bumped to `0.8.0`; OpenTelemetry crates bumped to the `0.32` line; `burn-ndarray`, `log4rs`, `arc-swap`, and `crossbeam-utils` are direct crate dependencies.
+
+### Fixed
+- **Model-update subset filtering** - Scoped `update_models` / `get_model_versions` calls again ignore unregistered actor ids instead of dispatching to them.
+- **Combined file-mode params** - Lifecycle startup now honors explicit trajectory-file params from `OfflineWithFilesAndCache` / `OnlineWithFilesAndCache`, not only the files-only variants.
+- **Local model-inference error propagation** - Batch inference failures no longer always collapse to zero actions; only `ModelError::UnsupportedModelType` falls back to zeros, and other errors propagate as `ActorError`.
+- **Config load panics removed** - Missing/unreadable config files no longer `panic!`/`expect()` on the compatibility `new_config` / `load_config` paths; they log and fall back to defaults, while runtime startup prefers the fallible `try_*` APIs.
+- **`ClientCoordinator::shutdown()` best-effort teardown** - Shutdown always clears live runtime params, runs teardown steps best-effort, preserves drained trajectory caches on partial failure, snapshots actor identities before teardown, and releases temporary borrows so one failed step cannot leave the coordinator advertised as live over a half-torn-down runtime.
+- **Client namespace ownership** - The coordinator keeps the reserved `OwnedNamespace` alive as `ClientNamespace` for the runtime lifetime and threads it into state/scale managers, actors, and vectorized environments, fixing `UnauthorizedNamespaceWriteAccessError` on actor/environment writes and releasing the namespace on shutdown.
+- **Experimental transport namespace writes (`nats-transport` / `zmq-transport`)** - NATS/ZMQ identity reservation and ZMQ socket-pool cleanup now use the owned `ClientNamespace` and correct context strings instead of free-registry writes / hard-coded mismatched namespace strings.
+- **Feature-gated builds** - Fixed `metrics`, `nats-transport`, and `nats-transport`+`metrics` compound compilation failures (`MetricsStart` wiring, duplicate imports/traits, shared trajectory-cache types).
+- **Docs and examples** - Corrected invalid `DeviceType` import paths and aligned crate docs/examples/tests with the `ActorInfo`-based public API.
+
+### Removed
+- **Unfinished server runtime and presets** - Deleted the in-tree `network::server` module and `presets` helpers. The reserved `training-server` / `inference-server` feature flags remain in `Cargo.toml` as no-ops for a future implementation.
+
+### Breaking
+- **Actor-targeting APIs use `ActorInfo`** - Callers passing bare `ActorUuid`/`Uuid` values (or `Vec<Uuid>`) must switch to `ActorInfo` handles; methods that previously took owned `Vec<ActorUuid>` now take borrowed `&[ActorInfo]` slices.
+- **Public trait/method renames** - Update call sites for `RelayRLActors`, `RelayRLBatchEnv`, `RelayRLStepDriven`, `init`, `update_models`, `get_model_versions`, `drain_trajectory_caches`, `scale_data_routers`, `data_routers`, and `data_buffer_size`.
+- **`ActorDataMode` replaces `ActorTrainingDataMode`** - Rename the type and migrate `*Memory*` variants to sized `*Cache*` variants; update `actor_training_data_mode(...)` to `actor_data_mode(...)`.
+- **`TransportType` renamed to `TransportMode`** - Replace `transport_type(...)` with `transport_mode(...)`.
+- **Default features / logging flag** - Default builds no longer enable `logging`; replace `logging` with `logging-init` where initialization helpers are required.
+- **Config schema and buffer sizing** - Adapt client JSON to the `config_polling_seconds` / nested metrics / `*_address` shape, and set per-actor buffer size through builder/runtime APIs rather than `router_buffer_size_per_actor`.
+- **Server module unavailable** - Code that imported `relayrl_framework::network::server` or relied on compiled server runtimes under `training-server` / `inference-server` must treat those paths as unavailable in this branch.
+- **Tensor prelude path** - Prefer `prelude::types::tensor::*` (and `burn::ndarray` / optional `burn::tch`) over the removed nested `prelude::types::tensor::relayrl` module path.
+
+## [0.5.0-rc] - 2026-06-14
+
+### Added
+- **Actor ID return values and rank filtering** - `new_actor` now returns the created `ActorUuid`, `new_actors` returns all created actor IDs, and `get_actor_ids_by_rank<D_IN, D_OUT>()` returns live actors matching the requested observation/action ranks.
+- **Release-candidate prelude exports** - Added `prelude::types::records` for Arrow/CSV record adapters and `prelude::utilities::uuid` for active-uuid-registry UUID types.
+
+### Changed
+- **Release-candidate package metadata** - Bumped `relayrl_framework` from `0.5.0-beta.5` to `0.5.0-rc`; the default feature set is now `client` + `logging`, with `metrics` opt-in.
+- **Docs.rs build surface** - Narrowed docs.rs feature coverage to `client` + `logging` and removed the extra docs.rs rustc cfg arg.
+- **Runtime and README documentation** - Rewrote the README and crate-level docs around the `0.5.0` local/default runtime support contract, layered architecture, feature flags, quick start, and experimental transport/server scope.
+- **Inference mode names** - Renamed the local inference variant from `ActorInferenceMode::Local` to `ActorInferenceMode::Client`, and renamed `ServerOverflow` to `ClientFallback` to describe the fallback behavior more clearly.
+- **Environment training return value** - `run_env_with_ppo`, `run_env_with_ippo`, and `run_env_with_mappo` now return the trained `ModelModule` instead of `()`, and their generic bounds no longer require `Default` for supplied network types.
+- **Trajectory memory terminology** - Renamed the in-memory trajectory accessor from `get_trajectory_memory` to `get_trajectory_cache` to better describe the shared cache returned by the runtime.
+- **Prelude layout** - Moved config and codec re-exports from `prelude::config` to `prelude::utilities::config`, and grouped UUID helpers under `prelude::utilities::uuid`.
+
+### Fixed
+- **Local environment byte inference** - Local environment evaluation now routes byte observations through an erased local inference path and decodes actions with the configured action dtype, avoiding dtype mismatches in discrete and continuous environment stepping.
+- **PPO environment rollouts** - PPO-driven environment loops now propagate the trained policy module, mark trajectories truncated when environments truncate or rollout/max-episode limits are reached, and keep observation normalization within the rollout loop.
+- **Model update call shape** - `RelayRLAgent::update_model` now takes actor IDs before the model module, aligning docs and examples around targeted model updates.
+
+### Breaking
+- **Default features changed** - Default builds no longer enable `metrics`; users relying on Prometheus/OpenTelemetry support from defaults must enable the `metrics` feature explicitly.
+- **Inference mode variants renamed** - Replace `ActorInferenceMode::Local(...)` with `ActorInferenceMode::Client(...)`, and `ActorInferenceMode::ServerOverflow(...)` with `ActorInferenceMode::ClientFallback(...)`.
+- **Actor creation return types changed** - `new_actor` now returns `ActorUuid` and `new_actors` returns `Vec<ActorUuid>` instead of `()`.
+- **Environment training return types changed** - `run_env_with_ppo`, `run_env_with_ippo`, and `run_env_with_mappo` now return `ModelModule<B>` instead of `()`.
+- **Trajectory cache accessor renamed** - Replace `get_trajectory_memory()` with `get_trajectory_cache()`.
+- **Model update argument order changed** - `update_model` now takes `(actor_ids, model)` instead of `(model, actor_ids)`.
+- **Prelude config path moved** - Replace `relayrl_framework::prelude::config::*` with `relayrl_framework::prelude::utilities::config::*`.
+
 ## [0.5.0-beta.5] - 2026-06-01
 
 ### Added
@@ -357,4 +434,4 @@ Final release of the prototype version with Python-first design.
 - Single-agent focused API
 - Unified configuration system
 
-*For detailed v0.4.52 documentation, see the prototype README in [RelayRL-prototype/relayrl_framework/](https://github.com/jrcalgo/RelayRL-prototype)*
+*For detailed v0.4.52 documentation, see the prototype README in [RL4Sys-prototype/relayrl_framework/](https://github.com/jrcalgo/RL4Sys-prototype)*

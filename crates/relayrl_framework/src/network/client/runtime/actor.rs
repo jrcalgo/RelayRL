@@ -1,38 +1,36 @@
 //! Runtime actor implementation.
 //!
 //! Actors own local inference state, trajectory assembly, and the message-handling loop for the
-//! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
+//! client runtime. Transport-backed server inference paths remain experimental in `0.5.0`.
 
+use crate::network::client::agent::ClientModes;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::agent::AlgorithmInitArgs;
-use crate::network::client::agent::{ActorInferenceMode, ClientModes};
+use crate::network::client::agent::{ActorInferenceMode, AlgorithmInitArgs};
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::state_manager::{
+    ActorUuid, NameTag, decode_argmax, decode_continuous_bytes,
+};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::network::client::runtime::data::router::InferenceRequest;
+use crate::network::client::runtime::data::router::{
+    ControlPayload, DataPayload, RoutedMessage, RoutingProtocol,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-use crate::network::client::runtime::router::{
-    ControlPayload, DataPayload, InferenceRequest, RoutedMessage, RoutingProtocol,
-};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
 use active_uuid_registry::registry_uuid::Uuid;
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
-#[cfg(feature = "tch-backend")]
-use relayrl_env_trait::EnvTchDType;
-use relayrl_env_trait::{EnvDType, EnvNdArrayDType};
 use relayrl_types::data::action::RelayRLAction;
-#[cfg(feature = "tch-backend")]
-use relayrl_types::data::tensor::TchDType;
-use relayrl_types::data::tensor::{
-    BackendMatcher, DType, DeviceType, NdArrayDType, SupportedTensorBackend, TensorData,
-};
+use relayrl_types::data::tensor::{BackendMatcher, DType, DeviceType, TensorData};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
@@ -48,6 +46,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{Receiver, Sender};
+#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use tokio::sync::oneshot;
 use tokio::sync::{Mutex, RwLock};
 
@@ -62,6 +61,73 @@ use thiserror::Error;
 ///   a snapshot swap through any one actor (handshake / model update) is immediately visible
 ///   to every other actor that shares it.
 pub(crate) type LocalModelHandle<B> = Arc<ArcSwapOption<HotReloadableModel<B>>>;
+
+/// Identification information for an actor in the runtime.
+///
+/// This is a read-only handle: every clone shares the same underlying id and nametag slots
+/// with the actor runtime that owns them, so a rename or retag performed through the agent
+/// API is immediately visible to every outstanding `ActorInfo` for that actor.
+#[derive(Clone)]
+pub struct ActorInfo {
+    id: Arc<ArcSwap<ActorUuid>>,
+    nametag: Arc<ArcSwapOption<NameTag>>,
+}
+
+impl ActorInfo {
+    pub(crate) fn new(id: ActorUuid, nametag: Option<NameTag>) -> Self {
+        Self {
+            id: Arc::new(ArcSwap::new(Arc::new(id))),
+            nametag: Arc::new(ArcSwapOption::new(nametag.map(Arc::new))),
+        }
+    }
+
+    /// Returns the actor's current id.
+    pub fn id(&self) -> ActorUuid {
+        *self.id.load_full()
+    }
+
+    /// Returns the actor's current nametag, if one is set.
+    pub fn nametag(&self) -> Option<NameTag> {
+        self.nametag.load_full().map(|tag| (*tag).clone())
+    }
+
+    /// Returns the actor's current nametag as a shared handle, avoiding a clone of the tag's
+    /// contents when the caller only needs to compare or forward it.
+    pub(crate) fn nametag_arc(&self) -> Option<Arc<NameTag>> {
+        self.nametag.load_full()
+    }
+
+    pub(crate) fn set_id(&self, new_id: ActorUuid) {
+        self.id.store(Arc::new(new_id));
+    }
+
+    pub(crate) fn set_nametag(&self, new_nametag: Option<NameTag>) {
+        self.nametag.store(new_nametag.map(Arc::new));
+    }
+}
+
+impl std::fmt::Debug for ActorInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorInfo")
+            .field("id", &self.id())
+            .field("nametag", &self.nametag())
+            .finish()
+    }
+}
+
+impl PartialEq for ActorInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
+    }
+}
+
+impl Eq for ActorInfo {}
+
+impl std::hash::Hash for ActorInfo {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id().hash(state);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ActorShape {
@@ -79,6 +145,17 @@ pub(crate) trait ErasedActorRuntime<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync
 {
     fn actor_shape(&self) -> ActorShape;
+
+    fn get_actor_info(&self) -> Result<ActorInfo, ActorError>;
+
+    fn get_actor_nametag(&self) -> Result<Option<Arc<NameTag>>, ActorError>;
+
+    fn set_actor_nametag(&self, new_nametag: Option<NameTag>) -> Result<(), ActorError>;
+
+    /// Updates the actor's identity slot in place so every outstanding `ActorInfo` handle for
+    /// this actor observes the new id. Callers are responsible for moving any id-keyed state
+    /// (routing tables, registries, etc.) before or after calling this.
+    fn set_actor_id(&self, new_id: ActorUuid) -> Result<(), ActorError>;
 
     fn current_model_dtypes(&self) -> Result<ActorDTypes, ActorError>;
 
@@ -115,6 +192,18 @@ pub(crate) trait ErasedActorRuntime<B: Backend + BackendMatcher<Backend = B>>:
         model_module: ModelModule<B>,
         device: DeviceType,
     ) -> Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send + 'a>>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn perform_local_byte_inference_erased<'a>(
+        &'a self,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &'a DType,
+        act_dtype: &'a DType,
+        discrete: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + Send + 'a>>;
 }
 
 struct ActorTrajectoryState {
@@ -262,7 +351,7 @@ pub(crate) struct ActorRuntime<
     const D_IN: usize,
     const D_OUT: usize,
 > {
-    actor_id: ActorUuid,
+    actor_info: ActorInfo,
     pub(crate) reloadable_model: LocalModelHandle<B>,
     temp_env_models: DashMap<String, LocalModelHandle<B>>,
     max_traj_length: Arc<usize>,
@@ -282,6 +371,7 @@ impl<
 {
     pub(crate) async fn new(
         actor_id: ActorUuid,
+        nametag: Option<NameTag>,
         reloadable_model: LocalModelHandle<B>,
         max_traj_length: usize,
         shared_tx_to_buffer: Sender<RoutedMessage>,
@@ -290,8 +380,9 @@ impl<
         algorithm_args: AlgorithmInitArgs,
     ) -> Self {
         let max_traj_length = Arc::new(max_traj_length);
+
         Self {
-            actor_id,
+            actor_info: ActorInfo::new(actor_id, nametag),
             reloadable_model,
             temp_env_models: DashMap::new(),
             max_traj_length: max_traj_length.clone(),
@@ -313,7 +404,7 @@ impl<
             .duration_since(UNIX_EPOCH)
             .map_err(|e| ActorError::SystemError(format!("Clock skew: {e}")))?;
         Ok(RoutedMessage {
-            actor_id: self.actor_id,
+            actor_id: self.actor_info.id(),
             protocol: RoutingProtocol::Data(DataPayload::SendTrajectory {
                 timestamp: (duration.as_millis(), duration.as_nanos()),
                 trajectory,
@@ -342,7 +433,7 @@ impl<
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
-        let result = async {
+        let action_result = async {
             let action = {
                 let guard = self.reloadable_model.load();
                 let reloadable_model = match &*guard {
@@ -354,7 +445,7 @@ impl<
                     }
                 };
                 reloadable_model
-                    .forward::<D_IN, D_OUT>(observation, mask, reward, self.actor_id)
+                    .forward::<D_IN, D_OUT>(observation, mask, reward, self.actor_info.id())
                     .map_err(ActorError::from)?
             };
 
@@ -365,7 +456,7 @@ impl<
         .await;
 
         #[cfg(feature = "metrics")]
-        match &result {
+        match &action_result {
             Ok(_) => {
                 let duration = start_time.elapsed().as_secs_f64();
                 self.metrics
@@ -382,7 +473,7 @@ impl<
             }
         }
 
-        result
+        action_result
     }
 
     pub(crate) async fn perform_env_byte_inference(
@@ -417,6 +508,42 @@ impl<
             .unwrap_or_else(|_| module.flat_batch_zeros(n_envs)))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn perform_local_byte_inference(
+        &self,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &DType,
+        act_dtype: &DType,
+        discrete: bool,
+    ) -> Result<Vec<u8>, ActorError> {
+        let model_guard = self.reloadable_model.load();
+        let model = model_guard.as_ref().ok_or_else(|| {
+            ActorError::SystemError("Model not loaded/available for actor inference".to_string())
+        })?;
+        let module = model.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            obs_dtype.clone(),
+            obs_bytes.to_vec(),
+            B::get_supported_backend(),
+        );
+        let output = match module.flat_batch_inference(input) {
+            Ok(output) => output,
+            Err(ModelError::UnsupportedModelType(_)) => module.try_flat_batch_zeros(n_envs)?,
+            Err(error) => return Err(ActorError::from(error)),
+        };
+        let action_bytes = if discrete {
+            decode_argmax(&output.data, act_dtype, n_envs, act_dim)
+        } else {
+            decode_continuous_bytes(&output.data, &output.dtype, n_envs * act_dim, act_dtype)
+        };
+        Ok(action_bytes)
+    }
+
     pub(crate) async fn flag_last_action(
         &self,
         reward: f32,
@@ -432,14 +559,14 @@ impl<
                 let mut trajectories = self.trajectories.lock().await;
                 Some(match env_id {
                     Some(env_id) => trajectories.take_completed_env_trajectory(
-                        self.actor_id,
+                        self.actor_info.id(),
                         env_id,
                         env_label,
                         reward,
                         self.max_traj_length.clone(),
                     ),
                     None => trajectories.take_completed_actor_trajectory(
-                        self.actor_id,
+                        self.actor_info.id(),
                         reward,
                         self.max_traj_length.clone(),
                     ),
@@ -515,7 +642,7 @@ impl<
     pub(crate) async fn flush_shutdown_trajectories(&self) -> Result<(), ActorError> {
         let trajectories = {
             let mut state = self.trajectories.lock().await;
-            state.take_shutdown_trajectories(self.actor_id, self.max_traj_length.clone())
+            state.take_shutdown_trajectories(self.actor_info.id(), self.max_traj_length.clone())
         };
 
         for trajectory in trajectories {
@@ -536,6 +663,24 @@ where
             d_in: D_IN,
             d_out: D_OUT,
         }
+    }
+
+    fn get_actor_info(&self) -> Result<ActorInfo, ActorError> {
+        Ok(self.actor_info.clone())
+    }
+
+    fn get_actor_nametag(&self) -> Result<Option<Arc<NameTag>>, ActorError> {
+        Ok(self.actor_info.nametag_arc())
+    }
+
+    fn set_actor_nametag(&self, new_nametag: Option<NameTag>) -> Result<(), ActorError> {
+        self.actor_info.set_nametag(new_nametag);
+        Ok(())
+    }
+
+    fn set_actor_id(&self, new_id: ActorUuid) -> Result<(), ActorError> {
+        self.actor_info.set_id(new_id);
+        Ok(())
     }
 
     fn current_model_dtypes(&self) -> Result<ActorDTypes, ActorError> {
@@ -622,6 +767,24 @@ where
                 .await
         })
     }
+
+    fn perform_local_byte_inference_erased<'a>(
+        &'a self,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &'a DType,
+        act_dtype: &'a DType,
+        discrete: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.perform_local_byte_inference(
+                obs_bytes, n_envs, obs_dim, act_dim, obs_dtype, act_dtype, discrete,
+            )
+            .await
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -644,6 +807,8 @@ pub enum ActorError {
     SystemError(String),
     #[error(transparent)]
     UuidPoolError(#[from] active_uuid_registry::UuidPoolError),
+    #[error("Nametag failure: {0}")]
+    NameTagError(String),
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[error(transparent)]
     TransportError(#[from] TransportError),
@@ -657,7 +822,7 @@ pub trait ActorEntity<
 {
     #[allow(clippy::too_many_arguments)]
     async fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         actor_id: ActorUuid,
         device: DeviceType,
         runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
@@ -675,6 +840,7 @@ pub trait ActorEntity<
     where
         Self: Sized;
     async fn spawn_loop(&mut self) -> Result<(), ActorError>;
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError>;
     async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError>;
     async fn refresh_model(&self, msg: RoutedMessage) -> Result<(), ActorError>;
@@ -688,7 +854,7 @@ pub(crate) struct Actor<
     const D_OUT: usize,
 > {
     #[allow(dead_code)]
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     actor_id: ActorUuid,
     runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
@@ -700,6 +866,7 @@ pub(crate) struct Actor<
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     model_device: DeviceType,
     rx_from_router: Receiver<RoutedMessage>,
+    #[allow(unused)]
     shared_client_modes: Arc<ClientModes>,
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
@@ -713,6 +880,7 @@ impl<
 {
     #[inline(always)]
     #[allow(clippy::type_complexity)]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     fn extract_inference_request(
         msg: RoutedMessage,
     ) -> Result<
@@ -751,34 +919,23 @@ impl<
     }
 
     #[inline(always)]
-    async fn handle_inference_kind(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    async fn handle_inference_kind(&mut self, _msg: RoutedMessage) -> Result<(), ActorError> {
         match self.shared_client_modes.actor_inference_mode {
-            ActorInferenceMode::Local(_) => self.perform_local_inference(msg).await,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            ActorInferenceMode::Server(_) => self.request_server_inference(msg).await,
+            ActorInferenceMode::Server(_) => self.request_server_inference(_msg).await,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            ActorInferenceMode::ServerOverflow(_, _) => {
-                self.request_server_overflow_inference(msg).await
+            ActorInferenceMode::ClientFallback(_, _) => {
+                self.request_client_fallback_inference(_msg).await
             }
+            _ => unreachable!(),
         }
-    }
-
-    async fn perform_local_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
-        let action = self
-            .runtime
-            .perform_local_inference(obs, mask, reward)
-            .await?;
-        reply_to.send(Arc::new(action)).map_err(|e| {
-            ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
-        })?;
-        Ok(())
     }
 
     /// Server inference: serialize observation (and optionally mask) and send to server.
     /// Note: if obs/mask live on GPU, you will pay a device->host copy during serialization.
     ///
-    /// This path is still experimental in `0.5.0-beta`.
+    /// This path is still experimental in `0.5.0`.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn request_server_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         // Both the inference_kind and inference_dispatcher initializations are based on
@@ -813,21 +970,23 @@ impl<
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
         } else {
-            // Fall back to local inference if a server dispatcher is not available.
-            return self.perform_local_inference(msg).await;
+            return Err(ActorError::SystemError(
+                "Server dispatcher not available".into(),
+            ));
         }
 
         Ok(())
     }
 
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    async fn request_server_overflow_inference(
+    async fn request_client_fallback_inference(
         &mut self,
         msg: RoutedMessage,
     ) -> Result<(), ActorError> {
         todo!()
     }
 
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn perform_flag_last_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutingProtocol::Data(DataPayload::FlagLastAction {
             reward,
@@ -851,7 +1010,7 @@ impl<
 > ActorEntity<B, D_IN, D_OUT> for Actor<B, D_IN, D_OUT>
 {
     async fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         actor_id: ActorUuid,
         device: DeviceType,
         runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
@@ -900,12 +1059,15 @@ impl<
     async fn spawn_loop(&mut self) -> Result<(), ActorError> {
         while let Some(msg) = self.rx_from_router.recv().await {
             match msg.protocol {
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 RoutingProtocol::Control(ControlPayload::ModelHandshake) => {
                     self.initial_model_handshake(msg).await?;
                 }
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 RoutingProtocol::Data(DataPayload::RequestInference(_)) => {
                     self.handle_inference_kind(msg).await?;
                 }
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 RoutingProtocol::Data(DataPayload::FlagLastAction {
                     reward: _,
                     env_id: _,
@@ -932,6 +1094,7 @@ impl<
         Ok(())
     }
 
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutingProtocol::Control(ControlPayload::ModelHandshake) = msg.protocol {
             // Fast path: skip the handshake when a model is already available locally.
@@ -1179,12 +1342,9 @@ impl<
     async fn handle_shutdown(&mut self, _msg: RoutedMessage) -> Result<(), ActorError> {
         let _ = self.runtime.flush_shutdown_trajectories().await;
 
-        active_uuid_registry::interface::remove_id(
-            self.client_namespace.as_ref(),
-            crate::network::ACTOR_CONTEXT,
-            self.actor_id,
-        )
-        .map_err(ActorError::from)?;
+        self.client_namespace
+            .remove_id(crate::network::ACTOR_CONTEXT, self.actor_id)
+            .map_err(ActorError::from)?;
 
         Ok(())
     }
@@ -1195,48 +1355,108 @@ mod unit_tests {
     use super::*;
 
     use crate::network::client::agent::{
-        ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode,
+        ActorDataMode, ActorInferenceMode, ClientModes, ModelMode,
     };
-    use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
+    use crate::network::client::runtime::control::coordinator::CHANNEL_THROUGHPUT;
 
     use active_uuid_registry::registry_uuid::Uuid;
-    use relayrl_types::data::tensor::{DType, DeviceType, NdArrayDType};
+    use relayrl_types::data::tensor::DeviceType;
 
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{RwLock, mpsc, oneshot};
 
     use burn_ndarray::NdArray;
-    use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
-    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
     type NdArrayBackend = NdArray<f32>;
 
     const D_IN: usize = 4;
     const D_OUT: usize = 1;
 
+    #[test]
+    fn actor_info_accessors_return_current_id_and_nametag() {
+        let id = Uuid::new_v4();
+        let tag = NameTag {
+            tag: "scout".to_string(),
+            duplicate: 0,
+        };
+        let info = ActorInfo::new(id, Some(tag.clone()));
+
+        assert_eq!(info.id(), id);
+        assert_eq!(info.nametag(), Some(tag));
+    }
+
+    #[test]
+    fn actor_info_with_no_nametag_returns_none() {
+        let info = ActorInfo::new(Uuid::new_v4(), None);
+        assert_eq!(info.nametag(), None);
+    }
+
+    #[test]
+    fn cloned_actor_info_observes_nametag_changes() {
+        let info = ActorInfo::new(Uuid::new_v4(), None);
+        let cloned = info.clone();
+
+        let tag = NameTag {
+            tag: "renamed".to_string(),
+            duplicate: 2,
+        };
+        info.set_nametag(Some(tag.clone()));
+
+        // The clone shares the same underlying slot, so it observes the update immediately.
+        assert_eq!(cloned.nametag(), Some(tag));
+
+        info.set_nametag(None);
+        assert_eq!(cloned.nametag(), None);
+    }
+
+    #[test]
+    fn cloned_actor_info_observes_id_changes() {
+        let original_id = Uuid::new_v4();
+        let info = ActorInfo::new(original_id, None);
+        let cloned = info.clone();
+
+        let new_id = Uuid::new_v4();
+        info.set_id(new_id);
+
+        assert_eq!(cloned.id(), new_id);
+        assert_ne!(cloned.id(), original_id);
+    }
+
+    #[test]
+    fn actor_info_equality_and_hash_are_based_on_current_id() {
+        use std::collections::HashSet;
+
+        let id = Uuid::new_v4();
+        let a = ActorInfo::new(id, None);
+        let b = ActorInfo::new(
+            id,
+            Some(NameTag {
+                tag: "other".to_string(),
+                duplicate: 0,
+            }),
+        );
+
+        // Independently constructed handles for the same id compare equal even though their
+        // nametags differ and they do not share an underlying slot.
+        assert_eq!(a, b);
+
+        // ActorInfo equality/hashing is by id; interior mutability in the handle is intentional.
+        #[allow(clippy::mutable_key_type)]
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b));
+    }
+
     fn disabled_data_mode() -> Arc<ClientModes> {
         Arc::new(ClientModes {
-            actor_inference_mode: ActorInferenceMode::Local(ModelMode::Independent),
-            actor_training_data_mode: ActorTrainingDataMode::Disabled,
+            actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
+            actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
     fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
         Arc::new(ArcSwapOption::new(None))
-    }
-
-    fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<NdArrayBackend, D_IN>> {
-        let device = NdArrayBackend::get_device(&DeviceType::Cpu).unwrap();
-        let tensor = Tensor::<NdArrayBackend, D_IN, Float>::from_data(
-            BurnTensorData::new(values.to_vec(), [1, 1, 1, values.len()]),
-            &device,
-        );
-
-        Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
-            tensor: Arc::new(tensor),
-            dtype: DType::NdArray(NdArrayDType::F32),
-        }))
     }
 
     async fn create_ndarray_actor(
@@ -1254,6 +1474,7 @@ mod unit_tests {
         let runtime = Arc::new(
             ActorRuntime::new(
                 actor_id,
+                None,
                 model_handle,
                 max_traj_length,
                 tx_to_buffer.clone(),
@@ -1265,8 +1486,14 @@ mod unit_tests {
             .await,
         );
 
+        let namespace_str = format!("test-actor-namespace-{}", Uuid::new_v4());
+        let namespace_handle =
+            active_uuid_registry::interface::reserve_owned_namespace(&namespace_str)
+                .expect("reserve owned test namespace");
+        let client_namespace = ClientNamespace::new(namespace_handle, Arc::from(namespace_str));
+
         let actor = Actor::<NdArrayBackend, D_IN, D_OUT>::new(
-            Arc::from("test-actor-namespace"),
+            client_namespace,
             actor_id,
             device,
             runtime,
@@ -1322,12 +1549,10 @@ mod unit_tests {
     async fn spawn_loop_exits_on_shutdown_message() {
         let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
-        active_uuid_registry::interface::add_id(
-            "test-actor-namespace",
-            crate::network::ACTOR_CONTEXT,
-            actor_id,
-        )
-        .unwrap();
+        actor
+            .client_namespace
+            .add_id(crate::network::ACTOR_CONTEXT, actor_id)
+            .unwrap();
         let handle = tokio::spawn(async move { actor.spawn_loop().await });
 
         tx.send(build_msg(
@@ -1380,6 +1605,7 @@ mod unit_tests {
     }
 
     #[tokio::test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn handle_shutdown_sends_trajectory_when_non_empty() {
         let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
@@ -1441,6 +1667,7 @@ mod unit_tests {
     }
 
     #[tokio::test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn flag_last_action_appends_terminal_action_and_sends_traj() {
         let (mut actor, tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
@@ -1472,6 +1699,7 @@ mod unit_tests {
     }
 
     #[tokio::test]
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn flag_last_action_with_env_id_flushes_only_target_env_traj() {
         let (mut actor, _tx, mut rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let env_id_1 = Uuid::new_v4();
@@ -1552,12 +1780,10 @@ mod unit_tests {
         for _ in 0..3 {
             let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
             let actor_id = actor.actor_id;
-            active_uuid_registry::interface::add_id(
-                "test-actor-namespace",
-                crate::network::ACTOR_CONTEXT,
-                actor_id,
-            )
-            .unwrap();
+            actor
+                .client_namespace
+                .add_id(crate::network::ACTOR_CONTEXT, actor_id)
+                .unwrap();
             let h = tokio::spawn(async move { actor.spawn_loop().await });
             // Immediately shut each actor down
             tx.send(build_msg(
@@ -1579,11 +1805,13 @@ mod unit_tests {
     }
 
     #[tokio::test]
-    async fn trajectory_send_failure_returns_err() {
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    async fn closed_trajectory_buffer_is_treated_as_disabled() {
         let (mut actor, tx, rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
 
-        // Drop buffer receiver so send() fails
+        // Drop buffer receiver; a closed channel means the buffer is disabled or already shut down,
+        // so the actor should silently return Ok(()) rather than propagate an error.
         drop(rx_buf);
 
         let result = actor
@@ -1598,8 +1826,8 @@ mod unit_tests {
             .await;
 
         assert!(
-            matches!(result, Err(ActorError::TrajectorySendError(_))),
-            "Expected TrajectorySendError, got {:?}",
+            result.is_ok(),
+            "Expected Ok(()) for closed buffer channel, got {:?}",
             result
         );
         drop(tx);

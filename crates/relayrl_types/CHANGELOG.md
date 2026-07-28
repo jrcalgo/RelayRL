@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] - 2026-07-26
+
+### Changed
+- **Fallible model stepping** - `ModelModule::try_step` is now the primary inference path. It surfaces genuine engine errors (dtype/shape mismatches, ORT/LibTorch failures) and falls back to a zero action only for `ModelError::UnsupportedModelType` when no inference engine is available.
+- **`step` as compatibility wrapper** - `ModelModule::step` wraps `try_step` and, on non-`UnsupportedModelType` failures, logs the error and returns a zero-action fallback so existing callers keep working. Prefer `try_step` in new code.
+- **Batched inference error policy** - `step_batch` / `flat_batch_inference` fall back to zeros only for `UnsupportedModelType`; other inference errors propagate.
+- **Hot-reload and validation** - `HotReloadableModel` and `validate_module` call `try_step` / `try_resolve_device` so schema-mismatched or failing models are rejected instead of silently validating against zero-filled fallbacks when an engine is present.
+- **Package metadata** - Bumped `relayrl_types` from `0.9.1` to `0.9.2`.
+- **Logging dependency** - Added workspace `log` so model fallback paths can report inference failures.
+
+### Fixed
+- **Reduced-feature test warnings** - Quieted unused-variable / assertion style warnings in codec and tensor unit tests under sparse feature sets.
+
+## [0.9.1] - 2026-07-15
+
+### Added
+- **Prelude `tensor` exports** - `relayrl_types::prelude::tensor::relayrl::*` now contains NdArrayDType and TchDType re-exports.
+
+## [0.9.0] - 2026-07-14
+
+### Changed
+- **Schema-agnostic ONNX ingestion** - `ModelModule::load_from_path` / `from_onnx_bytes` now introspect the loaded ONNX Runtime session's real input/output names, element types, and shapes instead of assuming a hard-coded `"input"` name and first-output selection. Any graph exposing exactly one tensor input and one tensor output is now supported regardless of its I/O naming.
+- **Metadata validated against the graph** - `metadata.json` remains required, but its `input_dtype`/`output_dtype`/`input_shape`/`output_shape` are now checked against the ONNX graph's discovered signature at construction time (exact element-type match; fixed dimensions must agree; dynamic dimensions accept any metadata value), with specific `ModelError`s instead of a runtime failure inside `Session::run`.
+- **Actual runtime output shape** - ONNX inference now returns ONNX Runtime's real output shape (important for graphs with a dynamic/symbolic batch dimension) instead of a shape reconstructed from metadata.
+- **Native `Bool`/`Float16`/`Bfloat16` ONNX tensors** - Enabled ORT's `half` feature so `f16`/`bf16` tensors bind to their native ONNX element types, and `Bool` RelayRL tensors now bind to ONNX's native `Bool` type instead of being reinterpreted as `Uint8`.
+- **Stricter model validation** - `validate_module` (used by `HotReloadableModel::new_from_path`/`new_from_module` and now also `reload_from_path`/`reload_from_module`) exercises the model's real forward pass and checks exact output dtype/shape instead of accepting a zero-action fallback whenever the configured inference engine is actually available.
+- **Unified ONNX runner** - Collapsed the previously duplicated Burn-tensor and `TensorData` ONNX execution paths into a single runner shared by both.
+- Removed the unused `burn-onnx` dependency stub.
+
+## [0.8.1] - 2026-06-14
+
+### Added
+- **Public API documentation** - Added crate-level documentation and expanded item-level rustdoc for actions, tensors, trajectories, record adapters, codec utilities, model metadata, model modules, and hot-reloadable models.
+- **Comparable codec configs** - Added `PartialEq` to `CodecConfig` so codec settings can be compared directly in tests and caller-side validation.
+
+### Changed
+- **Package metadata** - Bumped `relayrl_types` from `0.8.0` to `0.8.1`.
+- **Record test fixtures** - Updated internal record-helper fixtures to include the `is_truncated` and `policy_version` trajectory fields introduced in `0.8.0`.
+
+### Fixed
+- **Reduced-feature tensor imports** - Avoided importing `half::f16` unconditionally in tensor code, keeping the half import scoped to the backend path that requires it.
+- **Model output extraction** - Avoided an unnecessary allocation when converting extracted ONNX output slices into raw tensor bytes.
+- **Batched hot-reload forwarding** - Simplified `HotReloadableModel::forward_batch()` result collection so errors propagate directly from the collected iterator.
+
 ## [0.8.0] - 2026-05-24
 
 ### Breaking

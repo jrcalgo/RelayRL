@@ -3,9 +3,9 @@ pub(super) mod ops;
 pub(super) mod policies;
 
 use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
+use crate::network::client::runtime::data::router::RoutedMessage;
 use crate::network::client::runtime::data::sinks::transport_sink::ScalingOperation;
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
-use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
 
 use relayrl_types::HyperparameterArgs;

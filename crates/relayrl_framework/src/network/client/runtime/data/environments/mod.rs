@@ -1,3 +1,4 @@
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
 use crate::network::client::runtime::data::environments::vec_env::{
     BatchVecEnv, ScalarVecEnv, VecEnvError, VecEnvTrait,
 };
@@ -7,7 +8,6 @@ use relayrl_types::data::tensor::{DType, DeviceType};
 
 pub(crate) mod vec_env;
 
-use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -65,7 +65,7 @@ fn map_env_dtype(dtype: EnvDType) -> Result<DType, EnvironmentInterfaceError> {
 }
 
 pub(crate) struct EnvironmentInterface {
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     device: DeviceType,
     env: Option<Box<dyn VecEnvTrait>>,
     obs_dtype: Option<EnvDType>,
@@ -73,7 +73,7 @@ pub(crate) struct EnvironmentInterface {
 }
 
 impl EnvironmentInterface {
-    pub(crate) fn new(client_namespace: Arc<str>, device: DeviceType) -> Self {
+    pub(crate) fn new(client_namespace: ClientNamespace, device: DeviceType) -> Self {
         Self {
             client_namespace,
             device,
@@ -227,6 +227,7 @@ impl EnvironmentInterface {
         self.env.as_mut().and_then(|env| env.step_bytes(actions))
     }
 
+    #[allow(unused)]
     pub(crate) fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         self.env.as_ref().and_then(|env| env.flat_env_ids())
     }
@@ -239,10 +240,12 @@ impl EnvironmentInterface {
         self.act_dtype.clone()
     }
 
+    #[allow(unused)]
     pub(crate) fn obs_dim(&self) -> Option<usize> {
         self.env.as_ref().map(|env| env.obs_dim())
     }
 
+    #[allow(unused)]
     pub(crate) fn act_dim(&self) -> Option<usize> {
         self.env.as_ref().map(|env| env.act_dim())
     }
@@ -251,9 +254,219 @@ impl EnvironmentInterface {
         self.env.as_ref().and_then(|env| env.action_is_discrete())
     }
 
+    #[allow(unused)]
     pub(crate) fn get_env_context(&self) -> Option<String> {
         self.env
             .as_ref()
             .map(|env| env.get_env_context().to_string())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    use std::any::Any;
+    use std::sync::Mutex;
+
+    fn owned_test_namespace(prefix: &str) -> ClientNamespace {
+        let namespace_str = format!("{}-{}", prefix, EnvironmentUuid::new_v4());
+        let handle = active_uuid_registry::interface::reserve_owned_namespace(&namespace_str)
+            .expect("reserve owned test namespace");
+        ClientNamespace::new(handle, std::sync::Arc::from(namespace_str))
+    }
+
+    #[derive(Clone)]
+    struct TestScalarEnv;
+
+    impl Environment for TestScalarEnv {
+        fn run_environment(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+            Ok(Box::new(self.flat_observation_bytes()))
+        }
+        fn build_mask(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+            Ok(Box::new(()))
+        }
+        fn observation_dtype(&self) -> EnvDType {
+            EnvDType::NdArray(EnvNdArrayDType::F32)
+        }
+        fn action_dtype(&self) -> EnvDType {
+            EnvDType::NdArray(EnvNdArrayDType::I64)
+        }
+        fn observation_dim(&self) -> usize {
+            2
+        }
+        fn action_dim(&self) -> usize {
+            1
+        }
+        fn flat_observation_bytes(&self) -> Observation {
+            vec![0u8; 8]
+        }
+        fn flat_mask_bytes(&self) -> Mask {
+            None
+        }
+        fn action_is_discrete(&self) -> bool {
+            true
+        }
+        fn kind(&self) -> EnvironmentKind {
+            EnvironmentKind::Scalar
+        }
+        fn into_handle(self: Box<Self>) -> EnvironmentHandle {
+            EnvironmentHandle::Scalar(Box::new(*self))
+        }
+    }
+
+    impl ScalarEnvironment for TestScalarEnv {
+        fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError> {
+            Ok(ScalarEnvReset {
+                observation: self.flat_observation_bytes(),
+                info: None,
+            })
+        }
+        fn step_bytes(
+            &self,
+            _action: &[u8],
+        ) -> Option<(Observation, Mask, Reward, Done, Truncated)> {
+            Some((self.flat_observation_bytes(), None, 0.0, false, false))
+        }
+    }
+
+    /// Minimal batched double: `n_envs` reflects only environments allocated via
+    /// `init_num_envs`, which is all this test needs (registry writes go through
+    /// `BatchVecEnv`'s own `env_ids` bookkeeping, not this double's internal count).
+    struct TestVectorEnv {
+        ids: Mutex<Vec<EnvironmentUuid>>,
+    }
+
+    impl TestVectorEnv {
+        fn new() -> Self {
+            Self {
+                ids: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Environment for TestVectorEnv {
+        fn run_environment(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+            Ok(Box::new(()))
+        }
+        fn build_mask(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+            Ok(Box::new(()))
+        }
+        fn observation_dtype(&self) -> EnvDType {
+            EnvDType::NdArray(EnvNdArrayDType::F32)
+        }
+        fn action_dtype(&self) -> EnvDType {
+            EnvDType::NdArray(EnvNdArrayDType::I64)
+        }
+        fn observation_dim(&self) -> usize {
+            2
+        }
+        fn action_dim(&self) -> usize {
+            1
+        }
+        fn flat_observation_bytes(&self) -> Observation {
+            Vec::new()
+        }
+        fn flat_mask_bytes(&self) -> Mask {
+            None
+        }
+        fn action_is_discrete(&self) -> bool {
+            true
+        }
+        fn kind(&self) -> EnvironmentKind {
+            EnvironmentKind::Vector
+        }
+        fn into_handle(self: Box<Self>) -> EnvironmentHandle {
+            EnvironmentHandle::Vector(self)
+        }
+    }
+
+    impl VectorEnvironment for TestVectorEnv {
+        fn init_num_envs(&self, num_envs: usize) -> Result<Vec<EnvironmentUuid>, EnvironmentError> {
+            let mut ids = self.ids.lock().unwrap();
+            let new_ids: Vec<EnvironmentUuid> =
+                (0..num_envs).map(|_| EnvironmentUuid::new_v4()).collect();
+            ids.extend(new_ids.iter().copied());
+            Ok(new_ids)
+        }
+        fn reset(
+            &self,
+            env_ids: &[EnvironmentUuid],
+        ) -> Result<Vec<VectorEnvReset>, EnvironmentError> {
+            Ok(env_ids
+                .iter()
+                .map(|id| VectorEnvReset {
+                    env_id: *id,
+                    observation: Vec::new(),
+                    info: None,
+                })
+                .collect())
+        }
+        fn n_envs(&self) -> usize {
+            self.ids.lock().unwrap().len()
+        }
+        #[allow(clippy::type_complexity)]
+        fn step_bytes(
+            &self,
+            _actions: &[u8],
+        ) -> Option<(Observation, Mask, Vec<Reward>, Vec<Done>, Vec<Truncated>)> {
+            None
+        }
+    }
+
+    #[test]
+    fn scalar_env_registers_resizes_and_removes_through_owned_namespace() {
+        let client_namespace = owned_test_namespace("test-env-scalar");
+        let mut interface = EnvironmentInterface::new(client_namespace, DeviceType::Cpu);
+
+        interface
+            .set_env(Some(Box::new(TestScalarEnv)), 2)
+            .expect("set_env should register through the owned client namespace");
+        assert_eq!(interface.get_env_count().unwrap(), 2);
+
+        interface
+            .increase_env_count(3)
+            .expect("increase_env_count should reserve new ids through the owned handle");
+        assert_eq!(interface.get_env_count().unwrap(), 5);
+
+        interface
+            .decrease_env_count(4)
+            .expect("decrease_env_count should remove ids through the owned handle");
+        assert_eq!(interface.get_env_count().unwrap(), 1);
+
+        interface
+            .remove_env()
+            .expect("remove_env should succeed once an environment is set");
+    }
+
+    #[test]
+    fn vector_env_registers_resizes_and_removes_through_owned_namespace() {
+        let client_namespace = owned_test_namespace("test-env-vector");
+        let mut interface = EnvironmentInterface::new(client_namespace, DeviceType::Cpu);
+
+        interface
+            .set_env(Some(Box::new(TestVectorEnv::new())), 2)
+            .expect("set_env should register through the owned client namespace");
+        assert_eq!(interface.get_env_count().unwrap(), 2);
+
+        interface
+            .increase_env_count(3)
+            .expect("increase_env_count should add ids through the owned handle");
+        assert_eq!(interface.get_env_count().unwrap(), 5);
+
+        interface
+            .decrease_env_count(4)
+            .expect("decrease_env_count should remove ids through the owned handle");
+        assert_eq!(interface.get_env_count().unwrap(), 1);
+
+        interface
+            .remove_env()
+            .expect("remove_env should succeed once an environment is set");
     }
 }

@@ -43,7 +43,7 @@ pub fn convert_generic_dict(
 pub fn validate_module<B: Backend + BackendMatcher<Backend = B> + 'static>(
     module: &ModelModule<B>,
 ) -> Result<(), ModelError> {
-    let device = module.resolve_device();
+    let device = module.try_resolve_device()?;
 
     let input_shape = &module.metadata.input_shape;
     let output_shape = &module.metadata.output_shape;
@@ -121,6 +121,62 @@ fn slice_to_array<const N: usize>(shape: &[usize]) -> Result<[usize; N], ModelEr
     })
 }
 
+/// Builds an uninitialized dummy tensor of `shape`/`dtype`, dispatching to the right
+/// `AnyBurnTensor` variant (float/int/bool) for the element kind. Used to exercise a
+/// model's forward pass during validation without requiring real observation data.
+fn build_dummy_tensor<B: Backend + BackendMatcher<Backend = B> + 'static, const D: usize>(
+    dtype: &DType,
+    shape: &Shape,
+    device: &<B as Backend>::Device,
+) -> Arc<AnyBurnTensor<B, D>> {
+    match dtype {
+        #[cfg(feature = "ndarray-backend")]
+        DType::NdArray(nd) => match nd {
+            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
+                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
+                    shape,
+                    &DType::NdArray(nd.clone()),
+                    device,
+                )))
+            }
+            NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
+                Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
+                    shape,
+                    &DType::NdArray(nd.clone()),
+                    device,
+                )))
+            }
+            NdArrayDType::Bool => Arc::new(AnyBurnTensor::Bool(BoolBurnTensor::empty(
+                shape,
+                &DType::NdArray(nd.clone()),
+                device,
+            ))),
+        },
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch) => match tch {
+            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
+                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
+                    shape,
+                    &DType::Tch(tch.clone()),
+                    device,
+                )))
+            }
+            TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
+                Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
+                    shape,
+                    &DType::Tch(tch.clone()),
+                    device,
+                )))
+            }
+            TchDType::Bool => Arc::new(AnyBurnTensor::Bool(BoolBurnTensor::empty(
+                shape,
+                &DType::Tch(tch.clone()),
+                device,
+            ))),
+        },
+    }
+}
+
 fn validate_model_shapes<
     B: Backend + BackendMatcher<Backend = B> + 'static,
     const D_IN: usize,
@@ -131,113 +187,30 @@ fn validate_model_shapes<
     input_shape: &Shape,
     output_shape: &Shape,
 ) -> Result<(), ModelError> {
-    let obs: Arc<AnyBurnTensor<B, D_IN>> = match &module.metadata.input_dtype {
-        #[cfg(feature = "ndarray-backend")]
-        DType::NdArray(nd) => match nd {
-            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
-                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
-                    input_shape,
-                    &DType::NdArray(nd.clone()),
-                    device,
-                )))
-            }
-            NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
-                Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
-                    input_shape,
-                    &DType::NdArray(nd.clone()),
-                    device,
-                )))
-            }
-            NdArrayDType::Bool => Arc::new(AnyBurnTensor::Bool(BoolBurnTensor::empty(
-                input_shape,
-                &DType::NdArray(nd.clone()),
-                device,
-            ))),
-        },
-        #[cfg(feature = "tch-backend")]
-        DType::Tch(tch) => match tch {
-            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
-                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
-                    input_shape,
-                    &DType::Tch(tch.clone()),
-                    device,
-                )))
-            }
-            TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
-                Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
-                    input_shape,
-                    &DType::Tch(tch.clone()),
-                    device,
-                )))
-            }
-            TchDType::Bool => Arc::new(AnyBurnTensor::Bool(BoolBurnTensor::empty(
-                input_shape,
-                &DType::Tch(tch.clone()),
-                device,
-            ))),
-        },
-    };
+    let obs: Arc<AnyBurnTensor<B, D_IN>> =
+        build_dummy_tensor::<B, D_IN>(&module.metadata.input_dtype, input_shape, device);
 
-    let mask: Arc<AnyBurnTensor<B, D_OUT>> = match &module.metadata.output_dtype {
-        #[cfg(feature = "ndarray-backend")]
-        DType::NdArray(nd) => match nd {
-            NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64 => {
-                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
-                    output_shape,
-                    &DType::NdArray(nd.clone()),
-                    device,
-                )))
-            }
-            NdArrayDType::I8 | NdArrayDType::I16 | NdArrayDType::I32 | NdArrayDType::I64 => {
-                Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
-                    output_shape,
-                    &DType::NdArray(nd.clone()),
-                    device,
-                )))
-            }
-            NdArrayDType::Bool => Arc::new(AnyBurnTensor::Bool(BoolBurnTensor::empty(
-                output_shape,
-                &DType::NdArray(nd.clone()),
-                device,
-            ))),
-        },
-        #[cfg(feature = "tch-backend")]
-        DType::Tch(tch) => match tch {
-            TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64 => {
-                Arc::new(AnyBurnTensor::Float(FloatBurnTensor::empty(
-                    output_shape,
-                    &DType::Tch(tch.clone()),
-                    device,
-                )))
-            }
-            TchDType::I8 | TchDType::I16 | TchDType::I32 | TchDType::I64 | TchDType::U8 => {
-                Arc::new(AnyBurnTensor::Int(IntBurnTensor::empty(
-                    output_shape,
-                    &DType::Tch(tch.clone()),
-                    device,
-                )))
-            }
-            TchDType::Bool => Arc::new(AnyBurnTensor::Bool(BoolBurnTensor::empty(
-                output_shape,
-                &DType::Tch(tch.clone()),
-                device,
-            ))),
-        },
-    };
+    // Uses the fallible runner (not `step()`) so a genuine engine error (dtype/shape
+    // mismatch, ORT/LibTorch failure) is reported instead of silently "validating" against
+    // a zero-filled fallback action. `UnsupportedModelType` still falls back to zeros inside
+    // `try_step` so structural validation can run without an inference engine.
+    let (action_tensor, _, _) = module.try_step::<D_IN, D_OUT>(obs, None)?;
 
-    let (action_tensor, _, _) = module.step::<D_IN, D_OUT>(obs, Some(mask));
-
-    let action_dims: &Vec<usize> = &action_tensor.shape;
-    let output_dims: &Vec<usize> = &output_shape.dims;
-
-    for (a, o) in action_dims.iter().zip(output_dims.iter()) {
-        if *a != *o {
-            return Err(ModelError::InvalidOutputDimension(format!(
-                "Model output shape mismatch: expected {:?}, got {:?}",
-                output_dims, action_dims
-            )));
-        }
+    if action_tensor.dtype != module.metadata.output_dtype {
+        return Err(ModelError::DTypeError(format!(
+            "Model output dtype mismatch: expected {}, got {}",
+            module.metadata.output_dtype, action_tensor.dtype
+        )));
     }
+
+    let output_dims: &Vec<usize> = &output_shape.dims;
+    if &action_tensor.shape != output_dims {
+        return Err(ModelError::InvalidOutputDimension(format!(
+            "Model output shape mismatch: expected {:?}, got {:?}",
+            output_dims, action_tensor.shape
+        )));
+    }
+
     Ok(())
 }
 

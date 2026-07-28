@@ -1,9 +1,0 @@
-syntax = "proto3";
-
-package server_cli;
-
-service ServerCLIService {
-
-}
-
-message 

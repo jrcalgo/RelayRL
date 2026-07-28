@@ -19,6 +19,7 @@ static INIT: Once = Once::new();
 ///
 /// This function is called automatically when the observability module
 /// is initialized. It configures log4rs with sensible defaults.
+#[cfg_attr(not(feature = "logging-init"), allow(dead_code))]
 pub fn init_logging() {
     INIT.call_once(|| {
         // Set up default console logger

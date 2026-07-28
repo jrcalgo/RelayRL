@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[macro_use]
-pub mod client_config_macros {
+pub(crate) mod client_config_macros {
     /// Resolves config json file between argument and default value.
     #[macro_export]
     macro_rules! resolve_client_config_json_path {
@@ -57,7 +57,7 @@ pub static DEFAULT_CLIENT_CONFIG_PATH: Lazy<Option<PathBuf>> =
     Lazy::new(|| get_or_create_client_config_json_path!(PathBuf::from("client_config.json")));
 
 #[macro_use]
-pub mod server_config_macros {
+pub(crate) mod server_config_macros {
     /// Resolves config json file between argument and default value.
     #[macro_export]
     macro_rules! resolve_training_server_config_json_path {
@@ -158,7 +158,7 @@ pub static DEFAULT_INFERENCE_SERVER_CONFIG_PATH: Lazy<Option<PathBuf>> = Lazy::n
 
 pub(crate) const DEFAULT_CLIENT_CONFIG_JSON: &str = r#"{
     "client_config": {
-        "config_update_polling_seconds": 10.0,
+        "config_polling_seconds": 10,
         "init_hyperparameters": {
             "PPO": {
                 "discrete": true,
@@ -204,17 +204,24 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_JSON: &str = r#"{
                 "_comment3": "These key-values will be sent to the server for initialization"
             }
         },
-        "router_buffer_size_per_actor": 1000,
+        "local_model_module": {
+            "directory": "model_module",
+            "model_name": "client_model",
+            "format": "pt"
+        },
+        "metrics": {
+            "meter_name": "relayrl-client",
+            "otlp_endpoint": {
+                "prefix": "http://",
+                "host": "127.0.0.1",
+                "port": "4317"
+            }
+        },
+        "trajectory_cache_size": 1000,
         "trajectory_file_output": {
             "directory": "experiment_data",
             "_comment": "use `Csv` or `Arrow`",
             "file_type": "Csv"
-        },
-        "metrics_meter_name": "relayrl-client",
-        "metrics_otlp_endpoint": {
-            "prefix": "http://",
-            "host": "127.0.0.1",
-            "port": "4317"
         }
     },
     "transport_config": {
@@ -257,11 +264,6 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_JSON: &str = r#"{
                     "port": "7778"
                 }
             }
-        },
-        "local_model_module": {
-            "directory": "model_module",
-            "model_name": "client_model",
-            "format": "pt"
         }
     }
 }"#;
@@ -310,6 +312,11 @@ pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_JSON: &str = r#"{
                 "target_kl": 0.01,
                 "traj_per_epoch": 8
             }
+        },
+        "local_model_module": {
+            "directory": "model_module",
+            "model_name": "training_server_model",
+            "format": "pt"
         },
         "training_tensorboard": {
             "_comment1": "Runs `tensorboard --logdir /logs` in cwd on start up of server.",
@@ -360,11 +367,6 @@ pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_JSON: &str = r#"{
                     "port": "7778"
                 }
             }
-        },
-        "local_model_module": {
-            "directory": "model_module",
-            "model_name": "training_server_model",
-            "format": "pt"
         }
     }
 }"#;
@@ -372,7 +374,12 @@ pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_JSON: &str = r#"{
 /// TODO: Implement infernece server configuration file and builder components.
 pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_JSON: &str = r#"{
     "inference_server_config": {
-        "config_update_polling_seconds": 10.0,
+        "config_polling_seconds": 10.0,
+        "local_model_module": {
+            "directory": "model_module",
+            "model_name": "inference_server_model",
+            "format": "pt"
+        },
         "transport_config": {
             "nats_addresses": {
                 "inference_server_address": {
@@ -413,11 +420,6 @@ pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_JSON: &str = r#"{
                         "port": "7778"
                     }
                 }
-            },
-            "local_model_module": {
-                "directory": "model_module",
-                "model_name": "inference_server_model",
-                "format": "pt"
             }
         }
     }

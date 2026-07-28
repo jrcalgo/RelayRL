@@ -1,5 +1,5 @@
 use crate::network::client::runtime::actor::ErasedActorRuntime;
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
+use crate::network::client::runtime::control::state_manager::{ActorUuid, env_dtype_to_dtype};
 use crate::network::client::runtime::data::environments::{
     EnvironmentInterface, EnvironmentInterfaceError,
 };
@@ -10,8 +10,11 @@ use relayrl_algorithms::prelude::ppo::algorithm::{EpochTrainOutput, PPOParams};
 use relayrl_algorithms::prelude::ppo::trainer::{PPOTrainer, PPOTrainerSpec};
 use relayrl_algorithms::prelude::templates::AlgorithmError;
 use relayrl_types::data::action::{RelayRLAction, RelayRLData};
+#[cfg(feature = "tch-backend")]
+use relayrl_types::data::tensor::TchDType;
 use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
+use relayrl_types::model::ModelModule;
 use relayrl_types::prelude::tensor::burn::{BasicOps, Numeric, TensorKind, backend::Backend};
 use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, DeviceType};
 
@@ -59,11 +62,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         loop_iters: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), TrainingError>
+    ) -> Result<ModelModule<B>, TrainingError>
     where
-        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         #[inline(always)]
@@ -75,9 +78,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         ) -> Result<(), TrainingError>
         where
             B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
-            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Send + 'static,
         {
             if let Some(pi_module) = trainer.acquire_pi_module() {
                 runtime
@@ -111,41 +114,48 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
             epoch_count: &std::sync::atomic::AtomicU64,
         ) where
             B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
-            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Send + 'static,
         {
             trainer.apply_epoch_result(output);
             trainer.log_epoch();
             epoch_count.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
 
-        let (max_episode_steps, rollout_len, traj_per_epoch, normalize_obs, device) =
-            match &trainer_spec {
-                PPOTrainerSpec::PPO {
-                    args, hyperparams, ..
-                }
-                | PPOTrainerSpec::IPPO {
-                    args, hyperparams, ..
-                } => {
-                    let p = hyperparams
-                        .as_ref()
-                        .map_or(PPOParams::default(), |hp| hp.clone());
+        let (
+            max_episode_steps,
+            rollout_len,
+            traj_per_epoch,
+            normalize_obs,
+            sync_epoch_boundary,
+            device,
+        ) = match &trainer_spec {
+            PPOTrainerSpec::PPO {
+                args, hyperparams, ..
+            }
+            | PPOTrainerSpec::IPPO {
+                args, hyperparams, ..
+            } => {
+                let p = hyperparams
+                    .as_ref()
+                    .map_or(PPOParams::default(), |hp| hp.clone());
 
-                    (
-                        p.max_episode_steps,
-                        p.rollout_len,
-                        p.traj_per_epoch as usize,
-                        p.normalize_obs,
-                        args.device.clone(),
-                    )
-                }
-                _ => {
-                    return Err(TrainingError::AlgorithmConfig(
-                        "[TrainingInterface] Expected PPO/IPPO, got MAPPO".to_string(),
-                    ));
-                }
-            };
+                (
+                    p.max_episode_steps,
+                    p.rollout_len,
+                    p.traj_per_epoch as usize,
+                    p.normalize_obs,
+                    p.sync_epoch_boundary,
+                    args.device.clone(),
+                )
+            }
+            _ => {
+                return Err(TrainingError::AlgorithmConfig(
+                    "[TrainingInterface] Expected PPO/IPPO, got MAPPO".to_string(),
+                ));
+            }
+        };
 
         tokio::task::block_in_place(|| {
             let local_runtime = tokio::task::LocalSet::new();
@@ -179,51 +189,78 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                     let mut trainer = trainer;
                     let mut pending_train: Option<tokio::task::JoinHandle<EpochTrainOutput<B, KindIn, KindOut, Pi>>> = None;
 
+                    // Shared "epoch landed" handling: log + refresh models + republish kernel
+                    // snapshot. Used by both the overlapped and synchronous select branches to
+                    // avoid tripling this block. A macro (not an async closure) is used because
+                    // the block does `.await` while holding `&mut trainer` across awaits.
+                    macro_rules! land_epoch {
+                        ($output:expr) => {{
+                            log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, $output, &learner_epoch_count);
+                            refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device).await?;
+                            let next_kernel_snapshot = trainer
+                                .get_ppo_actor_kernel()
+                                .map_err(|e| TrainingError::TrainerError(e.to_string()))?
+                                .to_arc_snapshot();
+                            learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
+                        }};
+                    }
+
                     loop {
                         if let Some(ref mut handle) = pending_train {
-                            tokio::select! {
-                                _ = async {
-                                    if let Some(ref mut rx) = shutdown_rx {
-                                        let _ = rx.recv().await;
-                                    } else {
-                                        std::future::pending::<()>().await;
-                                    }
-                                } => {
-                                    break;
-                                }
-
-                                result = handle => {
-                                    let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
-
-                                    log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, output, &learner_epoch_count);
-                                    refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device).await?;
-                                    let next_kernel_snapshot = trainer
-                                        .get_ppo_actor_kernel()
-                                        .map_err(|e| TrainingError::TrainerError(e.to_string()))?
-                                        .to_arc_snapshot();
-                                    learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
-
-                                    pending_train = trainer.start_epoch_training();
-                                }
-
-                                maybe_traj = traj_rx.recv() => {
-                                    match maybe_traj {
-                                        Some(traj) => {
-                                            trainer.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                            if sync_epoch_boundary {
+                                // Synchronous epoch boundary: do NOT poll traj_rx while training
+                                // is in flight. The producer loop's traj_tx.send().await will
+                                // naturally block once the bounded channel (capacity
+                                // traj_per_epoch) fills, creating a true collect -> train ->
+                                // collect barrier with zero changes to the producer loop.
+                                tokio::select! {
+                                    _ = async {
+                                        if let Some(ref mut rx) = shutdown_rx {
+                                            let _ = rx.recv().await;
+                                        } else {
+                                            std::future::pending::<()>().await;
                                         }
-                                        None => {
-                                            if let Some(handle) = pending_train.take() &&
-                                                let Ok(output) = handle.await {
-                                                    log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, output, &learner_epoch_count);
-                                                    refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device).await?;
-                                                    let next_kernel_snapshot = trainer
-                                                        .get_ppo_actor_kernel()
-                                                        .map_err(|e| TrainingError::TrainerError(e.to_string()))?
-                                                        .to_arc_snapshot();
-                                                    learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
-                                                }
+                                    } => {
+                                        break;
+                                    }
 
-                                            break;
+                                    result = handle => {
+                                        let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
+                                        land_epoch!(output);
+                                        pending_train = trainer.start_epoch_training();
+                                    }
+                                }
+                            } else {
+                                tokio::select! {
+                                    _ = async {
+                                        if let Some(ref mut rx) = shutdown_rx {
+                                            let _ = rx.recv().await;
+                                        } else {
+                                            std::future::pending::<()>().await;
+                                        }
+                                    } => {
+                                        break;
+                                    }
+
+                                    result = handle => {
+                                        let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
+                                        land_epoch!(output);
+                                        pending_train = trainer.start_epoch_training();
+                                    }
+
+                                    maybe_traj = traj_rx.recv() => {
+                                        match maybe_traj {
+                                            Some(traj) => {
+                                                trainer.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                                            }
+                                            None => {
+                                                if let Some(handle) = pending_train.take() &&
+                                                    let Ok(output) = handle.await {
+                                                        land_epoch!(output);
+                                                    }
+
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -244,7 +281,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                     }
 
-                    Ok::<(), TrainingError>(())
+                    trainer.acquire_pi_module().ok_or(TrainingError::TrainerError("Policy model not found".to_string()))
                 });
 
                 let mut per_env_trajs: Vec<RelayRLTrajectory> = (0..n_envs).map(|_| RelayRLTrajectory::new(max_traj_length)).collect();
@@ -265,32 +302,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                     Some(d) => d,
                     None => return Err(TrainingError::EnvironmentInterfaceNotFound(actor_id)),
                 })?;
+                // Discrete envs (e.g. ScalarVecEnv with action_is_discrete()==true) step on a
+                // single raw u8 action-index byte per env, not the act_dtype-width encoding
+                // (e.g. 4-byte F32) that policy_forward_bytes produces for training storage.
+                // Without this decode, step_bytes silently misreads the action buffer and the
+                // env never receives the policy's actual chosen action.
+                let discrete_action_space = env_interface.action_is_discrete().unwrap_or(true);
 
-                let (obs_bytes_per_env, act_bytes_per_env) = {
-                    #[inline(always)]
-                    fn dtype_bytes_per_elem(dtype: &DType) -> usize {
-                        match dtype {
-                            DType::NdArray(nd) => match nd {
-                                NdArrayDType::F16 | NdArrayDType::I16 => 2,
-                                NdArrayDType::F32 | NdArrayDType::I32 => 4,
-                                NdArrayDType::F64 | NdArrayDType::I64 => 8,
-                                NdArrayDType::I8 | NdArrayDType::Bool => 1,
-                            }
-                            #[cfg(feature = "tch-backend")]
-                            DType::Tch(tch) => match tch {
-                                TchDType::F16 | TchDType::Bf16 | TchDType::I16 => 2,
-                                TchDType::F32 | TchDType::I32 => 4,
-                                TchDType::F64 | TchDType::I64 => 8,
-                                TchDType::I8 | TchDType::U8 | TchDType::Bool => 1,
-                            }
-                        }
-                    }
-
-                    let obs_bytes = dtype_bytes_per_elem(&obs_dtype);
-                    let act_bytes = dtype_bytes_per_elem(&act_dtype);
-
-                    (obs_bytes, act_bytes)
-                };
+                let (obs_bytes_per_env, act_bytes_per_env) =
+                    obs_act_byte_strides(obs_dim, act_dim, &obs_dtype, &act_dtype, discrete_action_space);
 
                 let mut obs_normalizer = ObsNormalizer::new(obs_dim, obs_dtype.clone());
 
@@ -363,7 +383,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                 let loop_epoch_count = Arc::clone(&shared_epoch_count);
                 for _ in 0..loop_iters {
-                    let (mut new_obs_bytes, new_mask_bytes, rewards, dones, truncateds) = env_interface.step_bytes(&current_act_bytes).ok_or(TrainingError::EnvironmentInterfaceNotFound(actor_id))?;
+                    let (mut new_obs_bytes, new_mask_bytes, rewards, dones, truncateds) = if discrete_action_space {
+                        let act_indices = convert_byte_dtype_to_f32(current_act_bytes.clone(), act_dtype.clone())
+                            .map_err(|e| TrainingError::InferenceRequestError(format!("[TrainingInterface] {} - failed to decode action bytes for env step: {}", actor_id, e)))?;
+                        let env_step_act_bytes: Vec<u8> = act_indices.into_iter().map(|f| f.round() as u8).collect();
+                        env_interface.step_bytes(&env_step_act_bytes).ok_or(TrainingError::EnvironmentInterfaceNotFound(actor_id))?
+                    } else {
+                        env_interface.step_bytes(&current_act_bytes).ok_or(TrainingError::EnvironmentInterfaceNotFound(actor_id))?
+                    };
 
                     if normalize_obs {
                         obs_normalizer.update(&new_obs_bytes)?;
@@ -380,13 +407,20 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                         let action_i = {
                             let start = i * act_bytes_per_env;
-                            TensorData::new(vec![act_dim], act_dtype.clone(), current_act_bytes[start..start + act_bytes_per_env].to_vec(), backend.clone())
+                            let act_shape = if discrete_action_space { vec![1] } else { vec![act_dim] };
+                            TensorData::new(act_shape, act_dtype.clone(), current_act_bytes[start..start + act_bytes_per_env].to_vec(), backend.clone())
                         };
 
                         let mask_i = match new_mask_bytes {
                             Some(ref mask_bytes) => {
-                                let start = i * 4;
-                                Some(TensorData::new(vec![act_dim], backend_f32_dtype.clone(), mask_bytes[start..start + 4].to_vec(), backend.clone()))
+                                // Mask bytes are one u8 eligibility flag per (env, action) slot
+                                // (see PPOKernelOps::policy_forward_bytes' get_env_byte_action,
+                                // which reads mask[env_id * act_dim + j]), not act_dtype-width
+                                // values, so decode into the declared f32 mask tensor explicitly
+                                // instead of reinterpreting raw flag bytes as packed floats.
+                                let start = i * act_dim;
+                                let mask_bytes_f32 = mask_flags_to_f32_bytes(&mask_bytes[start..start + act_dim]);
+                                Some(TensorData::new(vec![act_dim], backend_f32_dtype.clone(), mask_bytes_f32, backend.clone()))
                             }
                             None => None,
                         };
@@ -487,14 +521,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                 drop(inference_obs_tx);
                 drop(traj_tx);
-                learner_handle.await.map_err(|e| TrainingError::TrainerError(e.to_string()))??;
+                let model_module = learner_handle.await.map_err(|e| TrainingError::TrainerError(e.to_string()))??;
                 inference_handle.await.map_err(|e| TrainingError::InferenceRequestError(e.to_string()))??;
 
-                Ok(())
+                Ok(model_module)
             }))
         })
     }
 
+    #[allow(unused)]
     pub(crate) fn train_ippo<KindIn, KindOut, Pi>(
         _actor_id: ActorUuid,
         _shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -503,15 +538,17 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         _loop_iters: usize,
         _max_traj_length: usize,
         _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), TrainingError>
+    ) -> Result<ModelModule<B>, TrainingError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
+        // TODO: implement this :)
         unimplemented!()
     }
 
+    #[allow(unused)]
     pub(crate) fn train_mappo<KindIn, KindOut, Pi>(
         _actor_id: ActorUuid,
         _shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -520,14 +557,70 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         _loop_iters: usize,
         _max_traj_length: usize,
         _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<(), TrainingError>
+    ) -> Result<ModelModule<B>, TrainingError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
+        // TODO: implement this :)
         unimplemented!()
     }
+}
+
+#[inline(always)]
+fn dtype_bytes_per_elem(dtype: &DType) -> usize {
+    match dtype {
+        DType::NdArray(nd) => match nd {
+            NdArrayDType::F16 | NdArrayDType::I16 => 2,
+            NdArrayDType::F32 | NdArrayDType::I32 => 4,
+            NdArrayDType::F64 | NdArrayDType::I64 => 8,
+            NdArrayDType::I8 | NdArrayDType::Bool => 1,
+        },
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tch) => match tch {
+            TchDType::F16 | TchDType::Bf16 | TchDType::I16 => 2,
+            TchDType::F32 | TchDType::I32 => 4,
+            TchDType::F64 | TchDType::I64 => 8,
+            TchDType::I8 | TchDType::U8 | TchDType::Bool => 1,
+        },
+    }
+}
+
+/// Per-env byte strides for the flat observation/action buffers exchanged with
+/// `EnvironmentInterface::step_bytes` / `flat_observation_bytes`.
+///
+/// Observations are always `obs_dim` dtype-encoded elements per env. Discrete
+/// actions are a single dtype-encoded index per env (see
+/// `PPOKernelOps::policy_forward_bytes`); continuous actions are `act_dim`
+/// dtype-encoded values per env.
+#[inline(always)]
+fn obs_act_byte_strides(
+    obs_dim: usize,
+    act_dim: usize,
+    obs_dtype: &DType,
+    act_dtype: &DType,
+    discrete_action_space: bool,
+) -> (usize, usize) {
+    let obs_bytes = obs_dim * dtype_bytes_per_elem(obs_dtype);
+    let act_bytes = if discrete_action_space {
+        dtype_bytes_per_elem(act_dtype)
+    } else {
+        act_dim * dtype_bytes_per_elem(act_dtype)
+    };
+    (obs_bytes, act_bytes)
+}
+
+/// Decodes `act_dim` raw u8 eligibility flags (one per `(env, action)` slot —
+/// see `PPOKernelOps::policy_forward_bytes`'s `get_env_byte_action`, which
+/// reads `mask[env_id * act_dim + j]`) into little-endian f32 `0.0`/`1.0`
+/// bytes for one env's mask `TensorData`.
+#[inline(always)]
+fn mask_flags_to_f32_bytes(flags: &[u8]) -> Vec<u8> {
+    flags
+        .iter()
+        .flat_map(|&flag| (if flag != 0 { 1.0f32 } else { 0.0f32 }).to_le_bytes())
+        .collect()
 }
 
 struct ObsNormalizer {
@@ -609,11 +702,6 @@ impl ObsNormalizer {
                         )));
                     }
                 },
-                _ => {
-                    return Err(TrainingError::AlgorithmConfig(
-                        "Unsupported byte backend for Obs Normalizer".to_string(),
-                    ));
-                }
             };
 
             Ok(dtype_vec)
@@ -642,6 +730,7 @@ impl ObsNormalizer {
     fn normalize(&self, obs_bytes: &mut [u8]) -> Result<(), TrainingError> {
         enum DTypeSliceMut<'a> {
             F16(&'a mut [half::f16]),
+            #[allow(unused)]
             Bf16(&'a mut [half::bf16]),
             F32(&'a mut [f32]),
             F64(&'a mut [f64]),
@@ -718,11 +807,6 @@ impl ObsNormalizer {
                         )));
                     }
                 },
-                _ => {
-                    return Err(TrainingError::AlgorithmConfig(
-                        "Unsupported byte backend for Obs Normalizer".to_string(),
-                    ));
-                }
             };
 
             Ok(dtype_vec)
@@ -741,5 +825,80 @@ impl ObsNormalizer {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn obs_stride_covers_the_full_obs_dim_not_a_single_element() {
+        let obs_dtype = DType::NdArray(NdArrayDType::F32);
+        let act_dtype = DType::NdArray(NdArrayDType::F32);
+
+        let (obs_bytes, _) = obs_act_byte_strides(8, 1, &obs_dtype, &act_dtype, true);
+
+        // 8 F32 elements per env, not 1 element's worth of bytes.
+        assert_eq!(obs_bytes, 8 * 4);
+    }
+
+    #[test]
+    fn discrete_action_stride_is_a_single_dtype_encoded_index_per_env() {
+        let obs_dtype = DType::NdArray(NdArrayDType::F32);
+        let act_dtype = DType::NdArray(NdArrayDType::F32);
+
+        // act_dim=4 (four possible discrete actions), but the encoded action
+        // is a single chosen index, not one value per possible action.
+        let (_, act_bytes) = obs_act_byte_strides(8, 4, &obs_dtype, &act_dtype, true);
+
+        assert_eq!(
+            act_bytes, 4,
+            "discrete action stride should be one F32 index, not act_dim indices"
+        );
+    }
+
+    #[test]
+    fn continuous_action_stride_covers_all_act_dim_elements() {
+        let obs_dtype = DType::NdArray(NdArrayDType::F32);
+        let act_dtype = DType::NdArray(NdArrayDType::F32);
+
+        let (_, act_bytes) = obs_act_byte_strides(8, 3, &obs_dtype, &act_dtype, false);
+
+        assert_eq!(
+            act_bytes,
+            3 * 4,
+            "continuous action stride should cover all act_dim F32 values"
+        );
+    }
+
+    #[test]
+    fn byte_strides_respect_dtype_element_width() {
+        let obs_dtype = DType::NdArray(NdArrayDType::F64);
+        let act_dtype = DType::NdArray(NdArrayDType::I16);
+
+        let (obs_bytes, act_bytes) = obs_act_byte_strides(2, 5, &obs_dtype, &act_dtype, false);
+
+        assert_eq!(obs_bytes, 2 * 8);
+        assert_eq!(act_bytes, 5 * 2);
+    }
+
+    #[test]
+    fn mask_flags_decode_to_zero_and_one_f32_values() {
+        let flags: [u8; 4] = [0, 1, 0, 1];
+        let decoded = mask_flags_to_f32_bytes(&flags);
+
+        let values: &[f32] = bytemuck::cast_slice(&decoded);
+        assert_eq!(values, &[0.0f32, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn mask_flags_treat_any_nonzero_byte_as_eligible() {
+        // Environments may use any truthy byte (not just 1) to mark eligibility.
+        let flags: [u8; 2] = [0, 42];
+        let decoded = mask_flags_to_f32_bytes(&flags);
+
+        let values: &[f32] = bytemuck::cast_slice(&decoded);
+        assert_eq!(values, &[0.0f32, 1.0]);
     }
 }

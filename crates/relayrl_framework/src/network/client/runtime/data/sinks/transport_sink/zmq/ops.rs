@@ -1,24 +1,26 @@
 //! ZMQ transport operations for the experimental client transport path.
 //!
-//! The local/default client runtime is the supported `0.5.0-beta` path. ZMQ-backed workflows in
+//! The local/default client runtime is the supported `0.5.0` path. ZMQ-backed workflows in
 //! this module remain experimental.
 
 use crate::network::HyperparameterArgs;
 use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
-use crate::network::client::runtime::coordination::lifecycle_manager::{
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
+use crate::network::client::runtime::control::lifecycle_manager::{
     SharedTransportAddresses, SharedZmqInferenceAddresses, SharedZmqTrainingAddresses,
 };
-use crate::network::client::runtime::coordination::scale_manager::ScalingOperation;
+use crate::network::client::runtime::control::scale_manager::ScalingOperation;
+use crate::network::client::runtime::data::router::{
+    ControlPayload, RoutedMessage, RoutingProtocol,
+};
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 use crate::network::client::runtime::data::sinks::transport_sink::zmq::{
     ZmqClientError, ZmqInferenceExecution, ZmqTrainingExecution,
 };
-use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
 use crossbeam_utils::CachePadded;
 
 use active_uuid_registry::UuidPoolError;
-use active_uuid_registry::interface::{remove_id, reserve_id_with};
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
 use relayrl_types::data::trajectory::EncodedTrajectory;
@@ -75,7 +77,7 @@ pub(super) struct ZmqSocketPool {
 /// Application-level state (model version, algorithm initialization) is managed
 /// by the dispatcher layer (see `transport_dispatcher.rs`).
 pub(super) struct ZmqPool {
-    client_namespace: Arc<str>,
+    client_namespace: ClientNamespace,
     pub(super) zmq_socket_context: Context,
     cached_addresses: Option<DashMap<Uuid, Arc<RwLock<SharedTransportAddresses>>>>,
     cached_sockets: Arc<ZmqSocketPool>,
@@ -103,7 +105,7 @@ enum SocketPoolType {
 }
 
 impl ZmqPool {
-    pub fn new(client_namespace: Arc<str>) -> Self {
+    pub fn new(client_namespace: ClientNamespace) -> Self {
         Self {
             client_namespace,
             zmq_socket_context: Context::new(),
@@ -128,13 +130,10 @@ impl ZmqPool {
         let socket = zmq_socket_context.socket(zmq::DEALER)?;
 
         // Set socket identity
-        let identity: SocketUuid = reserve_id_with(
-            self.client_namespace.as_ref(),
-            crate::network::ZMQ_CLIENT_CONTEXT,
-            117,
-            100,
-        )
-        .map_err(ZmqPoolError::from)?;
+        let identity: SocketUuid = self
+            .client_namespace
+            .reserve_id_with(crate::network::ZMQ_CLIENT_CONTEXT, 117, 100)
+            .map_err(ZmqPoolError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         // Set socket options for performance
@@ -156,13 +155,10 @@ impl ZmqPool {
     ) -> Result<Socket, ZmqPoolError> {
         let socket = zmq_socket_context.socket(zmq::PUSH)?;
 
-        let identity: SocketUuid = reserve_id_with(
-            self.client_namespace.as_ref(),
-            crate::network::ZMQ_CLIENT_CONTEXT,
-            67,
-            100,
-        )
-        .map_err(ZmqPoolError::from)?;
+        let identity: SocketUuid = self
+            .client_namespace
+            .reserve_id_with(crate::network::ZMQ_CLIENT_CONTEXT, 67, 100)
+            .map_err(ZmqPoolError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         // Set send timeout to non-blocking
@@ -181,13 +177,10 @@ impl ZmqPool {
     ) -> Result<Socket, ZmqPoolError> {
         let socket = zmq_socket_context.socket(zmq::SUB)?;
 
-        let identity: SocketUuid = reserve_id_with(
-            self.client_namespace.as_ref(),
-            crate::network::ZMQ_CLIENT_CONTEXT,
-            69,
-            100,
-        )
-        .map_err(ZmqPoolError::from)?;
+        let identity: SocketUuid = self
+            .client_namespace
+            .reserve_id_with(crate::network::ZMQ_CLIENT_CONTEXT, 69, 100)
+            .map_err(ZmqPoolError::from)?;
         socket.set_identity(identity.as_bytes())?;
 
         socket.set_subscribe(b"")?;
@@ -656,21 +649,19 @@ impl ZmqInferenceOps {
     }
 
     pub(super) fn shutdown(&self) -> Result<(), TransportError> {
-        if let Some(sockets) = &self
-            .zmq_pool
-            .read()
-            .map_err(|e| {
-                TransportError::InvalidState(format!(
-                    "Failed to read ZMQ pool during inference shutdown: {}",
-                    e
-                ))
-            })?
-            .cached_sockets
-            .inference_dealer_socket
-        {
+        let pool_guard = self.zmq_pool.read().map_err(|e| {
+            TransportError::InvalidState(format!(
+                "Failed to read ZMQ pool during inference shutdown: {}",
+                e
+            ))
+        })?;
+
+        if let Some(sockets) = &pool_guard.cached_sockets.inference_dealer_socket {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_dealer_socket", socket_id)
+                pool_guard
+                    .client_namespace
+                    .remove_id(crate::network::ZMQ_CLIENT_CONTEXT, socket_id)
                     .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
@@ -682,7 +673,7 @@ impl ZmqInferenceOps {
 }
 
 /// Experimental client-side ZMQ inference operations. These request paths are not implemented as
-/// part of the `0.5.0-beta` support promise.
+/// part of the `0.5.0` support promise.
 impl ZmqInferenceExecution for ZmqInferenceOps {
     fn execute_send_inference_request(
         &self,
@@ -805,90 +796,65 @@ impl ZmqTrainingOps {
             })?
             .begin_shutdown();
 
-        if let Some(sockets) = &self
-            .zmq_pool
-            .read()
-            .map_err(|e| {
-                TransportError::SendTrajError(format!(
-                    "Failed to read ZMQ pool during cache removal: {}",
-                    e
-                ))
-            })?
-            .cached_sockets
-            .model_dealer_socket
-        {
+        let pool_guard = self.zmq_pool.read().map_err(|e| {
+            TransportError::SendTrajError(format!(
+                "Failed to read ZMQ pool during cache removal: {}",
+                e
+            ))
+        })?;
+
+        if let Some(sockets) = &pool_guard.cached_sockets.model_dealer_socket {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_dealer_socket", socket_id)
+                pool_guard
+                    .client_namespace
+                    .remove_id(crate::network::ZMQ_CLIENT_CONTEXT, socket_id)
                     .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
         }
 
-        if let Some(sockets) = &self
-            .zmq_pool
-            .read()
-            .map_err(|e| {
-                TransportError::SendTrajError(format!(
-                    "Failed to read ZMQ pool during cache removal: {}",
-                    e
-                ))
-            })?
-            .cached_sockets
-            .model_sub_socket
-        {
+        if let Some(sockets) = &pool_guard.cached_sockets.model_sub_socket {
             for entry in sockets.iter() {
                 let socket_id = *entry.key();
-                remove_id("client", "zmq_sub_socket", socket_id).map_err(TransportError::from)?;
-
-                sockets.remove(&socket_id);
-            }
-        }
-
-        if let Some(sockets) = &self
-            .zmq_pool
-            .read()
-            .map_err(|e| {
-                TransportError::SendTrajError(format!(
-                    "Failed to read ZMQ pool during cache removal: {}",
-                    e
-                ))
-            })?
-            .cached_sockets
-            .traj_push_socket
-        {
-            for entry in sockets.iter() {
-                let socket_id = *entry.key();
-                remove_id("client", "zmq_push_socket", socket_id).map_err(TransportError::from)?;
-
-                sockets.remove(&socket_id);
-            }
-        }
-
-        if let Some(sockets) = &self
-            .zmq_pool
-            .read()
-            .map_err(|e| {
-                TransportError::SendTrajError(format!(
-                    "Failed to read ZMQ pool during cache removal: {}",
-                    e
-                ))
-            })?
-            .cached_sockets
-            .scaling_dealer_socket
-        {
-            for entry in sockets.iter() {
-                let socket_id = *entry.key();
-                remove_id("client", "zmq_dealer_socket", socket_id)
+                pool_guard
+                    .client_namespace
+                    .remove_id(crate::network::ZMQ_CLIENT_CONTEXT, socket_id)
                     .map_err(TransportError::from)?;
 
                 sockets.remove(&socket_id);
             }
         }
 
-        let (client_namspace, zmq_context, transport_id) = self.transport_entry.clone();
-        remove_id(client_namspace.as_ref(), zmq_context.as_ref(), transport_id)
+        if let Some(sockets) = &pool_guard.cached_sockets.traj_push_socket {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                pool_guard
+                    .client_namespace
+                    .remove_id(crate::network::ZMQ_CLIENT_CONTEXT, socket_id)
+                    .map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        if let Some(sockets) = &pool_guard.cached_sockets.scaling_dealer_socket {
+            for entry in sockets.iter() {
+                let socket_id = *entry.key();
+                pool_guard
+                    .client_namespace
+                    .remove_id(crate::network::ZMQ_CLIENT_CONTEXT, socket_id)
+                    .map_err(TransportError::from)?;
+
+                sockets.remove(&socket_id);
+            }
+        }
+
+        let (_, zmq_context, transport_id) = self.transport_entry.clone();
+        pool_guard
+            .client_namespace
+            .remove_id(zmq_context.as_ref(), transport_id)
             .map_err(TransportError::from)?;
 
         Ok(())
@@ -1044,7 +1010,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ZmqTrainingExecution<B> for ZmqTr
         agent_listener_address: &str,
     ) -> Result<(), TransportError> {
         // Experimental transport path: shared vs independent server-side algorithm
-        // initialization is not finalized in `0.5.0-beta`.
+        // initialization is not finalized in `0.5.0`.
         let validated_entry = validate_entry(scaling_entry)?;
         let (client_namespace, manager_context, scaling_id) = validated_entry.clone();
 
@@ -2138,14 +2104,17 @@ mod tests {
         assert_eq!(routed_message.actor_id, Uuid::from_bytes([1; 16]));
         assert!(matches!(
             routed_message.protocol,
-            RoutingProtocol::ModelUpdate
-        ));
-        match routed_message.payload {
-            RoutedPayload::ModelUpdate {
-                model_bytes,
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                ref model_bytes,
                 version,
-            } => {
-                assert_eq!(model_bytes, vec![10, 20]);
+            })
+        ));
+        match routed_message.protocol {
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                ref model_bytes,
+                version,
+            }) => {
+                assert_eq!(*model_bytes, vec![10, 20]);
                 assert_eq!(version, 7);
             }
             _ => panic!("expected model update payload"),
@@ -2190,9 +2159,16 @@ mod tests {
         }
     }
 
+    fn owned_test_namespace(prefix: &str) -> ClientNamespace {
+        let namespace_str = format!("{}-{}", prefix, Uuid::new_v4());
+        let handle = active_uuid_registry::interface::reserve_owned_namespace(&namespace_str)
+            .expect("reserve owned test namespace");
+        ClientNamespace::new(handle, Arc::from(namespace_str))
+    }
+
     #[test]
     fn register_and_stop_model_listener_updates_flag() {
-        let pool = ZmqPool::new(Arc::from("test-client"));
+        let pool = ZmqPool::new(owned_test_namespace("test-client"));
         let receiver_id = Uuid::new_v4();
 
         let listener_shutdown = pool.register_model_listener(&receiver_id);
@@ -2205,7 +2181,7 @@ mod tests {
 
     #[test]
     fn begin_shutdown_marks_transport_and_active_listeners() {
-        let pool = ZmqPool::new(Arc::from("test-client"));
+        let pool = ZmqPool::new(owned_test_namespace("test-client"));
         let receiver_id = Uuid::new_v4();
         let listener_shutdown = pool.register_model_listener(&receiver_id);
 
@@ -2217,7 +2193,7 @@ mod tests {
 
     #[test]
     fn unregister_model_listener_removes_flag_entry() {
-        let pool = ZmqPool::new(Arc::from("test-client"));
+        let pool = ZmqPool::new(owned_test_namespace("test-client"));
         let receiver_id = Uuid::new_v4();
 
         let _ = pool.register_model_listener(&receiver_id);

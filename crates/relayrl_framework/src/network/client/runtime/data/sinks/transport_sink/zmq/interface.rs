@@ -1,17 +1,17 @@
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, AlgorithmInitArgs, ModelMode,
+    ActorDataMode, ActorInferenceMode, AlgorithmInitArgs, ModelMode,
 };
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::data::router::RoutedMessage;
 use crate::network::client::runtime::data::sinks::transport_sink::combine_scaling_results;
 use crate::network::client::runtime::data::sinks::transport_sink::{
     ScalingOperation, SyncClientInferenceTransportOps, SyncClientScalingTransportOps,
     SyncClientTrainingTransportOps, SyncClientTransportInterface, TransportError, TransportUuid,
 };
-use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
 
-use active_uuid_registry::interface::reserve_id_with;
 use relayrl_types::prelude::action::RelayRLAction;
 use relayrl_types::prelude::model::ModelModule;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
@@ -47,16 +47,12 @@ pub(crate) struct ZmqInterface<B: Backend + BackendMatcher<Backend = B>> {
 
 impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> for ZmqInterface<B> {
     fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         shared_client_modes: Arc<ClientModes>,
     ) -> Result<Self, TransportError> {
-        let transport_id: TransportUuid = reserve_id_with(
-            client_namespace.as_ref(),
-            crate::network::ZMQ_CLIENT_CONTEXT,
-            42,
-            100,
-        )
-        .map_err(TransportError::from)?;
+        let transport_id: TransportUuid = client_namespace
+            .reserve_id_with(crate::network::ZMQ_CLIENT_CONTEXT, 42, 100)
+            .map_err(TransportError::from)?;
 
         let transport_entry = (
             client_namespace.to_string(),
@@ -64,7 +60,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
             transport_id,
         );
 
-        let zmq_pool = Arc::new(RwLock::new(ZmqPool::new(client_namespace.clone())));
+        let zmq_pool = Arc::new(RwLock::new(ZmqPool::new(client_namespace)));
         let zmq_inference_ops = ZmqInferenceOps::new(transport_entry.clone(), zmq_pool.clone());
         let zmq_training_ops = ZmqTrainingOps::new(transport_entry, zmq_pool.clone());
 
@@ -80,14 +76,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
                     config,
                 })
             }
-            ActorInferenceMode::Local(_) => None,
-            ActorInferenceMode::ServerOverflow(_, _) => todo!(),
+            ActorInferenceMode::Client(_) => None,
+            ActorInferenceMode::ClientFallback(_, _) => todo!(),
         };
 
-        let training_protocol = match shared_client_modes.actor_training_data_mode {
-            ActorTrainingDataMode::Online(_)
-            | ActorTrainingDataMode::OnlineWithFiles(_, _)
-            | ActorTrainingDataMode::OnlineWithMemory(_) => {
+        let training_protocol = match shared_client_modes.actor_data_mode {
+            ActorDataMode::Online(_)
+            | ActorDataMode::OnlineWithFiles(_, _)
+            | ActorDataMode::OnlineWithCache(_, _) => {
                 let config = ZmqPolicyConfig::for_training();
                 Some(ZmqProtocol {
                     circuit_breaker: CircuitBreaker::new(
@@ -103,14 +99,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> SyncClientTransportInterface<B> f
 
         let scaling_protocol = match (
             &shared_client_modes.actor_inference_mode,
-            &shared_client_modes.actor_training_data_mode,
+            &shared_client_modes.actor_data_mode,
         ) {
             (
-                ActorInferenceMode::Local(_),
-                ActorTrainingDataMode::Disabled
-                | ActorTrainingDataMode::OfflineWithFiles(_)
-                | ActorTrainingDataMode::OfflineWithMemory
-                | ActorTrainingDataMode::OfflineWithFilesAndMemory(_),
+                ActorInferenceMode::Client(_),
+                ActorDataMode::Disabled
+                | ActorDataMode::OfflineWithFiles(_)
+                | ActorDataMode::OfflineWithCache(_)
+                | ActorDataMode::OfflineWithFilesAndCache(_, _),
             ) => None,
             _ => {
                 let config = ZmqPolicyConfig::for_scaling();

@@ -1,4 +1,4 @@
-name: Rust
+name: RelayRL CI
 
 on:
   push:
@@ -10,30 +10,105 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - run: cargo fmt --all -- --check
 
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo clippy --workspace --all-targets
+          --no-default-features --features client -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo test --workspace
+          --no-default-features --features "client logging-init"
+      - run: >
+          cargo test -p relayrl --doc
+          --no-default-features --features client
+
+  features:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        toolchain:
-          - stable
-          - beta
-    defaults:
-      run:
-        working-directory: crates
-
+        include:
+          - name: offline
+            pkg: relayrl
+            features: client
+          - name: offline-obs
+            pkg: relayrl
+            features: "client metrics logging-init"
     steps:
-    - uses: actions/checkout@v4
-    - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
-    - name: Build framework (offline)
-      run: cargo build -p relayrl --release --no-default-features --features client --verbose
-    - name: Build framework (online::zmq)
-      run: cargo build -p relayrl --release --no-default-features --features "client zmq-transport" --verbose
-    - name: Build framework (online::nats)
-      run: cargo build -p relayrl --release --no-default-features --features "client nats-transport" --verbose
-    - name: Build framework (online::zmq&nats)
-      run: cargo build -p relayrl --release --no-default-features --features "client zmq-transport nats-transport" --verbose
-    # - name: Run tests
-    #   run: cargo test --release --verbose
-    # - name: Run benchmarks
-    #   run: cargo bench --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native deps
+        if: contains(matrix.features, 'zmq')
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+      - run: >
+          cargo check -p ${{ matrix.pkg }} --release
+          --no-default-features --features "${{ matrix.features }}"
+
+  # Experimental transports (zmq/nats) are not part of the 0.5.0 support promise. This job
+  # always runs so failures are visible, but `continue-on-error` keeps it from blocking the
+  # aggregate `ci` gate, which intentionally omits `experimental` from its success check below.
+  experimental:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: zmq (experimental)
+            features: "client zmq-transport"
+          - name: nats (experimental)
+            features: "client nats-transport"
+          - name: zmq-nats (experimental)
+            features: "client zmq-transport nats-transport"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native deps
+        if: contains(matrix.features, 'zmq')
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+      - run: >
+          cargo check -p relayrl_framework --release
+          --no-default-features --features "${{ matrix.features }}"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps
+        env: { RUSTDOCFLAGS: -D warnings }
+
+  ci:
+    if: always()
+    needs: [fmt, clippy, test, features, docs, experimental]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          [ "${{ needs.fmt.result }}" = success ] &&
+          [ "${{ needs.clippy.result }}" = success ] &&
+          [ "${{ needs.test.result }}" = success ] &&
+          [ "${{ needs.features.result }}" = success ] &&
+          [ "${{ needs.docs.result }}" = success ]

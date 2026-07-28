@@ -1,17 +1,17 @@
 use crate::network::client::agent::ClientModes;
 use crate::network::client::agent::{
-    ActorInferenceMode, ActorTrainingDataMode, AlgorithmInitArgs, ModelMode,
+    ActorDataMode, ActorInferenceMode, AlgorithmInitArgs, ModelMode,
 };
-use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::control::coordinator::ClientNamespace;
+use crate::network::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::network::client::runtime::data::router::RoutedMessage;
 use crate::network::client::runtime::data::sinks::transport_sink::{
     AsyncClientInferenceTransportOps, AsyncClientScalingTransportOps,
     AsyncClientTrainingTransportOps, AsyncClientTransportInterface, ScalingOperation,
     TransportError, TransportUuid,
 };
-use crate::network::client::runtime::router::RoutedMessage;
 use crate::utilities::configuration::Algorithm;
 
-use active_uuid_registry::interface::reserve_id_with;
 use relayrl_types::HyperparameterArgs;
 use relayrl_types::prelude::action::RelayRLAction;
 use relayrl_types::prelude::model::ModelModule;
@@ -59,16 +59,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
     for NatsInterface<B>
 {
     async fn new(
-        client_namespace: Arc<str>,
+        client_namespace: ClientNamespace,
         shared_client_modes: Arc<ClientModes>,
     ) -> Result<Self, TransportError> {
-        let _transport_id: TransportUuid = reserve_id_with(
-            client_namespace.as_ref(),
-            crate::network::NATS_CLIENT_CONTEXT,
-            42,
-            100,
-        )
-        .map_err(TransportError::from)?;
+        let _transport_id: TransportUuid = client_namespace
+            .reserve_id_with(crate::network::NATS_CLIENT_CONTEXT, 42, 100)
+            .map_err(TransportError::from)?;
 
         let transport_entry = (
             client_namespace.to_string(),
@@ -76,7 +72,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
         );
 
         let nats_connection_manager = Arc::new(RwLock::new(NatsConnectionManager::new(
-            client_namespace.clone(),
+            client_namespace.as_arc(),
         )));
         let nats_inference_ops =
             NatsInferenceOps::new(transport_entry.clone(), nats_connection_manager.clone());
@@ -95,14 +91,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
                     config,
                 })
             }
-            ActorInferenceMode::Local(_) => None,
-            ActorInferenceMode::ServerOverflow(_, _) => todo!(),
+            ActorInferenceMode::Client(_) => None,
+            ActorInferenceMode::ClientFallback(..) => todo!(),
         };
 
-        let training_protocol = match shared_client_modes.actor_training_data_mode {
-            ActorTrainingDataMode::Online(_)
-            | ActorTrainingDataMode::OnlineWithFiles(_, _)
-            | ActorTrainingDataMode::OnlineWithMemory(_) => {
+        let training_protocol = match shared_client_modes.actor_data_mode {
+            ActorDataMode::Online(_)
+            | ActorDataMode::OnlineWithFiles(..)
+            | ActorDataMode::OnlineWithCache(..) => {
                 let config = NatsPolicyConfig::for_training();
                 Some(NatsProtocol {
                     circuit_breaker: CircuitBreaker::new(
@@ -118,14 +114,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
 
         let scaling_protocol = match (
             &shared_client_modes.actor_inference_mode,
-            &shared_client_modes.actor_training_data_mode,
+            &shared_client_modes.actor_data_mode,
         ) {
             (
-                ActorInferenceMode::Local(_),
-                ActorTrainingDataMode::Disabled
-                | ActorTrainingDataMode::OfflineWithFiles(_)
-                | ActorTrainingDataMode::OfflineWithMemory
-                | ActorTrainingDataMode::OfflineWithFilesAndMemory(_),
+                ActorInferenceMode::Client(_),
+                ActorDataMode::Disabled
+                | ActorDataMode::OfflineWithFiles(_)
+                | ActorDataMode::OfflineWithCache(_)
+                | ActorDataMode::OfflineWithFilesAndCache(..),
             ) => None,
             _ => {
                 let config = NatsPolicyConfig::for_scaling();

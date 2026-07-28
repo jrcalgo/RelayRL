@@ -1,17 +1,18 @@
 pub mod hot_reloadable;
+#[cfg(feature = "onnx-model")]
+pub mod onnx;
 pub mod utils;
 
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::fs;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "onnx-model")]
 use std::sync::Mutex;
 
 use burn_tensor::backend::Backend;
-use ort::tensor::IntoTensorElementType;
 use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
@@ -35,14 +36,12 @@ use crate::data::tensor::TchDType;
 use tch::{CModule, Tensor as TchTensor, no_grad};
 
 #[cfg(feature = "onnx-model")]
-use ort::{
-    session::{Session, SessionInputValue},
-    value::Value as OrtValue,
-};
+use ort::session::Session;
 
 pub use burn_tensor::Shape;
 pub use hot_reloadable::HotReloadableModel;
 
+/// Errors from model loading, saving, format detection, and inference execution.
 #[derive(Debug, Clone, Error)]
 pub enum ModelError {
     #[error("Serialization error: {0}")]
@@ -83,6 +82,7 @@ impl From<serde_json::Error> for ModelError {
     }
 }
 
+/// On-disk format of a model file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelFileType {
@@ -91,6 +91,7 @@ pub enum ModelFileType {
 }
 
 impl ModelFileType {
+    /// Infers the model file type from the file extension (`pt` or `onnx`).
     pub fn from_path(path: &Path) -> Result<Self, ModelError> {
         match path
             .extension()
@@ -107,6 +108,7 @@ impl ModelFileType {
     }
 }
 
+/// JSON metadata (`metadata.json`) that describes a model directory: shapes, dtypes, file name, and default device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMetadata {
     pub model_file: String,
@@ -119,6 +121,7 @@ pub struct ModelMetadata {
 }
 
 impl ModelMetadata {
+    /// Reads and validates `metadata.json` from `dir`.
     pub fn load_from_dir(dir: impl Into<PathBuf>) -> Result<Self, ModelError> {
         let dir: PathBuf = dir.into();
         let meta_path: PathBuf = dir.join("metadata.json");
@@ -139,6 +142,7 @@ impl ModelMetadata {
         Ok(meta)
     }
 
+    /// Serialises this metadata to `metadata.json` inside `dir`, creating the directory if needed.
     pub fn save_to_dir(&self, dir: impl Into<PathBuf>) -> Result<(), ModelError> {
         let dir: PathBuf = dir.into();
         fs::create_dir_all(&dir)?;
@@ -148,6 +152,7 @@ impl ModelMetadata {
         Ok(())
     }
 
+    /// Returns the resolved path to the model file by joining `dir` and `model_file`.
     pub fn resolve_model_path(&self, dir: &Path) -> PathBuf {
         dir.join(&self.model_file)
     }
@@ -158,7 +163,7 @@ pub enum InferenceModel {
     #[cfg(feature = "tch-model")]
     Pt(Arc<CModule>),
     #[cfg(feature = "onnx-model")]
-    Onnx(Arc<Mutex<Session>>),
+    Onnx(Arc<Mutex<Session>>, Arc<onnx::OnnxSignature>),
     Unsupported,
 }
 
@@ -202,13 +207,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
             ModelFileType::Onnx => {
                 #[cfg(feature = "onnx-model")]
                 {
-                    let session = Arc::new(std::sync::Mutex::new(
-                        Session::builder()
-                            .map_err(|err| ModelError::BackendError(err.to_string()))?
-                            .commit_from_file(path)
-                            .map_err(|err| ModelError::BackendError(err.to_string()))?,
-                    ));
-                    Ok(InferenceModel::Onnx(session))
+                    let (session, signature) = onnx::commit_and_introspect_from_file(path)?;
+                    Ok(InferenceModel::Onnx(session, Arc::new(signature)))
                 }
                 #[cfg(not(feature = "onnx-model"))]
                 {
@@ -237,17 +237,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
     pub fn from_onnx_bytes(bytes: Vec<u8>) -> Result<Self, ModelError> {
         #[cfg(feature = "onnx-model")]
         {
-            let session = Arc::new(std::sync::Mutex::new(
-                Session::builder()
-                    .map_err(|e| ModelError::BackendError(e.to_string()))?
-                    .commit_from_memory(&bytes)
-                    .map_err(|e| ModelError::BackendError(e.to_string()))?,
-            ));
+            let (session, signature) = onnx::commit_and_introspect_from_memory(&bytes)?;
             let raw_bytes: Arc<[u8]> = bytes.into();
             Ok(Self {
                 file_type: ModelFileType::Onnx,
                 raw_bytes,
-                inference: InferenceModel::Onnx(session),
+                inference: InferenceModel::Onnx(session, Arc::new(signature)),
                 _phantom: PhantomData,
             })
         }
@@ -264,6 +259,33 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
     }
 }
 
+/// Validates a freshly-built `Model` against RelayRL-supplied `metadata`.
+///
+/// For ONNX models this checks the discovered graph signature (I/O count, tensor kind,
+/// element type, and fixed dimensions) against `metadata`; other model kinds are not
+/// currently introspected and pass through unchanged.
+#[cfg_attr(not(feature = "onnx-model"), allow(unused_variables))]
+fn validate_model_against_metadata<B: Backend + BackendMatcher<Backend = B>>(
+    model: &Model<B>,
+    metadata: &ModelMetadata,
+) -> Result<(), ModelError> {
+    match model.inference() {
+        #[cfg(feature = "onnx-model")]
+        InferenceModel::Onnx(_, signature) => {
+            onnx::validate_metadata_against_signature(metadata, signature)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A loaded model bundle: the inference engine and its `ModelMetadata`. Use `load_from_path` to construct.
+///
+/// ```ignore
+/// use relayrl::types::model::ModelModule;
+/// use burn_ndarray::NdArray;
+///
+/// let model = ModelModule::<NdArray>::load_from_path("model_dir")?;
+/// ```
 #[derive(Clone)]
 #[cfg(all(
     any(feature = "tch-model", feature = "onnx-model"),
@@ -304,6 +326,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         let file_type = ModelFileType::from_path(&model_path)?;
         let model = Model::<B>::load_from_file(file_type, &model_path)?;
 
+        Self::finish(model, metadata)
+    }
+
+    /// Validates `model` against `metadata` (schema/type/shape compatibility for ONNX graphs)
+    /// before assembling the final `ModelModule`. All constructors route through this so no
+    /// path can produce a module whose declared metadata disagrees with the loaded model.
+    fn finish(model: Model<B>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+        validate_model_against_metadata(&model, &metadata)?;
         Ok(Self { model, metadata })
     }
 
@@ -317,10 +347,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
     }
 
     /// Build a `ModelModule` directly from raw ONNX bytes without touching the filesystem.
-    /// The caller supplies the `metadata` describing input/output shapes and dtypes.
+    /// The caller supplies the `metadata` describing input/output shapes and dtypes; it is
+    /// validated against the ONNX graph's discovered signature before this returns.
     pub fn from_onnx_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
         let model = Model::<B>::from_onnx_bytes(bytes)?;
-        Ok(Self { model, metadata })
+        Self::finish(model, metadata)
     }
 
     /// Build a `ModelModule` from TorchScript bytes via a temporary file.
@@ -346,35 +377,66 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             .map_err(|e| ModelError::BackendError(format!("Failed to load CModule: {}", e)))?;
 
         let raw_bytes: Arc<[u8]> = bytes.into();
-        let model = Self {
-            model: Model {
-                file_type: ModelFileType::Pt,
-                raw_bytes,
-                inference: InferenceModel::Pt(Arc::new(module)),
-                _phantom: PhantomData,
-            },
-            metadata,
+        let model = Model {
+            file_type: ModelFileType::Pt,
+            raw_bytes,
+            inference: InferenceModel::Pt(Arc::new(module)),
+            _phantom: PhantomData,
         };
 
         // Temp file is automatically cleaned up when dropped
-        Ok(model)
+        Self::finish(model, metadata)
     }
 
+    /// Stores TorchScript bytes without an active inference engine when the `tch-model` feature is disabled.
     #[cfg(not(feature = "tch-model"))]
     pub fn from_pt_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
         let raw_bytes: Arc<[u8]> = bytes.into();
-        Ok(Self {
-            model: Model {
-                file_type: ModelFileType::Pt,
-                raw_bytes,
-                inference: InferenceModel::Unsupported,
-                _phantom: PhantomData,
-            },
-            metadata,
-        })
+        let model = Model {
+            file_type: ModelFileType::Pt,
+            raw_bytes,
+            inference: InferenceModel::Unsupported,
+            _phantom: PhantomData,
+        };
+        Self::finish(model, metadata)
     }
 
-    /// Generic forward; dispatches to ONNX or LibTorch paths based on metadata.
+    /// Fallible single-step inference. Prefer this over [`Self::step`] in runtime paths.
+    ///
+    /// Falls back to a zero action only for [`ModelError::UnsupportedModelType`] (no inference
+    /// engine compiled in). Genuine engine/conversion failures are propagated.
+    #[cfg(all(
+        any(feature = "tch-model", feature = "onnx-model"),
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    #[allow(clippy::type_complexity)]
+    pub fn try_step<const D_IN: usize, const D_OUT: usize>(
+        &self,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
+    ) -> Result<(TensorData, Option<TensorData>, HashMap<String, RelayRLData>), ModelError> {
+        let base_action = match self.run_inference::<D_IN, D_OUT>(observation) {
+            Ok(action) => action,
+            Err(ModelError::UnsupportedModelType(_)) => self.zeros_action::<D_OUT>()?,
+            Err(error) => return Err(error),
+        };
+
+        let mask_td = mask
+            .map(|mask_tensor| self.mask_to_tensor_data(mask_tensor))
+            .transpose()?;
+
+        let act_td = match mask_td.as_ref() {
+            Some(mask) => Self::apply_mask_to_action(base_action, mask),
+            None => base_action,
+        };
+
+        Ok((act_td, mask_td, HashMap::new()))
+    }
+
+    /// Compatibility wrapper around [`Self::try_step`]. Prefer `try_step` in new code.
+    ///
+    /// On error, logs and returns a zero action (or an empty tensor if zero construction also
+    /// fails) rather than panicking.
     #[cfg(all(
         any(feature = "tch-model", feature = "onnx-model"),
         any(feature = "ndarray-backend", feature = "tch-backend")
@@ -384,59 +446,32 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         observation: Arc<AnyBurnTensor<B, D_IN>>,
         mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
     ) -> (TensorData, Option<TensorData>, HashMap<String, RelayRLData>) {
-        let base_action = self
-            .run_inference::<D_IN, D_OUT>(observation)
-            .unwrap_or_else(|_| {
-                self.zeros_action::<D_OUT>()
-                    .expect("Failed to create zeros action")
-            });
-
-        let mask_td: Option<TensorData> = match mask {
-            Some(mask_tensor) => match mask_tensor.as_ref() {
-                AnyBurnTensor::Float(wrapper) => Some(
-                    TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor.clone(),
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    })
-                    .expect("Failed to convert mask tensor to TensorData"),
-                ),
-                AnyBurnTensor::Int(wrapper) => Some(
-                    TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor.clone(),
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    })
-                    .expect("Failed to convert mask tensor to TensorData"),
-                ),
-                AnyBurnTensor::Bool(wrapper) => Some(
-                    TensorData::try_from(ConversionBurnTensor {
-                        inner: wrapper.tensor.clone(),
-                        conversion_dtype: self.metadata.output_dtype.clone(),
-                    })
-                    .expect("Failed to convert mask tensor to TensorData"),
-                ),
-            },
-            None => None,
-        };
-
-        let act_td: TensorData = match mask_td {
-            Some(ref mask) => {
-                let action_data: Vec<u8> = base_action
-                    .data
-                    .iter()
-                    .zip(mask.data.iter())
-                    .map(|(a, m)| a * m)
-                    .collect();
-                TensorData {
-                    shape: base_action.shape.clone(),
-                    dtype: base_action.dtype.clone(),
-                    data: action_data,
-                    supported_backend: base_action.supported_backend.clone(),
+        match self.try_step::<D_IN, D_OUT>(observation, mask) {
+            Ok(result) => result,
+            Err(error) => {
+                log::error!(
+                    "[ModelModule::step] inference failed, returning zero-action fallback: {error}"
+                );
+                match self.zeros_action::<D_OUT>() {
+                    Ok(action) => (action, None, HashMap::new()),
+                    Err(fallback_error) => {
+                        log::error!(
+                            "[ModelModule::step] zero-action fallback failed: {fallback_error}"
+                        );
+                        (
+                            TensorData::new(
+                                self.metadata.output_shape.clone(),
+                                self.metadata.output_dtype.clone(),
+                                Vec::new(),
+                                TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
+                            ),
+                            None,
+                            HashMap::new(),
+                        )
+                    }
                 }
             }
-            None => base_action,
-        };
-
-        (act_td, mask_td, HashMap::new())
+        }
     }
 
     #[cfg(all(
@@ -444,6 +479,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         any(feature = "ndarray-backend", feature = "tch-backend")
     ))]
     #[allow(clippy::type_complexity)]
+    /// Runs batched inference over a slice of observations, returning one `(action, mask, aux)` per entry.
     pub fn step_batch<const D_IN: usize, const D_OUT: usize>(
         &self,
         observations: &[Arc<AnyBurnTensor<B, D_IN>>],
@@ -476,9 +512,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             .collect::<Result<_, _>>()?;
 
         let batched_input = Self::stack_tensor_data(&observation_data)?;
-        let batched_output = self
-            .run_inference_tensor_data(batched_input)
-            .unwrap_or_else(|_| self.zeros_batch_action(observations.len()));
+        let batched_output = match self.run_inference_tensor_data(batched_input) {
+            Ok(output) => output,
+            Err(ModelError::UnsupportedModelType(_)) => {
+                self.try_zeros_batch_action(observations.len())?
+            }
+            Err(error) => return Err(error),
+        };
         let split_actions = Self::split_tensor_data_rows(batched_output, observations.len())?;
 
         Ok(split_actions
@@ -630,25 +670,31 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         Ok(result)
     }
 
-    fn resolve_device(&self) -> <B as Backend>::Device {
+    /// Resolves the Burn device for this model's preferred/default device.
+    pub(crate) fn try_resolve_device(&self) -> Result<<B as Backend>::Device, ModelError> {
         let preferred = self.metadata.default_device.clone().unwrap_or_default();
         <B as BackendMatcher>::get_device(&preferred)
             .or_else(|_| <B as BackendMatcher>::get_device(&DeviceType::default()))
-            .expect("Failed to resolve backend device")
+            .map_err(|error| {
+                ModelError::BackendError(format!("Failed to resolve backend device: {error}"))
+            })
     }
 
-    fn zeros_batch_action(&self, rows: usize) -> TensorData {
+    fn try_zeros_batch_action(&self, rows: usize) -> Result<TensorData, ModelError> {
         let mut shape = Vec::with_capacity(self.metadata.output_shape.len() + 1);
         shape.push(rows);
         shape.extend(self.metadata.output_shape.iter().copied());
-        let row_zero = self
-            .zeros_action::<1>()
-            .expect("Failed to create zeros action for batch fallback");
+        let row_zero = self.zeros_action::<1>()?;
         let mut data = Vec::with_capacity(row_zero.data.len() * rows);
         for _ in 0..rows {
             data.extend_from_slice(&row_zero.data);
         }
-        TensorData::new(shape, row_zero.dtype, data, row_zero.supported_backend)
+        Ok(TensorData::new(
+            shape,
+            row_zero.dtype,
+            data,
+            row_zero.supported_backend,
+        ))
     }
 
     fn zeros_action<const D_OUT: usize>(&self) -> Result<TensorData, ModelError> {
@@ -873,8 +919,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 self.run_libtorch_step::<D_IN, D_OUT>(module, observation)
             }
             #[cfg(feature = "onnx-model")]
-            InferenceModel::Onnx(session) => {
-                self.run_onnx_step::<D_IN, D_OUT>(session, observation)
+            InferenceModel::Onnx(session, signature) => {
+                let input_data = self.observation_to_tensor_data(observation)?;
+                self.run_onnx_tensor(session, signature, input_data)
             }
             _ => Err(ModelError::UnsupportedModelType(
                 "Unsupported model type".to_string(),
@@ -882,12 +929,38 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         }
     }
 
+    /// Runs inference over a pre-stacked flat `TensorData` batch and returns the output `TensorData`.
     pub fn flat_batch_inference(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
         self.run_inference_tensor_data(input_data)
     }
 
+    /// Fallible zero-filled batch output with the model's output shape, repeated `rows` times.
+    pub fn try_flat_batch_zeros(&self, rows: usize) -> Result<TensorData, ModelError> {
+        self.try_zeros_batch_action(rows)
+    }
+
+    /// Returns a zero-filled output `TensorData` with the model's output shape, repeated `rows` times.
+    ///
+    /// Prefer [`Self::try_flat_batch_zeros`] in runtime paths. On failure this logs and returns an
+    /// empty tensor rather than panicking.
     pub fn flat_batch_zeros(&self, rows: usize) -> TensorData {
-        self.zeros_batch_action(rows)
+        match self.try_flat_batch_zeros(rows) {
+            Ok(data) => data,
+            Err(error) => {
+                log::error!(
+                    "[ModelModule::flat_batch_zeros] {error}; returning empty tensor fallback"
+                );
+                let mut shape = Vec::with_capacity(self.metadata.output_shape.len() + 1);
+                shape.push(rows);
+                shape.extend(self.metadata.output_shape.iter().copied());
+                TensorData::new(
+                    shape,
+                    self.metadata.output_dtype.clone(),
+                    Vec::new(),
+                    TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
+                )
+            }
+        }
     }
 
     fn run_inference_tensor_data(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
@@ -895,10 +968,206 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             #[cfg(feature = "tch-model")]
             InferenceModel::Pt(module) => self.run_libtorch_step_data(module, input_data),
             #[cfg(feature = "onnx-model")]
-            InferenceModel::Onnx(session) => self.run_onnx_step_data(session, input_data),
+            InferenceModel::Onnx(session, signature) => {
+                self.run_onnx_tensor(session, signature, input_data)
+            }
             _ => Err(ModelError::UnsupportedModelType(
                 "Unsupported model type".to_string(),
             )),
+        }
+    }
+
+    /// Runs the ONNX graph's single input → single output tensor pass, binding by the
+    /// discovered input/output names and returning the actual runtime output shape.
+    #[cfg(all(
+        feature = "onnx-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn run_onnx_tensor(
+        &self,
+        session: &Arc<std::sync::Mutex<Session>>,
+        signature: &Arc<onnx::OnnxSignature>,
+        input_data: TensorData,
+    ) -> Result<TensorData, ModelError> {
+        onnx::run_tensor(
+            session,
+            signature,
+            &input_data.dtype,
+            &self.metadata.output_dtype,
+            &input_data.shape,
+            &input_data.data,
+        )
+    }
+
+    #[cfg(all(
+        feature = "tch-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn run_tch_forward(
+        module: &Arc<CModule>,
+        obs_tensor: &TchTensor,
+    ) -> Result<TchTensor, ModelError> {
+        no_grad(|| module.forward_ts(&[obs_tensor])).map_err(|error| {
+            ModelError::BackendError(format!("LibTorch forward pass failed: {error}"))
+        })
+    }
+
+    #[cfg(all(
+        feature = "tch-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn tch_flattened_to_bytes(flattened: TchTensor, dtype: &DType) -> Result<Vec<u8>, ModelError> {
+        match dtype {
+            #[cfg(feature = "ndarray-backend")]
+            DType::NdArray(dtype) => match dtype {
+                NdArrayDType::F16 => {
+                    let vec = Vec::<f16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::F32 => {
+                    let vec = Vec::<f32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::F64 => {
+                    let vec = Vec::<f64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I8 => {
+                    let vec = Vec::<i8>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i8: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I16 => {
+                    let vec = Vec::<i16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I32 => {
+                    let vec = Vec::<i32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::I64 => {
+                    let vec = Vec::<i64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                NdArrayDType::Bool => {
+                    let vec = Vec::<bool>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to bool: {error}"
+                        ))
+                    })?;
+                    Ok(vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect())
+                }
+            },
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(dtype) => match dtype {
+                TchDType::F16 => {
+                    let vec = Vec::<f16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::Bf16 => {
+                    let vec = Vec::<bf16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to bf16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::F32 => {
+                    let vec = Vec::<f32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::F64 => {
+                    let vec = Vec::<f64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to f64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I8 => {
+                    let vec = Vec::<i8>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i8: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I16 => {
+                    let vec = Vec::<i16>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i16: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I32 => {
+                    let vec = Vec::<i32>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i32: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::I64 => {
+                    let vec = Vec::<i64>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to i64: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::U8 => {
+                    let vec = Vec::<u8>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to u8: {error}"
+                        ))
+                    })?;
+                    Ok(bytemuck::cast_slice(&vec).to_vec())
+                }
+                TchDType::Bool => {
+                    let vec = Vec::<bool>::try_from(flattened).map_err(|error| {
+                        ModelError::BackendError(format!(
+                            "Failed to convert LibTorch output to bool: {error}"
+                        ))
+                    })?;
+                    Ok(vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect())
+                }
+            },
         }
     }
 
@@ -989,305 +1258,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             },
         };
 
-        let act_tensor: TchTensor =
-            no_grad(|| module.forward_ts(&[&obs_tensor])).expect("Failed to run forward pass");
+        let act_tensor = Self::run_tch_forward(module, &obs_tensor)?;
         let output_shape: Vec<usize> = act_tensor
             .size()
             .into_iter()
             .map(|dim| dim as usize)
             .collect();
         let flattened_act: TchTensor = act_tensor.flatten(0, -1);
-
-        let act_bytes: Vec<u8> = match &self.metadata.output_dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 => bytemuck::cast_slice(
-                    &Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16"),
-                )
-                .to_vec(),
-                NdArrayDType::F32 => bytemuck::cast_slice(
-                    &Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32"),
-                )
-                .to_vec(),
-                NdArrayDType::F64 => bytemuck::cast_slice(
-                    &Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64"),
-                )
-                .to_vec(),
-                NdArrayDType::I8 => bytemuck::cast_slice(
-                    &Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8"),
-                )
-                .to_vec(),
-                NdArrayDType::I16 => bytemuck::cast_slice(
-                    &Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16"),
-                )
-                .to_vec(),
-                NdArrayDType::I32 => bytemuck::cast_slice(
-                    &Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32"),
-                )
-                .to_vec(),
-                NdArrayDType::I64 => bytemuck::cast_slice(
-                    &Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64"),
-                )
-                .to_vec(),
-                NdArrayDType::Bool => Vec::<bool>::try_from(flattened_act)
-                    .expect("Failed to convert flattened_act to bool")
-                    .into_iter()
-                    .map(|b| if b { 1u8 } else { 0u8 })
-                    .collect(),
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(dtype) => match dtype {
-                TchDType::F16 => bytemuck::cast_slice(
-                    &Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16"),
-                )
-                .to_vec(),
-                TchDType::Bf16 => bytemuck::cast_slice(
-                    &Vec::<bf16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bf16"),
-                )
-                .to_vec(),
-                TchDType::F32 => bytemuck::cast_slice(
-                    &Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32"),
-                )
-                .to_vec(),
-                TchDType::F64 => bytemuck::cast_slice(
-                    &Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64"),
-                )
-                .to_vec(),
-                TchDType::I8 => bytemuck::cast_slice(
-                    &Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8"),
-                )
-                .to_vec(),
-                TchDType::I16 => bytemuck::cast_slice(
-                    &Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16"),
-                )
-                .to_vec(),
-                TchDType::I32 => bytemuck::cast_slice(
-                    &Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32"),
-                )
-                .to_vec(),
-                TchDType::I64 => bytemuck::cast_slice(
-                    &Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64"),
-                )
-                .to_vec(),
-                TchDType::U8 => bytemuck::cast_slice(
-                    &Vec::<u8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to u8"),
-                )
-                .to_vec(),
-                TchDType::Bool => Vec::<bool>::try_from(flattened_act)
-                    .expect("Failed to convert flattened_act to bool")
-                    .into_iter()
-                    .map(|b| if b { 1u8 } else { 0u8 })
-                    .collect(),
-            },
-        };
-
-        Ok(TensorData::new(
-            output_shape,
-            self.metadata.output_dtype.clone(),
-            act_bytes,
-            TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
-        ))
-    }
-
-    #[cfg(all(
-        feature = "onnx-model",
-        any(feature = "ndarray-backend", feature = "tch-backend")
-    ))]
-    fn run_onnx_step_data(
-        &self,
-        session: &Arc<std::sync::Mutex<Session>>,
-        input_data: TensorData,
-    ) -> Result<TensorData, ModelError> {
-        fn convert_obs_to_act<IN, OUT>(
-            tensor_data: TensorData,
-            session_: &Arc<std::sync::Mutex<Session>>,
-        ) -> Result<Vec<u8>, ModelError>
-        where
-            IN: IntoTensorElementType
-                + ort::tensor::PrimitiveTensorElementType
-                + Debug
-                + Clone
-                + bytemuck::Pod,
-            OUT: IntoTensorElementType
-                + ort::tensor::PrimitiveTensorElementType
-                + Debug
-                + Clone
-                + bytemuck::Pod,
-        {
-            let typed_data: &[IN] = bytemuck::cast_slice(&tensor_data.data);
-            let data_vec: Vec<IN> = typed_data.to_vec();
-            let shape = ort::tensor::Shape::from(tensor_data.shape.as_slice());
-            let ort_value = OrtValue::from_array((shape, data_vec)).map_err(|e| {
-                ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
-            })?;
-            let input = SessionInputValue::from(ort_value);
-            let mut inputs_map = HashMap::new();
-            inputs_map.insert("input".to_string(), input);
-            let mut session_guard = session_
-                .lock()
-                .map_err(|e| ModelError::BackendError(format!("Failed to lock session: {}", e)))?;
-            let output_value = session_guard
-                .run(inputs_map)
-                .map_err(|e| ModelError::BackendError(format!("Failed to run session: {}", e)))?;
-            let first = output_value.into_iter().next().ok_or_else(|| {
-                ModelError::BackendError("No output from ONNX session".to_string())
-            })?;
-            let (_, value) = first;
-            let (_, owned_slice) = value.try_extract_tensor::<OUT>().map_err(|e| {
-                ModelError::BackendError(format!("Failed to extract tensor from output: {:?}", e))
-            })?;
-            Ok(bytemuck::cast_slice(owned_slice).to_vec())
-        }
-
-        fn match_obs_to_act<IN>(
-            input_data: TensorData,
-            output_dtype: DType,
-            session_: &Arc<std::sync::Mutex<Session>>,
-        ) -> Result<Vec<u8>, ModelError>
-        where
-            IN: IntoTensorElementType
-                + ort::tensor::PrimitiveTensorElementType
-                + Debug
-                + Clone
-                + bytemuck::Pod,
-        {
-            match &output_dtype {
-                #[cfg(feature = "ndarray-backend")]
-                DType::NdArray(nd) => match nd {
-                    NdArrayDType::F16 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    NdArrayDType::F32 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    NdArrayDType::F64 => convert_obs_to_act::<IN, f64>(input_data, session_),
-                    NdArrayDType::I8 => convert_obs_to_act::<IN, i8>(input_data, session_),
-                    NdArrayDType::I16 => convert_obs_to_act::<IN, i16>(input_data, session_),
-                    NdArrayDType::I32 => convert_obs_to_act::<IN, i32>(input_data, session_),
-                    NdArrayDType::I64 => convert_obs_to_act::<IN, i64>(input_data, session_),
-                    NdArrayDType::Bool => convert_obs_to_act::<IN, u8>(input_data, session_),
-                },
-                #[cfg(feature = "tch-backend")]
-                DType::Tch(tch) => match tch {
-                    TchDType::F16 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    TchDType::Bf16 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    TchDType::F32 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    TchDType::F64 => convert_obs_to_act::<IN, f64>(input_data, session_),
-                    TchDType::I8 => convert_obs_to_act::<IN, i8>(input_data, session_),
-                    TchDType::I16 => convert_obs_to_act::<IN, i16>(input_data, session_),
-                    TchDType::I32 => convert_obs_to_act::<IN, i32>(input_data, session_),
-                    TchDType::I64 => convert_obs_to_act::<IN, i64>(input_data, session_),
-                    TchDType::U8 => convert_obs_to_act::<IN, u8>(input_data, session_),
-                    TchDType::Bool => convert_obs_to_act::<IN, u8>(input_data, session_),
-                },
-            }
-        }
-
-        let rows = input_data.shape.first().copied().unwrap_or(1);
-        let act_bytes = match &input_data.dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(nd) => match nd {
-                NdArrayDType::F16 => match_obs_to_act::<f32>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                NdArrayDType::F32 => match_obs_to_act::<f32>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                NdArrayDType::F64 => match_obs_to_act::<f64>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                NdArrayDType::I8 => {
-                    match_obs_to_act::<i8>(input_data, self.metadata.output_dtype.clone(), session)?
-                }
-                NdArrayDType::I16 => match_obs_to_act::<i16>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                NdArrayDType::I32 => match_obs_to_act::<i32>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                NdArrayDType::I64 => match_obs_to_act::<i64>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                NdArrayDType::Bool => {
-                    match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?
-                }
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(tch) => match tch {
-                TchDType::F16 => match_obs_to_act::<f32>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                TchDType::Bf16 => match_obs_to_act::<f32>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                TchDType::F32 => match_obs_to_act::<f32>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                TchDType::F64 => match_obs_to_act::<f64>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                TchDType::I8 => {
-                    match_obs_to_act::<i8>(input_data, self.metadata.output_dtype.clone(), session)?
-                }
-                TchDType::I16 => match_obs_to_act::<i16>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                TchDType::I32 => match_obs_to_act::<i32>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                TchDType::I64 => match_obs_to_act::<i64>(
-                    input_data,
-                    self.metadata.output_dtype.clone(),
-                    session,
-                )?,
-                TchDType::U8 => {
-                    match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?
-                }
-                TchDType::Bool => {
-                    match_obs_to_act::<u8>(input_data, self.metadata.output_dtype.clone(), session)?
-                }
-            },
-        };
-
-        let mut output_shape = Vec::with_capacity(self.metadata.output_shape.len() + 1);
-        output_shape.push(rows);
-        output_shape.extend(self.metadata.output_shape.iter().copied());
+        let act_bytes = Self::tch_flattened_to_bytes(flattened_act, &self.metadata.output_dtype)?;
 
         Ok(TensorData::new(
             output_shape,
@@ -1538,112 +1516,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             },
         };
 
-        // Step 3
-        let act_tensor: TchTensor =
-            no_grad(|| module.forward_ts(&[&obs_tensor])).expect("Failed to run forward pass");
-
-        // Step 4
+        // Step 3-5: forward, flatten, and convert without panicking.
+        let act_tensor = Self::run_tch_forward(module, &obs_tensor)?;
         let flattened_act: TchTensor = act_tensor.flatten(0, -1);
-
-        // Steps 5
-        let act_bytes: Vec<u8> = match &self.metadata.output_dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(dtype) => match dtype {
-                NdArrayDType::F16 => {
-                    let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::F32 => {
-                    let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::F64 => {
-                    let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I8 => {
-                    let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I16 => {
-                    let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I32 => {
-                    let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::I64 => {
-                    let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                NdArrayDType::Bool => {
-                    let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bool");
-                    vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
-                }
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(dtype) => match dtype {
-                TchDType::F16 => {
-                    let vec: Vec<f16> = Vec::<f16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::Bf16 => {
-                    let vec: Vec<bf16> = Vec::<bf16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bf16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::F32 => {
-                    let vec: Vec<f32> = Vec::<f32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::F64 => {
-                    let vec: Vec<f64> = Vec::<f64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to f64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I8 => {
-                    let vec: Vec<i8> = Vec::<i8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i8");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I16 => {
-                    let vec: Vec<i16> = Vec::<i16>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i16");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I32 => {
-                    let vec: Vec<i32> = Vec::<i32>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i32");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::I64 => {
-                    let vec: Vec<i64> = Vec::<i64>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to i64");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::U8 => {
-                    let vec: Vec<u8> = Vec::<u8>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to u8");
-                    bytemuck::cast_slice(&vec).to_vec()
-                }
-                TchDType::Bool => {
-                    let vec: Vec<bool> = Vec::<bool>::try_from(flattened_act)
-                        .expect("Failed to convert flattened_act to bool");
-                    vec.into_iter().map(|b| if b { 1u8 } else { 0u8 }).collect()
-                }
-            },
-        };
+        let act_bytes = Self::tch_flattened_to_bytes(flattened_act, &self.metadata.output_dtype)?;
 
         // Step 6
         Ok(TensorData::new(
@@ -1652,367 +1528,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             act_bytes,
             TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
         ))
-    }
-
-    #[cfg(all(
-        feature = "onnx-model",
-        any(feature = "ndarray-backend", feature = "tch-backend")
-    ))]
-    fn run_onnx_step<const D_IN: usize, const D_OUT: usize>(
-        &self,
-        session: &Arc<std::sync::Mutex<Session>>,
-        observation: Arc<AnyBurnTensor<B, D_IN>>,
-    ) -> Result<TensorData, ModelError> {
-        // Step 1: Convert AnyBurnTensor to inner Tensor<B, D_IN, K> to metadata dtype using ConversionBurnTensor enum & methods
-        // Step 2: Convert RelayRL TensorData to OrtValue
-        // Step 3: Run ONNX session forward pass inference
-        // Step 4: Extract tensor from output
-        // Step 5: Convert tensor to bytes
-        // Step 6: Convert bytes to RelayRL TensorData
-
-        fn convert_obs_to_act<IN, OUT>(
-            tensor_data: TensorData,
-            session_: &Arc<std::sync::Mutex<Session>>,
-        ) -> Result<Vec<u8>, ModelError>
-        where
-            IN: IntoTensorElementType
-                + ort::tensor::PrimitiveTensorElementType
-                + Debug
-                + Clone
-                + bytemuck::Pod,
-            OUT: IntoTensorElementType
-                + ort::tensor::PrimitiveTensorElementType
-                + Debug
-                + Clone
-                + bytemuck::Pod,
-        {
-            let typed_data: &[IN] = bytemuck::cast_slice(&tensor_data.data);
-
-            let data_vec: Vec<IN> = typed_data.to_vec();
-            let shape = ort::tensor::Shape::from(tensor_data.shape.as_slice());
-
-            let ort_value = OrtValue::from_array((shape, data_vec)).map_err(|e| {
-                ModelError::BackendError(format!("Failed to create OrtValue: {}", e))
-            })?;
-
-            let input = SessionInputValue::from(ort_value);
-
-            let mut inputs_map = HashMap::new();
-            inputs_map.insert("input".to_string(), input);
-            let mut session_guard = session_
-                .lock()
-                .map_err(|e| ModelError::BackendError(format!("Failed to lock session: {}", e)))?;
-            let output_value = session_guard
-                .run(inputs_map)
-                .map_err(|e| ModelError::BackendError(format!("Failed to run session: {}", e)))?;
-            let first = output_value.into_iter().next().ok_or_else(|| {
-                ModelError::BackendError("No output from ONNX session".to_string())
-            })?;
-
-            let (_, value) = first;
-            let (_, owned_slice) = value.try_extract_tensor::<OUT>().map_err(|e| {
-                ModelError::BackendError(format!("Failed to extract tensor from output: {:?}", e))
-            })?;
-
-            let act_vec: Vec<OUT> = owned_slice.to_vec();
-            let act_bytes: Vec<u8> = bytemuck::cast_slice(&act_vec).to_vec();
-            Ok(act_bytes)
-        }
-
-        fn match_obs_to_act<IN>(
-            input_data: TensorData,
-            output_dtype: DType,
-            session_: &Arc<std::sync::Mutex<Session>>,
-        ) -> Result<Vec<u8>, ModelError>
-        where
-            IN: IntoTensorElementType
-                + ort::tensor::PrimitiveTensorElementType
-                + Debug
-                + Clone
-                + bytemuck::Pod,
-        {
-            match &output_dtype {
-                #[cfg(feature = "ndarray-backend")]
-                DType::NdArray(nd) => match nd {
-                    NdArrayDType::F16 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    NdArrayDType::F32 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    NdArrayDType::F64 => convert_obs_to_act::<IN, f64>(input_data, session_),
-                    NdArrayDType::I8 => convert_obs_to_act::<IN, i8>(input_data, session_),
-                    NdArrayDType::I16 => convert_obs_to_act::<IN, i16>(input_data, session_),
-                    NdArrayDType::I32 => convert_obs_to_act::<IN, i32>(input_data, session_),
-                    NdArrayDType::I64 => convert_obs_to_act::<IN, i64>(input_data, session_),
-                    NdArrayDType::Bool => convert_obs_to_act::<IN, u8>(input_data, session_),
-                },
-                #[cfg(feature = "tch-backend")]
-                DType::Tch(tch) => match tch {
-                    TchDType::F16 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    TchDType::Bf16 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    TchDType::F32 => convert_obs_to_act::<IN, f32>(input_data, session_),
-                    TchDType::F64 => convert_obs_to_act::<IN, f64>(input_data, session_),
-                    TchDType::I8 => convert_obs_to_act::<IN, i8>(input_data, session_),
-                    TchDType::I16 => convert_obs_to_act::<IN, i16>(input_data, session_),
-                    TchDType::I32 => convert_obs_to_act::<IN, i32>(input_data, session_),
-                    TchDType::I64 => convert_obs_to_act::<IN, i64>(input_data, session_),
-                    TchDType::U8 => convert_obs_to_act::<IN, u8>(input_data, session_),
-                    TchDType::Bool => convert_obs_to_act::<IN, u8>(input_data, session_),
-                },
-            }
-        }
-
-        // Step 1
-        let act_bytes = match &self.metadata.input_dtype {
-            #[cfg(feature = "ndarray-backend")]
-            DType::NdArray(nd) => match nd {
-                NdArrayDType::F16 => {
-                    // ONNX doesn't support f16, so convert to f32
-                    let obs_tensor_data: TensorData =
-                        observation.clone().into_f32_data().map_err(|e| {
-                            ModelError::BackendError(format!(
-                                "Failed to convert observation to f32 (from f16): {}",
-                                e
-                            ))
-                        })?;
-                    match_obs_to_act::<f32>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                NdArrayDType::F32 => {
-                    let obs_tensor_data = observation.clone().into_f32_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to f32: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<f32>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                NdArrayDType::F64 => {
-                    let obs_tensor_data = observation.clone().into_f64_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to f64: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<f64>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                NdArrayDType::I8 => {
-                    let obs_tensor_data = observation.clone().into_i8_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i8: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i8>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                NdArrayDType::I16 => {
-                    let obs_tensor_data = observation.clone().into_i16_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i16: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i16>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                NdArrayDType::I32 => {
-                    let obs_tensor_data = observation.clone().into_i32_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i32: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i32>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                NdArrayDType::I64 => {
-                    let obs_tensor_data = observation.clone().into_i64_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i64: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i64>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                NdArrayDType::Bool => {
-                    let obs_tensor_data = observation.clone().into_bool_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to bool: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<u8>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-            },
-            #[cfg(feature = "tch-backend")]
-            DType::Tch(tch) => match tch {
-                TchDType::F16 => {
-                    // ONNX doesn't support f16, so convert to f32
-                    let obs_tensor_data = observation.clone().into_f32_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to f32 (from f16): {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<f32>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::Bf16 => {
-                    // ONNX doesn't support bf16, so convert to f32
-                    let obs_tensor_data = observation.clone().into_f32_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to f32 (from bf16): {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<f32>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::F32 => {
-                    let obs_tensor_data = observation.clone().into_f32_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to f32: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<f32>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::F64 => {
-                    let obs_tensor_data = observation.clone().into_f64_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to f64: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<f64>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::I8 => {
-                    let obs_tensor_data = observation.clone().into_i8_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i8: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i8>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::I16 => {
-                    let obs_tensor_data = observation.clone().into_i16_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i16: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i16>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::I32 => {
-                    let obs_tensor_data = observation.clone().into_i32_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i32: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i32>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::I64 => {
-                    let obs_tensor_data = observation.clone().into_i64_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to i64: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<i64>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::U8 => {
-                    let obs_tensor_data = observation.clone().into_u8_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to u8: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<u8>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-                TchDType::Bool => {
-                    let obs_tensor_data = observation.clone().into_bool_data().map_err(|e| {
-                        ModelError::BackendError(format!(
-                            "Failed to convert observation to bool: {}",
-                            e
-                        ))
-                    })?;
-                    match_obs_to_act::<u8>(
-                        obs_tensor_data,
-                        self.metadata.output_dtype.clone(),
-                        session,
-                    )?
-                }
-            },
-        };
-
-        Ok(TensorData {
-            shape: self.metadata.output_shape.clone(),
-            dtype: self.metadata.output_dtype.clone(),
-            data: act_bytes,
-            supported_backend: TensorData::get_backend_from_dtype(&self.metadata.output_dtype),
-        })
     }
 }
 
@@ -2172,7 +1687,7 @@ mod unit_tests {
     fn resolve_device_returns_cpu_for_ndarray_models() {
         let module = stub_module(vec![2]);
         assert!(matches!(
-            module.resolve_device(),
+            module.try_resolve_device().expect("device should resolve"),
             burn_tensor::Device::<NdArray>::Cpu
         ));
     }
@@ -2217,5 +1732,83 @@ mod unit_tests {
                 .flat_map(|value| value.to_le_bytes())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn try_step_falls_back_to_zero_actions_when_inference_is_unavailable() {
+        let module = stub_module(vec![2]);
+        let observation = float_any_tensor(&[1.0, 2.0]);
+        let mask = float_any_tensor(&[1.0, 0.0]);
+
+        let (action, mask_data, aux) = module
+            .try_step::<1, 1>(observation, Some(mask))
+            .expect("UnsupportedModelType should fall back to zeros");
+
+        assert!(aux.is_empty());
+        assert_eq!(action.shape, vec![2]);
+        assert_eq!(action.data, vec![0; 8]);
+        assert_eq!(
+            mask_data.expect("mask data should be preserved").data,
+            [1.0f32, 0.0]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn step_batch_falls_back_only_for_unsupported_model_type() {
+        let module = stub_module(vec![2]);
+        let observations = vec![float_any_tensor(&[1.0, 2.0]), float_any_tensor(&[3.0, 4.0])];
+        let masks = vec![None, None];
+
+        let steps = module
+            .step_batch::<1, 1>(&observations, &masks)
+            .expect("UnsupportedModelType should fall back to zeros");
+
+        assert_eq!(steps.len(), 2);
+        for (action, mask, aux) in steps {
+            assert!(mask.is_none());
+            assert!(aux.is_empty());
+            assert_eq!(action.shape, vec![2]);
+            assert_eq!(action.data, vec![0; 8]);
+        }
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn try_flat_batch_zeros_returns_result() {
+        let module = stub_module(vec![2]);
+        let zeros = module
+            .try_flat_batch_zeros(3)
+            .expect("zeros batch should succeed");
+        assert_eq!(zeros.shape, vec![3, 2]);
+        assert_eq!(zeros.data, vec![0; 24]);
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "ndarray-backend",
+        any(feature = "tch-model", feature = "onnx-model")
+    ))]
+    fn step_batch_rejects_observation_mask_length_mismatch() {
+        let module = stub_module(vec![2]);
+        let observations = vec![float_any_tensor(&[1.0, 2.0])];
+        let masks = vec![None, None];
+        let err = module
+            .step_batch::<1, 1>(&observations, &masks)
+            .expect_err("mismatched lengths should fail");
+        assert!(matches!(err, ModelError::InvalidInputDimension(_)));
     }
 }

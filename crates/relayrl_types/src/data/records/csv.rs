@@ -13,6 +13,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Errors from reading or writing trajectories in CSV format.
 #[derive(thiserror::Error, Debug)]
 pub enum CsvDataError {
     #[error("Failed to use csv file: {0}")]
@@ -27,6 +28,7 @@ pub enum CsvDataError {
     WriterCacheNotInitialized(String),
 }
 
+/// Alias for [`CsvDataError`].
 pub type CsvTrajectoryError = CsvDataError;
 
 struct WriterCache {
@@ -168,6 +170,14 @@ impl TensorAccumulator {
     }
 }
 
+/// Adapter that reads and writes a [`RelayRLTrajectory`] as a CSV file, with cached readers/writers for chunked I/O.
+///
+/// ```ignore
+/// use relayrl::types::records::CsvTrajectory;
+///
+/// CsvTrajectory::new(Some(trajectory)).to_csv("episode.csv", 8192)?;
+/// let loaded = CsvTrajectory::new(None).from_csv("episode.csv", 8192, None, None)?;
+/// ```
 pub struct CsvTrajectory {
     pub trajectory: Option<RelayRLTrajectory>,
     writer_cache: Option<WriterCache>,
@@ -175,6 +185,7 @@ pub struct CsvTrajectory {
 }
 
 impl CsvTrajectory {
+    /// Wraps an optional trajectory; pass `None` when loading from a file.
     pub fn new(trajectory: Option<RelayRLTrajectory>) -> Self {
         Self {
             trajectory,
@@ -183,6 +194,7 @@ impl CsvTrajectory {
         }
     }
 
+    /// Returns the raw CSV records cached from the most recent read.
     pub fn get_records(&self) -> Result<&[StringRecord], CsvDataError> {
         self.reader_cache
             .as_ref()
@@ -194,6 +206,7 @@ impl CsvTrajectory {
             })
     }
 
+    /// Writes the held trajectory to `path`, flushing in chunks of roughly `byte_capacity` bytes.
     pub fn to_csv<P: AsRef<Path>>(
         mut self,
         path: P,
@@ -278,6 +291,7 @@ impl CsvTrajectory {
         Ok(self)
     }
 
+    /// Loads a trajectory from the CSV file at `path` (reading in `byte_capacity` chunks), tagging it with `episode` and `training_step`.
     pub fn from_csv<P: AsRef<Path>>(
         mut self,
         path: P,

@@ -1,13 +1,15 @@
 //! NATS transport operations for the experimental client transport path.
 //!
-//! The local/default client runtime is the supported `0.5.0-beta` path. NATS-backed workflows in
+//! The local/default client runtime is the supported `0.5.0` path. NATS-backed workflows in
 //! this module remain experimental.
 
 use crate::network::client::agent::{AlgorithmInitArgs, ModelMode};
+use crate::network::client::runtime::data::router::{
+    ControlPayload, RoutedMessage, RoutingProtocol,
+};
 use crate::network::client::runtime::data::sinks::transport_sink::{
     ScalingOperation, TransportError,
 };
-use crate::network::client::runtime::router::{ControlPayload, RoutedMessage, RoutingProtocol};
 use crate::utilities::configuration::Algorithm;
 
 use super::inference_subjects::{
@@ -1641,6 +1643,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
 mod unit_tests {
     use super::*;
 
+    use crate::network::client::runtime::data::router::{ControlPayload, DataPayload};
     use tokio::sync::mpsc;
 
     fn make_model_update_payload(
@@ -1675,13 +1678,16 @@ mod unit_tests {
         assert_eq!(first_message.actor_id, Uuid::from_bytes([1; 16]));
         assert!(matches!(
             first_message.protocol,
-            RoutingProtocol::ModelUpdate
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
+                ref model_bytes,
+                version,
+            })
         ));
-        match first_message.payload {
-            RoutedPayload::ModelUpdate {
+        match first_message.protocol {
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
                 model_bytes,
                 version,
-            } => {
+            }) => {
                 assert_eq!(model_bytes, vec![10, 20]);
                 assert_eq!(version, 3);
             }
@@ -1690,11 +1696,11 @@ mod unit_tests {
 
         let second_message = rx.recv().await.unwrap();
         assert_eq!(second_message.actor_id, Uuid::from_bytes([2; 16]));
-        match second_message.payload {
-            RoutedPayload::ModelUpdate {
+        match second_message.protocol {
+            RoutingProtocol::Control(ControlPayload::ModelUpdate {
                 model_bytes,
                 version,
-            } => {
+            }) => {
                 assert_eq!(model_bytes, vec![30, 40]);
                 assert_eq!(version, 4);
             }

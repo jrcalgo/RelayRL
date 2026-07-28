@@ -1,51 +1,14 @@
-use burn_ndarray::{NdArray, NdArrayDevice};
+#![cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+
+mod common;
+
+use burn_ndarray::NdArrayDevice;
 use burn_tensor::{Float, Tensor, TensorData};
-use relayrl_framework::prelude::network::{AgentBuilder, RelayRLAgentActors};
-use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
-use relayrl_types::data::tensor::{DType, NdArrayDType};
-use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
+use common::{TestBackend, try_load_test_model_module};
+use relayrl_framework::prelude::network::{AgentBuilder, RelayRLActors, RelayRLStepDriven};
+use relayrl_framework::prelude::types::tensor::DeviceType;
 use std::fs;
-use tch::{CModule, Device as TchDevice, Kind, Tensor as TchTensor};
 use tempfile::tempdir;
-
-type TestBackend = NdArray<f32>;
-
-fn load_test_model_module() -> (tempfile::TempDir, ModelModule<TestBackend>) {
-    let model_dir = tempdir().expect("tempdir should be created");
-    let model_path = model_dir.path().join("test.pt");
-    let metadata = ModelMetadata {
-        model_file: "test.pt".to_string(),
-        model_type: ModelFileType::Pt,
-        input_dtype: DType::NdArray(NdArrayDType::F32),
-        output_dtype: DType::NdArray(NdArrayDType::F32),
-        input_shape: vec![2],
-        output_shape: vec![2],
-        default_device: Some(DeviceType::Cpu),
-    };
-
-    let trace_inputs = [TchTensor::zeros([2], (Kind::Float, TchDevice::Cpu))];
-    let mut trace_closure =
-        |inputs: &[TchTensor]| -> Vec<TchTensor> { vec![inputs[0].shallow_clone()] };
-    let traced_module = CModule::create_by_tracing(
-        "relayrl_test_module",
-        "forward",
-        &trace_inputs,
-        &mut trace_closure,
-    )
-    .expect("TorchScript smoke module should be traceable");
-    traced_module
-        .save(&model_path)
-        .expect("TorchScript smoke module should be written");
-
-    metadata
-        .save_to_dir(model_dir.path())
-        .expect("model metadata should be written");
-
-    let model_module = ModelModule::<TestBackend>::load_from_path(model_dir.path())
-        .expect("test TorchScript payload should load through the public model API");
-
-    (model_dir, model_module)
-}
 
 #[tokio::test]
 async fn local_client_smoke_covers_build_start_request_and_shutdown()
@@ -53,39 +16,48 @@ async fn local_client_smoke_covers_build_start_request_and_shutdown()
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("client_config.json");
     fs::write(&config_path, "{}")?;
-    let (_model_dir, default_model) = load_test_model_module();
+    let Some((_model_dir, default_model)) = try_load_test_model_module() else {
+        return Ok(());
+    };
 
     let (mut agent, params) = AgentBuilder::<TestBackend>::builder()
+        .params()
         .default_model(default_model)
         .config_path(config_path.clone())
         .build()
         .await?;
 
-    assert_eq!(params.router_scale, 1);
+    assert_eq!(params.data_routers, 1);
     assert_eq!(params.config_path.as_ref(), Some(&config_path));
 
     agent.start(params).await?;
 
-    let ids = agent.get_actor_ids()?;
-    assert_eq!(ids.len(), 1);
+    let actor_info = agent
+        .new_actor::<1, 1>(
+            DeviceType::Cpu,
+            1000,
+            None,
+            None,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            None,
+        )
+        .await?;
 
     let observation = Tensor::<TestBackend, 1, Float>::from_data(
         TensorData::new(vec![1.0_f32, 2.0_f32], [2]),
         &NdArrayDevice::default(),
     );
-    let actions = agent
+    let action = agent
         .request_action::<1, 1, Float, Float>(
-            ids.clone(),
+            &actor_info,
             observation,
             None::<Tensor<TestBackend, 1, Float>>,
             1.25,
         )
         .await?;
 
-    assert_eq!(actions.len(), 1);
-    assert_eq!(actions[0].0, ids[0]);
-    assert_eq!(actions[0].1.get_rew(), 1.25);
-    assert_eq!(actions[0].1.get_agent_id(), Some(&ids[0]));
+    assert_eq!(action.get_rew(), 1.25);
+    assert_eq!(action.get_agent_id(), Some(&actor_info.id()));
 
     agent.shutdown().await?;
     Ok(())

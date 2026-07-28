@@ -16,6 +16,11 @@ use relayrl_types::data::tensor::{DType, TensorData};
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use std::{collections::HashMap, sync::Arc};
 
+/// Clamp range for continuous Gaussian `log_std` before `exp()`.
+const LOG_STD_MIN: f32 = -20.0;
+const LOG_STD_MAX: f32 = 2.0;
+const LOG_2_PI: f32 = 1.837877_f32; // ln(2π)
+
 // ---- training module  ----
 
 pub(crate) mod training {
@@ -344,6 +349,140 @@ pub(crate) mod training {
                 .unwrap_or_else(|_| vec![0.0; n])
         }
 
+        /// Diagonal-Gaussian log-probs for continuous actions.
+        ///
+        /// `act_flat` is `[n * action_dim]` float action components. The policy network emits
+        /// `[mean || log_std]` with width `2 * action_dim`.
+        pub fn logprobs_flat_continuous(
+            &self,
+            obs_flat: &[f32],
+            obs_dim: usize,
+            act_flat: &[f32],
+            action_dim: usize,
+        ) -> Vec<f32> {
+            let n = (obs_flat.len() / obs_dim.max(1)).min(act_flat.len() / action_dim.max(1));
+            if n == 0 || obs_dim == 0 || action_dim == 0 {
+                return Vec::new();
+            }
+            let net = match self.network.as_ref() {
+                Some(net) => net,
+                None => return vec![0.0; n],
+            };
+            let device = <TB as burn_tensor::backend::Backend>::Device::default();
+            let obs = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &device,
+            );
+            let act = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(act_flat[..n * action_dim].to_vec(), [n, action_dim]),
+                &device,
+            );
+            let (logp, _) = gaussian_logp_and_entropy(net.pi_forward(obs), act, n, action_dim);
+            logp.into_data()
+                .to_vec::<f32>()
+                .unwrap_or_else(|_| vec![0.0; n])
+        }
+
+        /// Combined pi+vf forward+backward for continuous diagonal-Gaussian PPO.
+        #[allow(clippy::too_many_arguments)]
+        pub fn train_step_continuous(
+            &mut self,
+            obs_flat: &[f32],
+            obs_dim: usize,
+            act_flat: &[f32],
+            action_dim: usize,
+            adv: &[f32],
+            logp_old: &[f32],
+            ret: &[f32],
+            clip_ratio: f32,
+            ent_coef: f32,
+            compute_stats: bool,
+        ) -> (f32, f32, HashMap<String, f32>) {
+            let n = (obs_flat.len() / obs_dim.max(1))
+                .min(act_flat.len() / action_dim.max(1))
+                .min(adv.len())
+                .min(logp_old.len())
+                .min(ret.len());
+            if n == 0 || obs_dim == 0 || action_dim == 0 {
+                return (0.0, 0.0, zero_pi_info().1);
+            }
+            let net = match self.network.take() {
+                Some(net) => net,
+                None => return (0.0, 0.0, zero_pi_info().1),
+            };
+            let device = <TB as burn_tensor::backend::Backend>::Device::default();
+
+            let obs = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &device,
+            );
+            let act = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(act_flat[..n * action_dim].to_vec(), [n, action_dim]),
+                &device,
+            );
+
+            let (logp, entropy_t) =
+                gaussian_logp_and_entropy(net.pi_forward(obs.clone()), act, n, action_dim);
+            let adv_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(adv[..n].to_vec(), [n]),
+                &device,
+            );
+            let logp_old_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(logp_old[..n].to_vec(), [n]),
+                &device,
+            );
+            let ratio = (logp.clone() - logp_old_tensor).exp();
+            let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
+            let clip_obj = (ratio.clone() * adv_tensor.clone())
+                .min_pair(clipped_ratio * adv_tensor)
+                .mean();
+            let pi_loss_t = -(clip_obj + ent_coef * entropy_t.clone());
+
+            let v_pred = net.vf_forward(obs).reshape([n]);
+            let ret_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(ret[..n].to_vec(), [n]),
+                &device,
+            );
+            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
+
+            let vf_coef_t = self.vf_coef;
+            let total_loss = pi_loss_t.clone() + vf_loss_t.clone() * vf_coef_t;
+
+            let pi_loss_val = scalar_from_tensor(&pi_loss_t);
+            let vf_loss_val = scalar_from_tensor(&vf_loss_t);
+
+            let grads = total_loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &net);
+            let lr = self.effective_lr();
+            let net = self.optimizer.step(lr, net, grads_params);
+            self.network = Some(net);
+            self.grad_step_count += 1;
+
+            if !compute_stats {
+                return (pi_loss_val, vf_loss_val, HashMap::new());
+            }
+
+            let entropy_val = entropy_t.into_scalar();
+            let approx_kl = ((ratio.clone() - 1.0) - ratio.clone().log())
+                .mean()
+                .into_scalar();
+            let ratio_values = ratio
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or_else(|_| vec![1.0; n]);
+            let clipfrac = ratio_values
+                .iter()
+                .filter(|r| (**r - 1.0).abs() > clip_ratio)
+                .count() as f32
+                / n as f32;
+
+            let mut info = HashMap::new();
+            info.insert("kl".to_string(), approx_kl);
+            info.insert("entropy".to_string(), entropy_val);
+            info.insert("clipfrac".to_string(), clipfrac);
+            (pi_loss_val, vf_loss_val, info)
+        }
+
         pub fn get_pi_layer_specs(&self) -> Option<LayerSpecs> {
             let network = self.network.as_ref()?;
             let mut specs = Vec::new();
@@ -402,6 +541,33 @@ pub(crate) mod training {
             .unwrap_or_else(|_| vec![0.0])[0]
     }
 
+    /// Shared continuous Gaussian log-prob + mean entropy over the batch.
+    ///
+    /// `raw_pi` is `[n, 2 * action_dim]` laid out as mean then log_std.
+    /// Returns `(logp [n], entropy scalar)`.
+    fn gaussian_logp_and_entropy(
+        raw_pi: Tensor<TB, 2, Float>,
+        act: Tensor<TB, 2, Float>,
+        n: usize,
+        action_dim: usize,
+    ) -> (Tensor<TB, 1, Float>, Tensor<TB, 1, Float>) {
+        let mean = raw_pi.clone().narrow(1, 0, action_dim);
+        let log_std = raw_pi
+            .narrow(1, action_dim, action_dim)
+            .clamp(LOG_STD_MIN, LOG_STD_MAX);
+        let std = log_std.clone().exp();
+        let normalized = (act - mean) / std;
+        let logp = ((normalized.powf_scalar(2.0) * -0.5) - log_std.clone() - (0.5 * LOG_2_PI))
+            .sum_dim(1)
+            .reshape([n]);
+        // Diagonal Gaussian entropy: sum_j (0.5 + 0.5 ln(2π) + log_std_j), mean over batch.
+        let entropy = (log_std + (0.5 + 0.5 * LOG_2_PI))
+            .sum_dim(1)
+            .reshape([n])
+            .mean();
+        (logp, entropy)
+    }
+
     /// Convert a slice of obs TensorData to a flat Vec<f32>.
     pub fn obs_flat_from_tdata(obs: &[TensorData]) -> Result<Vec<f32>, NeuralNetworkError> {
         let mut out = Vec::new();
@@ -423,12 +589,30 @@ pub(crate) mod training {
             })
             .collect()
     }
+
+    /// Flatten continuous action tensors into concatenated f32 components.
+    pub fn action_f32_flat_from_tdata(act: &[TensorData]) -> Result<Vec<f32>, NeuralNetworkError> {
+        let mut out = Vec::new();
+        for td in act {
+            let vals = convert_byte_dtype_to_f32(td.data.clone(), td.dtype.clone())?;
+            out.extend_from_slice(&vals);
+        }
+        Ok(out)
+    }
+
+    /// Scalar diagonal-Gaussian log-prob matching sampling / training formulas.
+    pub fn gaussian_logp_scalar(mean: f32, log_std: f32, action: f32) -> f32 {
+        let log_std = log_std.clamp(LOG_STD_MIN, LOG_STD_MAX);
+        let std = log_std.exp();
+        -0.5 * ((action - mean) / std).powi(2) - log_std - 0.5 * LOG_2_PI
+    }
 }
 
 // ---- policy network head definitions ----
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
+/// Wraps a policy network as either discrete (categorical) or continuous (Gaussian) for PPO inference.
 pub enum PPOPolicyHead<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -440,6 +624,7 @@ pub enum PPOPolicyHead<
 }
 
 #[derive(Clone, Debug)]
+/// A policy head that samples discrete actions from a categorical distribution over network logits.
 pub struct DiscretePPOPolicyHead<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -457,6 +642,7 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Wraps a policy network as a discrete policy head.
     pub fn new(pi: Pi) -> Result<Self, NeuralNetworkError> {
         Ok(Self {
             pi,
@@ -464,6 +650,7 @@ where
         })
     }
 
+    /// Runs the policy network forward pass on an observation, producing action logits.
     pub fn forward<const IN_D: usize, const OUT_D: usize>(
         &self,
         obs: Tensor<B, IN_D, KindIn>,
@@ -471,12 +658,18 @@ where
         self.pi.forward(obs)
     }
 
+    /// Returns the policy network's per-layer weight specs for model export.
     pub fn get_pi_layer_specs(&self) -> LayerSpecs {
         self.pi.get_layer_specs()
     }
 }
 
 #[derive(Clone, Debug)]
+/// A policy head that samples continuous actions from a diagonal Gaussian.
+///
+/// The wrapped network must emit `2 * action_dim` floats laid out as
+/// `[mean_0..mean_{A-1}, log_std_0..log_std_{A-1}]`. `TrainerArgs.act_dim` is the
+/// environment action dimension `A`; the network `output_dim` must equal `2A`.
 pub struct ContinuousPPOPolicyHead<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -494,13 +687,22 @@ where
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
+    /// Wraps a policy network as a continuous policy head.
+    ///
+    /// Rejects odd or zero output widths; exact `2 * act_dim` matching is enforced by
+    /// `validate_ppo_spec`.
     pub fn new(pi: Pi) -> Result<Self, NeuralNetworkError> {
+        let out = *pi.output_dim();
+        if out == 0 || out % 2 != 0 {
+            return Err(NeuralNetworkError::InvalidContinuousOutputDim { output_dim: out });
+        }
         Ok(Self {
             pi,
             _phantom: std::marker::PhantomData,
         })
     }
 
+    /// Runs the policy network forward pass on an observation, producing mean‖log_std.
     pub fn forward<const IN_D: usize, const OUT_D: usize>(
         &self,
         obs: Tensor<B, IN_D, KindIn>,
@@ -508,6 +710,7 @@ where
         self.pi.forward(obs)
     }
 
+    /// Returns the policy network's per-layer weight specs for model export.
     pub fn get_pi_layer_specs(&self) -> LayerSpecs {
         self.pi.get_layer_specs()
     }
@@ -515,10 +718,14 @@ where
 
 // ---- kernel interfaces ----
 
+/// Policy loss value from a PPO gradient step.
 pub type PiLoss = f32;
+/// Value function loss from a PPO gradient step.
 pub type VfLoss = f32;
+/// Diagnostic key-value pairs from a training step.
 pub type Info = HashMap<String, f32>;
 
+/// Provides the gradient update step for a PPO policy/value kernel.
 pub trait PPOKernelTraining<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -541,9 +748,12 @@ pub trait PPOKernelTraining<
     ) -> (PiLoss, VfLoss, Info);
 }
 
+/// Serialized action bytes produced by a PPO policy forward pass.
 pub type ActBytes = Vec<u8>;
+/// Serialized log-probability bytes corresponding to sampled actions.
 pub type LogpBytes = Vec<u8>;
 
+/// Provides inference-side operations for a PPO kernel: action sampling and log-probability computation.
 pub trait PPOKernelOps<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -561,9 +771,11 @@ pub trait PPOKernelOps<
     fn get_pi_logprobs(&self, obs: &[TensorData], obs_dim: usize, act: &[TensorData]) -> Vec<f32>;
     fn value_forward(&self, obs: &[TensorData], obs_dim: usize) -> Vec<f32>;
     fn normalize_persistent_returns(&mut self, ret: &[f32]) -> Vec<f32>;
+    fn set_return_denorm_stats(&mut self, mean: f32, std: f32);
 }
 
 /// Factory for constructing continuous or discrete PPO kernels.
+/// Constructs a `PPOKernel` from separate policy head and value function, validating dimension consistency.
 pub struct PPOKernelFactory<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -573,6 +785,7 @@ pub struct PPOKernelFactory<
     _phantom: std::marker::PhantomData<(B, KindIn, KindOut, Pi)>,
 }
 
+/// Concrete discrete-action PPO kernel: policy head, value function, and optional trainer with return statistics.
 pub struct DiscretePPOKernel<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -582,11 +795,14 @@ pub struct DiscretePPOKernel<
     pub pi: DiscretePPOPolicyHead<B, KindIn, KindOut, Pi>,
     pub vf: ValueFunction<B, KindIn>,
     pub trainer: Option<training::PPOActorCriticTrainer>,
-    pub returns_mean: f32,
-    pub returns_variance: f32,
+    pub returns_mean: f64,
+    pub returns_variance: f64,
     pub returns_count: u64,
+    pub ret_denorm_mean: f32,
+    pub ret_denorm_std: f32,
 }
 
+/// Concrete continuous-action PPO kernel: policy head, value function, and optional trainer with return statistics.
 pub struct ContinuousPPOKernel<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -596,11 +812,14 @@ pub struct ContinuousPPOKernel<
     pub pi: ContinuousPPOPolicyHead<B, KindIn, KindOut, Pi>,
     pub vf: ValueFunction<B, KindIn>,
     pub trainer: Option<training::PPOActorCriticTrainer>,
-    pub returns_mean: f32,
-    pub returns_variance: f32,
+    pub returns_mean: f64,
+    pub returns_variance: f64,
     pub returns_count: u64,
+    pub ret_denorm_mean: f32,
+    pub ret_denorm_std: f32,
 }
 
+/// Active PPO kernel holding the policy head and value function along with their training state.
 pub enum PPOKernel<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -611,6 +830,7 @@ pub enum PPOKernel<
     Continuous(ContinuousPPOKernel<B, KindIn, KindOut, Pi>),
 }
 
+/// A read-only reference snapshot of a `PPOKernel` used for inference without holding the full kernel.
 pub struct PPOKernelSnapshot<
     B: Backend + BackendMatcher<Backend = B>,
     KindIn: TensorKind<B> + BasicOps<B>,
@@ -635,6 +855,7 @@ impl<
 }
 
 /// Training parameters for the actor-critic kernel.
+/// Learning-rate, value-function coefficient, and optional LR schedule for a `PPOKernel`.
 pub struct PPOKernelTrainingArgs {
     pub pi_lr: f64,
     pub vf_coef: f32,
@@ -648,6 +869,7 @@ impl<
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 > PPOKernelFactory<B, KindIn, KindOut, Pi>
 {
+    /// Builds a `PPOKernel` from a policy head, value MLP, and training args, validating matching dimensions.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(
         pi_head: PPOPolicyHead<B, KindIn, KindOut, Pi>,
@@ -706,13 +928,22 @@ impl<
                         returns_mean: 0.0,
                         returns_variance: 1.0,
                         returns_count: 0,
+                        ret_denorm_mean: 0.0,
+                        ret_denorm_std: 1.0,
                     },
                 ))
             }
             PPOPolicyHead::Continuous(continuous_pi) => {
                 check_input_dim::<B, KindIn, KindOut, Pi>(&continuous_pi.pi, &vf)?;
                 let obs_dim = *continuous_pi.pi.input_dim();
-                let act_dim = *continuous_pi.pi.output_dim();
+                // Continuous policy raw width is 2A (mean, log_std); the Burn trainer's
+                // last layer must match that raw width.
+                let policy_out = *continuous_pi.pi.output_dim();
+                if policy_out == 0 || policy_out % 2 != 0 {
+                    return Err(NeuralNetworkError::InvalidContinuousOutputDim {
+                        output_dim: policy_out,
+                    });
+                }
                 let hidden_sizes: Vec<usize> = continuous_pi
                     .pi
                     .get_layer_specs()
@@ -725,7 +956,7 @@ impl<
                 let trainer = Some(training::PPOActorCriticTrainer::new(
                     obs_dim,
                     &hidden_sizes,
-                    act_dim,
+                    policy_out,
                     training_args.pi_lr,
                     training_args.vf_coef,
                     training_args.lr_schedule_steps,
@@ -738,6 +969,8 @@ impl<
                         returns_mean: 0.0,
                         returns_variance: 1.0,
                         returns_count: 0,
+                        ret_denorm_mean: 0.0,
+                        ret_denorm_std: 1.0,
                     },
                 ))
             }
@@ -754,6 +987,7 @@ impl<
     Pi: NeuralNetwork<B, KindIn, KindOut> + Clone,
 > PPOKernel<B, KindIn, KindOut, Pi>
 {
+    /// Clones the kernel for inference only, dropping the trainer state.
     pub fn clone_for_inference(&self) -> Self {
         match self {
             PPOKernel::Discrete(kernel) => PPOKernel::Discrete(DiscretePPOKernel {
@@ -763,6 +997,8 @@ impl<
                 returns_mean: kernel.returns_mean,
                 returns_variance: kernel.returns_variance,
                 returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
             }),
             PPOKernel::Continuous(kernel) => PPOKernel::Continuous(ContinuousPPOKernel {
                 pi: kernel.pi.clone(),
@@ -771,10 +1007,13 @@ impl<
                 returns_mean: kernel.returns_mean,
                 returns_variance: kernel.returns_variance,
                 returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
             }),
         }
     }
 
+    /// Produces a shareable, inference-only `PPOKernelSnapshot` backed by an `Arc`.
     pub fn to_arc_snapshot(&self) -> PPOKernelSnapshot<B, KindIn, KindOut, Pi> {
         PPOKernelSnapshot {
             kernel: Arc::new(self.clone_for_inference()),
@@ -787,8 +1026,38 @@ impl<
     KindIn: TensorKind<B> + BasicOps<B>,
     KindOut: TensorKind<B> + BasicOps<B>,
     Pi: NeuralNetwork<B, KindIn, KindOut>,
+> PPOKernel<B, KindIn, KindOut, Pi>
+{
+    /// Raw policy-network output width: `A` for discrete, `2A` for continuous.
+    pub fn policy_output_dim(&self) -> usize {
+        match self {
+            PPOKernel::Discrete(k) => *k.pi.pi.output_dim(),
+            PPOKernel::Continuous(k) => *k.pi.pi.output_dim(),
+        }
+    }
+
+    /// Environment action dimension: `A` for both variants (`policy_output_dim / 2` when continuous).
+    pub fn action_dim(&self) -> usize {
+        match self {
+            PPOKernel::Discrete(k) => *k.pi.pi.output_dim(),
+            PPOKernel::Continuous(k) => *k.pi.pi.output_dim() / 2,
+        }
+    }
+
+    /// Returns `true` when this kernel is a continuous diagonal-Gaussian policy.
+    pub fn is_continuous(&self) -> bool {
+        matches!(self, PPOKernel::Continuous(_))
+    }
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 > PPOKernelSnapshot<B, KindIn, KindOut, Pi>
 {
+    /// Samples actions from raw policy output bytes, returning serialized action and log-probability bytes for `n_envs`.
     pub fn policy_forward_bytes(
         &self,
         raw_model_output: &TensorData,
@@ -832,6 +1101,7 @@ impl<
         }
     }
 
+    /// Extracts value-function layer specs from the trainer (after training); falls back to the inference vf.
     pub fn get_vf_layer_specs(&self) -> Option<LayerSpecs> {
         match self {
             PPOKernel::Discrete(kernel) => {
@@ -933,10 +1203,15 @@ impl<
             raw_model_output.dtype.clone(),
         )?;
 
-        let act_dim = match self {
-            PPOKernel::Discrete(kernel) => *kernel.pi.pi.output_dim(),
-            PPOKernel::Continuous(kernel) => *kernel.pi.pi.output_dim(),
-        };
+        let policy_out = self.policy_output_dim();
+        let act_dim = self.action_dim();
+        let expected = n_envs.saturating_mul(policy_out);
+        if logits.len() < expected {
+            return Err(NeuralNetworkError::ModelOutputTooShort {
+                expected,
+                actual: logits.len(),
+            });
+        }
 
         let mut action_bytes = Vec::<u8>::new();
         let mut logp_bytes = Vec::<u8>::with_capacity(n_envs * 4);
@@ -967,6 +1242,7 @@ impl<
                     logp_bytes.extend_from_slice(&logp.to_le_bytes());
                 }
             }
+            // Continuous action masking is not defined by the current API; mask_bytes is ignored.
             PPOKernel::Continuous(_) => {
                 let results: Vec<Result<(Vec<f32>, f32), NeuralNetworkError>> =
                     if n_envs < MIN_RAYON_PARALLEL_ENVS {
@@ -1001,21 +1277,31 @@ impl<
     }
 
     fn get_pi_logprobs(&self, obs: &[TensorData], obs_dim: usize, act: &[TensorData]) -> Vec<f32> {
-        {
-            let trainer = match self {
-                PPOKernel::Discrete(k) => k.trainer.as_ref(),
-                PPOKernel::Continuous(k) => k.trainer.as_ref(),
-            };
-            if let Some(t) = trainer {
-                let obs_flat = match training::obs_flat_from_tdata(obs) {
+        let trainer = match self {
+            PPOKernel::Discrete(k) => k.trainer.as_ref(),
+            PPOKernel::Continuous(k) => k.trainer.as_ref(),
+        };
+        let Some(t) = trainer else {
+            return vec![0.0; act.len()];
+        };
+        let obs_flat = match training::obs_flat_from_tdata(obs) {
+            Ok(f) => f,
+            Err(_) => return vec![0.0; act.len()],
+        };
+        match self {
+            PPOKernel::Discrete(_) => {
+                let act_flat = training::action_indices_from_tdata(act);
+                t.logprobs_flat(&obs_flat, obs_dim, &act_flat)
+            }
+            PPOKernel::Continuous(_) => {
+                let action_dim = self.action_dim();
+                let act_flat = match training::action_f32_flat_from_tdata(act) {
                     Ok(f) => f,
                     Err(_) => return vec![0.0; act.len()],
                 };
-                let act_flat = training::action_indices_from_tdata(act);
-                return t.logprobs_flat(&obs_flat, obs_dim, &act_flat);
+                t.logprobs_flat_continuous(&obs_flat, obs_dim, &act_flat, action_dim)
             }
         }
-        vec![0.0; act.len()]
     }
 
     fn value_forward(&self, obs: &[TensorData], obs_dim: usize) -> Vec<f32> {
@@ -1023,16 +1309,46 @@ impl<
             return Vec::new();
         }
 
-        let trainer = match self {
-            PPOKernel::Discrete(k) => k.trainer.as_ref(),
-            PPOKernel::Continuous(k) => k.trainer.as_ref(),
-        };
+        let (trainer, returns_mean, returns_var, returns_count, ret_denorm_mean, ret_denorm_std) =
+            match self {
+                PPOKernel::Discrete(k) => (
+                    k.trainer.as_ref(),
+                    k.returns_mean,
+                    k.returns_variance,
+                    k.returns_count,
+                    k.ret_denorm_mean,
+                    k.ret_denorm_std,
+                ),
+                PPOKernel::Continuous(k) => (
+                    k.trainer.as_ref(),
+                    k.returns_mean,
+                    k.returns_variance,
+                    k.returns_count,
+                    k.ret_denorm_mean,
+                    k.ret_denorm_std,
+                ),
+            };
         if let Some(t) = trainer {
             let obs_flat = match training::obs_flat_from_tdata(obs) {
                 Ok(f) => f,
                 Err(_) => return vec![0.0; obs.len()],
             };
-            return t.value_forward_flat(&obs_flat, obs_dim);
+            let v = t.value_forward_flat(&obs_flat, obs_dim);
+
+            let persistent_std = if returns_count > 1 {
+                (returns_var / (returns_count - 1) as f64).sqrt().max(1e-8)
+            } else {
+                1.0
+            };
+            let persistent_mean = if returns_count > 0 { returns_mean } else { 0.0 };
+
+            return v
+                .into_iter()
+                .map(|v| {
+                    ((v as f64 * persistent_std + persistent_mean) * ret_denorm_std as f64
+                        + ret_denorm_mean as f64) as f32
+                })
+                .collect();
         }
         vec![0.0; obs.len()]
     }
@@ -1052,19 +1368,33 @@ impl<
         };
         for &r in ret {
             *count += 1;
-            let delta = r - *mean;
-            *mean += delta / *count as f32;
-            let delta2 = r - *mean;
+            let r64 = r as f64;
+            let delta = r64 - *mean;
+            *mean += delta / *count as f64;
+            let delta2 = r64 - *mean;
             *variance += delta * delta2;
         }
         let std = if *count > 1 {
-            (*variance / (*count - 1) as f32).sqrt().max(1e-8)
+            (*variance / (*count - 1) as f64).sqrt().max(1e-8)
         } else {
             1.0
         };
         ret.iter()
-            .map(|&r| ((r - *mean) / std).clamp(-5.0, 5.0))
+            .map(|&r| ((r as f64 - *mean) / std).clamp(-5.0, 5.0) as f32)
             .collect()
+    }
+
+    fn set_return_denorm_stats(&mut self, mean: f32, std: f32) {
+        match self {
+            PPOKernel::Discrete(k) => {
+                k.ret_denorm_mean = mean;
+                k.ret_denorm_std = std;
+            }
+            PPOKernel::Continuous(k) => {
+                k.ret_denorm_mean = mean;
+                k.ret_denorm_std = std;
+            }
+        }
     }
 }
 
@@ -1087,30 +1417,50 @@ impl<
         ent_coef: f32,
         compute_stats: bool,
     ) -> (PiLoss, VfLoss, Info) {
-        {
-            match self {
-                PPOKernel::Discrete(kernel) => {
-                    if let Some(trainer) = kernel.trainer.as_mut() {
-                        let obs_flat = match training::obs_flat_from_tdata(obs) {
-                            Ok(f) => f,
-                            Err(_) => return (0.0, 0.0, HashMap::new()),
-                        };
-                        let act_flat = training::action_indices_from_tdata(act);
-                        return trainer.train_step_discrete(
-                            &obs_flat,
-                            obs_dim,
-                            &act_flat,
-                            adv,
-                            logp_old,
-                            ret,
-                            clip_ratio,
-                            ent_coef,
-                            compute_stats,
-                        );
-                    }
+        match self {
+            PPOKernel::Discrete(kernel) => {
+                if let Some(trainer) = kernel.trainer.as_mut() {
+                    let obs_flat = match training::obs_flat_from_tdata(obs) {
+                        Ok(f) => f,
+                        Err(_) => return (0.0, 0.0, HashMap::new()),
+                    };
+                    let act_flat = training::action_indices_from_tdata(act);
+                    return trainer.train_step_discrete(
+                        &obs_flat,
+                        obs_dim,
+                        &act_flat,
+                        adv,
+                        logp_old,
+                        ret,
+                        clip_ratio,
+                        ent_coef,
+                        compute_stats,
+                    );
                 }
-                PPOKernel::Continuous(_kernel) => {
-                    // Continuous training deferred; return zeros
+            }
+            PPOKernel::Continuous(kernel) => {
+                let action_dim = *kernel.pi.pi.output_dim() / 2;
+                if let Some(trainer) = kernel.trainer.as_mut() {
+                    let obs_flat = match training::obs_flat_from_tdata(obs) {
+                        Ok(f) => f,
+                        Err(_) => return (0.0, 0.0, HashMap::new()),
+                    };
+                    let act_flat = match training::action_f32_flat_from_tdata(act) {
+                        Ok(f) => f,
+                        Err(_) => return (0.0, 0.0, HashMap::new()),
+                    };
+                    return trainer.train_step_continuous(
+                        &obs_flat,
+                        obs_dim,
+                        &act_flat,
+                        action_dim,
+                        adv,
+                        logp_old,
+                        ret,
+                        clip_ratio,
+                        ent_coef,
+                        compute_stats,
+                    );
                 }
             }
         }
@@ -1189,6 +1539,10 @@ impl<
 > ContinuousPPOKernel<B, KindIn, KindOut, Pi>
 {
     #[inline(always)]
+    /// Sample one continuous action vector for `env_id`.
+    ///
+    /// `act_dim` is the environment action dimension `A`. Raw logits for this env are
+    /// `2A` floats: mean then log_std. Caller must ensure `logits` is long enough.
     pub(super) fn get_env_byte_action(
         env_id: usize,
         logits: &[f32],
@@ -1198,8 +1552,15 @@ impl<
         let mut rng = rand::rng();
 
         let stride = act_dim.saturating_mul(2);
-        let start = env_id * stride;
-        let env_logits = &logits[start..start + stride];
+        let start = env_id.saturating_mul(stride);
+        let end = start.saturating_add(stride);
+        if end > logits.len() || act_dim == 0 {
+            return Err(NeuralNetworkError::ModelOutputTooShort {
+                expected: end,
+                actual: logits.len(),
+            });
+        }
+        let env_logits = &logits[start..end];
 
         let mean = &env_logits[..act_dim];
         let log_std = &env_logits[act_dim..stride];
@@ -1208,19 +1569,215 @@ impl<
         let mut total_log_prob = 0.0f32;
 
         for j in 0..act_dim {
-            let std = log_std[j].exp();
+            let clamped_log_std = log_std[j].clamp(LOG_STD_MIN, LOG_STD_MAX);
+            let std = clamped_log_std.exp();
             let distribution =
                 Normal::new(mean[j], std).map_err(|_| NeuralNetworkError::InvalidDistribution)?;
 
             let action = distribution.sample(&mut rng);
-
-            total_log_prob += -0.5 * (((action - mean[j]) / std).powi(2))
-                - log_std[j]
-                - (0.5 * (2.0 * std::f32::consts::PI).ln());
-
+            total_log_prob += training::gaussian_logp_scalar(mean[j], clamped_log_std, action);
             act_vec.push(action);
         }
 
         Ok((act_vec, total_log_prob))
+    }
+}
+
+#[cfg(test)]
+mod continuous_tests {
+    use super::*;
+    use crate::algorithms::{ActivationKind, GenericMlp};
+    use burn_ndarray::NdArray;
+    use burn_nn::activation::Relu;
+    use burn_tensor::Float;
+    use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend};
+
+    type B = NdArray;
+    type Pi = GenericMlp<B, Float, Float>;
+
+    fn f32_dtype() -> DType {
+        DType::NdArray(NdArrayDType::F32)
+    }
+
+    fn relu() -> ActivationKind<B> {
+        ActivationKind::ReLU(Relu::new())
+    }
+
+    fn f32_tdata(values: &[f32], shape: Vec<usize>) -> TensorData {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        TensorData::new(shape, f32_dtype(), bytes, SupportedTensorBackend::NdArray)
+    }
+
+    fn continuous_kernel(obs_dim: usize, act_dim: usize) -> PPOKernel<B, Float, Float, Pi> {
+        let device = <B as Backend>::Device::default();
+        let policy_out = act_dim * 2;
+        let pi = GenericMlp::new(
+            obs_dim,
+            f32_dtype(),
+            &[8],
+            policy_out,
+            f32_dtype(),
+            relu(),
+            &device,
+        );
+        let vf = GenericMlp::new(obs_dim, f32_dtype(), &[8], 1, f32_dtype(), relu(), &device);
+        let head = ContinuousPPOPolicyHead::new(pi).expect("even continuous width");
+        PPOKernelFactory::new(
+            PPOPolicyHead::Continuous(head),
+            vf,
+            PPOKernelTrainingArgs {
+                pi_lr: 3e-4,
+                vf_coef: 0.5,
+                lr_schedule_steps: None,
+            },
+        )
+        .expect("continuous kernel factory")
+    }
+
+    #[test]
+    fn continuous_policy_head_rejects_odd_width() {
+        let device = <B as Backend>::Device::default();
+        let pi: Pi = GenericMlp::new(3, f32_dtype(), &[4], 3, f32_dtype(), relu(), &device);
+        match ContinuousPPOPolicyHead::<B, Float, Float, Pi>::new(pi) {
+            Err(NeuralNetworkError::InvalidContinuousOutputDim { output_dim: 3 }) => {}
+            other => panic!("expected InvalidContinuousOutputDim(3), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continuous_gaussian_logp_scalar_matches_formula() {
+        let logp = training::gaussian_logp_scalar(0.0, 0.0, 0.0);
+        let expected = -0.5 * LOG_2_PI;
+        assert!((logp - expected).abs() < 1e-5);
+        let two_dim = logp + training::gaussian_logp_scalar(0.0, 0.0, 0.0);
+        assert!((two_dim - 2.0 * expected).abs() < 1e-5);
+    }
+
+    #[test]
+    fn continuous_policy_forward_bytes_serial_shape() {
+        let kernel = continuous_kernel(3, 2);
+        let raw = f32_tdata(&[0.0, 0.0, 0.0, 0.0], vec![1, 4]);
+        let (act_bytes, logp_bytes) = kernel
+            .policy_forward_bytes(&raw, None, 1, &f32_dtype())
+            .expect("sample");
+        assert_eq!(act_bytes.len(), 2 * 4);
+        assert_eq!(logp_bytes.len(), 4);
+        assert!(kernel.is_continuous());
+        assert_eq!(kernel.action_dim(), 2);
+        assert_eq!(kernel.policy_output_dim(), 4);
+    }
+
+    #[test]
+    fn continuous_policy_forward_bytes_parallel_shape() {
+        let kernel = continuous_kernel(3, 2);
+        let n_envs = 8;
+        let mut values = Vec::with_capacity(n_envs * 4);
+        for _ in 0..n_envs {
+            values.extend_from_slice(&[0.1, -0.2, -0.5, -0.5]);
+        }
+        let raw = f32_tdata(&values, vec![n_envs, 4]);
+        let (act_bytes, logp_bytes) = kernel
+            .policy_forward_bytes(&raw, None, n_envs, &f32_dtype())
+            .expect("parallel sample");
+        assert_eq!(act_bytes.len(), n_envs * 2 * 4);
+        assert_eq!(logp_bytes.len(), n_envs * 4);
+    }
+
+    #[test]
+    fn continuous_policy_forward_rejects_short_output() {
+        let kernel = continuous_kernel(3, 2);
+        let raw = f32_tdata(&[0.0, 0.0], vec![1, 2]);
+        let err = kernel
+            .policy_forward_bytes(&raw, None, 1, &f32_dtype())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            NeuralNetworkError::ModelOutputTooShort {
+                expected: 4,
+                actual: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn continuous_get_pi_logprobs_returns_one_per_transition() {
+        let kernel = continuous_kernel(3, 2);
+        let obs = vec![
+            f32_tdata(&[0.0, 0.0, 0.0], vec![3]),
+            f32_tdata(&[1.0, 0.0, -1.0], vec![3]),
+        ];
+        let act = vec![
+            f32_tdata(&[0.0, 0.0], vec![2]),
+            f32_tdata(&[0.5, -0.5], vec![2]),
+        ];
+        let logps = kernel.get_pi_logprobs(&obs, 3, &act);
+        assert_eq!(logps.len(), 2);
+        assert!(logps.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn continuous_train_step_updates_weights() {
+        let mut kernel = continuous_kernel(3, 2);
+        let before_pi = kernel.get_pi_layer_specs().expect("pi specs");
+        let before_vf = kernel.get_vf_layer_specs().expect("vf specs");
+
+        let obs = vec![
+            f32_tdata(&[0.1, 0.2, 0.3], vec![3]),
+            f32_tdata(&[-0.1, 0.0, 0.2], vec![3]),
+            f32_tdata(&[0.0, -0.2, 0.1], vec![3]),
+            f32_tdata(&[0.3, 0.1, -0.1], vec![3]),
+        ];
+        let act = vec![
+            f32_tdata(&[0.1, -0.1], vec![2]),
+            f32_tdata(&[0.0, 0.2], vec![2]),
+            f32_tdata(&[-0.2, 0.0], vec![2]),
+            f32_tdata(&[0.3, 0.1], vec![2]),
+        ];
+        let adv = [1.0, -0.5, 0.25, -1.0];
+        let logp_old = [-1.0, -1.1, -0.9, -1.2];
+        let ret = [1.0, 0.5, 0.25, -0.5];
+
+        let (pi_loss, vf_loss, info) =
+            kernel.train_step(&obs, 3, &act, &adv, &logp_old, &ret, 0.2, 0.01, true);
+        assert!(pi_loss.is_finite());
+        assert!(vf_loss.is_finite());
+        assert!(info.get("kl").copied().unwrap_or(f32::NAN).is_finite());
+        assert!(info.get("entropy").copied().unwrap_or(f32::NAN).is_finite());
+        assert!(
+            info.get("clipfrac")
+                .copied()
+                .unwrap_or(f32::NAN)
+                .is_finite()
+        );
+
+        let after_pi = kernel.get_pi_layer_specs().expect("pi specs after");
+        let after_vf = kernel.get_vf_layer_specs().expect("vf specs after");
+        assert_ne!(before_pi, after_pi, "policy weights should update");
+        assert_ne!(before_vf, after_vf, "value weights should update");
+    }
+
+    #[test]
+    fn continuous_train_step_compute_stats_false_returns_empty_info() {
+        let mut kernel = continuous_kernel(3, 2);
+        let obs = vec![f32_tdata(&[0.0, 0.0, 0.0], vec![3])];
+        let act = vec![f32_tdata(&[0.0, 0.0], vec![2])];
+        let (pi_loss, vf_loss, info) =
+            kernel.train_step(&obs, 3, &act, &[1.0], &[-1.0], &[1.0], 0.2, 0.0, false);
+        assert!(pi_loss.is_finite());
+        assert!(vf_loss.is_finite());
+        assert!(info.is_empty());
+    }
+
+    #[test]
+    fn continuous_train_step_empty_batch_returns_zeroes() {
+        let mut kernel = continuous_kernel(3, 2);
+        let (pi_loss, vf_loss, info) =
+            kernel.train_step(&[], 3, &[], &[], &[], &[], 0.2, 0.0, true);
+        assert_eq!(pi_loss, 0.0);
+        assert_eq!(vf_loss, 0.0);
+        assert_eq!(info.get("kl").copied(), Some(0.0));
     }
 }
