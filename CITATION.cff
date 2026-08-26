@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: "RelayRL: Single process Deep RL actor-system"
+message: "If you use any crate part of RelayRL, please cite it as below."
+authors:
+- family-names: "Catersino"
+  given-names: "Jackson"
+repository-code: "https://github.com/jrcalgo/RelayRL"
+license: Apache
+keywords:
+  - reinforcement-learning
+  - multiagent-learning
+  - actor-system
+  - concurrency
+  - orchestrator
+  - runtime
+  - training
+  - inference
+  - throughput
