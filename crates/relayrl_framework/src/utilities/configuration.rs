@@ -1,4 +1,4 @@
-use crate::network::client::agent::LocalTrajectoryFileParams;
+use crate::agent::process::LocalTrajectoryFileParams;
 pub use crate::utilities::config_json::*;
 
 use relayrl_algorithms::prelude::ppo::algorithm::{MAPPOParams, PPOParams};
@@ -876,7 +876,7 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
         hyperparameter_args: HyperparameterArgs,
     ) -> &mut Self {
         let hp_map: HashMap<String, String> =
-            crate::network::parse_args(&Some(hyperparameter_args.clone()));
+            crate::agent::parse_args(&Some(hyperparameter_args.clone()));
 
         // Start from defaults for all supported algorithms.
         let mut all_cfg = HyperparameterConfig {

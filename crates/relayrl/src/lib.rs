@@ -719,7 +719,7 @@
 // These paths are under active development and are not covered by the 0.5.x support promise.
 
 pub mod agent {
-    pub use relayrl_framework::network::client::agent::*;
+    pub use relayrl_framework::agent::process::*;
 }
 
 pub mod algorithms {

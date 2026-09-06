@@ -128,18 +128,17 @@
 //! - `inference-server` / `training-server`: reserved/no-op feature flags; no server
 //!   runtime ships in this branch.
 
-/// Core networking functionality for RelayRL.
+/// Core functionality for RelayRL.
 ///
-/// This module provides the multi-actor client runtime. Server runtime support is
-/// reserved for a future implementation and is not compiled in this branch.
+/// This module provides the multi-actor runtime.
 ///
-/// ## Client Runtime
+/// ## Agent Runtime
 ///
-/// The [`client`](network::client) module contains the complete rewrite (v0.5.0) of the
-/// multi-actor client runtime.
+/// The [`agent`](agent) module contains the complete rewrite (v0.5.0) of the
+/// client (& server) from v0.4.52
 ///
 /// In `0.5.0`, the supported path is the local/default client runtime, including:
-/// - Public [`agent`](network::client::agent) API for agent construction and control
+/// - Public [`agent`](agent) API for agent construction and control
 /// - Internal runtime control (scaling, lifecycle, state management)
 /// - Router-based message dispatching
 /// - Actor execution with local inference
@@ -149,7 +148,7 @@
 /// Client transport-backed workflows remain experimental even when the corresponding
 /// feature flags are enabled.
 ///
-pub mod network;
+pub mod agent;
 
 /// Configuration, logging, metrics, and system utilities.
 ///
@@ -184,7 +183,7 @@ pub mod prelude {
     }
 
     pub mod network {
-        pub use crate::network::client::agent::*;
+        pub use crate::agent::process::*;
     }
 
     pub mod templates {
