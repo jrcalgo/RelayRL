@@ -224,26 +224,25 @@ fn validate_model_shapes<
 ///
 /// # Returns
 ///
-/// A vector of bytes representing the serialized model.
+/// A vector of bytes representing the serialized model, or a [`ModelError`] if temporary-file
+/// creation, model saving, or file reading fails.
 pub fn serialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
     model: &ModelModule<B>,
     dir: PathBuf,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, ModelError> {
     // Save the full model directory (metadata.json + model file) to a temp dir,
     // then bundle as [4-byte metadata_len][metadata_bytes][model_bytes] so
     // deserialize_model_module can reconstruct the directory.
     let temp_dir = tempfile::Builder::new()
         .prefix("_model_save_")
-        .tempdir_in(dir)
-        .expect("Failed to create temp dir");
+        .tempdir_in(dir)?;
     let temp_path = temp_dir.path().to_path_buf();
 
-    ModelModule::<B>::save(model, &temp_path).expect("Failed to save model");
+    ModelModule::<B>::save(model, &temp_path)?;
 
-    let meta_bytes =
-        std::fs::read(temp_path.join("metadata.json")).expect("Failed to read metadata.json");
+    let meta_bytes = std::fs::read(temp_path.join("metadata.json"))?;
     let model_path = temp_path.join(&model.metadata.model_file);
-    let model_bytes = std::fs::read(&model_path).expect("Failed to read model file");
+    let model_bytes = std::fs::read(&model_path)?;
 
     // Bundle: [4LE: meta_len][meta_bytes][model_bytes]
     let meta_len = meta_bytes.len() as u32;
@@ -251,7 +250,7 @@ pub fn serialize_model_module<B: Backend + BackendMatcher<Backend = B>>(
     bundle.extend_from_slice(&meta_len.to_le_bytes());
     bundle.extend_from_slice(&meta_bytes);
     bundle.extend_from_slice(&model_bytes);
-    bundle
+    Ok(bundle)
 }
 
 /// Deserializes a vector of bytes into a model (`ModelModule`).
@@ -398,6 +397,43 @@ mod unit_tests {
         assert!(matches!(
             err,
             ModelError::UnsupportedRank(message) if message.contains("input 10 output 10")
+        ));
+    }
+
+    #[test]
+    fn serialize_model_module_returns_io_error_for_non_directory_parent() {
+        let parent_file = tempfile::NamedTempFile::new().unwrap();
+
+        let error = serialize_model_module(&stub_module(1), parent_file.path().to_path_buf())
+            .expect_err("a regular file cannot contain a temporary model directory");
+
+        assert!(matches!(error, ModelError::IoError(_)));
+    }
+
+    #[test]
+    fn deserialize_model_module_rejects_short_bundle() {
+        let error = deserialize_model_module::<NdArray>(vec![1, 2, 3], DeviceType::Cpu)
+            .err()
+            .expect("bundle shorter than its length prefix must be rejected");
+
+        assert!(matches!(
+            error,
+            ModelError::InvalidMetadata(message) if message.contains("bundle too short")
+        ));
+    }
+
+    #[test]
+    fn deserialize_model_module_rejects_truncated_metadata() {
+        let mut bundle = 10_u32.to_le_bytes().to_vec();
+        bundle.extend_from_slice(b"short");
+
+        let error = deserialize_model_module::<NdArray>(bundle, DeviceType::Cpu)
+            .err()
+            .expect("declared metadata length must fit inside the bundle");
+
+        assert!(matches!(
+            error,
+            ModelError::InvalidMetadata(message) if message.contains("bundle truncated")
         ));
     }
 }

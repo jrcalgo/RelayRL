@@ -14,12 +14,16 @@ use crate::data::tensor::{AnyBurnTensor, BackendMatcher, ConversionBurnTensor, T
 use crate::model::utils::validate_module;
 use crate::model::{ModelError, ModelModule};
 
-/// An `ArcSwap`-backed model wrapper that allows the underlying `ModelModule` to be swapped atomically at runtime with no downtime.
+struct ModelSnapshot<B: Backend + BackendMatcher<Backend = B>> {
+    module: Arc<ModelModule<B>>,
+    version: i64,
+}
+
+/// An `ArcSwap`-backed model wrapper that allows the model and its version to be swapped atomically at runtime with no downtime.
 ///
-/// Maintained per-actor; the swap count is exposed via `version()`.
+/// Maintained per-actor; the published model version is exposed via `version()`.
 pub struct HotReloadableModel<B: Backend + BackendMatcher<Backend = B>> {
-    inner: ArcSwap<ModelModule<B>>,
-    version: AtomicI64,
+    inner: ArcSwap<ModelSnapshot<B>>,
     default_device: DeviceType,
     input_dim: usize,
     output_dim: usize,
@@ -50,13 +54,24 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
         module: ModelModule<B>,
         device: DeviceType,
     ) -> Result<Self, ModelError> {
+        Self::new_from_module_with_version(module, device, 0).await
+    }
+
+    /// Validates a pre-loaded module and publishes it at an explicit generation.
+    pub async fn new_from_module_with_version(
+        module: ModelModule<B>,
+        device: DeviceType,
+        version: i64,
+    ) -> Result<Self, ModelError> {
         validate_module::<B>(&module)?;
         let input_dim = module.metadata.input_shape.len();
         let output_dim = module.metadata.output_shape.len();
 
         Ok(Self {
-            inner: ArcSwap::new(Arc::new(module)),
-            version: AtomicI64::new(0),
+            inner: ArcSwap::new(Arc::new(ModelSnapshot {
+                module: Arc::new(module),
+                version,
+            })),
             default_device: device,
             input_dim,
             output_dim,
@@ -85,7 +100,26 @@ impl<B: Backend + BackendMatcher<Backend = B>> HotReloadableModel<B> {
 
     /// Returns an `Arc` snapshot of the currently loaded model.
     pub fn current_module(&self) -> Arc<ModelModule<B>> {
-        self.inner.load_full()
+        self.current_module_with_version().0
+    }
+
+    /// Returns the module and the version published in the same atomic snapshot.
+    pub fn current_module_with_version(&self) -> (Arc<ModelModule<B>>, i64) {
+        let snapshot = self.inner.load();
+        (Arc::clone(&snapshot.module), snapshot.version)
+    }
+
+    fn publish(&self, module: ModelModule<B>, version: i64) {
+        self.inner.store(Arc::new(ModelSnapshot {
+            module: Arc::new(module),
+            version,
+        }));
+    }
+
+    #[cfg(test)]
+    fn published_pair(&self) -> (Arc<ModelModule<B>>, i64) {
+        let snapshot = self.inner.load();
+        (Arc::clone(&snapshot.module), snapshot.version)
     }
 
     /// Atomically swap the model from disk and bump version.
@@ -301,14 +335,77 @@ mod unit_tests {
         let reloadable = HotReloadableModel::new_from_module(stub_module(vec![2]), DeviceType::Cpu)
             .await
             .unwrap();
+        let mut replacement = stub_module(vec![2]);
+        replacement.metadata.model_file = "7".to_string();
 
-        let version = reloadable
-            .reload_from_module(stub_module(vec![2]), 7)
-            .await
-            .unwrap();
+        let version = reloadable.reload_from_module(replacement, 7).await.unwrap();
 
         assert_eq!(version, 7);
         assert_eq!(reloadable.version(), 7);
+        let (module, published_version) = reloadable.published_pair();
+        assert_eq!(published_version, 7);
+        assert_eq!(module.metadata.model_file, "7");
+    }
+
+    #[tokio::test]
+    async fn concurrent_reloads_publish_consistent_module_version_pairs() {
+        let mut initial = stub_module(vec![2]);
+        initial.metadata.model_file = "0".to_string();
+        let reloadable = Arc::new(
+            HotReloadableModel::new_from_module(initial, DeviceType::Cpu)
+                .await
+                .unwrap(),
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let mismatches = Arc::new(AtomicUsize::new(0));
+
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let reloadable = Arc::clone(&reloadable);
+                let stop = Arc::clone(&stop);
+                let mismatches = Arc::clone(&mismatches);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let (module, version) = reloadable.published_pair();
+                        if module.metadata.model_file != version.to_string() {
+                            mismatches.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let writers: Vec<_> = (0..2)
+            .map(|writer| {
+                let reloadable = Arc::clone(&reloadable);
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    for sequence in 0..2_000 {
+                        let version = (sequence * 2 + writer + 1) as i64;
+                        let mut module = stub_module(vec![2]);
+                        module.metadata.model_file = version.to_string();
+                        runtime
+                            .block_on(reloadable.reload_from_module(module, version))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        stop.store(true, Ordering::Release);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+
+        assert_eq!(mismatches.load(Ordering::Relaxed), 0);
+        let (module, version) = reloadable.published_pair();
+        assert_eq!(module.metadata.model_file, version.to_string());
     }
 
     #[tokio::test]

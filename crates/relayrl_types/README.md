@@ -329,10 +329,31 @@ Graphs with more than one input/output, or with non-tensor I/O (sequences, maps,
 are rejected with a specific `ModelError` at construction time rather than failing later inside
 `Session::run`.
 
-`metadata.json` itself is unchanged and remains **required** — RelayRL still needs it for
-shapes/dtypes/device defaults and as the cross-process wire contract used by the transport
-layer (coordinator bundles, NATS `ModelFilesBundle`, and on-disk directories); it is now
-*validated against the graph* instead of being trusted blindly. See
+`metadata.json` remains **required** for shapes, dtypes, device defaults, and the cross-process
+wire contract used by coordinator bundles, NATS `ModelFilesBundle`, and on-disk directories.
+Every model must also contain a non-null `obs_preprocess` object:
+
+```json
+{
+  "obs_preprocess": {
+    "state": {
+      "schema_version": 1,
+      "mean": [0.0, 0.0],
+      "m2": [1.0, 1.0],
+      "count": 0,
+      "std_floor": 0.0001,
+      "policy_version": -1
+    },
+    "mode": "caller_normalized"
+  }
+}
+```
+
+Use the identity `caller_normalized` state for models that need no runtime transform.
+`external_frozen` applies a frozen affine before inference, while `folded_into_graph` declares
+that the affine is already in the graph. Metadata missing this field, including pre-field model
+directories, is rejected rather than treated as identity. The complete metadata is validated
+against the graph instead of being trusted blindly. See
 [`crates/relayrl_types/tests/onnx_ingestion.rs`](tests/onnx_ingestion.rs) for worked examples,
 including non-standard I/O names, dynamic batch dimensions, `bool` tensors, and each rejection
 case.

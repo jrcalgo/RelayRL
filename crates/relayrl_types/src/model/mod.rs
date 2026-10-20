@@ -110,6 +110,7 @@ impl ModelFileType {
 
 /// JSON metadata (`metadata.json`) that describes a model directory: shapes, dtypes, file name, and default device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelMetadata {
     pub model_file: String,
     pub model_type: ModelFileType,
@@ -118,6 +119,8 @@ pub struct ModelMetadata {
     pub input_shape: Vec<usize>,
     pub output_shape: Vec<usize>,
     pub default_device: Option<DeviceType>,
+    /// Required contract describing where observation preprocessing is performed.
+    pub obs_preprocess: ObservationPreprocessMetadata,
 }
 
 impl ModelMetadata {
@@ -128,34 +131,73 @@ impl ModelMetadata {
         let mut s = String::new();
         fs::File::open(&meta_path)?.read_to_string(&mut s)?;
         let meta: ModelMetadata = serde_json::from_str(&s)?;
+        meta.validate()?;
+        Ok(meta)
+    }
 
-        if meta.model_file.trim().is_empty() {
+    /// Validates the required model and observation-preprocessing metadata.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.model_file.trim().is_empty() {
             return Err(ModelError::InvalidMetadata(
                 "metadata.model_file is empty".to_string(),
             ));
         }
-        if meta.input_shape.is_empty() || meta.output_shape.is_empty() {
+        if self.input_shape.is_empty() || self.output_shape.is_empty() {
             return Err(ModelError::InvalidMetadata(
                 "metadata input_shape/output_shape cannot be empty".to_string(),
             ));
         }
-        Ok(meta)
+        let width = *self.input_shape.last().unwrap_or(&0);
+        self.obs_preprocess.validate(width)?;
+        match self.obs_preprocess.mode {
+            ObservationPreprocessMode::ExternalFrozen
+            | ObservationPreprocessMode::FoldedIntoGraph => {
+                if !self.input_dtype.is_float() {
+                    return Err(ModelError::InvalidMetadata(
+                        "observation normalization requires a floating-point input dtype"
+                            .to_string(),
+                    ));
+                }
+                if self.obs_preprocess.state.policy_version < 0 {
+                    return Err(ModelError::InvalidMetadata(
+                        "frozen observation preprocessing requires a bound policy version"
+                            .to_string(),
+                    ));
+                }
+            }
+            ObservationPreprocessMode::CallerNormalized => {}
+        }
+        Ok(())
     }
 
     /// Serialises this metadata to `metadata.json` inside `dir`, creating the directory if needed.
     pub fn save_to_dir(&self, dir: impl Into<PathBuf>) -> Result<(), ModelError> {
+        self.validate()?;
         let dir: PathBuf = dir.into();
         fs::create_dir_all(&dir)?;
         let meta_path: PathBuf = dir.join("metadata.json");
-        let s = serde_json::to_string_pretty(self)?;
-        fs::write(meta_path, s)?;
-        Ok(())
+        let bytes = serde_json::to_vec_pretty(self)?;
+        atomic_write(&meta_path, &bytes)
     }
 
     /// Returns the resolved path to the model file by joining `dir` and `model_file`.
     pub fn resolve_model_path(&self, dir: &Path) -> PathBuf {
         dir.join(&self.model_file)
     }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ModelError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary
+        .persist(path)
+        .map_err(|error| ModelError::IoError(error.to_string()))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -176,9 +218,13 @@ pub struct Model<B: Backend + BackendMatcher<Backend = B>> {
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
-    fn load_from_file(file_type: ModelFileType, path: &Path) -> Result<Self, ModelError> {
+    fn load_from_file(
+        file_type: ModelFileType,
+        path: &Path,
+        device: Option<DeviceType>,
+    ) -> Result<Self, ModelError> {
         let raw_bytes: Arc<[u8]> = fs::read(path)?.into();
-        let inference: InferenceModel = Self::build_inference(file_type.clone(), path)?;
+        let inference: InferenceModel = Self::build_inference(file_type.clone(), path, device)?;
         Ok(Self {
             file_type,
             raw_bytes,
@@ -190,14 +236,25 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
     fn build_inference(
         file_type: ModelFileType,
         path: &Path,
+        device: Option<DeviceType>,
     ) -> Result<InferenceModel, ModelError> {
         match file_type {
             ModelFileType::Pt => {
                 #[cfg(feature = "tch-model")]
                 {
-                    let module = CModule::load(path)
-                        .map_err(|err| ModelError::BackendError(err.to_string()))?;
-                    Ok(InferenceModel::Pt(Arc::new(module)))
+                    // Traced weights can be graph constants. Load them on the declared
+                    // device; moving the module afterwards does not move those constants.
+                    let loaded = match device {
+                        #[cfg(feature = "tch-backend")]
+                        Some(DeviceType::Cuda(index)) => {
+                            CModule::load_on_device(path, tch::Device::Cuda(index))
+                        }
+                        #[cfg(feature = "tch-backend")]
+                        Some(DeviceType::Mps) => CModule::load_on_device(path, tch::Device::Mps),
+                        _ => CModule::load(path),
+                    }
+                    .map_err(|err| ModelError::BackendError(err.to_string()))?;
+                    Ok(InferenceModel::Pt(Arc::new(loaded)))
                 }
                 #[cfg(not(feature = "tch-model"))]
                 {
@@ -224,12 +281,20 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
         {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, self.raw_bytes.as_ref())?;
-        Ok(())
+        atomic_write(path, self.raw_bytes.as_ref())
     }
 
     fn inference(&self) -> &InferenceModel {
         &self.inference
+    }
+
+    #[cfg(feature = "tch-model")]
+    fn pt_module(&self) -> Option<&tch::CModule> {
+        match &self.inference {
+            InferenceModel::Pt(module) => Some(module.as_ref()),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
     }
 
     /// Build a `Model` directly from raw ONNX bytes, without touching the filesystem.
@@ -324,7 +389,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         let metadata = ModelMetadata::load_from_dir(&dir)?;
         let model_path = metadata.resolve_model_path(&dir);
         let file_type = ModelFileType::from_path(&model_path)?;
-        let model = Model::<B>::load_from_file(file_type, &model_path)?;
+        let model =
+            Model::<B>::load_from_file(file_type, &model_path, metadata.default_device.clone())?;
 
         Self::finish(model, metadata)
     }
@@ -332,17 +398,74 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
     /// Validates `model` against `metadata` (schema/type/shape compatibility for ONNX graphs)
     /// before assembling the final `ModelModule`. All constructors route through this so no
     /// path can produce a module whose declared metadata disagrees with the loaded model.
-    fn finish(model: Model<B>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+    fn finish(mut model: Model<B>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+        metadata.validate()?;
+        move_pt_module_to_device(&mut model, &metadata.default_device);
         validate_model_against_metadata(&model, &metadata)?;
         Ok(Self { model, metadata })
     }
 
-    /// Save `metadata.json` and the model file into `dir`.
+    /// MLP layers for a trainer that normalizes observations itself.
+    ///
+    /// Loads nothing extra: the TorchScript module is the one [`Model::load_from_file`] already
+    /// built. A folded raw-input graph has `(x - mean) / std` removed from its first layer.
+    #[cfg(feature = "tch-model")]
+    pub fn unfolded_training_layers(
+        &self,
+    ) -> Result<Vec<(usize, usize, Vec<f32>, Vec<f32>)>, ModelError> {
+        let module = self.model.pt_module().ok_or_else(|| {
+            ModelError::UnsupportedModelType(
+                "training-layer import requires a loaded TorchScript policy".to_string(),
+            )
+        })?;
+        let mut layers = pt_layers::mlp_layers(module)?;
+        if self.metadata.obs_preprocess.mode == ObservationPreprocessMode::FoldedIntoGraph {
+            let first = layers.first_mut().ok_or_else(|| {
+                ModelError::InvalidMetadata("loaded policy has no linear layers".to_string())
+            })?;
+            crate::model::obs_preprocess::unfold_observation_norm_from_first_layer(
+                first,
+                &self.metadata.obs_preprocess.state,
+            )?;
+        }
+        Ok(layers)
+    }
+}
+
+fn move_pt_module_to_device<B: Backend + BackendMatcher<Backend = B>>(
+    model: &mut Model<B>,
+    device: &Option<DeviceType>,
+) {
+    #[cfg(all(feature = "tch-model", feature = "tch-backend"))]
+    {
+        let Some(device) = device else {
+            return;
+        };
+        let target = match device {
+            DeviceType::Cpu => return,
+            DeviceType::Cuda(index) => tch::Device::Cuda(*index),
+            DeviceType::Mps => tch::Device::Mps,
+        };
+        if let InferenceModel::Pt(module) = &mut model.inference {
+            if let Some(module) = std::sync::Arc::get_mut(module) {
+                module.to(target, tch::Kind::Float, false);
+            }
+        }
+    }
+    #[cfg(not(all(feature = "tch-model", feature = "tch-backend")))]
+    {
+        let _ = (model, device);
+    }
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
+    /// Atomically save model bytes, then publish `metadata.json` last.
     pub fn save(&self, dir: impl Into<PathBuf>) -> Result<(), ModelError> {
         let dir: PathBuf = dir.into();
-        self.metadata.save_to_dir(&dir)?;
+        self.metadata.validate()?;
         let model_path = self.metadata.resolve_model_path(&dir);
         self.model.save_to_path(&model_path)?;
+        self.metadata.save_to_dir(&dir)?;
         Ok(())
     }
 
@@ -511,7 +634,8 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
             })
             .collect::<Result<_, _>>()?;
 
-        let batched_input = Self::stack_tensor_data(&observation_data)?;
+        let batched_input =
+            self.prepare_observation_input(Self::stack_tensor_data(&observation_data)?)?;
         let batched_output = match self.run_inference_tensor_data(batched_input) {
             Ok(output) => output,
             Err(ModelError::UnsupportedModelType(_)) => {
@@ -931,6 +1055,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
 
     /// Runs inference over a pre-stacked flat `TensorData` batch and returns the output `TensorData`.
     pub fn flat_batch_inference(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
+        let input_data = self.prepare_observation_input(input_data)?;
         self.run_inference_tensor_data(input_data)
     }
 
@@ -1257,8 +1382,10 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
                 }
             },
         };
+        let obs_tensor = Self::place_tch_input(obs_tensor, &self.metadata.default_device);
 
         let act_tensor = Self::run_tch_forward(module, &obs_tensor)?;
+        let act_tensor = act_tensor.to_device(tch::Device::Cpu);
         let output_shape: Vec<usize> = act_tensor
             .size()
             .into_iter()
@@ -1517,7 +1644,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         };
 
         // Step 3-5: forward, flatten, and convert without panicking.
+        let obs_tensor = Self::place_tch_input(obs_tensor, &self.metadata.default_device);
         let act_tensor = Self::run_tch_forward(module, &obs_tensor)?;
+        let act_tensor = act_tensor.to_device(tch::Device::Cpu);
         let flattened_act: TchTensor = act_tensor.flatten(0, -1);
         let act_bytes = Self::tch_flattened_to_bytes(flattened_act, &self.metadata.output_dtype)?;
 

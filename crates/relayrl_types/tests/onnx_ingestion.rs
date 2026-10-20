@@ -4,11 +4,20 @@
 //! against that discovered signature instead of being trusted blindly.
 #![cfg(all(feature = "onnx-model", feature = "ndarray-backend"))]
 
+use std::sync::Arc;
+
 use burn_ndarray::NdArray;
+use burn_tensor::{Float, Tensor, TensorData as BurnTensorData};
 use relayrl_types::data::tensor::{
-    DType, DeviceType, NdArrayDType, SupportedTensorBackend, TensorData,
+    AnyBurnTensor, DType, DeviceType, FloatBurnTensor, NdArrayDType, SupportedTensorBackend,
+    TensorData,
 };
+use relayrl_types::model::obs_preprocess::{
+    ObservationNormalizerState, ObservationPreprocessMetadata,
+};
+use relayrl_types::model::utils::{deserialize_model_module, serialize_model_module};
 use relayrl_types::model::{ModelError, ModelMetadata, ModelModule};
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
 type TestBackend = NdArray<f32>;
 
@@ -179,8 +188,12 @@ fn f32_metadata(model_file: &str, shape: Vec<usize>) -> ModelMetadata {
         input_dtype: DType::NdArray(NdArrayDType::F32),
         output_dtype: DType::NdArray(NdArrayDType::F32),
         input_shape: shape.clone(),
-        output_shape: shape,
+        output_shape: shape.clone(),
         default_device: Some(DeviceType::Cpu),
+        obs_preprocess:
+            relayrl_types::model::obs_preprocess::ObservationPreprocessMetadata::caller_normalized(
+                *shape.last().expect("test metadata shape must not be empty"),
+            ),
     }
 }
 
@@ -191,6 +204,18 @@ fn float_tensor_data(shape: Vec<usize>, values: &[f32]) -> TensorData {
         bytemuck::cast_slice(values).to_vec(),
         SupportedTensorBackend::NdArray,
     )
+}
+
+fn float_any_tensor(values: &[f32]) -> Arc<AnyBurnTensor<TestBackend, 1>> {
+    let device = TestBackend::get_device(&DeviceType::Cpu).expect("ndarray CPU device");
+    let tensor = Tensor::<TestBackend, 1, Float>::from_data(
+        BurnTensorData::new(values.to_vec(), [values.len()]),
+        &device,
+    );
+    Arc::new(AnyBurnTensor::Float(FloatBurnTensor {
+        tensor: Arc::new(tensor),
+        dtype: DType::NdArray(NdArrayDType::F32),
+    }))
 }
 
 /// The graph declares non-standard I/O names (`"obs"` / `"action"`); this must succeed and
@@ -266,6 +291,10 @@ fn bool_tensor_round_trips_through_native_onnx_bool_type() {
         input_shape: vec![3],
         output_shape: vec![3],
         default_device: Some(DeviceType::Cpu),
+        obs_preprocess:
+            relayrl_types::model::obs_preprocess::ObservationPreprocessMetadata::caller_normalized(
+                3,
+            ),
     };
 
     let module = ModelModule::<TestBackend>::from_onnx_bytes(bytes, metadata)
@@ -297,6 +326,10 @@ fn dtype_mismatch_is_rejected_at_construction() {
         input_shape: vec![2],
         output_shape: vec![2],
         default_device: Some(DeviceType::Cpu),
+        obs_preprocess:
+            relayrl_types::model::obs_preprocess::ObservationPreprocessMetadata::caller_normalized(
+                2,
+            ),
     };
 
     let err = match ModelModule::<TestBackend>::from_onnx_bytes(bytes, metadata) {
@@ -397,6 +430,7 @@ fn save_and_reload_round_trip_preserves_behavior() {
             "input_shape",
             "model_file",
             "model_type",
+            "obs_preprocess",
             "output_dtype",
             "output_shape",
         ]
@@ -404,6 +438,13 @@ fn save_and_reload_round_trip_preserves_behavior() {
 
     let reloaded = ModelModule::<TestBackend>::load_from_path(&dir)
         .expect("reloaded module should load and validate identically");
+    assert_eq!(
+        reloaded.metadata.obs_preprocess.mode,
+        relayrl_types::model::obs_preprocess::ObservationPreprocessMode::CallerNormalized
+    );
+    assert_eq!(reloaded.metadata.obs_preprocess.state.schema_version, 1);
+    assert_eq!(reloaded.metadata.obs_preprocess.state.count, 0);
+    assert_eq!(reloaded.metadata.obs_preprocess.state.policy_version, -1);
 
     let input = float_tensor_data(vec![2], &[7.0, 8.0]);
     let output = reloaded
@@ -413,4 +454,78 @@ fn save_and_reload_round_trip_preserves_behavior() {
     assert_eq!(values, &[7.0, 8.0]);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn external_frozen_is_applied_once_by_every_inference_entry_point() {
+    let mut state = ObservationNormalizerState::identity(2);
+    state.update_row(&[1.0, 2.0]);
+    state.update_row(&[3.0, 6.0]);
+    let raw = [5.0f32, -2.0];
+    let normalized = state.normalize_row(&raw.map(f64::from));
+
+    let single_bytes = build_identity_onnx("obs", "action", ONNX_FLOAT, &[Dim::Fixed(2)]);
+    let mut single_metadata = f32_metadata("single.onnx", vec![2]);
+    single_metadata.obs_preprocess =
+        ObservationPreprocessMetadata::external_frozen(state.clone(), 7);
+    let single = ModelModule::<TestBackend>::from_onnx_bytes(single_bytes, single_metadata)
+        .expect("single-step graph");
+    let (single_output, _, _) = single
+        .try_step::<1, 1>(float_any_tensor(&raw), None)
+        .expect("single-step inference");
+    let single_values: &[f32] = bytemuck::cast_slice(&single_output.data);
+    for (actual, expected) in single_values.iter().zip(&normalized) {
+        assert!((f64::from(*actual) - expected).abs() < 1e-5);
+    }
+
+    let batch_bytes = build_identity_onnx(
+        "obs",
+        "action",
+        ONNX_FLOAT,
+        &[Dim::Dynamic(Some("batch")), Dim::Fixed(2)],
+    );
+    let mut batch_metadata = f32_metadata("batch.onnx", vec![1, 2]);
+    batch_metadata.obs_preprocess = ObservationPreprocessMetadata::external_frozen(state, 7);
+    let batch = ModelModule::<TestBackend>::from_onnx_bytes(batch_bytes, batch_metadata)
+        .expect("batched graph");
+
+    let flat_output = batch
+        .flat_batch_inference(float_tensor_data(vec![1, 2], &raw))
+        .expect("flat-batch inference");
+    let flat_values: &[f32] = bytemuck::cast_slice(&flat_output.data);
+    for (actual, expected) in flat_values.iter().zip(&normalized) {
+        assert!((f64::from(*actual) - expected).abs() < 1e-5);
+    }
+
+    let observations = vec![float_any_tensor(&raw), float_any_tensor(&raw)];
+    let masks = vec![None, None];
+    let stacked = batch
+        .step_batch::<1, 1>(&observations, &masks)
+        .expect("stacked-batch inference");
+    for (output, _, _) in stacked {
+        let values: &[f32] = bytemuck::cast_slice(&output.data);
+        for (actual, expected) in values.iter().zip(&normalized) {
+            assert!((f64::from(*actual) - expected).abs() < 1e-5);
+        }
+    }
+}
+
+#[test]
+fn bundled_model_round_trip_preserves_behavior() {
+    let bytes = build_identity_onnx("obs", "action", ONNX_FLOAT, &[Dim::Fixed(2)]);
+    let metadata = f32_metadata("policy.onnx", vec![2]);
+    let module = ModelModule::<TestBackend>::from_onnx_bytes(bytes, metadata)
+        .expect("graph should load and validate");
+    let temp_dir = tempfile::tempdir().expect("temporary bundle directory");
+
+    let bundle = serialize_model_module(&module, temp_dir.path().to_path_buf())
+        .expect("valid module should serialize");
+    let reloaded = deserialize_model_module::<TestBackend>(bundle, DeviceType::Cpu)
+        .expect("serialized bundle should deserialize");
+
+    let output = reloaded
+        .flat_batch_inference(float_tensor_data(vec![2], &[7.0, 8.0]))
+        .expect("reloaded identity graph should run");
+    let values: &[f32] = bytemuck::cast_slice(&output.data);
+    assert_eq!(values, &[7.0, 8.0]);
 }

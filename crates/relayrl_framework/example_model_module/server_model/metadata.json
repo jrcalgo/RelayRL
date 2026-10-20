@@ -5,5 +5,16 @@
     "output_dtype": { "NdArray": "F32" },
     "input_shape": [1, 4],
     "output_shape": [1, 2],
-    "default_device": "cpu"
+    "default_device": "cpu",
+    "obs_preprocess": {
+        "state": {
+            "schema_version": 1,
+            "mean": [0.0, 0.0, 0.0, 0.0],
+            "m2": [1.0, 1.0, 1.0, 1.0],
+            "count": 0,
+            "std_floor": 0.0001,
+            "policy_version": -1
+        },
+        "mode": "caller_normalized"
+    }
 }

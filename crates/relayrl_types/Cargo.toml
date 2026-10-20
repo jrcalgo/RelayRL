@@ -11,6 +11,9 @@ keywords = ['networking', 'learning', 'tensors', 'types', 'serialization']
 categories = ['science', 'data-structures', 'encoding']
 license = "Apache-2.0"
 
+[lib]
+bench = false
+
 [features]
 default = ["ndarray-backend", "onnx-model"]
  
@@ -31,6 +34,9 @@ zerocopy = ["bytes"]
 codec-basic = ["compression", "integrity", "zerocopy"]
 codec-secure = ["codec-basic", "encryption"]
 codec-full = ["codec-secure", "metadata", "quantization"]
+
+[build-dependencies]
+cc = "1"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"]}

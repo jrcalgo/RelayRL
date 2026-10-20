@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Breaking: required observation preprocessing** - Every `ModelMetadata` now requires a non-null `obs_preprocess` contract. Generic models use explicit identity `caller_normalized` metadata; pre-field model directories intentionally no longer load.
+- **Consistent inference preprocessing** - Single-step, stacked-batch, and flat-batch inference apply `external_frozen` preprocessing exactly once. `caller_normalized` and `folded_into_graph` remain pass-through modes.
+- **Checkpoint publication order** - Atomic model bytes are replaced before `metadata.json`, which is published last as the graph/input-contract marker.
+
+### Added
+- **Observation-normalizer checkpoints** - `metadata.json` can carry optional `obs_preprocess` state (Welford mean, M2, count, standard-deviation floor, and policy version). Missing metadata still loads as an identity preprocess. Unknown fields and a normalizer width that does not match the model input are rejected. Model and metadata writes are replaced atomically. TorchScript files are loaded on the metadata device, because traced weights are graph constants and are not moved by a later device transfer.
+
 ## [0.9.2] - 2026-07-26
 
 ### Changed
