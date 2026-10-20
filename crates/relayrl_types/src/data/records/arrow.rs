@@ -130,7 +130,7 @@ impl ArrowTrajectory {
             episode,
             training_step,
             is_truncated: false,
-            policy_version: 0,
+            policy_version: -1,
         });
 
         for index in 0..batch.num_rows() {

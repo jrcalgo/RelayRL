@@ -157,6 +157,24 @@ impl std::fmt::Display for DType {
     }
 }
 
+impl DType {
+    /// Returns whether this element type is a floating-point observation type.
+    pub fn is_float(&self) -> bool {
+        match self {
+            #[cfg(feature = "ndarray-backend")]
+            DType::NdArray(dtype) => matches!(
+                dtype,
+                NdArrayDType::F16 | NdArrayDType::F32 | NdArrayDType::F64
+            ),
+            #[cfg(feature = "tch-backend")]
+            DType::Tch(dtype) => matches!(
+                dtype,
+                TchDType::F16 | TchDType::Bf16 | TchDType::F32 | TchDType::F64
+            ),
+        }
+    }
+}
+
 /// Element dtype variants for the LibTorch (`tch`) backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TchDType {

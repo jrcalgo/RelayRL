@@ -75,6 +75,15 @@ fn current_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Owned observation, action, and auxiliary data from a consumed `RelayRLAction`.
+pub struct ActionParts {
+    pub obs: Option<TensorData>,
+    pub act: Option<TensorData>,
+    pub data: Option<HashMap<String, RelayRLData>>,
+    pub rew: f32,
+    pub done: bool,
+}
+
 impl RelayRLAction {
     /// Constructs an action with explicit observation, action, mask, reward, done flag, auxiliary data, and agent id.
     pub fn new(
@@ -96,6 +105,13 @@ impl RelayRLAction {
             agent_id,
             timestamp: current_timestamp(),
         }
+    }
+
+    /// Inserts or replaces one auxiliary value on this action.
+    pub fn insert_data(&mut self, key: impl Into<String>, value: RelayRLData) {
+        self.data
+            .get_or_insert_with(HashMap::new)
+            .insert(key.into(), value);
     }
 
     /// Converts a `TensorData` to a backend-specific `Tensor`, downcasted to `Any`.
@@ -188,6 +204,32 @@ impl RelayRLAction {
         self.obs
             .as_ref()
             .and_then(|tensor_data| Self::to_tensor::<B>(tensor_data, device).ok())
+    }
+
+    /// Consumes the action and returns its observation tensor.
+    pub fn into_obs(self) -> Option<TensorData> {
+        self.obs
+    }
+
+    /// Consumes the action and returns its action tensor.
+    pub fn into_act(self) -> Option<TensorData> {
+        self.act
+    }
+
+    /// Consumes the action and returns its auxiliary data map.
+    pub fn into_data(self) -> Option<HashMap<String, RelayRLData>> {
+        self.data
+    }
+
+    /// Consumes the action, moving the tensors the replay buffer stores.
+    pub fn into_parts(self) -> ActionParts {
+        ActionParts {
+            obs: self.obs,
+            act: self.act,
+            data: self.data,
+            rew: self.rew,
+            done: self.done,
+        }
     }
 
     /// Returns the stored action tensor data.
@@ -550,6 +592,27 @@ mod unit_tests {
             values.iter().map(|value| u8::from(*value)).collect(),
             SupportedTensorBackend::NdArray,
         )
+    }
+
+    #[test]
+    fn into_parts_moves_the_same_tensors_getters_borrow() {
+        let action = RelayRLAction::new(
+            Some(f32_tensor(&[1.0, 2.0])),
+            Some(f32_tensor(&[3.0])),
+            None,
+            4.0,
+            true,
+            None,
+            None,
+        );
+        let borrowed_obs = action.get_obs().unwrap().data.clone();
+        let borrowed_act = action.get_act().unwrap().data.clone();
+        let parts = action.into_parts();
+        assert_eq!(parts.obs.unwrap().data, borrowed_obs);
+        assert_eq!(parts.act.unwrap().data, borrowed_act);
+        assert_eq!(parts.rew, 4.0);
+        assert!(parts.done);
+        assert!(parts.data.is_none());
     }
 
     fn rich_action() -> RelayRLAction {

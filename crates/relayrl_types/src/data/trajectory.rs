@@ -69,7 +69,7 @@ impl Default for RelayRLTrajectory {
             episode: None,
             training_step: None,
             is_truncated: false,
-            policy_version: 0,
+            policy_version: -1,
         }
     }
 }
@@ -87,7 +87,7 @@ impl RelayRLTrajectory {
             episode: None,
             training_step: None,
             is_truncated: false,
-            policy_version: 0,
+            policy_version: -1,
         }
     }
 
@@ -103,7 +103,7 @@ impl RelayRLTrajectory {
             episode: None,
             training_step: None,
             is_truncated: false,
-            policy_version: 0,
+            policy_version: -1,
         }
     }
 
@@ -126,8 +126,15 @@ impl RelayRLTrajectory {
             episode,
             training_step,
             is_truncated: false,
-            policy_version: 0,
+            policy_version: -1,
         }
+    }
+
+    /// Records the policy generation that produced this trajectory's log-probabilities.
+    ///
+    /// `-1` means the trajectory has not been stamped. Generation 0 is the initial policy.
+    pub fn set_policy_version(&mut self, version: i64) {
+        self.policy_version = version;
     }
 
     /// Appends an action and returns `true` when the trajectory should be flushed (max length reached or `done == true`).
