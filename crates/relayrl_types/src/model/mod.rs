@@ -1037,6 +1037,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         &self,
         observation: Arc<AnyBurnTensor<B, D_IN>>,
     ) -> Result<TensorData, ModelError> {
+        if self.uses_external_frozen_normalizer() {
+            let input = self.observation_to_tensor_data(observation)?;
+            let input = self.prepare_observation_input(input)?;
+            return self.run_inference_tensor_data(input);
+        }
         match self.model.inference() {
             #[cfg(feature = "tch-model")]
             InferenceModel::Pt(module) => {
@@ -1088,6 +1093,20 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         }
     }
 
+    fn uses_external_frozen_normalizer(&self) -> bool {
+        self.metadata.obs_preprocess.mode == ObservationPreprocessMode::ExternalFrozen
+    }
+
+    fn prepare_observation_input(&self, mut input: TensorData) -> Result<TensorData, ModelError> {
+        if self.metadata.obs_preprocess.mode == ObservationPreprocessMode::ExternalFrozen {
+            apply_frozen_normalizer_to_tensor_data(
+                &mut input,
+                &self.metadata.obs_preprocess.state,
+            )?;
+        }
+        Ok(input)
+    }
+
     fn run_inference_tensor_data(&self, input_data: TensorData) -> Result<TensorData, ModelError> {
         match self.model.inference() {
             #[cfg(feature = "tch-model")]
@@ -1135,6 +1154,33 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         no_grad(|| module.forward_ts(&[obs_tensor])).map_err(|error| {
             ModelError::BackendError(format!("LibTorch forward pass failed: {error}"))
         })
+    }
+
+    /// `from_slice` builds a CPU tensor. Move it onto the module device for the forward, then
+    /// bring the result back to CPU so the env loop can keep reading bytes.
+    #[cfg(all(
+        feature = "tch-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn tch_target_device(device: &DeviceType) -> Option<tch::Device> {
+        match device {
+            DeviceType::Cpu => None,
+            #[cfg(feature = "tch-backend")]
+            DeviceType::Cuda(index) => Some(tch::Device::Cuda(*index)),
+            #[cfg(feature = "tch-backend")]
+            DeviceType::Mps => Some(tch::Device::Mps),
+        }
+    }
+
+    #[cfg(all(
+        feature = "tch-model",
+        any(feature = "ndarray-backend", feature = "tch-backend")
+    ))]
+    fn place_tch_input(tensor: TchTensor, device: &Option<DeviceType>) -> TchTensor {
+        match device.as_ref().and_then(Self::tch_target_device) {
+            Some(target) => tensor.to_device(target),
+            None => tensor,
+        }
     }
 
     #[cfg(all(
