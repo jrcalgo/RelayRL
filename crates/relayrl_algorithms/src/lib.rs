@@ -104,9 +104,9 @@ pub mod prelude {
     pub mod ppo {
         pub mod algorithm {
             pub use crate::algorithms::PPO::kernel::{
-                ContinuousPPOPolicyHead, DiscretePPOPolicyHead, PPOKernel, PPOKernelFactory,
-                PPOKernelOps, PPOKernelSnapshot, PPOKernelTraining, PPOKernelTrainingArgs,
-                PPOPolicyHead,
+                ContinuousPPOPolicyHead, ConvShape, DiscretePPOPolicyHead, PPOArchitecture,
+                PPOKernel, PPOKernelFactory, PPOKernelOps, PPOKernelSnapshot, PPOKernelTraining,
+                PPOKernelTrainingArgs, PPOPolicyHead, PPOWarmStart,
             };
             pub use crate::algorithms::PPO::{
                 EpochTrainOutput, IPPOParams, IndependentPPOAlgorithm, MAPPOParams,
@@ -114,7 +114,9 @@ pub mod prelude {
             };
         }
         pub mod trainer {
-            pub use crate::algorithms::PPO::{PPONetworkArgs, PPOTrainer, PPOTrainerSpec};
+            pub use crate::algorithms::PPO::{
+                PPOActionKind, PPONetworkArgs, PPOTrainer, PPOTrainerSpec,
+            };
         }
     }
 
@@ -132,7 +134,7 @@ pub mod prelude {
     }
 }
 
-/// Common trainer arguments (directories, dimensions, dtypes, buffer size, device) consumed by `PPOTrainerSpec::default`.
+/// Common trainer arguments, including the optional reproducibility seed, consumed by `PPOTrainerSpec`.
 #[derive(Clone, Debug)]
 pub struct TrainerArgs {
     pub env_dir: PathBuf,
@@ -143,4 +145,5 @@ pub struct TrainerArgs {
     pub act_dtype: DType,
     pub buffer_size: usize,
     pub device: DeviceType,
+    pub seed: Option<u64>,
 }

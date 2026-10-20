@@ -151,6 +151,185 @@ impl Default for IPPOParams {
 /// Alias for `IPPOParams`; single-agent PPO uses the same hyperparameter set.
 pub type PPOParams = IPPOParams;
 
+/// Settings for statistically guarded early stopping.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EarlyStopping {
+    pub window: usize,
+    pub hold: usize,
+}
+
+impl Default for EarlyStopping {
+    fn default() -> Self {
+        Self {
+            window: 100,
+            hold: 50,
+        }
+    }
+}
+
+/// Summary of the most recent 100 completed episodes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReturnWindow {
+    pub mean: f32,
+    pub variance: f32,
+    pub timeout_fraction: f32,
+}
+
+/// Slope and its autocorrelation-adjusted standard error for one series.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlopeFit {
+    pub slope: f64,
+    pub std_error: f64,
+    pub flat: bool,
+}
+
+/// Tracks return and timeout series, arming only after significant improvement.
+pub struct ConvergenceTracker {
+    window: usize,
+    hold: usize,
+    returns: std::collections::VecDeque<f32>,
+    timeout_fracs: std::collections::VecDeque<f32>,
+    baseline: Option<ReturnWindow>,
+    armed: bool,
+    flat_streak: usize,
+}
+
+impl ConvergenceTracker {
+    pub fn new(spec: EarlyStopping) -> Self {
+        let window = spec.window.max(3);
+        Self {
+            window,
+            hold: spec.hold.max(1),
+            returns: std::collections::VecDeque::with_capacity(window),
+            timeout_fracs: std::collections::VecDeque::with_capacity(window),
+            baseline: None,
+            armed: false,
+            flat_streak: 0,
+        }
+    }
+
+    /// Records one landed update from a complete 100-episode return window.
+    ///
+    /// The first observation is retained as the Welch-style significance baseline. Once the
+    /// tracker has armed, it stays armed and may stop only after both observed series have been
+    /// flat for `hold` consecutive observations.
+    pub fn observe(&mut self, update: u64, window: ReturnWindow) -> Option<ConvergenceSample> {
+        let baseline = *self.baseline.get_or_insert(window);
+        if !self.armed {
+            let variance = (baseline.variance.max(0.0) + window.variance.max(0.0)) / 100.0;
+            let threshold = 2.0 * variance.sqrt();
+            self.armed = window.mean.is_finite()
+                && baseline.mean.is_finite()
+                && threshold.is_finite()
+                && window.mean - baseline.mean > threshold;
+        }
+
+        self.returns.push_back(window.mean);
+        self.timeout_fracs.push_back(window.timeout_fraction);
+        if self.returns.len() > self.window {
+            self.returns.pop_front();
+            self.timeout_fracs.pop_front();
+        }
+        if self.returns.len() < self.window {
+            self.flat_streak = 0;
+            return None;
+        }
+        let return_fit = fit_slope(self.returns.make_contiguous());
+        let timeout_fit = fit_slope(self.timeout_fracs.make_contiguous());
+        if self.armed && return_fit.flat && timeout_fit.flat {
+            self.flat_streak += 1;
+        } else {
+            self.flat_streak = 0;
+        }
+        Some(ConvergenceSample {
+            update,
+            y: window.mean,
+            z: window.timeout_fraction,
+            armed: self.armed,
+            stop: self.flat_streak >= self.hold,
+            return_fit,
+            timeout_fit,
+        })
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed
+    }
+}
+
+/// One evaluation of the two convergence series once a full fit window is available.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConvergenceSample {
+    pub update: u64,
+    pub y: f32,
+    pub z: f32,
+    pub armed: bool,
+    pub stop: bool,
+    pub return_fit: SlopeFit,
+    pub timeout_fit: SlopeFit,
+}
+
+/// Ordinary-least-squares slope of `values` against equally spaced time.
+pub fn fit_slope(values: &[f32]) -> SlopeFit {
+    let n = values.len();
+    if n < 3 {
+        return SlopeFit {
+            slope: 0.0,
+            std_error: f64::INFINITY,
+            flat: false,
+        };
+    }
+    let n_f = n as f64;
+    let mean_t = (n_f - 1.0) / 2.0;
+    let mean_y = values.iter().map(|value| f64::from(*value)).sum::<f64>() / n_f;
+    let mut sxx = 0.0;
+    let mut sxy = 0.0;
+    for (index, value) in values.iter().enumerate() {
+        let t = index as f64 - mean_t;
+        sxx += t * t;
+        sxy += t * (f64::from(*value) - mean_y);
+    }
+    let slope = if sxx == 0.0 { 0.0 } else { sxy / sxx };
+    let mut residuals = Vec::with_capacity(n);
+    let mut sse = 0.0;
+    for (index, value) in values.iter().enumerate() {
+        let fitted = mean_y + slope * (index as f64 - mean_t);
+        let residual = f64::from(*value) - fitted;
+        residuals.push(residual);
+        sse += residual * residual;
+    }
+    let residual_sd = (sse / (n_f - 2.0)).sqrt();
+    let mut lag_num = 0.0;
+    let mut lag_den = 0.0;
+    for index in 1..n {
+        lag_num += residuals[index] * residuals[index - 1];
+        lag_den += residuals[index] * residuals[index];
+    }
+    lag_den += residuals[0] * residuals[0];
+    let autocorrelation = if lag_den == 0.0 {
+        0.0
+    } else {
+        (lag_num / lag_den).clamp(-0.999, 0.999)
+    };
+    let effective = if (1.0 + autocorrelation).abs() < 1e-8 {
+        n_f
+    } else {
+        n_f * (1.0 - autocorrelation) / (1.0 + autocorrelation)
+    };
+    let n_eff = effective.clamp(3.0, n_f);
+    let std_error = if sxx == 0.0 {
+        f64::INFINITY
+    } else {
+        residual_sd / sxx.sqrt() * (n_f / n_eff).sqrt()
+    };
+    let flat = slope.abs() <= 2.0 * std_error && slope.abs() * n_f <= residual_sd;
+    SlopeFit {
+        slope,
+        std_error,
+        flat,
+    }
+}
+
 #[allow(dead_code)]
 struct RuntimeArgs {
     env_dir: PathBuf,

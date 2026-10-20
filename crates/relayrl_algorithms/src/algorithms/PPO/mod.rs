@@ -5,17 +5,21 @@ pub mod independent;
 pub mod multiagent;
 
 pub use independent::{
-    EpochTrainOutput, IPPOParams, IndependentPPOAlgorithm, PPOParams, SlotTrainResult,
+    ConvergenceSample, ConvergenceTracker, EarlyStopping, EpochTrainOutput, IPPOParams,
+    IndependentPPOAlgorithm, PPOParams, ReturnWindow, SlopeFit, SlotTrainResult, fit_slope,
 };
 pub use multiagent::{MAPPOParams, MultiAgentPPOAlgorithm};
 
 use crate::TrainerArgs;
 
 use crate::algorithms::PPO::kernel::{
-    ContinuousPPOPolicyHead, DiscretePPOPolicyHead, PPOKernel, PPOPolicyHead,
+    ContinuousPPOPolicyHead, DiscretePPOPolicyHead, PPOKernel, PPOPolicyHead, PPOWarmStart,
+    seeded_conv_architectures,
 };
+pub use crate::algorithms::PPO::kernel::{ConvShape, PPOArchitecture};
 use crate::algorithms::{
-    GenericMlp, NeuralNetwork, NeuralNetworkError, NeuralNetworkSpec, dtype_is_float,
+    GenericMlp, NeuralNetwork, NeuralNetworkError, NeuralNetworkSpec, WeightProvider,
+    acquire_conv_model_module, acquire_model_module, dtype_is_float,
 };
 
 use crate::templates::base_algorithm::AlgorithmError;
