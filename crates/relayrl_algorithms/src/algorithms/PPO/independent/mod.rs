@@ -589,10 +589,16 @@ where
                 self.hyperparams.lam,
                 self.hyperparams.max_buffered_episodes.map(|v| v as usize),
             );
-            let kernel = self.runtime.components.seed_kernel.take().ok_or_else(|| {
-                AlgorithmError::InitializationError("No seed kernel found".to_string())
-            })?;
             let index = self.runtime.components.agent_slots.len();
+            let kernel = self
+                .runtime
+                .components
+                .seed_kernel
+                .as_ref()
+                .ok_or_else(|| {
+                    AlgorithmError::InitializationError("No seed kernel found".to_string())
+                })?
+                .fork_independent(index as u64);
             self.runtime
                 .components
                 .agent_slots
@@ -762,7 +768,36 @@ where
     }
 
     /// Restore kernels from a completed background training run and record training stats.
-    pub fn apply_epoch_result(&mut self, output: EpochTrainOutput<B, KindIn, KindOut, Pi>) {
+    ///
+    /// Returns false when every submitted slot had no trainable batch. In that case kernels
+    /// are restored and the policy generation is left unchanged.
+    pub fn apply_epoch_result(&mut self, output: EpochTrainOutput<B, KindIn, KindOut, Pi>) -> bool {
+        let any_trained = output
+            .slot_results
+            .iter()
+            .any(|outcome| matches!(outcome, SlotEpochOutcome::Trained { .. }));
+        if !any_trained {
+            let mut slot_results = output.slot_results.into_iter();
+            for slot in self
+                .runtime
+                .components
+                .agent_slots
+                .iter_mut()
+                .filter(|slot| slot.kernel.is_none())
+            {
+                let Some(outcome) = slot_results.next() else {
+                    debug_assert!(false, "missing training result for submitted agent slot");
+                    break;
+                };
+                let SlotEpochOutcome::NotReady { kernel } = outcome else {
+                    debug_assert!(false, "trained outcome in an empty epoch");
+                    break;
+                };
+                slot.kernel = Some(kernel);
+            }
+            return false;
+        }
+
         // Advance the model version — this is the only place it increments, ensuring
         // it reflects real training completions and never inflates from wasted triggers.
         self.runtime.components.model_version += 1;

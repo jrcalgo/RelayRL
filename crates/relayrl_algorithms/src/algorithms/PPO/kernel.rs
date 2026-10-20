@@ -987,6 +987,34 @@ impl<
     Pi: NeuralNetwork<B, KindIn, KindOut> + Clone,
 > PPOKernel<B, KindIn, KindOut, Pi>
 {
+    /// Forks all trainable and normalization state for an independent agent slot.
+    pub(crate) fn fork_independent(&self, stream: u64) -> Self {
+        match self {
+            PPOKernel::Discrete(kernel) => PPOKernel::Discrete(DiscretePPOKernel {
+                pi: kernel.pi.clone(),
+                vf: kernel.vf.clone(),
+                trainer: kernel.trainer.clone(),
+                sampling_rng: fork_sampling_rng(&kernel.sampling_rng, stream),
+                returns_mean: kernel.returns_mean,
+                returns_variance: kernel.returns_variance,
+                returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
+            }),
+            PPOKernel::Continuous(kernel) => PPOKernel::Continuous(ContinuousPPOKernel {
+                pi: kernel.pi.clone(),
+                vf: kernel.vf.clone(),
+                trainer: kernel.trainer.clone(),
+                sampling_rng: fork_sampling_rng(&kernel.sampling_rng, stream),
+                returns_mean: kernel.returns_mean,
+                returns_variance: kernel.returns_variance,
+                returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
+            }),
+        }
+    }
+
     /// Clones the kernel for inference only, dropping the trainer state.
     pub fn clone_for_inference(&self) -> Self {
         match self {
