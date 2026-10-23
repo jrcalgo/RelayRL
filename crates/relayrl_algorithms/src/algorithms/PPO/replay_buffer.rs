@@ -1,23 +1,30 @@
 use crate::algorithms::{compute_normed_advantages, discounted_cumsum, scalar_stats};
 use crate::templates::base_replay_buffer::{Batch, GenericReplayBuffer, ReplayBufferError};
 use async_trait::async_trait;
-use relayrl_types::prelude::action::RelayRLData;
+use relayrl_types::prelude::action::{RelayRLAction, RelayRLData};
 use relayrl_types::prelude::tensor::relayrl::TensorData;
 use relayrl_types::prelude::trajectory::RelayRLTrajectory;
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+const BOOTSTRAP_OBS_KEY: &str = "bootstrap_obs";
+
 struct Buffers {
-    obs: Vec<TensorData>,
+    obs_flat: Vec<u8>,
+    obs_row_bytes: usize,
+    obs_template: Option<TensorData>,
     obs_dim: usize,
-    act: Vec<TensorData>,
+    act_flat: Vec<u8>,
+    act_row_bytes: usize,
+    act_template: Option<TensorData>,
     logp: Vec<f32>,
     rewards: Vec<f32>,
     advantages: Vec<f32>,
     returns: Vec<f32>,
     values: Vec<f32>,
     episode_boundaries: Vec<(usize, usize, bool)>,
+    episode_bootstrap_obs: Vec<Option<TensorData>>,
     episode_versions: Vec<i64>,
 }
 
@@ -43,6 +50,7 @@ pub struct PPOBatch {
 }
 
 /// Experience replay buffer for PPO that accumulates trajectories and computes GAE-normalized advantages on drain.
+#[derive(Clone)]
 pub struct PPOReplayBuffer {
     buffers: Arc<Mutex<Buffers>>,
     metadata: Arc<BufferMetadata>,
@@ -64,15 +72,20 @@ impl PPOReplayBuffer {
         max_buffered_episodes: Option<usize>,
     ) -> Self {
         let buffers = Buffers {
-            obs: Vec::with_capacity(buffer_size),
+            obs_flat: Vec::with_capacity(buffer_size),
+            obs_row_bytes: 0,
+            obs_template: None,
             obs_dim: 0,
-            act: Vec::with_capacity(buffer_size),
+            act_flat: Vec::with_capacity(buffer_size),
+            act_row_bytes: 0,
+            act_template: None,
             logp: Vec::with_capacity(buffer_size),
             rewards: Vec::with_capacity(buffer_size),
             advantages: Vec::with_capacity(buffer_size),
             returns: Vec::with_capacity(buffer_size),
             values: Vec::with_capacity(buffer_size),
             episode_boundaries: Vec::new(),
+            episode_bootstrap_obs: Vec::new(),
             episode_versions: Vec::new(),
         };
         Self {
@@ -126,7 +139,71 @@ impl PPOReplayBuffer {
         buffers.returns[start..end].copy_from_slice(&returns);
     }
 
-    /// Returns all buffered observations and their dimension for a value-function pass before GAE.
+    fn remember_obs(buffers: &mut Buffers, tensor: TensorData) {
+        if buffers.obs_row_bytes == 0 {
+            buffers.obs_dim = tensor.shape.iter().product();
+            buffers.obs_row_bytes = tensor.data.len();
+            buffers.obs_template = Some(TensorData {
+                shape: tensor.shape.clone(),
+                dtype: tensor.dtype.clone(),
+                data: Vec::new(),
+                supported_backend: tensor.supported_backend.clone(),
+            });
+        }
+        buffers.obs_flat.extend_from_slice(&tensor.data);
+    }
+
+    fn remember_act(buffers: &mut Buffers, tensor: TensorData) {
+        if buffers.act_row_bytes == 0 {
+            buffers.act_row_bytes = tensor.data.len();
+            buffers.act_template = Some(TensorData {
+                shape: tensor.shape.clone(),
+                dtype: tensor.dtype.clone(),
+                data: Vec::new(),
+                supported_backend: tensor.supported_backend.clone(),
+            });
+        }
+        buffers.act_flat.extend_from_slice(&tensor.data);
+    }
+
+    fn rows_from_flat(
+        flat: &[u8],
+        start_row: usize,
+        end_row: usize,
+        stride: usize,
+        template: &TensorData,
+    ) -> Vec<TensorData> {
+        if stride == 0 || start_row >= end_row {
+            return Vec::new();
+        }
+        (start_row..end_row)
+            .map(|row| {
+                let start = row * stride;
+                TensorData {
+                    shape: template.shape.clone(),
+                    dtype: template.dtype.clone(),
+                    data: flat[start..start + stride].to_vec(),
+                    supported_backend: template.supported_backend.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn drain_flat_prefix(flat: &mut Vec<u8>, rows: usize, stride: usize) {
+        let bytes = rows.saturating_mul(stride);
+        if bytes == 0 || flat.is_empty() {
+            return;
+        }
+        let bytes = bytes.min(flat.len());
+        flat.drain(0..bytes);
+    }
+
+    /// Returns observations and their dimension for a value-function pass before GAE.
+    ///
+    /// Transition observations come first. They are followed by the post-step
+    /// bootstrap observation for each non-terminal truncated boundary, in
+    /// boundary order. The paired finalize method interprets values with the
+    /// same layout.
     pub fn get_obs_for_gae_blocking(&self) -> (Vec<TensorData>, usize) {
         let buffers = self.buffers.lock().unwrap();
         let ptr = self.metadata.buffer_pointer.load(Ordering::Relaxed);
@@ -134,10 +211,25 @@ impl PPOReplayBuffer {
         if obs_dim == 0 || ptr == 0 {
             return (Vec::new(), 1);
         }
-        (buffers.obs[..ptr].to_vec(), obs_dim)
+        let Some(template) = buffers.obs_template.as_ref() else {
+            return (Vec::new(), 1);
+        };
+        let mut observations =
+            Self::rows_from_flat(&buffers.obs_flat, 0, ptr, buffers.obs_row_bytes, template);
+        observations.extend(
+            buffers
+                .episode_bootstrap_obs
+                .iter()
+                .filter_map(|observation| observation.clone()),
+        );
+        (observations, obs_dim)
     }
 
-    /// Return obs for exactly the first `n` complete episodes.
+    /// Returns observations for exactly the first `n` complete episodes.
+    ///
+    /// Transition observations in `[0, cut_step)` come first. They are followed
+    /// by the post-step bootstrap observation for each truncated boundary among
+    /// those episodes, in boundary order.
     /// Returns empty if fewer than `n` complete episodes exist in the buffer.
     pub fn get_obs_for_first_n_episodes(&self, n: usize) -> (Vec<TensorData>, usize) {
         let buffers = self.buffers.lock().unwrap();
@@ -149,7 +241,22 @@ impl PPOReplayBuffer {
             return (Vec::new(), 1);
         }
         let cut_step = buffers.episode_boundaries[n - 1].1;
-        (buffers.obs[..cut_step].to_vec(), obs_dim)
+        let Some(template) = buffers.obs_template.as_ref() else {
+            return (Vec::new(), 1);
+        };
+        let mut observations = Self::rows_from_flat(
+            &buffers.obs_flat,
+            0,
+            cut_step,
+            buffers.obs_row_bytes,
+            template,
+        );
+        observations.extend(
+            buffers.episode_bootstrap_obs[..n]
+                .iter()
+                .filter_map(|observation| observation.clone()),
+        );
+        (observations, obs_dim)
     }
 
     /// Stores the value estimates and computes GAE advantages/returns over all buffered episodes.
@@ -195,16 +302,12 @@ impl PPOReplayBuffer {
         }
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
+        let mut bootstrap_values = values.get(capacity..).unwrap_or_default().iter().copied();
         for (start, end, is_truncated) in boundaries {
             // Bootstrap with V(s_end) (the state reached after the chunk's last
             // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
             let bootstrap = if is_truncated {
-                buffers
-                    .values
-                    .get(end)
-                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
-                    .copied()
-                    .unwrap_or(0.0)
+                bootstrap_values.next().unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -215,8 +318,31 @@ impl PPOReplayBuffer {
         let (adv_mean, adv_std) = scalar_stats(adv_raw);
         let adv_norm = compute_normed_advantages(adv_raw, adv_mean, adv_std.max(1e-8));
 
-        let obs = buffers.obs[..capacity.min(buffers.obs.len())].to_vec();
-        let act = buffers.act[..capacity.min(buffers.act.len())].to_vec();
+        let obs = buffers
+            .obs_template
+            .as_ref()
+            .map(|template| {
+                Self::rows_from_flat(
+                    &buffers.obs_flat,
+                    0,
+                    capacity.min(buffers.obs_flat.len() / buffers.obs_row_bytes.max(1)),
+                    buffers.obs_row_bytes,
+                    template,
+                )
+            })
+            .unwrap_or_default();
+        let act = buffers
+            .act_template
+            .as_ref()
+            .map(|template| {
+                let rows = if buffers.act_row_bytes == 0 {
+                    0
+                } else {
+                    capacity.min(buffers.act_flat.len() / buffers.act_row_bytes)
+                };
+                Self::rows_from_flat(&buffers.act_flat, 0, rows, buffers.act_row_bytes, template)
+            })
+            .unwrap_or_default();
         let logp = buffers.logp[..capacity.min(buffers.logp.len())].to_vec();
         let ret_raw = &buffers.returns[..capacity];
         let (ret_mean, ret_std) = scalar_stats(ret_raw);
@@ -227,15 +353,20 @@ impl PPOReplayBuffer {
         self.metadata
             .buffer_path_start_idx
             .store(0, Ordering::Relaxed);
-        buffers.obs.clear();
+        buffers.obs_flat.clear();
+        buffers.obs_row_bytes = 0;
+        buffers.obs_template = None;
         buffers.obs_dim = 0;
-        buffers.act.clear();
+        buffers.act_flat.clear();
+        buffers.act_row_bytes = 0;
+        buffers.act_template = None;
         buffers.logp.clear();
         buffers.rewards.clear();
         buffers.advantages.clear();
         buffers.returns.clear();
         buffers.values.clear();
         buffers.episode_boundaries.clear();
+        buffers.episode_bootstrap_obs.clear();
         buffers.episode_versions.clear();
 
         Some(PPOBatch {
@@ -276,16 +407,12 @@ impl PPOReplayBuffer {
 
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
+        let mut bootstrap_values = values.get(cut_step..).unwrap_or_default().iter().copied();
         for (start, end, is_truncated) in &boundaries_n {
             // Bootstrap with V(s_end) (the state reached after the chunk's last
             // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
             let bootstrap = if *is_truncated {
-                buffers
-                    .values
-                    .get(*end)
-                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
-                    .copied()
-                    .unwrap_or(0.0)
+                bootstrap_values.next().unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -305,8 +432,24 @@ impl PPOReplayBuffer {
             if lag > max_version_lag {
                 continue; // stale: drain but don't train on this episode
             }
-            fresh_obs.extend_from_slice(&buffers.obs[start..end]);
-            fresh_acts.extend_from_slice(&buffers.act[start..end]);
+            if let Some(template) = buffers.obs_template.as_ref() {
+                fresh_obs.extend(Self::rows_from_flat(
+                    &buffers.obs_flat,
+                    start,
+                    end,
+                    buffers.obs_row_bytes,
+                    template,
+                ));
+            }
+            if let Some(template) = buffers.act_template.as_ref() {
+                fresh_acts.extend(Self::rows_from_flat(
+                    &buffers.act_flat,
+                    start,
+                    end,
+                    buffers.act_row_bytes,
+                    template,
+                ));
+            }
             fresh_logp.extend_from_slice(&buffers.logp[start..end]);
             fresh_adv.extend_from_slice(&buffers.advantages[start..end]);
             fresh_ret.extend_from_slice(&buffers.returns[start..end]);

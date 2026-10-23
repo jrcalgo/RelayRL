@@ -885,6 +885,19 @@ pub(crate) mod training {
             ent_coef: f32,
             compute_stats: bool,
         ) -> (f32, f32, HashMap<String, f32>) {
+            if self.conv_network.is_some() {
+                return self.train_step_discrete_conv(
+                    obs_flat,
+                    obs_dim,
+                    act_flat,
+                    adv,
+                    logp_old,
+                    ret,
+                    clip_ratio,
+                    ent_coef,
+                    compute_stats,
+                );
+            }
             let n = (obs_flat.len() / obs_dim.max(1))
                 .min(act_flat.len())
                 .min(adv.len())
@@ -897,28 +910,26 @@ pub(crate) mod training {
                 Some(net) => net,
                 None => return (0.0, 0.0, zero_pi_info().1),
             };
-            let device = <TB as burn_tensor::backend::Backend>::Device::default();
-
-            let obs = Tensor::<TB, 2, Float>::from_data(
+            let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
                 BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
-                &device,
+                &self.device,
             );
 
             // ── Policy head ──────────────────────────────────────────────
             let logits = net.pi_forward(obs.clone());
             let log_probs_full = log_softmax(logits, 1);
-            let act = Tensor::<TB, 2, Int>::from_data(
+            let act = Tensor::<Autodiff<B>, 2, Int>::from_data(
                 BurnTensorData::new(act_flat[..n].to_vec(), [n, 1]),
-                &device,
+                &self.device,
             );
             let logp = log_probs_full.clone().gather(1, act).reshape([n]);
-            let adv_tensor = Tensor::<TB, 1, Float>::from_data(
+            let adv_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
                 BurnTensorData::new(adv[..n].to_vec(), [n]),
-                &device,
+                &self.device,
             );
-            let logp_old_tensor = Tensor::<TB, 1, Float>::from_data(
+            let logp_old_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
                 BurnTensorData::new(logp_old[..n].to_vec(), [n]),
-                &device,
+                &self.device,
             );
             let ratio = (logp.clone() - logp_old_tensor).exp();
             let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
@@ -934,9 +945,9 @@ pub(crate) mod training {
 
             // ── Value head ────────────────────────────────────────────────
             let v_pred = net.vf_forward(obs).reshape([n]);
-            let ret_tensor = Tensor::<TB, 1, Float>::from_data(
+            let ret_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
                 BurnTensorData::new(ret[..n].to_vec(), [n]),
-                &device,
+                &self.device,
             );
             let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
 
@@ -958,19 +969,11 @@ pub(crate) mod training {
                 return (pi_loss_val, vf_loss_val, HashMap::new());
             }
 
-            let entropy_val = entropy_t.into_scalar();
-            let approx_kl = ((ratio.clone() - 1.0) - ratio.clone().log())
-                .mean()
-                .into_scalar();
-            let ratio_values = ratio
-                .into_data()
-                .to_vec::<f32>()
-                .unwrap_or_else(|_| vec![1.0; n]);
-            let clipfrac = ratio_values
-                .iter()
-                .filter(|r| (**r - 1.0).abs() > clip_ratio)
-                .count() as f32
-                / n as f32;
+            let entropy_val = scalar_from_tensor(&entropy_t);
+            let approx_kl_t = ((ratio.clone() - 1.0) - ratio.clone().log()).mean();
+            let clipfrac_t = (ratio - 1.0).abs().greater_elem(clip_ratio).float().mean();
+            let approx_kl = scalar_from_tensor(&approx_kl_t);
+            let clipfrac = scalar_from_tensor(&clipfrac_t);
 
             let mut info = HashMap::new();
             info.insert("kl".to_string(), approx_kl);
@@ -990,19 +993,53 @@ pub(crate) mod training {
             if n == 0 {
                 return Vec::new();
             }
+            if let Some(net) = self.conv_network.as_ref() {
+                let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
+                    BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                    &self.device,
+                );
+                return net
+                    .vf_forward(obs)
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap_or_else(|_| vec![0.0; n]);
+            }
             let net = match self.network.as_ref() {
                 Some(net) => net,
                 None => return vec![0.0; n],
             };
-            let device = <TB as burn_tensor::backend::Backend>::Device::default();
-            let obs = Tensor::<TB, 2, Float>::from_data(
+            let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
                 BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
-                &device,
+                &self.device,
             );
             let v = net.vf_forward(obs);
             v.into_data()
                 .to_vec::<f32>()
                 .unwrap_or_else(|_| vec![0.0; n])
+        }
+
+        /// Raw policy logits (or mean‖log_std) from the learner network.
+        pub fn policy_forward_flat(&self, obs_flat: &[f32], obs_dim: usize) -> Vec<f32> {
+            let n = if obs_dim > 0 {
+                obs_flat.len() / obs_dim
+            } else {
+                0
+            };
+            if n == 0 {
+                return Vec::new();
+            }
+            let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &self.device,
+            );
+            let output = if let Some(net) = self.conv_network.as_ref() {
+                net.pi_forward(obs)
+            } else if let Some(net) = self.network.as_ref() {
+                net.pi_forward(obs)
+            } else {
+                return Vec::new();
+            };
+            output.into_data().to_vec::<f32>().unwrap_or_default()
         }
 
         /// Log-probs for (obs, discrete act). Used for logp_old recompute.
@@ -1052,18 +1089,32 @@ pub(crate) mod training {
             if n == 0 || obs_dim == 0 || action_dim == 0 {
                 return Vec::new();
             }
+            if let Some(net) = self.conv_network.as_ref() {
+                let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
+                    BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                    &self.device,
+                );
+                let act = Tensor::<Autodiff<B>, 2, Float>::from_data(
+                    BurnTensorData::new(act_flat[..n * action_dim].to_vec(), [n, action_dim]),
+                    &self.device,
+                );
+                let (logp, _) = gaussian_logp_and_entropy(net.pi_forward(obs), act, n, action_dim);
+                return logp
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap_or_else(|_| vec![0.0; n]);
+            }
             let net = match self.network.as_ref() {
                 Some(net) => net,
                 None => return vec![0.0; n],
             };
-            let device = <TB as burn_tensor::backend::Backend>::Device::default();
-            let obs = Tensor::<TB, 2, Float>::from_data(
+            let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
                 BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
-                &device,
+                &self.device,
             );
-            let act = Tensor::<TB, 2, Float>::from_data(
+            let act = Tensor::<Autodiff<B>, 2, Float>::from_data(
                 BurnTensorData::new(act_flat[..n * action_dim].to_vec(), [n, action_dim]),
-                &device,
+                &self.device,
             );
             let (logp, _) = gaussian_logp_and_entropy(net.pi_forward(obs), act, n, action_dim);
             logp.into_data()
@@ -1086,6 +1137,20 @@ pub(crate) mod training {
             ent_coef: f32,
             compute_stats: bool,
         ) -> (f32, f32, HashMap<String, f32>) {
+            if self.conv_network.is_some() {
+                return self.train_step_continuous_conv(
+                    obs_flat,
+                    obs_dim,
+                    act_flat,
+                    action_dim,
+                    adv,
+                    logp_old,
+                    ret,
+                    clip_ratio,
+                    ent_coef,
+                    compute_stats,
+                );
+            }
             let n = (obs_flat.len() / obs_dim.max(1))
                 .min(act_flat.len() / action_dim.max(1))
                 .min(adv.len())
@@ -1098,26 +1163,24 @@ pub(crate) mod training {
                 Some(net) => net,
                 None => return (0.0, 0.0, zero_pi_info().1),
             };
-            let device = <TB as burn_tensor::backend::Backend>::Device::default();
-
-            let obs = Tensor::<TB, 2, Float>::from_data(
+            let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
                 BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
-                &device,
+                &self.device,
             );
-            let act = Tensor::<TB, 2, Float>::from_data(
+            let act = Tensor::<Autodiff<B>, 2, Float>::from_data(
                 BurnTensorData::new(act_flat[..n * action_dim].to_vec(), [n, action_dim]),
-                &device,
+                &self.device,
             );
 
             let (logp, entropy_t) =
                 gaussian_logp_and_entropy(net.pi_forward(obs.clone()), act, n, action_dim);
-            let adv_tensor = Tensor::<TB, 1, Float>::from_data(
+            let adv_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
                 BurnTensorData::new(adv[..n].to_vec(), [n]),
-                &device,
+                &self.device,
             );
-            let logp_old_tensor = Tensor::<TB, 1, Float>::from_data(
+            let logp_old_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
                 BurnTensorData::new(logp_old[..n].to_vec(), [n]),
-                &device,
+                &self.device,
             );
             let ratio = (logp.clone() - logp_old_tensor).exp();
             let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
@@ -1127,9 +1190,9 @@ pub(crate) mod training {
             let pi_loss_t = -(clip_obj + ent_coef * entropy_t.clone());
 
             let v_pred = net.vf_forward(obs).reshape([n]);
-            let ret_tensor = Tensor::<TB, 1, Float>::from_data(
+            let ret_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
                 BurnTensorData::new(ret[..n].to_vec(), [n]),
-                &device,
+                &self.device,
             );
             let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
 
@@ -1150,24 +1213,179 @@ pub(crate) mod training {
                 return (pi_loss_val, vf_loss_val, HashMap::new());
             }
 
-            let entropy_val = entropy_t.into_scalar();
-            let approx_kl = ((ratio.clone() - 1.0) - ratio.clone().log())
-                .mean()
-                .into_scalar();
-            let ratio_values = ratio
-                .into_data()
-                .to_vec::<f32>()
-                .unwrap_or_else(|_| vec![1.0; n]);
-            let clipfrac = ratio_values
-                .iter()
-                .filter(|r| (**r - 1.0).abs() > clip_ratio)
-                .count() as f32
-                / n as f32;
+            let entropy_val = scalar_from_tensor(&entropy_t);
+            let approx_kl_t = ((ratio.clone() - 1.0) - ratio.clone().log()).mean();
+            let clipfrac_t = (ratio - 1.0).abs().greater_elem(clip_ratio).float().mean();
+            let approx_kl = scalar_from_tensor(&approx_kl_t);
+            let clipfrac = scalar_from_tensor(&clipfrac_t);
 
             let mut info = HashMap::new();
             info.insert("kl".to_string(), approx_kl);
             info.insert("entropy".to_string(), entropy_val);
             info.insert("clipfrac".to_string(), clipfrac);
+            (pi_loss_val, vf_loss_val, info)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn train_step_discrete_conv(
+            &mut self,
+            obs_flat: &[f32],
+            obs_dim: usize,
+            act_flat: &[i64],
+            adv: &[f32],
+            logp_old: &[f32],
+            ret: &[f32],
+            clip_ratio: f32,
+            ent_coef: f32,
+            compute_stats: bool,
+        ) -> (f32, f32, HashMap<String, f32>) {
+            let n = (obs_flat.len() / obs_dim.max(1))
+                .min(act_flat.len())
+                .min(adv.len())
+                .min(logp_old.len())
+                .min(ret.len());
+            if n == 0 {
+                return (0.0, 0.0, zero_pi_info().1);
+            }
+            let net = match self.conv_network.take() {
+                Some(net) => net,
+                None => return (0.0, 0.0, zero_pi_info().1),
+            };
+            let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &self.device,
+            );
+            let logits = net.pi_forward(obs.clone());
+            let log_probs_full = log_softmax(logits, 1);
+            let act = Tensor::<Autodiff<B>, 2, Int>::from_data(
+                BurnTensorData::new(act_flat[..n].to_vec(), [n, 1]),
+                &self.device,
+            );
+            let logp = log_probs_full.clone().gather(1, act).reshape([n]);
+            let adv_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
+                BurnTensorData::new(adv[..n].to_vec(), [n]),
+                &self.device,
+            );
+            let logp_old_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
+                BurnTensorData::new(logp_old[..n].to_vec(), [n]),
+                &self.device,
+            );
+            let ratio = (logp - logp_old_tensor).exp();
+            let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
+            let clip_obj = (ratio.clone() * adv_tensor.clone())
+                .min_pair(clipped_ratio * adv_tensor)
+                .mean();
+            let entropy_t = (log_probs_full.clone().exp() * log_probs_full)
+                .neg()
+                .sum_dim(1)
+                .reshape([n])
+                .mean();
+            let pi_loss_t = -(clip_obj + ent_coef * entropy_t.clone());
+            let v_pred = net.vf_forward(obs).reshape([n]);
+            let ret_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
+                BurnTensorData::new(ret[..n].to_vec(), [n]),
+                &self.device,
+            );
+            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
+            let total_loss = pi_loss_t.clone() + vf_loss_t.clone() * self.vf_coef;
+            let pi_loss_val = scalar_from_tensor(&pi_loss_t);
+            let vf_loss_val = scalar_from_tensor(&vf_loss_t);
+            let grads = total_loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &net);
+            let lr = self.effective_lr();
+            let net = self.conv_optimizer.step(lr, net, grads_params);
+            self.conv_network = Some(net);
+            self.grad_step_count += 1;
+
+            if !compute_stats {
+                return (pi_loss_val, vf_loss_val, HashMap::new());
+            }
+            let entropy_val = scalar_from_tensor(&entropy_t);
+            let approx_kl_t = ((ratio.clone() - 1.0) - ratio.clone().log()).mean();
+            let clipfrac_t = (ratio - 1.0).abs().greater_elem(clip_ratio).float().mean();
+            let mut info = HashMap::new();
+            info.insert("kl".to_string(), scalar_from_tensor(&approx_kl_t));
+            info.insert("entropy".to_string(), entropy_val);
+            info.insert("clipfrac".to_string(), scalar_from_tensor(&clipfrac_t));
+            (pi_loss_val, vf_loss_val, info)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn train_step_continuous_conv(
+            &mut self,
+            obs_flat: &[f32],
+            obs_dim: usize,
+            act_flat: &[f32],
+            action_dim: usize,
+            adv: &[f32],
+            logp_old: &[f32],
+            ret: &[f32],
+            clip_ratio: f32,
+            ent_coef: f32,
+            compute_stats: bool,
+        ) -> (f32, f32, HashMap<String, f32>) {
+            let n = (obs_flat.len() / obs_dim.max(1))
+                .min(act_flat.len() / action_dim.max(1))
+                .min(adv.len())
+                .min(logp_old.len())
+                .min(ret.len());
+            if n == 0 || obs_dim == 0 || action_dim == 0 {
+                return (0.0, 0.0, zero_pi_info().1);
+            }
+            let net = match self.conv_network.take() {
+                Some(net) => net,
+                None => return (0.0, 0.0, zero_pi_info().1),
+            };
+            let obs = Tensor::<Autodiff<B>, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &self.device,
+            );
+            let act = Tensor::<Autodiff<B>, 2, Float>::from_data(
+                BurnTensorData::new(act_flat[..n * action_dim].to_vec(), [n, action_dim]),
+                &self.device,
+            );
+            let (logp, entropy_t) =
+                gaussian_logp_and_entropy(net.pi_forward(obs.clone()), act, n, action_dim);
+            let adv_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
+                BurnTensorData::new(adv[..n].to_vec(), [n]),
+                &self.device,
+            );
+            let logp_old_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
+                BurnTensorData::new(logp_old[..n].to_vec(), [n]),
+                &self.device,
+            );
+            let ratio = (logp - logp_old_tensor).exp();
+            let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
+            let clip_obj = (ratio.clone() * adv_tensor.clone())
+                .min_pair(clipped_ratio * adv_tensor)
+                .mean();
+            let pi_loss_t = -(clip_obj + ent_coef * entropy_t.clone());
+            let v_pred = net.vf_forward(obs).reshape([n]);
+            let ret_tensor = Tensor::<Autodiff<B>, 1, Float>::from_data(
+                BurnTensorData::new(ret[..n].to_vec(), [n]),
+                &self.device,
+            );
+            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
+            let total_loss = pi_loss_t.clone() + vf_loss_t.clone() * self.vf_coef;
+            let pi_loss_val = scalar_from_tensor(&pi_loss_t);
+            let vf_loss_val = scalar_from_tensor(&vf_loss_t);
+            let grads = total_loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &net);
+            let lr = self.effective_lr();
+            let net = self.conv_optimizer.step(lr, net, grads_params);
+            self.conv_network = Some(net);
+            self.grad_step_count += 1;
+
+            if !compute_stats {
+                return (pi_loss_val, vf_loss_val, HashMap::new());
+            }
+            let entropy_val = scalar_from_tensor(&entropy_t);
+            let approx_kl_t = ((ratio.clone() - 1.0) - ratio.clone().log()).mean();
+            let clipfrac_t = (ratio - 1.0).abs().greater_elem(clip_ratio).float().mean();
+            let mut info = HashMap::new();
+            info.insert("kl".to_string(), scalar_from_tensor(&approx_kl_t));
+            info.insert("entropy".to_string(), entropy_val);
+            info.insert("clipfrac".to_string(), scalar_from_tensor(&clipfrac_t));
             (pi_loss_val, vf_loss_val, info)
         }
 
