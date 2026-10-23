@@ -16,6 +16,113 @@ use relayrl_types::data::tensor::{DType, TensorData};
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use std::{collections::HashMap, sync::Arc};
 
+/// Channel-first image dimensions consumed by PPO's convolutional encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConvShape {
+    pub channels: usize,
+    pub height: usize,
+    pub width: usize,
+}
+
+impl ConvShape {
+    pub const fn new(channels: usize, height: usize, width: usize) -> Self {
+        Self {
+            channels,
+            height,
+            width,
+        }
+    }
+
+    pub fn flat_dim(self) -> Result<usize, NeuralNetworkError> {
+        self.channels
+            .checked_mul(self.height)
+            .and_then(|value| value.checked_mul(self.width))
+            .ok_or_else(|| {
+                NeuralNetworkError::InvalidLayerSpecs(
+                    "convolutional observation dimensions overflow usize".to_string(),
+                )
+            })
+    }
+
+    fn encoder_output(self) -> Result<(usize, usize, usize), NeuralNetworkError> {
+        fn output_dim(
+            input: usize,
+            kernel: usize,
+            stride: usize,
+            label: &str,
+        ) -> Result<usize, NeuralNetworkError> {
+            input
+                .checked_sub(kernel)
+                .map(|value| value / stride + 1)
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    NeuralNetworkError::InvalidLayerSpecs(format!(
+                        "convolutional {label} dimension {input} is too small for kernel {kernel}"
+                    ))
+                })
+        }
+
+        if self.channels == 0 {
+            return Err(NeuralNetworkError::InvalidLayerSpecs(
+                "convolutional input channels must be positive".to_string(),
+            ));
+        }
+        let h1 = output_dim(self.height, 8, 4, "height")?;
+        let w1 = output_dim(self.width, 8, 4, "width")?;
+        let h2 = output_dim(h1, 4, 2, "height")?;
+        let w2 = output_dim(w1, 4, 2, "width")?;
+        let h3 = output_dim(h2, 3, 1, "height")?;
+        let w3 = output_dim(w2, 3, 1, "width")?;
+        Ok((64, h3, w3))
+    }
+
+    pub(crate) fn encoded_flat_dim(self) -> Result<usize, NeuralNetworkError> {
+        let (channels, height, width) = self.encoder_output()?;
+        channels
+            .checked_mul(height)
+            .and_then(|value| value.checked_mul(width))
+            .ok_or_else(|| {
+                NeuralNetworkError::InvalidLayerSpecs(
+                    "convolutional encoder output dimensions overflow usize".to_string(),
+                )
+            })
+    }
+}
+
+/// Learner architecture selected for a PPO policy/value pair.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PPOArchitecture {
+    #[default]
+    Mlp,
+    ConvEncoder(ConvShape),
+}
+
+#[derive(Clone, Debug)]
+struct SeededActionRng {
+    state: u64,
+}
+
+impl SeededActionRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let bits = (value ^ (value >> 31)) >> 11;
+        bits as f64 * (1.0 / ((1_u64 << 53) as f64))
+    }
+
+    fn next_standard_normal(&mut self) -> f32 {
+        let u1 = self.next_f64().max(f64::MIN_POSITIVE);
+        let u2 = self.next_f64();
+        ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
+    }
+}
+
 /// Clamp range for continuous Gaussian `log_std` before `exp()`.
 const LOG_STD_MIN: f32 = -20.0;
 const LOG_STD_MAX: f32 = 2.0;
@@ -117,6 +224,92 @@ pub(crate) mod training {
             }
         }
 
+        fn layers_from_specs(
+            specs: &LayerSpecs,
+            device: &B::Device,
+        ) -> Result<Vec<Linear<B>>, NeuralNetworkError> {
+            if specs.is_empty() {
+                return Err(NeuralNetworkError::InvalidLayerSpecs(
+                    "actor-critic layer specs are empty".to_string(),
+                ));
+            }
+            specs
+                .iter()
+                .enumerate()
+                .map(|(index, (in_dim, out_dim, weights, biases))| {
+                    if weights.len() != in_dim.saturating_mul(*out_dim) || biases.len() != *out_dim
+                    {
+                        return Err(NeuralNetworkError::InvalidLayerSpecs(format!(
+                            "layer {index} does not match shape {in_dim}x{out_dim}"
+                        )));
+                    }
+                    let weight = Tensor::<B, 2, Float>::from_data(
+                        BurnTensorData::new(weights.clone(), [*in_dim, *out_dim]),
+                        device,
+                    );
+                    let bias = Tensor::<B, 1, Float>::from_data(
+                        BurnTensorData::new(biases.clone(), [*out_dim]),
+                        device,
+                    );
+                    Ok(Linear {
+                        weight: Param::from_tensor(weight),
+                        bias: Some(Param::from_tensor(bias)),
+                    })
+                })
+                .collect()
+        }
+
+        pub fn from_layer_specs(
+            pi_specs: &LayerSpecs,
+            vf_specs: &LayerSpecs,
+            device: &B::Device,
+        ) -> Result<Self, NeuralNetworkError> {
+            let obs_dim = pi_specs.first().map(|layer| layer.0).unwrap_or(0);
+            let act_dim = pi_specs.last().map(|layer| layer.1).unwrap_or(0);
+            if vf_specs.first().map(|layer| layer.0) != Some(obs_dim)
+                || vf_specs.last().map(|layer| layer.1) != Some(1)
+            {
+                return Err(NeuralNetworkError::InvalidLayerSpecs(
+                    "value layers must share the policy input and end at width one".to_string(),
+                ));
+            }
+            Ok(Self {
+                pi_layers: Self::layers_from_specs(pi_specs, device)?,
+                vf_layers: Self::layers_from_specs(vf_specs, device)?,
+                relu: Relu::new(),
+                obs_dim,
+                act_dim,
+            })
+        }
+
+        fn import_warm_start(
+            mut self,
+            warm_start: &PPOWarmStart,
+            device: &B::Device,
+        ) -> Result<Self, NeuralNetworkError> {
+            if let Some(pi_specs) = &warm_start.pi_layers {
+                if pi_specs.first().map(|layer| layer.0) != Some(self.obs_dim)
+                    || pi_specs.last().map(|layer| layer.1) != Some(self.act_dim)
+                {
+                    return Err(NeuralNetworkError::InvalidLayerSpecs(
+                        "warm-start policy dimensions do not match the trainer".to_string(),
+                    ));
+                }
+                self.pi_layers = Self::layers_from_specs(pi_specs, device)?;
+            }
+            if let Some(vf_specs) = &warm_start.vf_layers {
+                if vf_specs.first().map(|layer| layer.0) != Some(self.obs_dim)
+                    || vf_specs.last().map(|layer| layer.1) != Some(1)
+                {
+                    return Err(NeuralNetworkError::InvalidLayerSpecs(
+                        "warm-start value dimensions do not match the trainer".to_string(),
+                    ));
+                }
+                self.vf_layers = Self::layers_from_specs(vf_specs, device)?;
+            }
+            Ok(self)
+        }
+
         pub fn pi_forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
             let mut x = input;
             for (i, layer) in self.pi_layers.iter().enumerate() {
@@ -140,16 +333,462 @@ pub(crate) mod training {
         }
     }
 
-    pub struct PPOActorCriticTrainer {
-        pub network: Option<ActorCriticMlp<TB>>,
-        pub optimizer: OptimizerAdaptor<Adam, ActorCriticMlp<TB>, TB>,
+    fn elu<B: Backend, const D: usize>(x: Tensor<B, D, Float>) -> Tensor<B, D, Float> {
+        let positive = Relu::new().forward(x.clone());
+        positive.clone() + (x - positive).exp() - 1.0
+    }
+
+    /// Shared Nature-CNN-style feature encoder used by both PPO heads.
+    #[derive(Module, Debug)]
+    pub struct ConvEncoder<B: Backend> {
+        pub conv1: Conv2d<B>,
+        pub conv2: Conv2d<B>,
+        pub conv3: Conv2d<B>,
+        pub fc: Linear<B>,
+        pub channels: usize,
+        pub height: usize,
+        pub width: usize,
+        pub encoded_flat_dim: usize,
+    }
+
+    impl<B: Backend> ConvEncoder<B> {
+        fn from_parameters(
+            shape: ConvShape,
+            parameters: &SeededConvParameters,
+            device: &B::Device,
+        ) -> Result<Self, NeuralNetworkError> {
+            let encoded_flat_dim = shape.encoded_flat_dim()?;
+            let mut conv1 = Conv2dConfig::new([shape.channels, 32], [8, 8])
+                .with_stride([4, 4])
+                .init(device);
+            conv1.weight = Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.conv1_weights.clone(), [32, shape.channels, 8, 8]),
+                device,
+            ));
+            conv1.bias = Some(Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.conv1_biases.clone(), [32]),
+                device,
+            )));
+
+            let mut conv2 = Conv2dConfig::new([32, 64], [4, 4])
+                .with_stride([2, 2])
+                .init(device);
+            conv2.weight = Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.conv2_weights.clone(), [64, 32, 4, 4]),
+                device,
+            ));
+            conv2.bias = Some(Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.conv2_biases.clone(), [64]),
+                device,
+            )));
+
+            let mut conv3 = Conv2dConfig::new([64, 64], [3, 3])
+                .with_stride([1, 1])
+                .init(device);
+            conv3.weight = Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.conv3_weights.clone(), [64, 64, 3, 3]),
+                device,
+            ));
+            conv3.bias = Some(Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.conv3_biases.clone(), [64]),
+                device,
+            )));
+
+            let mut fc = LinearConfig::new(encoded_flat_dim, 512)
+                .with_initializer(Initializer::Zeros)
+                .init(device);
+            fc.weight = Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.fc_weights.clone(), [encoded_flat_dim, 512]),
+                device,
+            ));
+            fc.bias = Some(Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.fc_biases.clone(), [512]),
+                device,
+            )));
+
+            Ok(Self {
+                conv1,
+                conv2,
+                conv3,
+                fc,
+                channels: shape.channels,
+                height: shape.height,
+                width: shape.width,
+                encoded_flat_dim,
+            })
+        }
+
+        fn shape(&self) -> ConvShape {
+            ConvShape::new(self.channels, self.height, self.width)
+        }
+
+        pub fn forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+            let batch = input.dims()[0];
+            let x = input.reshape([batch, self.channels, self.height, self.width]);
+            let x = elu(self.conv1.forward(x));
+            let x = elu(self.conv2.forward(x));
+            let x = elu(self.conv3.forward(x));
+            elu(self.fc.forward(x.flatten(1, 3)))
+        }
+    }
+
+    /// PPO actor-critic with one shared convolutional encoder and separate heads.
+    #[derive(Module, Debug)]
+    pub struct ConvActorCritic<B: Backend> {
+        pub encoder: ConvEncoder<B>,
+        pub policy_head: Linear<B>,
+        pub value_head: Linear<B>,
+        pub policy_output_dim: usize,
+    }
+
+    impl<B: Backend> ConvActorCritic<B> {
+        fn from_parameters(
+            shape: ConvShape,
+            policy_output_dim: usize,
+            parameters: &SeededConvParameters,
+            device: &B::Device,
+        ) -> Result<Self, NeuralNetworkError> {
+            let encoder = ConvEncoder::from_parameters(shape, parameters, device)?;
+            let mut policy_head = LinearConfig::new(512, policy_output_dim)
+                .with_initializer(Initializer::Zeros)
+                .init(device);
+            policy_head.weight = Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.policy_weights.clone(), [512, policy_output_dim]),
+                device,
+            ));
+            policy_head.bias = Some(Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.policy_biases.clone(), [policy_output_dim]),
+                device,
+            )));
+
+            let mut value_head = LinearConfig::new(512, 1)
+                .with_initializer(Initializer::Zeros)
+                .init(device);
+            value_head.weight = Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.value_weights.clone(), [512, 1]),
+                device,
+            ));
+            value_head.bias = Some(Param::from_tensor(Tensor::from_data(
+                BurnTensorData::new(parameters.value_biases.clone(), [1]),
+                device,
+            )));
+
+            Ok(Self {
+                encoder,
+                policy_head,
+                value_head,
+                policy_output_dim,
+            })
+        }
+
+        pub fn pi_forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+            self.policy_head.forward(self.encoder.forward(input))
+        }
+
+        pub fn vf_forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+            self.value_head.forward(self.encoder.forward(input))
+        }
+    }
+
+    fn seeded_orthogonal_layer(
+        in_dim: usize,
+        out_dim: usize,
+        gain: f64,
+        rng: &mut StdRng,
+    ) -> (usize, usize, Vec<f32>, Vec<f32>) {
+        let rows = in_dim.max(out_dim);
+        let cols = in_dim.min(out_dim);
+        let mut q = vec![0.0f64; rows * cols];
+        for col in 0..cols {
+            loop {
+                for row in 0..rows {
+                    let u1 = rng.random::<f64>().max(f64::MIN_POSITIVE);
+                    let u2 = rng.random::<f64>();
+                    q[row * cols + col] =
+                        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+                }
+                for previous in 0..col {
+                    let dot = (0..rows)
+                        .map(|row| q[row * cols + col] * q[row * cols + previous])
+                        .sum::<f64>();
+                    for row in 0..rows {
+                        q[row * cols + col] -= dot * q[row * cols + previous];
+                    }
+                }
+                let norm = (0..rows)
+                    .map(|row| q[row * cols + col].powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                if norm > 1e-12 {
+                    for row in 0..rows {
+                        q[row * cols + col] /= norm;
+                    }
+                    break;
+                }
+            }
+        }
+        let mut weights = vec![0.0f32; in_dim * out_dim];
+        for input in 0..in_dim {
+            for output in 0..out_dim {
+                let value = if in_dim >= out_dim {
+                    q[input * cols + output]
+                } else {
+                    q[output * cols + input]
+                };
+                weights[input * out_dim + output] = (value * gain) as f32;
+            }
+        }
+        (in_dim, out_dim, weights, vec![0.0; out_dim])
+    }
+
+    fn seeded_orthogonal_layer_fast(
+        in_dim: usize,
+        out_dim: usize,
+        gain: f64,
+        rng: &mut StdRng,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let rows = in_dim.max(out_dim);
+        let cols = in_dim.min(out_dim);
+        let signs = (0..cols)
+            .map(|_| if rng.random::<bool>() { 1.0 } else { -1.0 })
+            .collect::<Vec<f64>>();
+        let mut weights = vec![0.0f32; in_dim * out_dim];
+        for input in 0..in_dim {
+            for output in 0..out_dim {
+                let (row, col) = if in_dim >= out_dim {
+                    (input, output)
+                } else {
+                    (output, input)
+                };
+                let scale = if col == 0 {
+                    (1.0 / rows as f64).sqrt()
+                } else {
+                    (2.0 / rows as f64).sqrt()
+                };
+                let angle = std::f64::consts::PI * (row as f64 + 0.5) * col as f64 / rows as f64;
+                weights[input * out_dim + output] =
+                    (gain * signs[col] * scale * angle.cos()) as f32;
+            }
+        }
+        (weights, vec![0.0; out_dim])
+    }
+
+    fn seeded_conv_weights(
+        in_channels: usize,
+        out_channels: usize,
+        kernel: usize,
+        gain: f64,
+        rng: &mut StdRng,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let fan_in = in_channels * kernel * kernel;
+        let (matrix, biases) = seeded_orthogonal_layer_fast(fan_in, out_channels, gain, rng);
+        let mut oihw = vec![0.0; matrix.len()];
+        for output in 0..out_channels {
+            for input in 0..fan_in {
+                oihw[output * fan_in + input] = matrix[input * out_channels + output];
+            }
+        }
+        (oihw, biases)
+    }
+
+    struct SeededConvParameters {
+        conv1_weights: Vec<f32>,
+        conv1_biases: Vec<f32>,
+        conv2_weights: Vec<f32>,
+        conv2_biases: Vec<f32>,
+        conv3_weights: Vec<f32>,
+        conv3_biases: Vec<f32>,
+        fc_weights: Vec<f32>,
+        fc_biases: Vec<f32>,
+        policy_weights: Vec<f32>,
+        policy_biases: Vec<f32>,
+        value_weights: Vec<f32>,
+        value_biases: Vec<f32>,
+    }
+
+    fn seeded_conv_parameters(
+        shape: ConvShape,
+        policy_output_dim: usize,
+        seed: u64,
+    ) -> Result<SeededConvParameters, NeuralNetworkError> {
+        if policy_output_dim == 0 {
+            return Err(NeuralNetworkError::InvalidLayerSpecs(
+                "convolutional policy output width must be positive".to_string(),
+            ));
+        }
+        let encoded_flat_dim = shape.encoded_flat_dim()?;
+        let mut rng = StdRng::seed_from_u64(seed);
+        let hidden_gain = 2.0f64.sqrt();
+        let (conv1_weights, conv1_biases) =
+            seeded_conv_weights(shape.channels, 32, 8, hidden_gain, &mut rng);
+        let (conv2_weights, conv2_biases) = seeded_conv_weights(32, 64, 4, hidden_gain, &mut rng);
+        let (conv3_weights, conv3_biases) = seeded_conv_weights(64, 64, 3, hidden_gain, &mut rng);
+        let (fc_weights, fc_biases) =
+            seeded_orthogonal_layer_fast(encoded_flat_dim, 512, hidden_gain, &mut rng);
+        let (policy_weights, policy_biases) =
+            seeded_orthogonal_layer_fast(512, policy_output_dim, 0.01, &mut rng);
+        let (value_weights, value_biases) = seeded_orthogonal_layer_fast(512, 1, 1.0, &mut rng);
+        Ok(SeededConvParameters {
+            conv1_weights,
+            conv1_biases,
+            conv2_weights,
+            conv2_biases,
+            conv3_weights,
+            conv3_biases,
+            fc_weights,
+            fc_biases,
+            policy_weights,
+            policy_biases,
+            value_weights,
+            value_biases,
+        })
+    }
+
+    fn conv_arch(
+        shape: ConvShape,
+        encoded_flat_dim: usize,
+        parameters: &SeededConvParameters,
+        head_weights: Vec<f32>,
+        head_biases: Vec<f32>,
+        head_output_dim: usize,
+    ) -> Vec<ArchLayer> {
+        vec![
+            ArchLayer::Reshape {
+                shape: vec![
+                    -1,
+                    shape.channels as i64,
+                    shape.height as i64,
+                    shape.width as i64,
+                ],
+            },
+            ArchLayer::Conv2d {
+                in_channels: shape.channels,
+                out_channels: 32,
+                kernel_size: 8,
+                stride: 4,
+                weights: parameters.conv1_weights.clone(),
+                biases: parameters.conv1_biases.clone(),
+            },
+            ArchLayer::Elu,
+            ArchLayer::Conv2d {
+                in_channels: 32,
+                out_channels: 64,
+                kernel_size: 4,
+                stride: 2,
+                weights: parameters.conv2_weights.clone(),
+                biases: parameters.conv2_biases.clone(),
+            },
+            ArchLayer::Elu,
+            ArchLayer::Conv2d {
+                in_channels: 64,
+                out_channels: 64,
+                kernel_size: 3,
+                stride: 1,
+                weights: parameters.conv3_weights.clone(),
+                biases: parameters.conv3_biases.clone(),
+            },
+            ArchLayer::Elu,
+            ArchLayer::Flatten,
+            ArchLayer::Linear {
+                in_dim: encoded_flat_dim,
+                out_dim: 512,
+                weights: parameters.fc_weights.clone(),
+                biases: parameters.fc_biases.clone(),
+            },
+            ArchLayer::Elu,
+            ArchLayer::Linear {
+                in_dim: 512,
+                out_dim: head_output_dim,
+                weights: head_weights,
+                biases: head_biases,
+            },
+        ]
+    }
+
+    pub(super) fn seeded_conv_architectures(
+        shape: ConvShape,
+        policy_output_dim: usize,
+        seed: u64,
+    ) -> Result<(Vec<ArchLayer>, Vec<ArchLayer>), NeuralNetworkError> {
+        let encoded_flat_dim = shape.encoded_flat_dim()?;
+        let parameters = seeded_conv_parameters(shape, policy_output_dim, seed)?;
+        let policy = conv_arch(
+            shape,
+            encoded_flat_dim,
+            &parameters,
+            parameters.policy_weights.clone(),
+            parameters.policy_biases.clone(),
+            policy_output_dim,
+        );
+        let value = conv_arch(
+            shape,
+            encoded_flat_dim,
+            &parameters,
+            parameters.value_weights.clone(),
+            parameters.value_biases.clone(),
+            1,
+        );
+        Ok((policy, value))
+    }
+
+    fn seeded_actor_critic_specs(
+        obs_dim: usize,
+        hidden_sizes: &[usize],
+        act_dim: usize,
+        seed: u64,
+    ) -> (LayerSpecs, LayerSpecs) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut pi_dims = vec![obs_dim];
+        pi_dims.extend_from_slice(hidden_sizes);
+        pi_dims.push(act_dim);
+        let pi_last = pi_dims.len() - 2;
+        let pi_layers = pi_dims
+            .windows(2)
+            .enumerate()
+            .map(|(index, dims)| {
+                seeded_orthogonal_layer(
+                    dims[0],
+                    dims[1],
+                    if index < pi_last { 2.0f64.sqrt() } else { 0.01 },
+                    &mut rng,
+                )
+            })
+            .collect();
+
+        let mut vf_dims = vec![obs_dim];
+        vf_dims.extend_from_slice(hidden_sizes);
+        vf_dims.push(1);
+        let vf_last = vf_dims.len() - 2;
+        let vf_layers = vf_dims
+            .windows(2)
+            .enumerate()
+            .map(|(index, dims)| {
+                seeded_orthogonal_layer(
+                    dims[0],
+                    dims[1],
+                    if index < vf_last { 2.0f64.sqrt() } else { 1.0 },
+                    &mut rng,
+                )
+            })
+            .collect();
+        (pi_layers, vf_layers)
+    }
+
+    #[derive(Clone)]
+    pub struct PPOActorCriticTrainer<B: Backend> {
+        pub network: Option<ActorCriticMlp<Autodiff<B>>>,
+        pub optimizer: OptimizerAdaptor<Adam, ActorCriticMlp<Autodiff<B>>, Autodiff<B>>,
+        pub conv_network: Option<ConvActorCritic<Autodiff<B>>>,
+        pub conv_optimizer: OptimizerAdaptor<Adam, ConvActorCritic<Autodiff<B>>, Autodiff<B>>,
+        pub device: B::Device,
         pub lr: f64,
         pub vf_coef: f32,
         pub lr_schedule_steps: Option<u64>,
         pub grad_step_count: u64,
     }
 
-    impl PPOActorCriticTrainer {
+    impl<B: Backend> PPOActorCriticTrainer<B> {
+        #[allow(clippy::too_many_arguments)]
         pub fn new(
             obs_dim: usize,
             hidden_sizes: &[usize],
@@ -157,20 +796,69 @@ pub(crate) mod training {
             lr: f64,
             vf_coef: f32,
             lr_schedule_steps: Option<u64>,
-        ) -> Self {
-            let device = <TB as burn_tensor::backend::Backend>::Device::default();
-            let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
+            max_grad_norm: f32,
+            device: B::Device,
+            seed: Option<u64>,
+            warm_start: &PPOWarmStart,
+        ) -> Result<Self, NeuralNetworkError> {
+            let network = if let Some(seed) = seed {
+                let (pi_specs, vf_specs) =
+                    seeded_actor_critic_specs(obs_dim, hidden_sizes, act_dim, seed);
+                ActorCriticMlp::from_layer_specs(&pi_specs, &vf_specs, &device)?
+            } else {
+                ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device)
+            }
+            .import_warm_start(warm_start, &device)?;
             let optimizer = AdamConfig::new()
-                .init::<TB, ActorCriticMlp<TB>>()
-                .with_grad_clipping(GradientClipping::Norm(4.0));
-            Self {
+                .init::<Autodiff<B>, ActorCriticMlp<Autodiff<B>>>()
+                .with_grad_clipping(GradientClipping::Norm(max_grad_norm));
+            let conv_optimizer = AdamConfig::new()
+                .init::<Autodiff<B>, ConvActorCritic<Autodiff<B>>>()
+                .with_grad_clipping(GradientClipping::Norm(max_grad_norm));
+            Ok(Self {
                 network: Some(network),
                 optimizer,
+                conv_network: None,
+                conv_optimizer,
+                device,
                 lr,
                 vf_coef,
                 lr_schedule_steps,
                 grad_step_count: 0,
-            }
+            })
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn new_conv(
+            shape: ConvShape,
+            policy_output_dim: usize,
+            lr: f64,
+            vf_coef: f32,
+            lr_schedule_steps: Option<u64>,
+            max_grad_norm: f32,
+            device: B::Device,
+            seed: u64,
+        ) -> Result<Self, NeuralNetworkError> {
+            let parameters = seeded_conv_parameters(shape, policy_output_dim, seed)?;
+            let network =
+                ConvActorCritic::from_parameters(shape, policy_output_dim, &parameters, &device)?;
+            let optimizer = AdamConfig::new()
+                .init::<Autodiff<B>, ActorCriticMlp<Autodiff<B>>>()
+                .with_grad_clipping(GradientClipping::Norm(max_grad_norm));
+            let conv_optimizer = AdamConfig::new()
+                .init::<Autodiff<B>, ConvActorCritic<Autodiff<B>>>()
+                .with_grad_clipping(GradientClipping::Norm(max_grad_norm));
+            Ok(Self {
+                network: None,
+                optimizer,
+                conv_network: Some(network),
+                conv_optimizer,
+                device,
+                lr,
+                vf_coef,
+                lr_schedule_steps,
+                grad_step_count: 0,
+            })
         }
 
         pub fn effective_lr(&self) -> f64 {
@@ -606,6 +1294,15 @@ pub(crate) mod training {
         let std = log_std.exp();
         -0.5 * ((action - mean) / std).powi(2) - log_std - 0.5 * LOG_2_PI
     }
+}
+
+/// Builds deterministic epoch-zero policy/value export graphs for a CNN PPO learner.
+pub fn seeded_conv_architectures(
+    shape: ConvShape,
+    policy_output_dim: usize,
+    seed: u64,
+) -> Result<(Vec<ArchLayer>, Vec<ArchLayer>), NeuralNetworkError> {
+    training::seeded_conv_architectures(shape, policy_output_dim, seed)
 }
 
 // ---- policy network head definitions ----

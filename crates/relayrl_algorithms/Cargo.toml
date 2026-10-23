@@ -9,6 +9,9 @@ keywords = ['rl-algorithms', 'multi-agent', 'single-agent', 'deep-learning', 'ai
 categories = ['science', 'algorithms', 'artificial-intelligence', 'concurrency', 'mathematics']
 license = "Apache-2.0"
 
+[lib]
+bench = false
+
 [features]
 tch-backend = ["burn-tch", "relayrl_types/tch-backend"]
 tch-model = ["relayrl_types/tch-model", "tch"]
@@ -39,4 +42,7 @@ async-trait = { workspace = true }
 tempfile = { workspace = true }
 
 tch = { version = "=0.22.0", features = ["download-libtorch"], default-features = false, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
