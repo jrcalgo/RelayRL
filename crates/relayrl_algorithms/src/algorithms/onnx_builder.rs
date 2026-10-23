@@ -127,26 +127,23 @@ fn build_tensor_proto(name: &str, dims: &[i64], data: &[f32]) -> Vec<u8> {
 
 /// Build a float `AttributeProto`.
 ///
-/// `type` field = 20, value FLOAT = 1.  `f` and `i` share field number 4 in the
-/// ONNX proto; they are distinguished by wire-type (5 = 32-bit for float, 0 = varint
-/// for int64).
+/// `type` field = 20, value FLOAT = 1. `f` is field 2.
 fn build_attribute_float(name: &str, val: f32) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend(field_str(1, name)); // name (field 1)
     msg.extend(field_varint(20, 1)); // type = FLOAT=1 (field 20)
-    msg.extend(field_fixed32(4, val)); // f (field 4, wire-type 5)
+    msg.extend(field_fixed32(2, val)); // f (field 2, wire-type 5)
     msg
 }
 
 /// Build an integer `AttributeProto`.
 ///
-/// `type` field = 20, value INT = 2.  `i` is encoded at field 4 with wire-type 0
-/// (varint), which coexists with `f` at the same field number (different wire-type).
+/// `type` field = 20, value INT = 2. `i` is field 3.
 fn build_attribute_int(name: &str, val: i64) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend(field_str(1, name)); // name (field 1)
     msg.extend(field_varint(20, 2)); // type = INT=2 (field 20)
-    msg.extend(field_varint(4, val as u64)); // i (field 4, wire-type 0)
+    msg.extend(field_varint(3, val as u64)); // i (field 3, wire-type 0)
     msg
 }
 
@@ -162,9 +159,9 @@ fn build_gemm_node(name: &str, input: &str, weight: &str, bias: &str, output: &s
     msg.extend(field_str(2, output)); // output[0]
     msg.extend(field_str(3, name)); // name
     msg.extend(field_str(4, "Gemm")); // op_type
-    msg.extend(field_msg(6, &build_attribute_float("alpha", 1.0)));
-    msg.extend(field_msg(6, &build_attribute_float("beta", 1.0)));
-    msg.extend(field_msg(6, &build_attribute_int("transB", 0)));
+    msg.extend(field_msg(5, &build_attribute_float("alpha", 1.0)));
+    msg.extend(field_msg(5, &build_attribute_float("beta", 1.0)));
+    msg.extend(field_msg(5, &build_attribute_int("transB", 0)));
     msg
 }
 
@@ -288,9 +285,11 @@ fn build_attribute_ints(name: &str, vals: &[i64]) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend(field_str(1, name)); // name (field 1)
     msg.extend(field_varint(20, 7)); // type = INTS = 7 (field 20)
-    for &v in vals {
-        msg.extend(field_varint(7, v as u64)); // ints (field 7, repeated varint)
-    }
+    let packed = vals
+        .iter()
+        .flat_map(|value| varint(*value as u64))
+        .collect::<Vec<_>>();
+    msg.extend(field_bytes(8, &packed)); // ints (field 8, packed repeated int64)
     msg
 }
 
@@ -316,8 +315,8 @@ fn build_conv_node(
     msg.extend(field_str(2, output)); // output[0]
     msg.extend(field_str(3, name)); // name
     msg.extend(field_str(4, "Conv")); // op_type
-    msg.extend(field_msg(6, &build_attribute_ints("kernel_shape", &[k, k])));
-    msg.extend(field_msg(6, &build_attribute_ints("strides", &[s, s])));
+    msg.extend(field_msg(5, &build_attribute_ints("kernel_shape", &[k, k])));
+    msg.extend(field_msg(5, &build_attribute_ints("strides", &[s, s])));
     msg
 }
 
@@ -328,7 +327,7 @@ fn build_elu_node(name: &str, input: &str, output: &str) -> Vec<u8> {
     msg.extend(field_str(2, output));
     msg.extend(field_str(3, name));
     msg.extend(field_str(4, "Elu"));
-    msg.extend(field_msg(6, &build_attribute_float("alpha", 1.0_f32)));
+    msg.extend(field_msg(5, &build_attribute_float("alpha", 1.0_f32)));
     msg
 }
 
@@ -340,7 +339,7 @@ fn build_flatten_node(name: &str, input: &str, output: &str) -> Vec<u8> {
     msg.extend(field_str(2, output));
     msg.extend(field_str(3, name));
     msg.extend(field_str(4, "Flatten"));
-    msg.extend(field_msg(6, &build_attribute_int("axis", 1)));
+    msg.extend(field_msg(5, &build_attribute_int("axis", 1)));
     msg
 }
 

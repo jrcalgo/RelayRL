@@ -21,4 +21,6 @@ pub enum NeuralNetworkError {
     InvalidContinuousActionDType(String),
     #[error("Model output too short: expected at least {expected} elements, got {actual}")]
     ModelOutputTooShort { expected: usize, actual: usize },
+    #[error("Invalid neural-network layer specs: {0}")]
+    InvalidLayerSpecs(String),
 }

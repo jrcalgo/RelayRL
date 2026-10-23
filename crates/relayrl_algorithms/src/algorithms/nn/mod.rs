@@ -13,7 +13,9 @@ pub use dtype::{
 };
 pub use error::NeuralNetworkError;
 pub use generic_mlp::GenericMlp;
-pub use model_module::{acquire_conv_model_module, acquire_model_module};
+pub use model_module::{
+    acquire_conv_model_module, acquire_model_module, acquire_model_module_with_preprocess,
+};
 pub use traits::{NeuralNetwork, NeuralNetworkForward, NeuralNetworkSpec, WeightProvider};
 pub use types::{ActivationKind, ArchLayer, Biases, Dim0, Dim1, LayerSpecs, Weights};
 pub use value_function::ValueFunction;

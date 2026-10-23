@@ -61,6 +61,49 @@ impl<
             _out_k: std::marker::PhantomData,
         }
     }
+
+    /// Builds an MLP from Burn `[input, output]` layer specs, including a copied policy.
+    pub fn from_layer_specs(
+        input_dtype: DType,
+        output_dtype: DType,
+        specs: &[(usize, usize, Vec<f32>, Vec<f32>)],
+        activation: ActivationKind<B>,
+        device: &B::Device,
+    ) -> Result<Self, String> {
+        if specs.is_empty() {
+            return Err("MLP layer specs are empty".to_string());
+        }
+        let input_dim = specs[0].0;
+        let output_dim = specs.last().map(|spec| spec.1).unwrap_or(0);
+        let mut layers = Vec::with_capacity(specs.len());
+        for (layer_index, (in_dim, out_dim, weights, biases)) in specs.iter().enumerate() {
+            if weights.len() != in_dim.saturating_mul(*out_dim) || biases.len() != *out_dim {
+                return Err(format!(
+                    "layer {layer_index} weight or bias length does not match {in_dim}x{out_dim}"
+                ));
+            }
+            let weight = Tensor::<B, 2>::from_data(
+                TensorData::new(weights.clone(), [*in_dim, *out_dim]),
+                device,
+            );
+            let bias =
+                Tensor::<B, 1>::from_data(TensorData::new(biases.clone(), [*out_dim]), device);
+            layers.push(Linear {
+                weight: Param::from_tensor(weight),
+                bias: Some(Param::from_tensor(bias)),
+            });
+        }
+        Ok(Self {
+            input_dim,
+            input_dtype,
+            output_dim,
+            output_dtype,
+            layers,
+            activation,
+            _in_k: std::marker::PhantomData,
+            _out_k: std::marker::PhantomData,
+        })
+    }
 }
 
 impl<
@@ -178,5 +221,46 @@ where
                 (dims[0], dims[1], weights, biases)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn_ndarray::NdArray;
+    use burn_tensor::Float;
+    use relayrl_types::data::tensor::{DType, NdArrayDType};
+
+    #[test]
+    fn from_layer_specs_roundtrips_through_get_layer_specs() {
+        let specs = vec![
+            (
+                2usize,
+                3usize,
+                vec![0.2f32, -0.1, 0.5, 0.3, 0.0, -0.4],
+                vec![0.1f32, -0.2, 0.3],
+            ),
+            (3usize, 1usize, vec![1.0f32, -1.0, 0.5], vec![0.25f32]),
+        ];
+        let mlp = GenericMlp::<NdArray, Float, Float>::from_layer_specs(
+            DType::NdArray(NdArrayDType::F32),
+            DType::NdArray(NdArrayDType::F32),
+            &specs,
+            ActivationKind::ReLU(burn_nn::activation::Relu::new()),
+            &burn_ndarray::NdArrayDevice::Cpu,
+        )
+        .expect("layer specs");
+        let loaded = mlp.get_layer_specs();
+        assert_eq!(loaded.len(), specs.len());
+        for (got, expected) in loaded.iter().zip(&specs) {
+            assert_eq!(got.0, expected.0);
+            assert_eq!(got.1, expected.1);
+            for (actual, want) in got.2.iter().zip(&expected.2) {
+                assert!((actual - want).abs() < 1e-6, "{actual} vs {want}");
+            }
+            for (actual, want) in got.3.iter().zip(&expected.3) {
+                assert!((actual - want).abs() < 1e-6, "{actual} vs {want}");
+            }
+        }
     }
 }
