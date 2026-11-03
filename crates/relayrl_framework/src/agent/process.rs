@@ -344,10 +344,8 @@ pub trait RelayRLActors<B: Backend + BackendMatcher<Backend = B>> {
         max_traj_length: usize,
         nametag: Option<&str>,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
-            AlgorithmInitArgs,
-        >,
-    ) -> Result<ActorInfo, ClientError>;
+        #[cfg(feature = "transport")] algorithm_args: Option<AlgorithmInitArgs>,
+    ) -> Result<ActorInfo, AgentError>;
 
     /// Creates `count` actors; equivalent to calling `new_actor` that many times.
     async fn new_actors<const D_IN: usize, const D_OUT: usize>(
@@ -357,31 +355,31 @@ pub trait RelayRLActors<B: Backend + BackendMatcher<Backend = B>> {
         max_traj_length: usize,
         nametag: Option<&str>,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] algorithm_args: Option<
-            AlgorithmInitArgs,
-        >,
-    ) -> Result<Vec<ActorInfo>, ClientError>;
+        #[cfg(feature = "transport")] algorithm_args: Option<AlgorithmInitArgs>,
+    ) -> Result<Vec<ActorInfo>, AgentError>;
 
-    /// Aborts an actor's task and frees all associated resources.
-    async fn remove_actor(&mut self, actor: &ActorInfo) -> Result<(), ClientError>;
+    /// Gracefully stops an actor and frees its runtime resources.
+    ///
+    /// In cache data modes, trajectories accepted before removal remain available through
+    /// [`RelayRLModelManagement::drain_trajectory_caches`] using the retained `ActorInfo`.
+    async fn remove_actor(&mut self, actor: &ActorInfo) -> Result<(), AgentError>;
 
     /// Removes multiple actors; equivalent to calling `remove_actor` for each.
-    async fn remove_actors(&mut self, actors: &[ActorInfo]) -> Result<(), ClientError>;
+    async fn remove_actors(&mut self, actors: &[ActorInfo]) -> Result<(), AgentError>;
 
     /// Returns the `ActorInfo` of the specified actor.
-    async fn get_actor(&self, id: ActorUuid) -> Result<ActorInfo, ClientError>;
+    async fn get_actor(&self, id: ActorUuid) -> Result<ActorInfo, AgentError>;
 
     /// Returns the `ActorInfo`s of all live actors from the namespaced registry.
-    async fn get_all_actors(&self) -> Result<Vec<ActorInfo>, ClientError>;
+    async fn get_all_actors(&self) -> Result<Vec<ActorInfo>, AgentError>;
 
     /// Returns the `ActorInfo`s of all live actors that match the specified D_IN, D_OUT qualifications
     async fn get_actors_by_rank<const D_IN: usize, const D_OUT: usize>(
         &self,
-    ) -> Result<Vec<ActorInfo>, ClientError>;
+    ) -> Result<Vec<ActorInfo>, AgentError>;
 
     /// Returns the `ActorInfo`s of all live actors that match the specified nametag.
-    async fn get_actors_by_tag(&self, nametag: Option<&str>)
-    -> Result<Vec<ActorInfo>, ClientError>;
+    async fn get_actors_by_tag(&self, nametag: Option<&str>) -> Result<Vec<ActorInfo>, AgentError>;
 
     /// Renames a live actor's ID in place; its task and inbox are preserved.
     ///

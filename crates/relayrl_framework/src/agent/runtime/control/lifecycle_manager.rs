@@ -1,31 +1,31 @@
-//! Lifecycle coordination for the client runtime.
+//! Lifecycle coordination for the agent runtime.
 //!
 //! This module owns config watching, shared runtime settings, and shutdown fan-out for the
-//! client runtime. The local/default path is the supported `0.5.0` path; transport-backed
+//! agent runtime. The local/default path is the supported `0.5.0` path; transport-backed
 //! settings exposed here remain experimental.
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use crate::agent::HyperparameterArgs;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use crate::agent::TransportMode;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::DefaultHyperparameterArgs;
+#[cfg(feature = "transport")]
+use crate::agent::builder::DefaultHyperparameterArgs;
 use crate::agent::builder::LocalTrajectoryFileParams;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use crate::prelude::utilities::config::TransportConfigParams;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use crate::utilities::configuration::Algorithm;
 #[cfg(feature = "metrics")]
 use crate::utilities::configuration::OtlpEndpointParams;
 use crate::utilities::configuration::{ClientConfigLoader, LocalModelModuleParams};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use crate::utilities::configuration::{HyperparameterConfig, NetworkParams};
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use relayrl_algorithms::prelude::ppo::algorithm::{IPPOParams, MAPPOParams, PPOParams};
 
 use crossbeam_utils::CachePadded;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -33,27 +33,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
-use tokio::sync::{Notify, RwLock, broadcast};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 
 use thiserror::Error;
 
-#[cfg(feature = "zmq-transport")]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SharedZmqInferenceAddresses {
-    pub(crate) inference_server_address: Arc<str>,
-    pub(crate) inference_scaling_server_address: Arc<str>,
-}
-
-#[cfg(feature = "zmq-transport")]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SharedZmqTrainingAddresses {
-    pub(crate) agent_listener_address: Arc<str>,
-    pub(crate) model_server_address: Arc<str>,
-    pub(crate) trajectory_server_address: Arc<str>,
-    pub(crate) training_scaling_server_address: Arc<str>,
-}
-
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 #[derive(Debug, Clone)]
 pub(crate) struct SharedDefaultHyperparameters {
     ppo: CachePadded<Arc<RwLock<PPOParams>>>,
@@ -264,32 +248,31 @@ pub enum LifecycleManagerError {
 /// Spins up and tears down futures cleanly
 #[derive(Debug, Clone)]
 pub(crate) struct LifecycleManager {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     default_hyperparameters: SharedDefaultHyperparameters,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
     #[cfg(feature = "metrics")]
     metrics_args: Arc<RwLock<(String, String)>>,
     local_model_path: Arc<RwLock<PathBuf>>,
     trajectory_file_output: Arc<RwLock<LocalTrajectoryFileParams>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     transport_mode: Arc<TransportMode>,
     config_path: Arc<PathBuf>,
     config_polling: LifecycleConfigPolling,
     last_modified: Arc<RwLock<SystemTime>>,
     shutdown_tx: broadcast::Sender<()>,
     shutdown_notifier: Arc<Notify>,
+    pub(crate) empty_buffer_notifiers: Arc<Mutex<Vec<Arc<Notify>>>>,
 }
 
 impl LifecycleManager {
     pub(crate) fn new(
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        default_hyperparameters: DefaultHyperparameterArgs,
+        #[cfg(feature = "transport")] default_hyperparameters: DefaultHyperparameterArgs,
         config: &ClientConfigLoader,
         config_path: PathBuf,
         config_polling_seconds: Option<u64>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        transport_mode: TransportMode,
+        #[cfg(feature = "transport")] transport_mode: TransportMode,
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(10_000);
 

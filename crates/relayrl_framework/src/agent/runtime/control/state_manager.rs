@@ -339,15 +339,27 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         nametag: Option<NameTag>,
         default_model: Option<ModelModule<B>>,
         tx_to_buffer: Sender<RoutedMessage>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: AlgorithmInitArgs,
+        #[cfg(feature = "transport")] algorithm_args: AlgorithmInitArgs,
     ) -> Result<(), StateManagerError> {
-        if self.actor_handles.contains_key(&actor_id) {
+        if let Some(cache) = &self.actor_params.shared_traj_cache 
+            && (!cache.can_register_id(actor_id)
+                || self.actor_params.task_handles.contains_key(&actor_id))
+            {
+                return Err(StateManagerError::ActorAlreadyTakenError(format!(
+                    "[StateManager] Actor ID {} cannot be reused while its trajectory cache is active",
+                    actor_id
+                )));
+            }
+        
+
+        if self.actor_params.task_handles.contains_key(&actor_id) {
             log::warn!(
                 "[StateManager] Actor ID {} already exists, replacing existing actor...",
                 actor_id
             );
-            self.remove_actor(actor_id)?
+
+            self.send_actor_shutdown(actor_id).await?;
+            self.remove_actor_params(actor_id, true)?
         }
 
         // Create actor inbox for receiving messages from the filter
@@ -361,29 +373,33 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         );
 
         let shared_local_model_path = self.shared_local_model_path.clone();
-        let shared_client_modes = self.shared_client_modes.clone();
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        let shared_modes = self.shared_modes.clone();
+        #[cfg(feature = "transport")]
         let shared_inference_dispatcher = self.shared_inference_dispatcher.clone();
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        #[cfg(feature = "transport")]
         let shared_training_dispatcher = self.shared_training_dispatcher.clone();
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        #[cfg(feature = "transport")]
         let shared_transport_addresses = self.shared_transport_addresses.clone();
         #[cfg(feature = "metrics")]
         let actor_metrics = self.metrics.clone();
         #[cfg(feature = "metrics")]
         let runtime_metrics = self.metrics.clone();
 
-        let client_namespace = self.client_namespace.clone();
+        let agent_namespace = self.agent_namespace.clone();
 
         let (model_handle, _model_handshake_flag) = self
             .get_or_init_model_handle(default_model, device.clone())
             .await?;
-        self.actor_devices.insert(actor_id, device.clone());
-        self.actor_envs.insert(
+        self.actor_params.devices.insert(actor_id, device.clone());
+        self.actor_params.envs.insert(
             actor_id,
-            EnvironmentInterface::new(self.client_namespace.clone(), device.clone()),
+            Arc::new(tokio::sync::Mutex::new(EnvironmentInterface::new(
+                self.agent_namespace.clone(),
+                device.clone(),
+            ))),
         );
-        self.actor_model_handles
+        self.actor_params
+            .model_handles
             .insert(actor_id, model_handle.clone());
         let runtime = Arc::new(
             ActorRuntime::<B, D_IN, D_OUT>::new(
@@ -394,29 +410,32 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
                 tx_to_buffer.clone(),
                 #[cfg(feature = "metrics")]
                 runtime_metrics,
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                #[cfg(feature = "transport")]
                 algorithm_args,
             )
             .await,
         );
         let erased_runtime: Arc<dyn ErasedActorRuntime<B>> = runtime.clone();
-        self.actor_runtime_handles.insert(actor_id, erased_runtime);
+        let actor_info = erased_runtime.get_actor_info()?;
+        self.actor_params
+            .runtime_handles
+            .insert(actor_id, erased_runtime);
 
         let handle: Arc<JoinHandle<()>> = Arc::new(tokio::spawn(async move {
             let mut actor: Actor<B, D_IN, D_OUT> = Actor::<B, D_IN, D_OUT>::new(
-                client_namespace,
-                actor_id,
+                agent_namespace,
+                actor_info,
                 device.clone(),
                 runtime,
                 shared_local_model_path,
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                #[cfg(feature = "transport")]
                 shared_inference_dispatcher,
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                #[cfg(feature = "transport")]
                 shared_training_dispatcher,
-                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                #[cfg(feature = "transport")]
                 shared_transport_addresses,
                 actor_inbox_rx,
-                shared_client_modes,
+                shared_modes,
                 #[cfg(feature = "metrics")]
                 actor_metrics,
             )
@@ -424,7 +443,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
 
             // Use the flag computed by StateManager so that, in Shared mode, only the first
             // actor per device triggers the network handshake.
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             if _model_handshake_flag {
                 let model_handshake_ms = RoutedMessage {
                     actor_id,
@@ -438,9 +457,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
             }
         }));
 
-        self.actor_handles.insert(actor_id, handle);
+        self.actor_params.task_handles.insert(actor_id, handle);
 
-        self.shared_actor_count.fetch_add(1, Ordering::Release);
+        self.actor_params
+            .count
+            .store(self.actor_params.task_handles.len(), Ordering::Release);
 
         Ok(())
     }

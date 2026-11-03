@@ -134,6 +134,146 @@ impl SharedTrajectoryCache {
     /// Drains buffered trajectories for `actors`, returning a snapshot map keyed by each actor's
     /// stable [`Uuid`] rather than by [`ActorInfo`]. Callers select actors via live `ActorInfo`
     /// handles, but the returned map is a one-shot copy that must remain valid even if one of
+    pub(crate) fn new(per_actor_size: usize) -> Self {
+        Self {
+            cache: Arc::new(DashMap::new()),
+            aliases: Arc::new(DashMap::new()),
+            removed_ids: Arc::new(DashSet::new()),
+            rekey_lock: Arc::new(Mutex::new(())),
+            per_actor_size,
+        }
+    }
+
+    /// Serializes compound cache operations; `DashMap` alone cannot make rekey + append atomic.
+    pub(crate) fn lock_rekey(&self) -> MutexGuard<'_, ()> {
+        self.rekey_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn resolve_id_locked(&self, stamped_id: Uuid) -> Option<Uuid> {
+        let mut id = stamped_id;
+        let mut visited = HashSet::new();
+
+        loop {
+            if !visited.insert(id) {
+                return None;
+            }
+            if self.removed_ids.contains(&id) {
+                return None;
+            }
+
+            let next = self.aliases.get(&id).map(|entry| *entry.value());
+            match next {
+                Some(next_id) if next_id == id => return None,
+                Some(next_id) => id = next_id,
+                None => return Some(id),
+            }
+        }
+    }
+
+    pub(crate) fn push_trajectory(
+        &self,
+        stamped_id: Uuid,
+        trajectory: Arc<RelayRLTrajectory>,
+        enforce_capacity: bool,
+    ) -> bool {
+        let _guard = self.lock_rekey();
+        let Some(actor_id) = self.resolve_id_locked(stamped_id) else {
+            return false;
+        };
+
+        if let Some(mut trajectories) = self.cache.get_mut(&actor_id) {
+            if enforce_capacity {
+                let room_after_push = self.per_actor_size.saturating_sub(1);
+                if trajectories.len() > room_after_push {
+                    let drop_count = trajectories.len() - room_after_push;
+                    trajectories.drain(..drop_count);
+                }
+            }
+            trajectories.push(trajectory);
+        } else {
+            self.cache.insert(actor_id, vec![trajectory]);
+        }
+
+        true
+    }
+
+    pub(crate) fn can_rekey_locked(
+        &self,
+        _guard: &MutexGuard<'_, ()>,
+        current_id: Uuid,
+        new_id: Uuid,
+    ) -> bool {
+        current_id != new_id
+            && !self.removed_ids.contains(&new_id)
+            && !self.aliases.contains_key(&new_id)
+    }
+
+    pub(crate) fn rekey_locked(&self, _guard: &MutexGuard<'_, ()>, current_id: Uuid, new_id: Uuid) {
+        let existing_aliases: Vec<Uuid> = self.aliases.iter().map(|entry| *entry.key()).collect();
+        let aliases_to_update: Vec<Uuid> = existing_aliases
+            .into_iter()
+            .filter(|alias| self.resolve_id_locked(*alias) == Some(current_id))
+            .collect();
+        for alias in aliases_to_update {
+            self.aliases.insert(alias, new_id);
+        }
+        self.aliases.insert(current_id, new_id);
+
+        if let Some((_, mut actor_cache)) = self.cache.remove(&current_id) {
+            if let Some(mut destination) = self.cache.get_mut(&new_id) {
+                destination.append(&mut actor_cache);
+            } else {
+                self.cache.insert(new_id, actor_cache);
+            }
+        }
+    }
+
+    pub(crate) fn can_register_id(&self, actor_id: Uuid) -> bool {
+        let _guard = self.lock_rekey();
+        !self.removed_ids.contains(&actor_id)
+            && !self.aliases.contains_key(&actor_id)
+            && !self.cache.contains_key(&actor_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_removed(&self, actor_id: Uuid) -> bool {
+        let _guard = self.lock_rekey();
+        self.removed_ids.contains(&actor_id)
+    }
+
+    pub(crate) fn retire_actor(&self, actor_id: Uuid) {
+        let _guard = self.lock_rekey();
+        let aliases: Vec<(Uuid, Uuid)> = self
+            .aliases
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        let mut retired_ids = HashSet::from([actor_id]);
+
+        loop {
+            let mut changed = false;
+            for (old_id, new_id) in &aliases {
+                if retired_ids.contains(new_id) && retired_ids.insert(*old_id) {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        for id in &retired_ids {
+            self.removed_ids.insert(*id);
+        }
+        for (old_id, new_id) in aliases {
+            if retired_ids.contains(&old_id) || retired_ids.contains(&new_id) {
+                self.aliases.remove(&old_id);
+            }
+        }
+    }
+
     /// those handles' ids is renamed afterward.
     pub(crate) fn drain(
         &mut self,
@@ -163,28 +303,63 @@ impl SharedTrajectoryCache {
     }
 }
 
+pub(crate) struct TrajectoryBufferLoops<B: Backend + BackendMatcher<Backend = B>> {
+    receiver_handle: Option<JoinHandle<()>>,
+    worker_handle: Option<JoinHandle<()>>,
+    _phantom: std::marker::PhantomData<B>,
+}
+
+impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferLoops<B> {
+    pub(super) fn new(buffer: &mut TrajectoryBuffer<B>) -> Result<Self, ScaleManagerError> {
+        match buffer.spawn_loop() {
+            Ok((receiver_handle, worker_handle)) => Ok(TrajectoryBufferLoops {
+                receiver_handle: Some(receiver_handle),
+                worker_handle: Some(worker_handle),
+                _phantom: std::marker::PhantomData::<B>::default(),
+            }),
+            Err(e) => match e {
+                crate::agent::runtime::data::router::RouterError::TrajectorySinkError(e) => {
+                    Err(ScaleManagerError::SpawnTrajectoryBufferError(e))
+                }
+                _ => Err(ScaleManagerError::TrajectoryLoopsError(
+                    "[ScaleManager] Trajectory buffer loops failed to spawn... {:?}".to_string(),
+                )),
+            },
+        }
+    }
+
+    pub(super) fn abort(&mut self) {
+        if let Some(receiver) = self.receiver_handle.take() {
+            receiver.abort();
+        }
+        if let Some(worker) = self.worker_handle.take() {
+            worker.abort();
+        }
+    }
+}
+
 pub(crate) struct ScaleManager<B: Backend + BackendMatcher<Backend = B>> {
-    client_namespace: ClientNamespace,
+    agent_namespace: AgentNamespace,
     router_namespace_counter: u32,
     #[allow(unused)]
     pub(crate) scaling_id: ScaleManagerUuid,
-    shared_client_modes: Arc<ClientModes>,
+    shared_modes: Arc<RuntimeModes>,
     shared_state: Arc<RwLock<StateManager<B>>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
     pub(crate) shared_buffer_size: Arc<AtomicUsize>,
     pub(crate) shared_traj_cache: Option<SharedTrajectoryCache>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     pub(crate) scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     pub(crate) training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     pub(crate) router_receiver_loop: Option<JoinHandle<()>>,
     pub(crate) router_dispatcher: Option<JoinHandle<()>>,
     pub(crate) router_filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
-    pub(crate) runtime_params: Option<DashMap<RouterNamespace, RouterRuntimeParams>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub(crate) runtime_params: Option<DashMap<RouterNamespace, RouterRuntimeParams<B>>>,
+    #[cfg(feature = "transport")]
     training_codec: CodecConfig,
     lifecycle: Option<LifecycleManager>,
 }
@@ -245,7 +420,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
         }));
 
         let shared_trajectory_file_output =
-            if uses_local_file_writing(&shared_client_modes.actor_data_mode) {
+            if uses_local_file_writing(&shared_modes.actor_data_mode) {
                 Some(lifecycle.get_trajectory_file_output())
             } else {
                 None
@@ -253,54 +428,49 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScaleManager<B> {
 
         let shared_traj_cache = if let ActorDataMode::OfflineWithCache(size)
         | ActorDataMode::OfflineWithFilesAndCache(_, size) =
-            shared_client_modes.actor_data_mode
+            shared_modes.actor_data_mode
         {
-            Some(SharedTrajectoryCache {
-                cache: Arc::new(DashMap::new()),
-                per_actor_size: size,
-            })
+            Some(SharedTrajectoryCache::new(size))
         } else {
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             {
                 if let ActorDataMode::OnlineWithCache(_, size)
-                | ActorDataMode::OnlineWithFilesAndCache(.., size) =
-                    shared_client_modes.actor_data_mode
+                | ActorDataMode::OnlineWithFilesAndCache(.., size) = shared_modes.actor_data_mode
                 {
-                    Some(SharedTrajectoryCache {
-                        cache: Arc::new(DashMap::new()),
-                        per_actor_size: size,
-                    })
+                    Some(SharedTrajectoryCache::new(size))
                 } else {
                     None
                 }
             }
-            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+            #[cfg(not(feature = "transport"))]
             None
         };
+
+        shared_state.write().await.actor_params.shared_traj_cache = shared_traj_cache.clone();
 
         let shared_buffer_size = Arc::new(AtomicUsize::new(data_buffer_size));
 
         Ok(Self {
-            client_namespace,
+            agent_namespace,
             router_namespace_counter: 0,
             scaling_id,
-            shared_client_modes,
+            shared_modes,
             shared_state,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             scaling_dispatcher,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             training_dispatcher,
             router_dispatcher,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             router_receiver_loop: None,
             router_filter_channels,
             runtime_params: None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             shared_transport_addresses,
             shared_trajectory_file_output,
             shared_traj_cache,
             shared_buffer_size,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             training_codec: training_codec.unwrap_or_default(),
             lifecycle: Some(lifecycle),
         })
