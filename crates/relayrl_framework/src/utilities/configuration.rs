@@ -648,7 +648,6 @@ impl ClientConfigBuildParams for ClientConfigBuilder {
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
                 nats_addresses: transport_config.nats_addresses.clone(),
-                zmq_addresses: transport_config.zmq_addresses.clone(),
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -1076,7 +1075,6 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
         let transport_config: TransportConfigParams = match &self.transport_config {
             Some(transport_config) => TransportConfigParams {
                 nats_addresses: transport_config.nats_addresses.clone(),
-                zmq_addresses: transport_config.zmq_addresses.clone(),
             },
             None => TransportConfigBuilder::build_default(),
         };
@@ -1093,29 +1091,6 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
     }
 }
 
-/// Inference endpoint addresses for ZMQ transport.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ZmqTransportInferenceAddresses {
-    pub inference_server_address: NetworkParams,
-    pub inference_scaling_server_address: NetworkParams,
-}
-
-/// Training endpoint addresses for ZMQ transport.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ZmqTransportTrainingAddresses {
-    pub agent_listener_address: NetworkParams,
-    pub model_server_address: NetworkParams,
-    pub trajectory_server_address: NetworkParams,
-    pub training_scaling_server_address: NetworkParams,
-}
-
-/// Combined ZMQ inference and training endpoint addresses.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ZmqTransportAddresses {
-    pub inference_addresses: ZmqTransportInferenceAddresses,
-    pub training_addresses: ZmqTransportTrainingAddresses,
-}
-
 /// Endpoint addresses for NATS transport.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NatsTransportAddresses {
@@ -1127,7 +1102,6 @@ pub struct NatsTransportAddresses {
 /// All transport endpoint addresses and the local model module path, from the `transport_config` section.
 pub struct TransportConfigParams {
     pub nats_addresses: NatsTransportAddresses,
-    pub zmq_addresses: ZmqTransportAddresses,
 }
 
 impl TransportConfigParams {
@@ -1140,60 +1114,12 @@ impl TransportConfigParams {
     pub fn get_nats_training_server_address(&self) -> &NetworkParams {
         &self.nats_addresses.training_server_address
     }
-
-    /// Returns the ZMQ inference server address.
-    pub fn get_zmq_inference_server_address(&self) -> &NetworkParams {
-        &self
-            .zmq_addresses
-            .inference_addresses
-            .inference_server_address
-    }
-
-    /// Returns the ZMQ agent listener address.
-    pub fn get_zmq_agent_listener_address(&self) -> &NetworkParams {
-        &self.zmq_addresses.training_addresses.agent_listener_address
-    }
-
-    /// Returns the ZMQ model server address.
-    pub fn get_zmq_model_server_address(&self) -> &NetworkParams {
-        &self.zmq_addresses.training_addresses.model_server_address
-    }
-
-    /// Returns the ZMQ trajectory server address.
-    pub fn get_zmq_trajectory_server_address(&self) -> &NetworkParams {
-        &self
-            .zmq_addresses
-            .training_addresses
-            .trajectory_server_address
-    }
-
-    /// Returns the ZMQ inference scaling server address.
-    pub fn get_zmq_inference_scaling_server_address(&self) -> &NetworkParams {
-        &self
-            .zmq_addresses
-            .inference_addresses
-            .inference_scaling_server_address
-    }
-
-    /// Returns the ZMQ training scaling server address.
-    pub fn get_zmq_training_scaling_server_address(&self) -> &NetworkParams {
-        &self
-            .zmq_addresses
-            .training_addresses
-            .training_scaling_server_address
-    }
 }
 
 /// Builder trait for constructing a `TransportConfigParams` programmatically.
 pub trait TransportConfigBuildParams {
     fn set_nats_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     fn set_nats_training_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_zmq_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_zmq_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_zmq_model_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_zmq_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_zmq_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
-    fn set_zmq_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self;
     /// Builds a `TransportConfigParams` from the current builder state.
     fn build(&self) -> TransportConfigParams;
     /// Builds a `TransportConfigParams` with all default localhost addresses.
@@ -1204,12 +1130,6 @@ pub trait TransportConfigBuildParams {
 pub struct TransportConfigBuilder {
     nats_inference_server_address: Option<NetworkParams>,
     nats_training_server_address: Option<NetworkParams>,
-    zmq_inference_server_address: Option<NetworkParams>,
-    zmq_agent_listener_address: Option<NetworkParams>,
-    zmq_model_server_address: Option<NetworkParams>,
-    zmq_trajectory_server_address: Option<NetworkParams>,
-    zmq_inference_scaling_server_address: Option<NetworkParams>,
-    zmq_training_scaling_server_address: Option<NetworkParams>,
 }
 
 impl TransportConfigBuildParams for TransportConfigBuilder {
@@ -1223,54 +1143,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
 
     fn set_nats_training_server_address(&mut self, host: &str, port: &str) -> &mut Self {
         self.nats_training_server_address = Some(NetworkParams {
-            host: host.to_string(),
-            port: port.to_string(),
-        });
-        self
-    }
-
-    fn set_zmq_inference_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.zmq_inference_server_address = Some(NetworkParams {
-            host: host.to_string(),
-            port: port.to_string(),
-        });
-        self
-    }
-
-    fn set_zmq_agent_listener_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.zmq_agent_listener_address = Some(NetworkParams {
-            host: host.to_string(),
-            port: port.to_string(),
-        });
-        self
-    }
-
-    fn set_zmq_model_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.zmq_model_server_address = Some(NetworkParams {
-            host: host.to_string(),
-            port: port.to_string(),
-        });
-        self
-    }
-
-    fn set_zmq_trajectory_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.zmq_trajectory_server_address = Some(NetworkParams {
-            host: host.to_string(),
-            port: port.to_string(),
-        });
-        self
-    }
-
-    fn set_zmq_inference_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.zmq_inference_scaling_server_address = Some(NetworkParams {
-            host: host.to_string(),
-            port: port.to_string(),
-        });
-        self
-    }
-
-    fn set_zmq_training_scaling_server_address(&mut self, host: &str, port: &str) -> &mut Self {
-        self.zmq_training_scaling_server_address = Some(NetworkParams {
             host: host.to_string(),
             port: port.to_string(),
         });
@@ -1295,73 +1167,10 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
             },
         };
 
-        let zmq_inference_server_address: NetworkParams = match &self.zmq_inference_server_address {
-            Some(address) => address.clone(),
-            None => NetworkParams {
-                host: "127.0.0.1".to_string(),
-                port: "50050".to_string(),
-            },
-        };
-
-        let zmq_agent_listener_address: NetworkParams = match &self.zmq_agent_listener_address {
-            Some(address) => address.clone(),
-            None => NetworkParams {
-                host: "127.0.0.1".to_string(),
-                port: "7778".to_string(),
-            },
-        };
-
-        let zmq_model_server_address: NetworkParams = match &self.zmq_model_server_address {
-            Some(address) => address.clone(),
-            None => NetworkParams {
-                host: "127.0.0.1".to_string(),
-                port: "50051".to_string(),
-            },
-        };
-
-        let zmq_trajectory_server_address: NetworkParams = match &self.zmq_trajectory_server_address
-        {
-            Some(address) => address.clone(),
-            None => NetworkParams {
-                host: "127.0.0.1".to_string(),
-                port: "7776".to_string(),
-            },
-        };
-
-        let zmq_inference_scaling_server_address: NetworkParams =
-            match &self.zmq_inference_scaling_server_address {
-                Some(address) => address.clone(),
-                None => NetworkParams {
-                    host: "127.0.0.1".to_string(),
-                    port: "7777".to_string(),
-                },
-            };
-
-        let zmq_training_scaling_server_address: NetworkParams =
-            match &self.zmq_training_scaling_server_address {
-                Some(address) => address.clone(),
-                None => NetworkParams {
-                    host: "127.0.0.1".to_string(),
-                    port: "7778".to_string(),
-                },
-            };
-
         TransportConfigParams {
             nats_addresses: NatsTransportAddresses {
                 inference_server_address: nats_inference_server_address,
                 training_server_address: nats_training_server_address,
-            },
-            zmq_addresses: ZmqTransportAddresses {
-                inference_addresses: ZmqTransportInferenceAddresses {
-                    inference_server_address: zmq_inference_server_address,
-                    inference_scaling_server_address: zmq_inference_scaling_server_address,
-                },
-                training_addresses: ZmqTransportTrainingAddresses {
-                    agent_listener_address: zmq_agent_listener_address,
-                    model_server_address: zmq_model_server_address,
-                    trajectory_server_address: zmq_trajectory_server_address,
-                    training_scaling_server_address: zmq_training_scaling_server_address,
-                },
             },
         }
     }
@@ -1376,36 +1185,6 @@ impl TransportConfigBuildParams for TransportConfigBuilder {
                 training_server_address: NetworkParams {
                     host: "127.0.0.1".to_string(),
                     port: "50051".to_string(),
-                },
-            },
-            zmq_addresses: ZmqTransportAddresses {
-                inference_addresses: ZmqTransportInferenceAddresses {
-                    inference_server_address: NetworkParams {
-                        host: "127.0.0.1".to_string(),
-                        port: "50050".to_string(),
-                    },
-                    inference_scaling_server_address: NetworkParams {
-                        host: "127.0.0.1".to_string(),
-                        port: "7777".to_string(),
-                    },
-                },
-                training_addresses: ZmqTransportTrainingAddresses {
-                    agent_listener_address: NetworkParams {
-                        host: "127.0.0.1".to_string(),
-                        port: "7779".to_string(),
-                    },
-                    model_server_address: NetworkParams {
-                        host: "127.0.0.1".to_string(),
-                        port: "50051".to_string(),
-                    },
-                    trajectory_server_address: NetworkParams {
-                        host: "127.0.0.1".to_string(),
-                        port: "7776".to_string(),
-                    },
-                    training_scaling_server_address: NetworkParams {
-                        host: "127.0.0.1".to_string(),
-                        port: "7778".to_string(),
-                    },
                 },
             },
         }
@@ -1468,36 +1247,6 @@ mod unit_tests {
                 "host": "127.0.0.1",
                 "port": "50051"
             }
-        },
-        "zmq_addresses": {
-            "inference_addresses": {
-                "inference_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7800"
-                },
-                "inference_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7801"
-                }
-            },
-            "training_addresses": {
-                "model_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50051"
-                },
-                "trajectory_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7776"
-                },
-                "agent_listener_address": {
-                    "host": "127.0.0.1",
-                    "port": "7777"
-                },
-                "training_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7778"
-                }
-            }
         }
     }
 }"#;
@@ -1544,36 +1293,6 @@ mod unit_tests {
             "training_server_address": {
                 "host": "127.0.0.1",
                 "port": "50051"
-            }
-        },
-        "zmq_addresses": {
-            "inference_addresses": {
-                "inference_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7800"
-                },
-                "inference_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7801"
-                }
-            },
-            "training_addresses": {
-                "model_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50051"
-                },
-                "trajectory_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7776"
-                },
-                "agent_listener_address": {
-                    "host": "127.0.0.1",
-                    "port": "7777"
-                },
-                "training_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7778"
-                }
             }
         }
     }
@@ -1652,17 +1371,6 @@ mod unit_tests {
         assert_eq!(nats_inf.port, "50050");
         assert_eq!(nats_train.host, "127.0.0.1");
         assert_eq!(nats_train.port, "50051");
-    }
-
-    #[test]
-    fn transport_build_default_zmq_addresses() {
-        let transport = TransportConfigBuilder::build_default();
-        let model_server = transport.get_zmq_model_server_address();
-        let traj_server = transport.get_zmq_trajectory_server_address();
-        assert_eq!(model_server.host, "127.0.0.1");
-        assert_eq!(model_server.port, "50051");
-        assert_eq!(traj_server.host, "127.0.0.1");
-        assert_eq!(traj_server.port, "7776");
     }
 
     #[test]

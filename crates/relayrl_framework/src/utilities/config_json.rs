@@ -234,36 +234,6 @@ pub(crate) const DEFAULT_CLIENT_CONFIG_JSON: &str = r#"{
                 "host": "127.0.0.1",
                 "port": "50051"
             }
-        },
-        "zmq_addresses": {
-            "inference_addresses": {
-                "inference_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7800"
-                },
-                "inference_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7801"
-                }
-            },
-            "training_addresses": {
-                "model_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50051"
-                },
-                "trajectory_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7776"
-                },
-                "agent_listener_address": {
-                    "host": "127.0.0.1",
-                    "port": "7777"
-                },
-                "training_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7778"
-                }
-            }
         }
     }
 }"#;
@@ -337,36 +307,6 @@ pub(crate) const DEFAULT_TRAINING_SERVER_CONFIG_JSON: &str = r#"{
                 "host": "127.0.0.1",
                 "port": "50051"
             }
-        },
-        "zmq_addresses": {
-            "inference_addresses": {
-                "inference_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7800"
-                },
-                "inference_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7801"
-                }
-            },
-            "training_addresses": {
-                "model_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "50051"
-                },
-                "trajectory_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7776"
-                },
-                "agent_listener_address": {
-                    "host": "127.0.0.1",
-                    "port": "7777"
-                },
-                "training_scaling_server_address": {
-                    "host": "127.0.0.1",
-                    "port": "7778"
-                }
-            }
         }
     }
 }"#;
@@ -389,36 +329,6 @@ pub(crate) const DEFAULT_INFERENCE_SERVER_CONFIG_JSON: &str = r#"{
                 "training_server_address": {
                     "host": "127.0.0.1",
                     "port": "50051"
-                }
-            },
-            "zmq_addresses": {
-                "inference_addresses": {
-                    "inference_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7800"
-                    },
-                    "inference_scaling_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7801"
-                    }
-                },
-                "training_addresses": {
-                    "model_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "50051"
-                    },
-                    "trajectory_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7776"
-                    },
-                    "agent_listener_address": {
-                        "host": "127.0.0.1",
-                        "port": "7777"
-                    },
-                    "training_scaling_server_address": {
-                        "host": "127.0.0.1",
-                        "port": "7778"
-                    }
                 }
             }
         }
