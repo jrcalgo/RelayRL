@@ -20,23 +20,23 @@ pub enum FilterError {
 }
 
 /// Intermediary routing process/filter for routing received models and requests to specified ActorEntity
-pub(crate) struct ClientCentralFilter<B: Backend + BackendMatcher<Backend = B>> {
+pub(crate) struct CentralFilter {
     associated_router_namespace: RouterNamespace,
     rx_from_receiver: Receiver<RoutedMessage>,
-    shared_agent_state: Arc<RwLock<StateManager<B>>>,
+    shared_router_state: Arc<SharedRouterState>,
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> ClientCentralFilter<B> {
+impl CentralFilter {
     pub(crate) fn new(
         associated_router_namespace: RouterNamespace,
         rx_from_receiver: Receiver<RoutedMessage>,
-        shared_agent_state: Arc<RwLock<StateManager<B>>>,
+        shared_router_state: Arc<SharedRouterState>,
     ) -> Self {
         Self {
             associated_router_namespace,
             rx_from_receiver,
-            shared_agent_state,
+            shared_router_state,
             shutdown: None,
         }
     }
@@ -50,12 +50,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientCentralFilter<B> {
         let mut shutdown: Option<broadcast::Receiver<()>> = self.shutdown.take();
         let mut rx: Receiver<RoutedMessage> = self.rx_from_receiver;
         let this_router_namespace: RouterNamespace = self.associated_router_namespace.clone();
-        let shared_router_state: Arc<SharedRouterState> = self
-            .shared_agent_state
-            .read()
-            .await
-            .shared_router_state
-            .clone();
+        let shared_router_state = self.shared_router_state.clone();
 
         loop {
             tokio::select! {
@@ -63,10 +58,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientCentralFilter<B> {
                     match msg_opt {
                         Some(msg) => {
                             if let RoutingProtocol::Control(ControlPayload::Shutdown) = msg.protocol {
-                                Self::route_message(msg, &this_router_namespace, &shared_router_state).await?;
-                                break Ok(());
+                                if let Err(e) = Self::route_message(msg, &this_router_namespace, &shared_router_state).await {
+                                    log::warn!("[Data Filter] message routing error: {:?}", e)
+                                }
+                                continue;
                             }
-                            Self::route_message(msg, &this_router_namespace, &shared_router_state).await?;
+
+                            if let Err(e) = Self::route_message(msg, &this_router_namespace, &shared_router_state).await {
+                                log::warn!("[Data Filter] message routing error: {:?}", e)
+                            }
                         }
                         None => break Ok(()),
                     }
@@ -168,15 +168,15 @@ mod unit_tests {
         let namespace_handle =
             active_uuid_registry::interface::reserve_owned_namespace(&namespace_str)
                 .expect("reserve owned test namespace");
-        let client_namespace = ClientNamespace::new(namespace_handle, Arc::from(namespace_str));
+        let agent_namespace = AgentNamespace::new(namespace_handle, Arc::from(namespace_str));
         StateManager::<TestBackend>::new(
-            client_namespace,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            agent_namespace,
+            #[cfg(feature = "transport")]
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
             disabled_modes(),
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
             Arc::new(RwLock::new(PathBuf::new())),
             None,
@@ -224,8 +224,13 @@ mod unit_tests {
         ns: RouterNamespace,
         rx: mpsc::Receiver<RoutedMessage>,
         shared: Arc<RwLock<StateManager<TestBackend>>>,
-    ) -> ClientCentralFilter<TestBackend> {
-        ClientCentralFilter::<TestBackend>::new(ns, rx, shared)
+    ) -> CentralFilter {
+        let shared_router_state = shared
+            .try_read()
+            .expect("test state should not be write-locked")
+            .shared_router_state
+            .clone();
+        CentralFilter::new(ns, rx, shared_router_state)
     }
 
     #[tokio::test]
@@ -261,13 +266,14 @@ mod unit_tests {
     }
 
     #[tokio::test]
-    async fn error_if_actor_assigned_to_different_namespace() {
+    async fn shutdown_exits_cleanly_if_actor_is_assigned_elsewhere() {
         let ns_a: RouterNamespace = Arc::from("ns-a-wrong");
         let ns_b: RouterNamespace = Arc::from("ns-b-wrong");
         let (shared, actor_id, _actor_rx) = make_shared_state_with_actor(ns_a.clone());
 
         let (filter_tx, filter_rx) = mpsc::channel::<RoutedMessage>(4);
-        // Filter uses namespace B, actor is assigned to A, error expected
+        // Filter uses namespace B while actor is assigned to A. The message is dropped, but
+        // a shutdown payload still terminates this filter cleanly.
         let filter = make_filter(ns_b, filter_rx, shared);
         let handle = tokio::spawn(async move { filter.spawn_loop().await });
 
@@ -278,17 +284,18 @@ mod unit_tests {
             ))
             .await
             .unwrap();
+        drop(filter_tx);
 
         let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
             .await
             .expect("timeout")
             .expect("join error");
 
-        assert!(result.is_err(), "Filter should error on wrong namespace");
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn error_if_actor_not_registered() {
+    async fn shutdown_exits_cleanly_if_actor_is_not_registered() {
         let ns: RouterNamespace = Arc::from("ns-unreg");
         let (shared, _actor_id, _actor_rx) = make_shared_state_with_actor(ns.clone());
 
@@ -304,13 +311,14 @@ mod unit_tests {
             ))
             .await
             .unwrap();
+        drop(filter_tx);
 
         let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
             .await
             .expect("timeout")
             .expect("join error");
 
-        assert!(result.is_err(), "Filter should error on unknown actor");
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -378,17 +386,18 @@ mod unit_tests {
             msg.protocol,
             RoutingProtocol::Control(ControlPayload::Shutdown)
         ));
+        drop(filter_tx);
 
         let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
             .await
-            .expect("filter did not exit after Shutdown msg")
+            .expect("filter did not exit after its channel closed")
             .expect("join error");
 
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn filter_error_on_actor_inbox_send_failure() {
+    async fn shutdown_exits_cleanly_if_actor_inbox_is_closed() {
         let ns: RouterNamespace = Arc::from("ns-inbox-fail2");
         let (shared, actor_id, actor_rx) = make_shared_state_with_actor(ns.clone());
 
@@ -405,15 +414,13 @@ mod unit_tests {
             ))
             .await
             .unwrap();
+        drop(filter_tx);
 
         let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
             .await
             .expect("timeout")
             .expect("join error");
 
-        assert!(
-            result.is_err(),
-            "Filter should error when actor inbox is closed"
-        );
+        assert!(result.is_ok());
     }
 }

@@ -53,9 +53,9 @@ fn prepare_transport_model_update_for_dispatch<B: Backend + BackendMatcher<Backe
     Some(msg)
 }
 
-/// Listens & receives model bytes from a training server. Created once per client runtime.
-pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backend = B>> {
-    client_namespace: Arc<str>,
+/// Listens & receives model bytes from a training server. Created once per agent runtime.
+pub(crate) struct TransportModelReceiver<B: Backend + BackendMatcher<Backend = B>> {
+    agent_namespace: Arc<str>,
     global_dispatcher_tx: Sender<RoutedMessage>,
     training_dispatcher: Arc<TrainingDispatcher<B>>,
     shared_state: Arc<RwLock<StateManager<B>>>,
@@ -63,16 +63,16 @@ pub(crate) struct ClientTransportModelReceiver<B: Backend + BackendMatcher<Backe
     shutdown: Option<broadcast::Receiver<()>>,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>> ClientTransportModelReceiver<B> {
+impl<B: Backend + BackendMatcher<Backend = B>> TransportModelReceiver<B> {
     pub fn new(
-        client_namespace: Arc<str>,
+        agent_namespace: Arc<str>,
         global_dispatcher_tx: Sender<RoutedMessage>,
         shared_state: Arc<RwLock<StateManager<B>>>,
         shared_transport_addresses: Arc<RwLock<SharedTransportAddresses>>,
         training_dispatcher: Arc<TrainingDispatcher<B>>,
     ) -> Self {
         Self {
-            client_namespace,
+            agent_namespace,
             global_dispatcher_tx,
             training_dispatcher,
             shared_state,
@@ -211,22 +211,22 @@ mod unit_tests {
     const D_IN: usize = 4;
     const D_OUT: usize = 1;
 
-    fn independent_modes() -> Arc<ClientModes> {
-        Arc::new(ClientModes {
+    fn independent_modes() -> Arc<RuntimeModes> {
+        Arc::new(RuntimeModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Independent),
             actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
-    fn shared_modes() -> Arc<ClientModes> {
-        Arc::new(ClientModes {
+    fn shared_modes() -> Arc<RuntimeModes> {
+        Arc::new(RuntimeModes {
             actor_inference_mode: ActorInferenceMode::Client(ModelMode::Shared),
             actor_data_mode: ActorDataMode::Disabled,
         })
     }
 
     fn make_state_manager(
-        modes: Arc<ClientModes>,
+        modes: Arc<RuntimeModes>,
     ) -> (
         StateManager<TestBackend>,
         tokio::sync::mpsc::Receiver<RoutedMessage>,
