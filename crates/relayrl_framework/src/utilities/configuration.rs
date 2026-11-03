@@ -833,11 +833,14 @@ impl TrainingServerConfigLoader {
 /// Reserved scaffolding: no server runtime consumes this builder in the current branch.
 pub trait TrainingServerConfigBuildParams {
     fn set_config_polling_seconds(&mut self, config_polling_seconds: u64) -> &mut Self;
+    /// Applies `key=value` or `key value` hyperparameters for one algorithm.
+    ///
+    /// Returns an error when a list entry is not exactly one key/value pair.
     fn set_hyperparameters(
         &mut self,
         algorithm: Algorithm,
         hyperparameter_args: HyperparameterArgs,
-    ) -> &mut Self;
+    ) -> Result<&mut Self, HyperparameterParseError>;
     fn set_training_tensorboard_params(
         &mut self,
         launch_tb_on_startup: bool,
@@ -874,9 +877,8 @@ impl TrainingServerConfigBuildParams for TrainingServerConfigBuilder {
         &mut self,
         algorithm: Algorithm,
         hyperparameter_args: HyperparameterArgs,
-    ) -> &mut Self {
-        let hp_map: HashMap<String, String> =
-            crate::agent::parse_args(&Some(hyperparameter_args.clone()));
+    ) -> Result<&mut Self, HyperparameterParseError> {
+        let hp_map: HashMap<String, String> = crate::agent::parse_args(&Some(hyperparameter_args))?;
 
         // Start from defaults for all supported algorithms.
         let mut all_cfg = HyperparameterConfig {
@@ -1897,6 +1899,53 @@ mod unit_tests {
             vec!["MetricA".to_string(), "MetricB".to_string()]
         );
         assert_eq!(tb.global_step_tag, "Step");
+    }
+
+    #[test]
+    fn training_server_builder_accepts_valid_hyperparameter_list() {
+        let mut builder = TrainingServerConfigBuilder {
+            config_polling_seconds: None,
+            default_hyperparameters: None,
+            training_tensorboard: None,
+            transport_config: None,
+            local_model_module: None,
+        };
+        builder
+            .set_hyperparameters(
+                Algorithm::PPO,
+                HyperparameterArgs::List(vec!["gamma=0.5".to_string()]),
+            )
+            .unwrap();
+
+        let loader = builder.build();
+        let ppo = loader
+            .get_hyperparameters()
+            .as_ref()
+            .and_then(|config| config.ppo.as_ref())
+            .expect("PPO defaults should be present");
+        assert_eq!(ppo.gamma, 0.5);
+        assert_eq!(ppo.clip_ratio, PPOParams::default().clip_ratio);
+    }
+
+    #[test]
+    fn training_server_builder_rejects_malformed_hyperparameter_list_without_mutation() {
+        let mut builder = TrainingServerConfigBuilder {
+            config_polling_seconds: None,
+            default_hyperparameters: None,
+            training_tensorboard: None,
+            transport_config: None,
+            local_model_module: None,
+        };
+        let error = match builder.set_hyperparameters(
+            Algorithm::PPO,
+            HyperparameterArgs::List(vec!["not-a-pair".to_string()]),
+        ) {
+            Ok(_) => panic!("malformed list should be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.argument, "not-a-pair");
+        assert!(builder.build().get_hyperparameters().is_none());
     }
 
     #[test]

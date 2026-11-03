@@ -98,8 +98,11 @@ impl Default for TransportMode {
 ///
 /// # Returns
 ///
-/// A [`HashMap`] where the keys and values are both strings.
-pub fn parse_args(hyperparameter_args: &Option<HyperparameterArgs>) -> HashMap<String, String> {
+/// A [`HashMap`] where the keys and values are both strings, or a
+/// [`HyperparameterParseError`] when a list entry is not exactly one key/value pair.
+pub fn parse_args(
+    hyperparameter_args: &Option<HyperparameterArgs>,
+) -> Result<HashMap<String, String>, HyperparameterParseError> {
     let mut hyperparams_map: HashMap<String, String> = HashMap::new();
 
     match hyperparameter_args {
@@ -116,17 +119,15 @@ pub fn parse_args(hyperparameter_args: &Option<HyperparameterArgs>) -> HashMap<S
                 } else if arg.contains(' ') {
                     arg.split(' ').collect()
                 } else {
-                    panic!(
-                        "[TrainingServer - new] Invalid hyperparameter argument: {}",
-                        arg
-                    );
+                    return Err(HyperparameterParseError {
+                        argument: arg.clone(),
+                    });
                 };
                 // Ensure exactly two parts are obtained: key and value.
                 if split.len() != 2 {
-                    panic!(
-                        "[TrainingServer - new] Invalid hyperparameter argument: {}",
-                        arg
-                    );
+                    return Err(HyperparameterParseError {
+                        argument: arg.clone(),
+                    });
                 }
                 hyperparams_map.insert(split[0].to_string(), split[1].to_string());
             }
@@ -134,5 +135,120 @@ pub fn parse_args(hyperparameter_args: &Option<HyperparameterArgs>) -> HashMap<S
         None => {}
     }
 
-    hyperparams_map
+    Ok(hyperparams_map)
+}
+
+pub(crate) async fn drive_on_runtime_thread<Build, Fut, Output>(
+    build: Build,
+) -> Result<Output, String>
+where
+    Build: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Output> + 'static,
+    Output: Send + 'static,
+{
+    let runtime = tokio::runtime::Handle::try_current()
+        .map_err(|error| format!("Tokio runtime unavailable: {error}"))?;
+    let (reply_to, reply_from_thread) = tokio::sync::oneshot::channel();
+
+    std::thread::Builder::new()
+        .name("relayrl-env-rollout".to_string())
+        .spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| runtime.block_on(build()))).map_err(
+                |panic_payload| {
+                    if let Some(message) = panic_payload.downcast_ref::<&str>() {
+                        (*message).to_string()
+                    } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+                        message.clone()
+                    } else {
+                        "rollout thread panicked with a non-string payload".to_string()
+                    }
+                },
+            );
+            let _ = reply_to.send(result);
+        })
+        .map_err(|error| format!("Failed to spawn rollout thread: {error}"))?;
+
+    reply_from_thread
+        .await
+        .map_err(|error| format!("Rollout thread ended without returning a result: {error}"))?
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::{drive_on_runtime_thread, parse_args};
+    use relayrl_types::HyperparameterArgs;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    #[test]
+    fn parse_args_accepts_none_map_and_empty_list() {
+        assert_eq!(parse_args(&None).unwrap(), HashMap::new());
+        assert_eq!(
+            parse_args(&Some(HyperparameterArgs::List(Vec::new()))).unwrap(),
+            HashMap::new()
+        );
+
+        let expected = HashMap::from([("gamma".to_string(), "0.99".to_string())]);
+        assert_eq!(
+            parse_args(&Some(HyperparameterArgs::Map(expected.clone()))).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn parse_args_preserves_valid_list_semantics() {
+        let parsed = parse_args(&Some(HyperparameterArgs::List(vec![
+            "gamma=0.99".to_string(),
+            "lam 0.95".to_string(),
+            "key=".to_string(),
+            "mixed=value with spaces".to_string(),
+            "gamma=0.5".to_string(),
+        ])))
+        .unwrap();
+
+        assert_eq!(parsed.get("gamma").map(String::as_str), Some("0.5"));
+        assert_eq!(parsed.get("lam").map(String::as_str), Some("0.95"));
+        assert_eq!(parsed.get("key").map(String::as_str), Some(""));
+        assert_eq!(
+            parsed.get("mixed").map(String::as_str),
+            Some("value with spaces")
+        );
+    }
+
+    #[test]
+    fn parse_args_reports_the_malformed_entry() {
+        for invalid in ["gamma", "a=b=c", "a b c"] {
+            let error =
+                parse_args(&Some(HyperparameterArgs::List(vec![invalid.to_string()]))).unwrap_err();
+            assert_eq!(error.argument, invalid);
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_thread_returns_output() {
+        let output = drive_on_runtime_thread(|| async { 42 }).await.unwrap();
+        assert_eq!(output, 42);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_thread_accepts_non_send_future() {
+        let output = drive_on_runtime_thread(|| async {
+            let value = Rc::new(42);
+            tokio::task::yield_now().await;
+            *value
+        })
+        .await
+        .unwrap();
+        assert_eq!(output, 42);
+    }
+
+    #[tokio::test]
+    async fn runtime_thread_reports_panics() {
+        let error = drive_on_runtime_thread(|| async {
+            panic!("rollout panic");
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("rollout panic"));
+    }
 }
