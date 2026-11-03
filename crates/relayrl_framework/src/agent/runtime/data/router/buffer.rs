@@ -4,52 +4,80 @@
 //! fan out trajectories to experimental transport-backed training sinks.
 
 use super::{DataPayload, RoutedMessage, RouterError, RoutingProtocol};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::ActorDataMode;
-use crate::agent::builder::ClientModes;
+#[cfg(feature = "transport")]
+use crate::agent::builder::ActorDataMode;
+use crate::agent::builder::RuntimeModes;
+#[cfg(feature = "transport")]
+use crate::agent::builder::uses_transport;
 use crate::agent::builder::{
     LocalTrajectoryFileParams, LocalTrajectoryFileType, uses_local_file_writing,
     uses_trajectory_cache,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
-use crate::agent::runtime::control::scale_manager::{
-    RouterNamespace, SharedTrajectoryCache,
-};
+#[cfg(feature = "transport")]
+use crate::agent::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::agent::runtime::control::scale_manager::{RouterNamespace, SharedTrajectoryCache};
 use crate::agent::runtime::control::state_manager::ActorUuid;
-use crate::agent::runtime::data::sinks::file_sink::{
-    FileSinkError, write_local_trajectory_file,
-};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::client::runtime::data::sinks::transport_sink::{
+use crate::agent::runtime::data::sinks::file_sink::{FileSinkError, write_local_trajectory_file};
+#[cfg(feature = "transport")]
+use crate::agent::runtime::data::sinks::transport_sink::{
     TransportError, transport_dispatcher::TrainingDispatcher,
 };
 use crossbeam_utils::CachePadded;
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use relayrl_types::data::trajectory::EncodedTrajectory;
 use relayrl_types::data::trajectory::{RelayRLTrajectory, TrajectoryError};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use relayrl_types::prelude::action::CodecConfig;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::registry_uuid::Uuid;
 
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::collections::BinaryHeap;
-#[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+#[cfg(not(feature = "transport"))]
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
+use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock, Semaphore, broadcast, oneshot};
+use tokio::task::JoinHandle;
 
 type PriorityRank = i64;
+
+async fn reconcile_semaphore_capacity(
+    semaphore: &Arc<Semaphore>,
+    current_capacity: &mut usize,
+    target_capacity: usize,
+) -> bool {
+    let target_capacity = target_capacity.clamp(1, Semaphore::MAX_PERMITS);
+
+    if target_capacity > *current_capacity {
+        semaphore.add_permits(target_capacity - *current_capacity);
+        *current_capacity = target_capacity;
+        return true;
+    }
+
+    if target_capacity < *current_capacity {
+        let removed = semaphore.forget_permits(*current_capacity - target_capacity);
+        *current_capacity -= removed;
+
+        while *current_capacity > target_capacity {
+            let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                return false;
+            };
+            permit.forget();
+            *current_capacity -= 1;
+        }
+    }
+
+    true
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SinkQueueEntry {
@@ -58,6 +86,11 @@ pub(crate) struct SinkQueueEntry {
     traj_for_processing: Arc<RelayRLTrajectory>,
     #[allow(unused)]
     permit: Option<Arc<OwnedSemaphorePermit>>,
+}
+
+enum BufferQueueItem {
+    Trajectory(SinkQueueEntry),
+    FlushBarrier(oneshot::Sender<()>),
 }
 
 impl Eq for SinkQueueEntry {}
@@ -83,7 +116,7 @@ impl Ord for SinkQueueEntry {
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
 pub enum TrajectorySinkError {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     #[error("Transport error: {0}")]
     TransportError(#[from] TransportError),
     #[error("Failed to encode trajectory: {0}")]
@@ -117,11 +150,24 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     ) -> &mut Self;
     fn with_trajectory_cache(&mut self, traj_memory: SharedTrajectoryCache) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
+    fn with_empty_notifier(&mut self, n: &Arc<Notify>) -> &mut Self;
     fn with_semaphore_capacity(
         &mut self,
         shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self;
-    fn spawn_loop(&mut self) -> Result<(), RouterError>;
+    fn spawn_loop(
+        &mut self,
+    ) -> Result<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>), RouterError>;
+    async fn build_sink_entry(
+        msg: RoutedMessage,
+        rx_semaphore: &mut Option<Arc<Semaphore>>,
+        recv_actor_count: &Option<Arc<CachePadded<AtomicUsize>>>,
+        recv_buffer_size: &Arc<AtomicUsize>,
+        current_semaphore_capacity: &mut usize,
+        receiver_actor_last_processed: &DashMap<Uuid, i64>,
+        acquire_permit: bool,
+    ) -> Option<SinkQueueEntry>;
+    async fn join_sink_handles(handles: &Option<Arc<RwLock<Vec<JoinHandle<()>>>>>, label: &str);
     fn _compute_priority(
         actor_id: &ActorUuid,
         actor_last_sent: &DashMap<Uuid, i64>,
@@ -129,7 +175,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     ) -> PriorityRank;
 }
 
-#[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+#[cfg(not(feature = "transport"))]
 pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>:
     LocalFileTrajectorySinkTrait<B>
 {
@@ -137,9 +183,8 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
         associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_buffer_size: Arc<AtomicUsize>,
-        shared_client_modes: Arc<ClientModes>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        training_codec: CodecConfig,
+        shared_modes: Arc<RuntimeModes>,
+        #[cfg(feature = "transport")] training_codec: CodecConfig,
     ) -> Self;
     fn with_trajectory_writer(
         &mut self,
@@ -147,11 +192,24 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     ) -> &mut Self;
     fn with_trajectory_cache(&mut self, traj_memory: SharedTrajectoryCache) -> &mut Self;
     fn with_shutdown(&mut self, rx: broadcast::Receiver<()>) -> &mut Self;
+    fn with_empty_notifier(&mut self, n: &Arc<Notify>) -> &mut Self;
     fn with_semaphore_capacity(
         &mut self,
         shared_actor_count: Arc<CachePadded<AtomicUsize>>,
     ) -> &mut Self;
-    fn spawn_loop(&mut self) -> Result<(), RouterError>;
+    fn spawn_loop(
+        &mut self,
+    ) -> Result<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>), RouterError>;
+    async fn build_sink_entry(
+        msg: RoutedMessage,
+        rx_semaphore: &mut Option<Arc<Semaphore>>,
+        recv_actor_count: &Option<Arc<CachePadded<AtomicUsize>>>,
+        recv_buffer_size: &Arc<AtomicUsize>,
+        current_semaphore_capacity: &mut usize,
+        receiver_actor_last_processed: &DashMap<Uuid, i64>,
+        acquire_permit: bool,
+    ) -> Option<SinkQueueEntry>;
+    async fn join_sink_handles(handles: &Option<Arc<RwLock<Vec<JoinHandle<()>>>>>, label: &str);
     fn _compute_priority(
         actor_id: &ActorUuid,
         actor_last_sent: &DashMap<Uuid, i64>,
@@ -159,7 +217,7 @@ pub(crate) trait TrajectoryBufferTrait<B: Backend + BackendMatcher<Backend = B>>
     ) -> PriorityRank;
 }
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 pub(crate) trait TransportTrajectorySinkTrait<B: Backend + BackendMatcher<Backend = B>> {
     async fn send_trajectory(
         associated_router_namespace: &RouterNamespace,
@@ -180,65 +238,64 @@ pub(crate) trait LocalFileTrajectorySinkTrait<B: Backend + BackendMatcher<Backen
     ) -> Result<(), TrajectorySinkError>;
 }
 
-pub(crate) struct ClientTrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
+pub(crate) struct TrajectoryBuffer<B: Backend + BackendMatcher<Backend = B>> {
     #[allow(unused)]
     associated_router_namespace: RouterNamespace,
     rx_from_actor: Option<Receiver<RoutedMessage>>,
     actor_last_processed: DashMap<Uuid, i64>,
     #[allow(dead_code)]
     traj_queue_tx: Option<Sender<SinkQueueEntry>>,
-    shared_client_modes: Arc<ClientModes>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    shared_modes: Arc<RuntimeModes>,
+    #[cfg(feature = "transport")]
     shared_training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     shared_transport_addresses: Option<Arc<RwLock<SharedTransportAddresses>>>,
     shared_trajectory_file_output: Option<Arc<RwLock<LocalTrajectoryFileParams>>>,
     shared_traj_cache: Option<SharedTrajectoryCache>,
     shared_buffer_size: Arc<AtomicUsize>,
     shutdown: Option<broadcast::Receiver<()>>,
+    empty_notifier: Option<Arc<Notify>>,
     shared_actor_count: Option<Arc<CachePadded<AtomicUsize>>>,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     training_codec: CodecConfig,
-    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[cfg(not(feature = "transport"))]
     _phantom: PhantomData<B>,
 }
 
 // ===== Buffer construction and runtime loop =====
 
-impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
-    for ClientTrajectoryBuffer<B>
-{
+impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B> for TrajectoryBuffer<B> {
     fn new(
         associated_router_namespace: RouterNamespace,
         rx_from_actor: Receiver<RoutedMessage>,
         shared_buffer_size: Arc<AtomicUsize>,
-        shared_client_modes: Arc<ClientModes>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        training_codec: CodecConfig,
+        shared_modes: Arc<RuntimeModes>,
+        #[cfg(feature = "transport")] training_codec: CodecConfig,
     ) -> Self {
         Self {
             associated_router_namespace,
             rx_from_actor: Some(rx_from_actor),
             actor_last_processed: DashMap::new(),
             traj_queue_tx: None,
-            shared_client_modes,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            shared_modes,
+            #[cfg(feature = "transport")]
             shared_training_dispatcher: None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             shared_transport_addresses: None,
             shared_trajectory_file_output: None,
             shared_traj_cache: None,
             shared_buffer_size,
             shutdown: None,
+            empty_notifier: None,
             shared_actor_count: None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             training_codec,
-            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+            #[cfg(not(feature = "transport"))]
             _phantom: PhantomData,
         }
     }
 
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     fn with_transport(
         &mut self,
         shared_training_dispatcher: Arc<TrainingDispatcher<B>>,
@@ -331,51 +388,67 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                             std::future::pending::<()>().await;
                         }
                     } => {
+                        rx_from_actor.close();
+
+                        while let Some(msg) = rx_from_actor.recv().await {
+                            let item = match msg {
+                                RoutedMessage {
+                                    protocol:
+                                        RoutingProtocol::Data(DataPayload::FlushBarrier {
+                                            reply_to,
+                                        }),
+                                    ..
+                                } => Some(BufferQueueItem::FlushBarrier(reply_to)),
+                                msg => Self::build_sink_entry(
+                                    msg,
+                                    &mut rx_semaphore,
+                                    &recv_actor_count,
+                                    &recv_buffer_size,
+                                    &mut current_semaphore_capacity,
+                                    &receiver_actor_last_processed,
+                                    false,
+                                )
+                                .await
+                                .map(BufferQueueItem::Trajectory),
+                            };
+                            if let Some(item) = item
+                                && traj_queue_tx.send(item).is_err()
+                            {
+                                break;
+                            }
+                        }
+
+                        drop(traj_queue_tx);
                         break;
                     }
 
                     msg_opt = rx_from_actor.recv() => {
                         match msg_opt {
                             Some(msg) => {
-                                // Only process SendTrajectory payloads
-                                if let RoutingProtocol::Data(DataPayload::SendTrajectory { timestamp, trajectory }) = msg.protocol {
-                                    let permit = match (&mut rx_semaphore, &recv_actor_count) {
-                                        (Some(semaphore), Some(actor_count)) => {
-                                            let new_capacity = recv_buffer_size.load(Ordering::Acquire)
-                                                .saturating_mul(actor_count.load(Ordering::Acquire).max(1));
-
-                                            if new_capacity > current_semaphore_capacity {
-                                                semaphore.add_permits(new_capacity - current_semaphore_capacity);
-                                                current_semaphore_capacity = new_capacity;
-                                            } else if new_capacity < current_semaphore_capacity {
-                                                *semaphore = Arc::new(Semaphore::new(new_capacity.max(1)));
-                                                current_semaphore_capacity = new_capacity;
-                                            }
-
-                                            match semaphore.clone().acquire_owned().await {
-                                                Ok(p) => Some(Arc::new(p)),
-                                                Err(_) => break,
-                                            }
-                                        }
-                                        _ => None,
-                                    };
-
-                                    let priority = Self::_compute_priority(
-                                        &msg.actor_id,
+                                let item = match msg {
+                                    RoutedMessage {
+                                        protocol:
+                                            RoutingProtocol::Data(DataPayload::FlushBarrier {
+                                                reply_to,
+                                            }),
+                                        ..
+                                    } => Some(BufferQueueItem::FlushBarrier(reply_to)),
+                                    msg => Self::build_sink_entry(
+                                        msg,
+                                        &mut rx_semaphore,
+                                        &recv_actor_count,
+                                        &recv_buffer_size,
+                                        &mut current_semaphore_capacity,
                                         &receiver_actor_last_processed,
-                                        timestamp,
-                                    );
-
-                                    let entry = SinkQueueEntry {
-                                        priority,
-                                        actor_id: msg.actor_id,
-                                        traj_for_processing: Arc::new(trajectory),
-                                        permit,
-                                    };
-
-                                    if traj_queue_tx.send(entry).is_err() {
+                                        true,
+                                    )
+                                    .await
+                                    .map(BufferQueueItem::Trajectory),
+                                };
+                                if let Some(item) = item
+                                    && traj_queue_tx.send(item).is_err()
+                                {
                                         break;
-                                    }
                                 }
                             }
                             None => {
@@ -389,21 +462,52 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let mut worker_queue: BinaryHeap<SinkQueueEntry> = worker_priority_queue.clone();
         let worker_actor_last_processed = actor_last_processed.clone();
-        let worker_modes = shared_client_modes.clone();
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        let worker_modes = shared_modes.clone();
+        #[cfg(feature = "transport")]
         let worker_training_dispatcher = shared_training_dispatcher.clone();
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        #[cfg(feature = "transport")]
         let worker_transport_addresses = shared_transport_addresses.clone();
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        #[cfg(feature = "transport")]
         let worker_codec = codec.clone();
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+        #[cfg(feature = "transport")]
         let worker_namespace = namespace.clone();
         let worker_trajectory_file_output = shared_trajectory_file_output.clone();
         let worker_traj_cache = shared_traj_cache.clone();
+        let worker_empty_notifier = self.empty_notifier.clone();
+        let mut pending_flush_barriers = Vec::<oneshot::Sender<()>>::new();
 
-        let _worker_handle = tokio::spawn(async move {
+        #[cfg(feature = "transport")]
+        let async_transport_handles: Option<Arc<RwLock<Vec<JoinHandle<()>>>>> =
+            if uses_transport(&worker_modes.actor_data_mode) {
+                Some(Arc::new(RwLock::new(Vec::new())))
+            } else {
+                None
+            };
+        let async_file_handles: Option<Arc<RwLock<Vec<JoinHandle<()>>>>> =
+            if uses_local_file_writing(&worker_modes.actor_data_mode) {
+                Some(Arc::new(RwLock::new(Vec::new())))
+            } else {
+                None
+            };
+
+        struct NotifyOnDrop {
+            pub(super) notifier: Option<Arc<Notify>>,
+        }
+
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                if let Some(notifier) = self.notifier.take() {
+                    notifier.notify_one();
+                }
+            }
+        }
+
+        let worker_handle = tokio::spawn(async move {
             const BATCH_SIZE: usize = 10_000;
             let mut worker_tick = tokio::time::interval(Duration::from_millis(1));
+            let _empty_notifier = NotifyOnDrop {
+                notifier: worker_empty_notifier,
+            };
 
             loop {
                 tokio::select! {
@@ -579,21 +683,93 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                 if uses_trajectory_cache(&worker_modes.actor_data_mode)
                     && let Some(ref traj_cache) = worker_traj_cache
                 {
-                    let actor_id = job.actor_id;
-                    let traj_clone = job.traj_for_processing.clone();
-
-                    if let Some(ref mut traj_vec) = traj_cache.cache.get_mut(&actor_id) {
-                        let _room_after_push = traj_cache.per_actor_size.saturating_sub(1);
-                        // normally we would check for OOM here, but since the system is shutting down, we should flush all trajectories to the cache
-                        traj_vec.push(traj_clone);
-                    } else {
-                        traj_cache.cache.insert(actor_id, vec![traj_clone]);
+                    // Preserve every remaining trajectory during graceful shutdown.
+                    if !traj_cache.push_trajectory(
+                        job.actor_id,
+                        job.traj_for_processing.clone(),
+                        false,
+                    ) {
+                        log::warn!(
+                            "[TrajectoryBuffer] Rejected shutdown cache write for actor {}",
+                            job.actor_id
+                        );
                     }
                 }
             }
+
+            for reply_to in pending_flush_barriers {
+                let _ = reply_to.send(());
+            }
         });
 
-        Ok(())
+        Ok((receiver_handle, worker_handle))
+    }
+
+    async fn build_sink_entry(
+        msg: RoutedMessage,
+        rx_semaphore: &mut Option<Arc<Semaphore>>,
+        recv_actor_count: &Option<Arc<CachePadded<AtomicUsize>>>,
+        recv_buffer_size: &Arc<AtomicUsize>,
+        current_semaphore_capacity: &mut usize,
+        receiver_actor_last_processed: &DashMap<Uuid, i64>,
+        acquire_permit: bool,
+    ) -> Option<SinkQueueEntry> {
+        // Only process SendTrajectory payloads
+        if let RoutingProtocol::Data(DataPayload::SendTrajectory {
+            timestamp,
+            trajectory,
+        }) = msg.protocol
+        {
+            let permit = match (acquire_permit, rx_semaphore, &recv_actor_count) {
+                (true, Some(semaphore), Some(actor_count)) => {
+                    let new_capacity = recv_buffer_size
+                        .load(Ordering::Acquire)
+                        .saturating_mul(actor_count.load(Ordering::Acquire).max(1))
+                        .clamp(1, Semaphore::MAX_PERMITS);
+
+                    if !reconcile_semaphore_capacity(
+                        semaphore,
+                        current_semaphore_capacity,
+                        new_capacity,
+                    )
+                    .await
+                    {
+                        return None;
+                    }
+
+                    match semaphore.clone().acquire_owned().await {
+                        Ok(p) => Some(Arc::new(p)),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+
+            let priority =
+                Self::_compute_priority(&msg.actor_id, receiver_actor_last_processed, timestamp);
+
+            Some(SinkQueueEntry {
+                priority,
+                actor_id: msg.actor_id,
+                traj_for_processing: Arc::new(trajectory),
+                permit,
+            })
+        } else {
+            None
+        }
+    }
+
+    async fn join_sink_handles(handles: &Option<Arc<RwLock<Vec<JoinHandle<()>>>>>, label: &str) {
+        if let Some(handles) = handles {
+            let mut guard = handles.write().await;
+            let hs = std::mem::take(&mut *guard);
+
+            for h in hs {
+                if let Err(e) = h.await {
+                    log::error!("[TrajectoryBuffer] Failed to join {} task: {:?}", label, e);
+                }
+            }
+        }
     }
 
     /// Round robin priority computation
@@ -933,7 +1109,44 @@ mod unit_tests {
         );
     }
 
-    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[tokio::test]
+    async fn semaphore_growth_is_applied_only_once() {
+        let semaphore = Arc::new(Semaphore::new(2));
+        let mut current_capacity = 2;
+
+        assert!(reconcile_semaphore_capacity(&semaphore, &mut current_capacity, 4).await);
+        assert_eq!(current_capacity, 4);
+        assert_eq!(semaphore.available_permits(), 4);
+
+        assert!(reconcile_semaphore_capacity(&semaphore, &mut current_capacity, 4).await);
+        assert_eq!(current_capacity, 4);
+        assert_eq!(semaphore.available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn semaphore_shrink_waits_for_outstanding_permits() {
+        let semaphore = Arc::new(Semaphore::new(4));
+        let held = semaphore.clone().acquire_many_owned(3).await.unwrap();
+        let mut current_capacity = 4;
+        let shrink_semaphore = semaphore.clone();
+
+        let shrink = tokio::spawn(async move {
+            let ok =
+                reconcile_semaphore_capacity(&shrink_semaphore, &mut current_capacity, 1).await;
+            (ok, current_capacity)
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!shrink.is_finished());
+        drop(held);
+
+        let (ok, current_capacity) = shrink.await.unwrap();
+        assert!(ok);
+        assert_eq!(current_capacity, 1);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[cfg(not(feature = "transport"))]
     #[tokio::test]
     async fn spawn_loop_double_call_returns_err() {
         let (tx, rx) = mpsc::channel::<RoutedMessage>(16);
