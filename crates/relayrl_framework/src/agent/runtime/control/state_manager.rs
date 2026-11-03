@@ -445,100 +445,171 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         Ok(())
     }
 
-    pub(crate) async fn shutdown_all_actors(&self) -> Result<Vec<ActorInfo>, StateManagerError> {
-        let mut actor_ids = Vec::<ActorUuid>::new();
+    pub(crate) async fn shutdown_all_actors(
+        &mut self,
+    ) -> Result<Vec<ActorInfo>, StateManagerError> {
+        let mut actors = Vec::<ActorInfo>::new();
+        let actor_ids: Vec<ActorUuid> = self
+            .shared_router_state
+            .actor_routes
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        let mut failures = Vec::new();
 
-        // Send Shutdown message to every actor inbox; actors will flush and exit
-        for entry in self.shared_router_state.actor_routes.iter() {
-            let actor_id: ActorUuid = *entry.key();
-            let tx: Sender<RoutedMessage> = entry.value().inbox.clone();
+        for actor_id in &actor_ids {
+            if let Some(runtime) = self.actor_params.runtime_handles.get(actor_id) {
+                match runtime.get_actor_info() {
+                    Ok(actor_info) => actors.push(actor_info),
+                    Err(e) => log::error!("{}", e),
+                }
+            }
+
             let shutdown_msg = RoutedMessage {
-                actor_id,
+                actor_id: *actor_id,
                 protocol: RoutingProtocol::Control(ControlPayload::Shutdown),
             };
-            let _ = tx.send(shutdown_msg).await;
+            if let Err(error) = self.global_dispatcher_tx.send(shutdown_msg).await {
+                failures.push(format!("failed to send shutdown to {actor_id}: {error}"));
+            }
+        }
 
-            let handle: Result<
-                dashmap::mapref::one::Ref<'_, Uuid, Arc<JoinHandle<()>>>,
-                StateManagerError,
-            > = self.actor_handles.get(&actor_id).ok_or(
-                StateManagerError::ActorHandleNotFoundError(
-                    "[StateManager] Actor handle not found".to_string(),
-                ),
+        let wait_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let active_ids = active_uuid_registry::interface::list_ids(
+                    self.agent_namespace.as_ref(),
+                    crate::agent::ACTOR_CONTEXT,
+                );
+                if actor_ids.iter().all(|id| !active_ids.contains(id)) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+
+        if wait_result.is_err() {
+            let active_ids = active_uuid_registry::interface::list_ids(
+                self.agent_namespace.as_ref(),
+                crate::agent::ACTOR_CONTEXT,
             );
+            let stuck_ids: Vec<_> = actor_ids
+                .iter()
+                .filter(|id| active_ids.contains(id))
+                .collect();
+            failures.push(format!("actor shutdown timed out for ids {stuck_ids:?}"));
+        }
 
+        for actor_id in actor_ids {
+            // Keep cache entries writable until the lifecycle barrier drains all buffer workers.
+            if let Err(error) = self.remove_actor_params(actor_id, false) {
+                failures.push(format!("failed to remove actor {actor_id}: {error}"));
+            }
+        }
+
+        if !failures.is_empty() {
+            return Err(StateManagerError::ShutdownAllActorsError(
+                failures.join("; "),
+            ));
+        }
+
+        Ok(actors)
+    }
+
+    pub(crate) async fn send_actor_shutdown(
+        &self,
+        actor_id: Uuid,
+    ) -> Result<(), StateManagerError> {
+        let tx = self.global_dispatcher_tx.clone();
+
+        let shutdown_msg = RoutedMessage {
+            actor_id,
+            protocol: RoutingProtocol::Control(ControlPayload::Shutdown),
+        };
+        let _ = tx.send(shutdown_msg).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while active_uuid_registry::interface::list_ids(
-                self.client_namespace.as_ref(),
+                self.agent_namespace.as_ref(),
                 crate::agent::ACTOR_CONTEXT,
             )
             .contains(&actor_id)
             {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    tokio::time::sleep(std::time::Duration::from_secs(1)),
-                )
-                .await
-                .map_err(|_| {
-                    StateManagerError::ShutdownAllActorsError(format!(
-                        "[StateManager] Shutdown all actors timeout: {}",
-                        actor_id
-                    ))
-                })?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+        })
+        .await
+        .map_err(|_| {
+            StateManagerError::ShutdownAllActorsError(format!(
+                "[StateManager] Shutdown all actors timeout: {}",
+                actor_id
+            ))
+        })?;
 
-            actor_ids.push(actor_id);
-
-            if let Ok(handle) = handle {
-                handle.abort();
-            } else {
-                continue;
-            }
-        }
-
-        Ok(actor_ids
-            .iter()
-            .filter_map(|id| {
-                let runtime = self.actor_runtime_handles.get(id)?;
-                match runtime.get_actor_info() {
-                    Ok(actor_info) => Some(actor_info),
-                    Err(e) => {
-                        log::error!("{}", e);
-                        None
-                    }
-                }
-            })
-            .collect())
+        Ok(())
     }
 
     pub(crate) async fn clear_runtime_components(&mut self) -> Result<(), StateManagerError> {
-        self.actor_handles.clear();
+        for handle in self.actor_params.task_handles.iter() {
+            handle.value().abort();
+        }
+        self.actor_params.task_handles.clear();
         self.shared_router_state.actor_routes.clear();
-        self.actor_devices.clear();
-        self.actor_model_handles.clear();
-        self.actor_runtime_handles.clear();
+        self.actor_params.devices.clear();
+        self.actor_params.model_handles.clear();
+        self.actor_params.runtime_handles.clear();
         self.shared_local_models.clear();
 
         Ok(())
     }
 
-    pub(crate) fn remove_actor(&mut self, id: Uuid) -> Result<(), StateManagerError> {
-        if let Some(mut route) = self.shared_router_state.actor_routes.get_mut(&id) {
+    pub(crate) fn remove_actor_params(
+        &mut self,
+        actor_id: Uuid,
+        retire_cache: bool,
+    ) -> Result<(), StateManagerError> {
+        let existed = self.actor_params.task_handles.contains_key(&actor_id)
+            || self.actor_params.runtime_handles.contains_key(&actor_id)
+            || self
+                .shared_router_state
+                .actor_routes
+                .contains_key(&actor_id);
+
+        if let Some(mut route) = self.shared_router_state.actor_routes.get_mut(&actor_id) {
             route.router_namespace = None;
         }
 
-        if let Some((_, handle)) = self.actor_handles.remove(&id) {
+        if let Some((_, handle)) = self.actor_params.task_handles.remove(&actor_id) {
             handle.abort();
         }
 
-        self.actor_envs.remove(&id);
-        self.actor_devices.remove(&id);
-        self.actor_model_handles.remove(&id);
-        self.actor_runtime_handles.remove(&id);
-        self.shared_router_state.actor_routes.remove(&id);
-        self.shared_actor_count.fetch_sub(1, Ordering::Release);
-        self.client_namespace
-            .remove_id(crate::agent::ACTOR_CONTEXT, id)
-            .map_err(StateManagerError::from)?;
+        if retire_cache && let Some(ref traj_cache) = self.actor_params.shared_traj_cache {
+            traj_cache.retire_actor(actor_id);
+        }
+        self.actor_params.envs.remove(&actor_id);
+        self.actor_params.devices.remove(&actor_id);
+        self.actor_params.model_handles.remove(&actor_id);
+        self.actor_params.runtime_handles.remove(&actor_id);
+        self.shared_router_state.actor_routes.remove(&actor_id);
+
+        if existed {
+            let _ =
+                self.actor_params
+                    .count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1));
+        }
+
+        let still_registered = active_uuid_registry::interface::list_ids(
+            self.agent_namespace.as_ref(),
+            crate::agent::ACTOR_CONTEXT,
+        )
+        .contains(&actor_id);
+
+        if still_registered {
+            self.agent_namespace
+                .remove_id(crate::agent::ACTOR_CONTEXT, actor_id)
+                .map_err(StateManagerError::from)?;
+        }
 
         Ok(())
     }
@@ -548,60 +619,93 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         current_id: ActorUuid,
         new_id: ActorUuid,
     ) -> Result<(), StateManagerError> {
+        let current_id_handle = StateManager::<B>::get_actor_handle(self, current_id)
+            .ok_or_else(|| {
+                StateManagerError::ActorHandleNotFoundError(format!(
+                    "[StateManager] Actor ID {} not found",
+                    current_id
+                ))
+            })?;
+        let current_route =
+            StateManager::<B>::get_actor_route(self, current_id).ok_or_else(|| {
+                StateManagerError::ActorInboxNotFoundError(format!(
+                    "[StateManager] Actor ID {} not found",
+                    current_id
+                ))
+            })?;
+
+        if StateManager::<B>::get_actor_handle(self, new_id).is_some()
+            || StateManager::<B>::get_actor_route(self, new_id).is_some()
         {
-            let current_id_handle = match StateManager::<B>::get_actor_handle(self, current_id) {
-                Some(handle) => handle.clone(),
-                None => {
-                    return Err(StateManagerError::ActorHandleNotFoundError(format!(
-                        "[StateManager] Actor ID {} not found",
-                        current_id
-                    )));
-                }
-            };
-            let current_route = match StateManager::<B>::get_actor_route(self, current_id) {
-                Some(route) => route,
-                None => {
-                    return Err(StateManagerError::ActorInboxNotFoundError(format!(
-                        "[StateManager] Actor ID {} not found",
-                        current_id
-                    )));
-                }
-            };
-            if StateManager::<B>::get_actor_handle(self, new_id).is_some()
-                || StateManager::<B>::get_actor_route(self, new_id).is_some()
+            return Err(StateManagerError::ActorAlreadyTakenError(format!(
+                "[StateManager] Actor ID {} already taken",
+                new_id
+            )));
+        }
+
+        let current_runtime = self
+            .actor_params
+            .runtime_handles
+            .get(&current_id)
+            .map(|runtime| Arc::clone(runtime.value()));
+        let cache_guard = self
+            .actor_params
+            .shared_traj_cache
+            .as_ref()
+            .map(|cache| cache.lock_rekey());
+
+        if let (Some(cache), Some(guard)) = (
+            self.actor_params.shared_traj_cache.as_ref(),
+            cache_guard.as_ref(),
+        ) {
+            if cache.cache.contains_key(&new_id)
+                || !cache.can_rekey_locked(guard, current_id, new_id)
             {
                 return Err(StateManagerError::ActorAlreadyTakenError(format!(
                     "[StateManager] Actor ID {} already taken",
                     new_id
                 )));
             }
-
-            self.actor_handles.insert(new_id, current_id_handle);
-            self.actor_handles.remove(&current_id);
-            self.shared_router_state
-                .actor_routes
-                .insert(new_id, current_route);
-            self.shared_router_state.actor_routes.remove(&current_id);
         }
 
-        if let Some((_, current_device)) = self.actor_devices.remove(&current_id) {
-            self.actor_devices.insert(new_id, current_device);
-        }
-        if let Some((_, current_env)) = self.actor_envs.remove(&current_id) {
-            self.actor_envs.insert(new_id, current_env);
-        }
-        if let Some((_, runtime)) = self.actor_runtime_handles.remove(&current_id) {
-            // Update the actor's shared identity slot so every outstanding `ActorInfo` handle
-            // for this actor observes the new id, then re-key the map by the new id.
-            runtime
-                .set_actor_id(new_id)
-                .map_err(StateManagerError::from)?;
-            self.actor_runtime_handles.insert(new_id, runtime);
-        }
-
-        self.client_namespace
+        self.agent_namespace
             .replace_id(crate::agent::ACTOR_CONTEXT, current_id, new_id)
             .map_err(StateManagerError::from)?;
+
+        if let (Some(cache), Some(guard)) = (
+            self.actor_params.shared_traj_cache.as_ref(),
+            cache_guard.as_ref(),
+        ) {
+            cache.rekey_locked(guard, current_id, new_id);
+        }
+        if let Some(runtime) = current_runtime {
+            runtime.set_actor_id(new_id);
+        }
+
+        self.actor_params
+            .task_handles
+            .insert(new_id, current_id_handle);
+        self.actor_params.task_handles.remove(&current_id);
+        self.shared_router_state
+            .actor_routes
+            .insert(new_id, current_route);
+        self.shared_router_state.actor_routes.remove(&current_id);
+
+        if let Some((_, current_device)) = self.actor_params.devices.remove(&current_id) {
+            self.actor_params.devices.insert(new_id, current_device);
+        }
+        if let Some((_, current_env)) = self.actor_params.envs.remove(&current_id) {
+            self.actor_params.envs.insert(new_id, current_env);
+        }
+        if let Some((_, current_model)) = self.actor_params.model_handles.remove(&current_id) {
+            self.actor_params
+                .model_handles
+                .insert(new_id, current_model);
+        }
+        if let Some((_, runtime)) = self.actor_params.runtime_handles.remove(&current_id) {
+            self.actor_params.runtime_handles.insert(new_id, runtime);
+        }
+        drop(cache_guard);
 
         Ok(())
     }

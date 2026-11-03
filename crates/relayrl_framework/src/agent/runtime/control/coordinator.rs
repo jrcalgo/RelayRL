@@ -1,43 +1,40 @@
-//! Client runtime coordinator.
+//! Agent runtime coordinator.
 //!
-//! This module owns top-level orchestration for the client runtime: configuration loading,
+//! This module owns top-level orchestration for the agent runtime: configuration loading,
 //! lifecycle management, actor state, router scaling, and the public request path exposed through
 //! `RelayRLAgent`.
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use crate::agent::TransportMode;
-use crate::agent::builder::{ActorDataMode, ActorInferenceMode, ClientModes};
-use crate::agent::process::ActorInfo;
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::{
+use crate::agent::builder::{ActorDataMode, ActorInferenceMode, RuntimeModes};
+#[cfg(feature = "transport")]
+use crate::agent::builder::{
     AlgorithmInitArgs, DefaultHyperparameterArgs, InferenceAddressesArgs, TrainingAddressesArgs,
 };
+use crate::agent::process::ActorInfo;
 use crate::agent::runtime::actor::{ActorDTypes, ActorShape, ErasedActorRuntime};
-use crate::agent::runtime::control::lifecycle_manager::{
-    LifecycleManager, LifecycleManagerError,
-};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::agent::runtime::control::lifecycle_manager::{LifecycleManager, LifecycleManagerError};
+#[cfg(feature = "transport")]
 use crate::agent::runtime::control::scale_manager::ProcessInitFlag;
 use crate::agent::runtime::control::scale_manager::RouterNamespace;
 use crate::agent::runtime::control::scale_manager::{ScaleManager, ScaleManagerError};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use crate::agent::runtime::control::state_manager::SharedRouterState;
 use crate::agent::runtime::control::state_manager::{ActorUuid, NameTag};
 use crate::agent::runtime::control::state_manager::{StateManager, StateManagerError};
-use crate::agent::runtime::data::router::{
-    ControlPayload, RoutedMessage, RoutingProtocol,
-};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::client::runtime::data::router::{DataPayload, InferenceRequest};
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::client::runtime::data::sinks::transport_sink::transport_dispatcher::{
+use crate::agent::runtime::data::router::{ControlPayload, RoutedMessage, RoutingProtocol};
+#[cfg(feature = "transport")]
+use crate::agent::runtime::data::router::{DataPayload, InferenceRequest};
+#[cfg(feature = "transport")]
+use crate::agent::runtime::data::sinks::transport_sink::transport_dispatcher::{
     InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-use crate::agent::client::runtime::data::sinks::transport_sink::{
+#[cfg(feature = "transport")]
+use crate::agent::runtime::data::sinks::transport_sink::{
     ClientTransportInterface, TransportError, client_transport_factory,
 };
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+use crate::agent::runtime::data::training::{TrainingBudget, TrainingOutcome};
+#[cfg(feature = "transport")]
 use crate::utilities::configuration::TransportConfigParams;
 use crate::utilities::configuration::{
     ClientConfigLoader, ConfigLoadError, DEFAULT_CLIENT_CONFIG_PATH,
@@ -47,7 +44,7 @@ use crate::utilities::observability::logging::init_logging;
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::*;
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 use active_uuid_registry::interface::{get_context_entries, get_namespace_entries};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use active_uuid_registry::{ContextString, NamespaceString};
@@ -336,35 +333,34 @@ pub(crate) trait LifecycleStart<B: Backend + BackendMatcher<Backend = B>> {
         &mut self,
         config_path: Option<PathBuf>,
         config_update_polling_seconds: Option<u64>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        default_hyperparameters: DefaultHyperparameterArgs,
+        #[cfg(feature = "transport")] default_hyperparameters: DefaultHyperparameterArgs,
     ) -> Result<(LifecycleManager, ClientConfigLoader), CoordinatorError>;
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     async fn set_lifecycle_addresses(
         &self,
         lifecycle: &LifecycleManager,
-        shared_client_modes: &Arc<ClientModes>,
+        shared_modes: &Arc<RuntimeModes>,
         config_loader: &mut ClientConfigLoader,
     ) -> Result<(), CoordinatorError>;
     async fn set_lifecycle_traj_file_path(
         lifecycle: &LifecycleManager,
-        shared_client_modes: &Arc<ClientModes>,
+        shared_modes: &Arc<RuntimeModes>,
     ) -> Result<(), CoordinatorError>;
 }
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 type TransportDispatchers<B> = (
     Option<Arc<InferenceDispatcher<B>>>,
     Option<Arc<ScalingDispatcher<B>>>,
     Option<Arc<TrainingDispatcher<B>>>,
 );
 
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 pub(crate) trait TransportStart<B: Backend + BackendMatcher<Backend = B>> {
     async fn build_transport_dispatchers(
         &self,
-        shared_client_modes: &Arc<ClientModes>,
-        client_namespace: &ClientNamespace,
+        shared_modes: &Arc<RuntimeModes>,
+        agent_namespace: &AgentNamespace,
     ) -> Result<TransportDispatchers<B>, CoordinatorError>;
 }
 
@@ -373,16 +369,13 @@ pub(crate) trait CoreRuntimeStart<B: Backend + BackendMatcher<Backend = B>> {
     async fn initialize_metrics(lifecycle: &LifecycleManager) -> MetricsManager;
     async fn build_state_and_scale_managers(
         &mut self,
-        client_namespace: ClientNamespace,
-        shared_client_modes: Arc<ClientModes>,
+        agent_namespace: AgentNamespace,
+        shared_modes: Arc<RuntimeModes>,
         lifecycle: LifecycleManager,
         #[cfg(feature = "metrics")] metrics: MetricsManager,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
+        #[cfg(feature = "transport")] inference_dispatcher: Option<Arc<InferenceDispatcher<B>>>,
+        #[cfg(feature = "transport")] scaling_dispatcher: Option<Arc<ScalingDispatcher<B>>>,
+        #[cfg(feature = "transport")] training_dispatcher: Option<Arc<TrainingDispatcher<B>>>,
         default_model: Option<ModelModule<B>>,
         data_buffer_size: usize,
     ) -> Result<(), CoordinatorError>;
@@ -390,23 +383,21 @@ pub(crate) trait CoreRuntimeStart<B: Backend + BackendMatcher<Backend = B>> {
     async fn initialize_data_routers(&mut self, data_routers: u32) -> Result<(), CoordinatorError>;
 }
 
-pub(crate) trait ClientActors<B: Backend + BackendMatcher<Backend = B>> {
+pub(crate) trait Actors<B: Backend + BackendMatcher<Backend = B>> {
     async fn new_actor<const D_IN: usize, const D_OUT: usize>(
         &mut self,
         device: DeviceType,
         max_traj_length: usize,
         nametag: Option<NameTag>,
         default_model: Option<ModelModule<B>>,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        algorithm_args: AlgorithmInitArgs,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_id: bool,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        send_algorithm_init: bool,
+        #[cfg(feature = "transport")] algorithm_args: AlgorithmInitArgs,
+        #[cfg(feature = "transport")] send_id: bool,
+        #[cfg(feature = "transport")] send_algorithm_init: bool,
     ) -> Result<ActorInfo, CoordinatorError>;
     async fn remove_actor(
         &mut self,
         actor: &ActorInfo,
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))] send_ids: bool,
+        #[cfg(feature = "transport")] send_ids: bool,
     ) -> Result<(), CoordinatorError>;
     async fn resolve_new_nametag(
         &self,
@@ -444,11 +435,11 @@ pub(crate) trait ClientActors<B: Backend + BackendMatcher<Backend = B>> {
     fn drain_trajectory_caches(&self, actors: &[ActorInfo]) -> DrainedCacheResult;
 }
 
-pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
+pub(crate) trait Environments<B: Backend + BackendMatcher<Backend = B>> {
     async fn run_env_eval(
         &self,
         actor: &ActorInfo,
-        loop_iters: usize,
+        vector_steps: usize,
     ) -> Result<(), CoordinatorError>;
     async fn run_env_with_ppo<
         KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
@@ -457,10 +448,10 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
     >(
         &self,
         actor: &ActorInfo,
-        loop_iters: usize,
+        budget: TrainingBudget,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<ModelModule<B>, CoordinatorError>
+    ) -> Result<TrainingOutcome<B>, CoordinatorError>
     where
         B: Default + Send + Sync + 'static;
     /// TODO: implement this :)
@@ -472,7 +463,7 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
     >(
         &self,
         actor: &ActorInfo,
-        loop_iters: usize,
+        vector_steps: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<ModelModule<B>, CoordinatorError>
@@ -487,7 +478,7 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
     >(
         &self,
         actor: &ActorInfo,
-        loop_iters: usize,
+        vector_steps: usize,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<ModelModule<B>, CoordinatorError>
@@ -519,7 +510,7 @@ pub(crate) enum InferencePathParams<B: Backend + BackendMatcher<Backend = B>> {
     Local {
         local_runtimes: Arc<DashMap<ActorUuid, Arc<dyn ErasedActorRuntime<B>>>>,
     },
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     Network {
         filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
         shared_router_state: Arc<SharedRouterState>,
@@ -528,7 +519,7 @@ pub(crate) enum InferencePathParams<B: Backend + BackendMatcher<Backend = B>> {
 }
 
 pub struct CoordinatorParams<B: Backend + BackendMatcher<Backend = B>> {
-    pub(crate) client_namespace: ClientNamespace,
+    pub(crate) agent_namespace: AgentNamespace,
     #[cfg(feature = "metrics")]
     pub(crate) metrics: MetricsManager,
     pub(crate) lifecycle: LifecycleManager,
@@ -536,7 +527,7 @@ pub struct CoordinatorParams<B: Backend + BackendMatcher<Backend = B>> {
     pub(crate) scaling: ScaleManager<B>,
 }
 
-/// Identifies a single fallible step inside [`ClientCoordinator::shutdown`] for deterministic
+/// Identifies a single fallible step inside [`Coordinator::shutdown`] for deterministic
 /// failure-injection in tests. Real callers never construct this; production code paths are
 /// exercised unconditionally regardless of this type's existence.
 #[cfg(test)]
