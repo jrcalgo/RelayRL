@@ -93,12 +93,35 @@ pub enum ClientError {
     RunEnvActive(String),
 }
 
-/// Client entry point for the RelayRL framework.
+struct RunEnvActiveGuard<'a> {
+    flags: &'a DashSet<Uuid>,
+    actor_id: Uuid,
+}
+
+impl<'a> RunEnvActiveGuard<'a> {
+    fn acquire(flags: &'a DashSet<Uuid>, actor_id: Uuid) -> Result<Self, AgentError> {
+        if flags.insert(actor_id) {
+            Ok(Self { flags, actor_id })
+        } else {
+            Err(AgentError::RunEnvActive(format!(
+                "run_env is already active for actor {actor_id}"
+            )))
+        }
+    }
+}
+
+impl Drop for RunEnvActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.flags.remove(&self.actor_id);
+    }
+}
+
+/// Agent entry point for the RelayRL framework.
 ///
 /// `RelayRLAgent` is a thin facade over the runtime coordinator, providing a stable public API
 /// for starting, scaling, and interacting with runtime actors.
 pub struct RelayRLAgent<B: Backend + BackendMatcher<Backend = B>> {
-    coordinator: ClientCoordinator<B>,
+    coordinator: Coordinator<B>,
     run_env_active_flags: DashSet<Uuid>,
 }
 
@@ -287,12 +310,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLAgent<B> {
     }
 
     /// Reads and returns the current `ClientConfigLoader` from the watched config file.
-    pub async fn get_config(&self) -> Result<ClientConfigLoader, ClientError> {
+    pub async fn get_config(&self) -> Result<ClientConfigLoader, AgentError> {
         Ok(self.coordinator.get_config().await?)
     }
 
     /// Applies the config at `config_path` immediately and updates the active runtime settings.
-    pub async fn set_config_path(&self, config_path: PathBuf) -> Result<(), ClientError> {
+    pub async fn set_config_path(&self, config_path: PathBuf) -> Result<(), AgentError> {
         self.coordinator.set_config_path(config_path).await?;
         Ok(())
     }

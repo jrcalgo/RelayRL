@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - Currently unreleased
+
+### Added
+- **PPO training budgets and outcomes** - `run_env_with_ppo` now accepts `TrainingBudget::{VectorSteps, UntilConvergence}` and returns `TrainingOutcome` with the final model, step/update/episode accounting, recent metrics, convergence sample, and observed curve.
+- **Guarded PPO convergence** - convergence uses the last 100 completed episodes, including timeouts, and can stop only after significant return improvement arms the detector and both return and timeout curves stay flat. Optional cap exhaustion returns a normal outcome with no convergence sample.
+
+### Changed
+- **Vector-step rollout counts** - `run_env_eval` and the PPO, IPPO, and MAPPO environment training APIs now name their rollout count `vector_steps`. Each vector step advances every bound environment once.
+- **Breaking: mandatory model preprocessing metadata** - Framework fixtures, examples, hot refreshes, and persisted PPO policies now use the required observation-preprocessing schema. Model directories without the field are rejected.
+- **Normalized PPO finalization** - Final export fails clearly if observation normalization is enabled but no snapshot has been bound to a published policy version; in-loop refresh modules remain unfolded and caller-prepared.
+
+### Fixed
+- **Async PPO collection backpressure** - While an update is in flight, the learner stops ingesting trajectories once one full update is already buffered. The bounded trajectory channel then stalls the collector instead of filling the replay buffer until it rejects a segment and drops the receiver.
+- **Rust LunarLander step limit** - The scalar environment now reports the step cap as truncated when the lander has not ended naturally, so timeout accounting remains distinct from natural termination.
+- **Persisted PPO observation normalization** - With `normalize_obs`, the collector keeps the existing Welford accumulator and seals a copy on the trajectory that fills an update. That copy is bound to the policy version published for the update. Returned policies are raw-input graphs; in-loop refreshes stay unfolded because collection already normalizes observations.
+- **Global PPO rollout windows** - When `rollout_len` is set, one vector-step clock flushes every open environment together. Natural endings still close immediately with zero bootstrap. A synchronous window carries a final marker, and the next environment step waits until the refreshed policy and value models and the inference snapshot have been published.
+- **Inference policy generation** - Named environment inference returns the module version loaded atomically with the weights. Model refresh publishes the trainer generation instead of reusing the previous slot version.
+- **Truncated PPO bootstrap observations** - Environment, episode-step, rollout-length, and trajectory-length cutoffs now attach the normalized post-step observation to the final action so GAE can compute a fresh `V(s')`; true terminals continue to bootstrap with zero.
+
 ## [0.5.0-rc.1] - 2026-07-28
 
 ### Added

@@ -316,6 +316,85 @@ impl ScalarEnvironment for DiscreteBanditEnv {
 }
 
 #[derive(Clone)]
+struct ImprovingBanditEnv {
+    episodes: Arc<Mutex<u64>>,
+}
+
+impl ImprovingBanditEnv {
+    fn new() -> Self {
+        Self {
+            episodes: Arc::new(Mutex::new(0)),
+        }
+    }
+}
+
+impl Environment for ImprovingBanditEnv {
+    fn run_environment(&self) -> Result<(), EnvironmentError> {
+        Ok(())
+    }
+
+    fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+        Ok(Box::new(self.flat_observation_bytes()))
+    }
+
+    fn build_mask(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+        Ok(Box::new(()))
+    }
+
+    fn observation_dtype(&self) -> EnvDType {
+        EnvDType::NdArray(EnvNdArrayDType::F32)
+    }
+
+    fn action_dtype(&self) -> EnvDType {
+        EnvDType::NdArray(EnvNdArrayDType::I64)
+    }
+
+    fn observation_dim(&self) -> usize {
+        OBS_DIM
+    }
+
+    fn action_dim(&self) -> usize {
+        DISCRETE_ACT_DIM
+    }
+
+    fn flat_observation_bytes(&self) -> Observation {
+        f32_bytes(&DISCRETE_OBS)
+    }
+
+    fn flat_mask_bytes(&self) -> Mask {
+        Some(vec![1u8; DISCRETE_ACT_DIM])
+    }
+
+    fn action_is_discrete(&self) -> bool {
+        true
+    }
+
+    fn kind(&self) -> EnvironmentKind {
+        EnvironmentKind::Scalar
+    }
+
+    fn into_handle(self: Box<Self>) -> EnvironmentHandle {
+        EnvironmentHandle::Scalar(Box::new(*self))
+    }
+}
+
+impl ScalarEnvironment for ImprovingBanditEnv {
+    fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError> {
+        Ok(ScalarEnvReset {
+            observation: self.flat_observation_bytes(),
+            info: None,
+        })
+    }
+
+    fn step_bytes(&self, _action: &[u8]) -> Option<(Observation, Mask, Reward, Done, Truncated)> {
+        let mut episodes = self.episodes.lock().expect("improving bandit lock");
+        let reward = if *episodes < 100 { 0.0 } else { 10.0 };
+        *episodes += 1;
+        Some((self.flat_observation_bytes(), None, reward, true, false))
+    }
+}
+
+#[derive(Clone)]
 struct ContinuousBanditEnv {
     stats: Arc<Mutex<BanditStats>>,
 }
@@ -601,6 +680,88 @@ async fn discrete_run_env_with_ppo_learns_bandit_preference()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn until_convergence_returns_convergence_sample() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((mut agent, _model_dir, _config_dir)) = start_batched_offline_agent().await? else {
+        return Ok(());
+    };
+
+    let actor = new_actor(&mut agent).await?;
+    agent
+        .set_env(&actor, Box::new(ImprovingBanditEnv::new()), 1)
+        .await?;
+
+    let work = tempfile::tempdir()?;
+    let spec = build_discrete_ppo_spec(
+        work.path().to_path_buf(),
+        work.path().join("converging_ppo"),
+    )?;
+    let outcome = agent
+        .run_env_with_ppo(
+            &actor,
+            TrainingBudget::UntilConvergence {
+                early_stopping: EarlyStopping { window: 5, hold: 2 },
+                max_vector_steps: Some(512),
+            },
+            PPO_MAX_TRAJ_LEN,
+            spec,
+        )
+        .await?;
+
+    let convergence = outcome
+        .convergence
+        .expect("improving bandit should converge before its cap");
+    assert!(convergence.armed);
+    assert!(convergence.stop);
+    assert!(outcome.executed_vector_steps < 512);
+    assert!(outcome.episodes >= 100);
+    assert!(!outcome.curve.is_empty());
+
+    agent.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn discrete_run_env_with_ppo_completes_on_current_thread_runtime()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some((mut agent, _model_dir, _config_dir)) = start_batched_offline_agent().await? else {
+        return Ok(());
+    };
+
+    let actor = new_actor(&mut agent).await?;
+    agent
+        .set_env(&actor, Box::new(DiscreteBanditEnv::new()), 1)
+        .await?;
+
+    let work = tempfile::tempdir()?;
+    let spec = build_discrete_ppo_spec(
+        work.path().to_path_buf(),
+        work.path().join("current_thread_discrete_ppo"),
+    )?;
+    let outcome = agent
+        .run_env_with_ppo(
+            &actor,
+            TrainingBudget::VectorSteps(8),
+            PPO_MAX_TRAJ_LEN,
+            spec,
+        )
+        .await?;
+    assert_eq!(outcome.executed_vector_steps, 8);
+    assert!(outcome.convergence.is_none());
+    let trained = outcome.model;
+
+    assert_eq!(trained.metadata.output_shape, vec![1, DISCRETE_ACT_DIM]);
+    assert_eq!(
+        trained.metadata.obs_preprocess.mode,
+        ObservationPreprocessMode::CallerNormalized
+    );
+    assert_eq!(trained.metadata.obs_preprocess.state.schema_version, 1);
+    assert_eq!(trained.metadata.obs_preprocess.state.count, 0);
+    assert_eq!(trained.metadata.obs_preprocess.state.policy_version, -1);
+    agent.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn continuous_run_env_with_ppo_moves_mean_toward_target()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some((mut agent, _model_dir, _config_dir)) = start_batched_offline_agent().await? else {
@@ -616,9 +777,17 @@ async fn continuous_run_env_with_ppo_moves_mean_toward_target()
         work.path().to_path_buf(),
         work.path().join("continuous_ppo"),
     )?;
-    let trained = agent
-        .run_env_with_ppo(&actor, PPO_LOOP_ITERS, PPO_MAX_TRAJ_LEN, spec)
+    let outcome = agent
+        .run_env_with_ppo(
+            &actor,
+            TrainingBudget::VectorSteps(PPO_LOOP_ITERS),
+            PPO_MAX_TRAJ_LEN,
+            spec,
+        )
         .await?;
+    assert_eq!(outcome.executed_vector_steps, PPO_LOOP_ITERS);
+    assert!(outcome.convergence.is_none());
+    let trained = outcome.model;
 
     assert_eq!(
         trained.metadata.output_shape,
@@ -667,6 +836,129 @@ async fn continuous_run_env_with_ppo_moves_mean_toward_target()
         stats.last_reward,
         stats.last_action
     );
+
+    agent.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalized_ppo_saves_a_raw_input_policy() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((mut agent, _model_dir, _config_dir)) = start_batched_offline_agent().await? else {
+        return Ok(());
+    };
+
+    let actor = new_actor(&mut agent).await?;
+    let env = DiscreteBanditEnv::new();
+    agent.set_env(&actor, Box::new(env), 1).await?;
+
+    let work = tempfile::tempdir()?;
+    let mut params = ppo_params(true);
+    params.normalize_obs = true;
+    params.min_steps_per_epoch = Some(4);
+    let networks = PPONetworkArgs {
+        pi_head: PPOPolicyHead::Discrete(DiscretePPOPolicyHead::new(small_mlp(
+            OBS_DIM,
+            DISCRETE_ACT_DIM,
+        ))?),
+        vf_mlp: small_mlp(OBS_DIM, 1),
+        observation_normalizer: None,
+        architecture: PPOArchitecture::Mlp,
+    };
+    let spec = PPOTrainerSpec::ppo(
+        trainer_args(
+            DISCRETE_ACT_DIM,
+            work.path().to_path_buf(),
+            work.path().join("normalized_ppo"),
+        ),
+        Some(params),
+        networks,
+    );
+    let outcome = agent
+        .run_env_with_ppo(
+            &actor,
+            TrainingBudget::VectorSteps(32),
+            PPO_MAX_TRAJ_LEN,
+            spec,
+        )
+        .await?;
+    assert_eq!(outcome.executed_vector_steps, 32);
+    assert!(outcome.convergence.is_none());
+    let trained = outcome.model;
+    let preprocess = trained.metadata.obs_preprocess.clone();
+    assert_eq!(preprocess.mode, ObservationPreprocessMode::FoldedIntoGraph);
+    assert!(preprocess.state.count > 0);
+    assert!(preprocess.state.policy_version >= 0);
+
+    let saved = work.path().join("deployable");
+    trained.save(&saved)?;
+    let loaded = ModelModule::<TestBackend>::load_from_path(&saved)?;
+    let live = infer_policy_f32(&trained, &DISCRETE_OBS)?;
+    let restored = infer_policy_f32(&loaded, &DISCRETE_OBS)?;
+    assert_eq!(live.len(), restored.len());
+    for (left, right) in live.iter().zip(&restored) {
+        assert!((left - right).abs() < 1e-4, "{left} vs {right}");
+    }
+
+    agent.shutdown().await?;
+    Ok(())
+}
+
+/// One-step episodes and a one-window buffer used to fill the replay buffer while SGD
+/// was still running, which closed the trajectory receiver. Backpressure must let the
+/// collector wait instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_small_window_does_not_close_the_trajectory_receiver()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some((mut agent, _model_dir, _config_dir)) = start_batched_offline_agent().await? else {
+        return Ok(());
+    };
+
+    const N_ENVS: u32 = 4;
+    const WINDOW: u64 = 2;
+    const STEPS: usize = 256;
+    let actor = new_actor(&mut agent).await?;
+    agent
+        .set_env(&actor, Box::new(DiscreteBanditEnv::new()), N_ENVS)
+        .await?;
+
+    let work = tempfile::tempdir()?;
+    let mut params = ppo_params(true);
+    params.sync_epoch_boundary = false;
+    params.max_version_lag = 1;
+    params.rollout_len = Some(WINDOW as usize);
+    params.min_steps_per_epoch = Some(u64::from(N_ENVS) * WINDOW);
+    params.max_buffered_episodes = Some(u64::from(N_ENVS) * WINDOW);
+    params.traj_per_epoch = 1;
+    params.train_pi_iters = 80;
+    params.train_vf_iters = 80;
+    let networks = PPONetworkArgs {
+        pi_head: PPOPolicyHead::Discrete(DiscretePPOPolicyHead::new(small_mlp(
+            OBS_DIM,
+            DISCRETE_ACT_DIM,
+        ))?),
+        vf_mlp: small_mlp(OBS_DIM, 1),
+        observation_normalizer: None,
+        architecture: PPOArchitecture::Mlp,
+    };
+    let spec = PPOTrainerSpec::ppo(
+        trainer_args(
+            DISCRETE_ACT_DIM,
+            work.path().to_path_buf(),
+            work.path().join("async_backpressure"),
+        ),
+        Some(params),
+        networks,
+    );
+    let outcome = agent
+        .run_env_with_ppo(
+            &actor,
+            TrainingBudget::VectorSteps(STEPS),
+            PPO_MAX_TRAJ_LEN,
+            spec,
+        )
+        .await?;
+    assert_eq!(outcome.executed_vector_steps, STEPS);
+    assert!(outcome.updates > 0);
 
     agent.shutdown().await?;
     Ok(())

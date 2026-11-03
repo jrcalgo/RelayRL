@@ -22,6 +22,80 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
+
+const BOOTSTRAP_OBS_KEY: &str = "bootstrap_obs";
+
+/// Selects a fixed PPO collection cap or statistically guarded convergence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainingBudget {
+    VectorSteps(usize),
+    UntilConvergence {
+        early_stopping: EarlyStopping,
+        max_vector_steps: Option<usize>,
+    },
+}
+
+/// One observed point in the training return and timeout curves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurvePoint {
+    pub update: u64,
+    pub vector_steps: usize,
+    pub episodes: u64,
+    pub mean_return: f32,
+    pub timeout_fraction: f32,
+}
+
+/// Final PPO model and accounting from an environment-driven training run.
+#[derive(Clone)]
+pub struct TrainingOutcome<B: Backend + BackendMatcher<Backend = B>> {
+    pub model: ModelModule<B>,
+    pub executed_vector_steps: usize,
+    pub updates: u64,
+    pub episodes: u64,
+    pub mean_return: f32,
+    pub timeout_fraction: f32,
+    pub convergence: Option<ConvergenceSample>,
+    pub curve: Vec<CurvePoint>,
+}
+
+struct WindowMarker {
+    generation: i64,
+    expected_steps: usize,
+    ack: tokio::sync::oneshot::Sender<Result<i64, String>>,
+}
+
+struct CollectedSegment {
+    trajectory: RelayRLTrajectory,
+    window_end: Option<WindowMarker>,
+    normalizer: Option<ObservationNormalizerState>,
+}
+
+fn collected_segment(
+    trajectory: RelayRLTrajectory,
+    window_end: Option<WindowMarker>,
+    normalizer: Option<&ObsNormalizer>,
+) -> CollectedSegment {
+    CollectedSegment {
+        trajectory,
+        window_end,
+        normalizer: normalizer.map(ObsNormalizer::snapshot),
+    }
+}
+
+fn advance_vector_window(rollout_len: Option<usize>, window_vector_steps: &mut usize) -> bool {
+    let Some(limit) = rollout_len else {
+        return false;
+    };
+    *window_vector_steps = window_vector_steps.saturating_add(1);
+    *window_vector_steps >= limit
+}
+
+fn finish_vector_window(window_boundary: bool, window_vector_steps: &mut usize) {
+    if window_boundary {
+        *window_vector_steps = 0;
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum TrainingError {
@@ -29,6 +103,8 @@ pub enum TrainingError {
     Distribution(String),
     #[error("Unsupported environment dtype: {0}")]
     UnsupportedEnvDType(String),
+    #[error("Unsupported tensor backend: {0:?}")]
+    UnsupportedBackend(SupportedTensorBackend),
     #[error("Algorithm configuration error: {0}")]
     AlgorithmConfig(String),
     #[error("Temporary directory creation failed: {0}")]
@@ -49,20 +125,133 @@ pub enum TrainingError {
     NeuralNetwork(#[from] NeuralNetworkError),
 }
 
+#[inline(always)]
+fn should_bootstrap_cutoff(
+    episode_ended: bool,
+    rollout_limit: bool,
+    trajectory_limit: bool,
+) -> bool {
+    !episode_ended && (rollout_limit || trajectory_limit)
+}
+
+fn record_completed_episode(
+    window: &mut VecDeque<(f32, bool)>,
+    episode_return: f32,
+    timed_out: bool,
+) {
+    if window.len() == 100 {
+        window.pop_front();
+    }
+    window.push_back((episode_return, timed_out));
+}
+
+fn summarize_return_window(window: &VecDeque<(f32, bool)>) -> Option<ReturnWindow> {
+    if window.is_empty() {
+        return None;
+    }
+    let count = window.len() as f32;
+    let mean = window
+        .iter()
+        .map(|(episode_return, _)| *episode_return)
+        .sum::<f32>()
+        / count;
+    let variance = window
+        .iter()
+        .map(|(episode_return, _)| {
+            let residual = *episode_return - mean;
+            residual * residual
+        })
+        .sum::<f32>()
+        / (count - 1.0).max(1.0);
+    let timeout_fraction = window.iter().filter(|(_, timed_out)| *timed_out).count() as f32 / count;
+    Some(ReturnWindow {
+        mean,
+        variance,
+        timeout_fraction,
+    })
+}
+
+fn note_convergence(sample: &ConvergenceSample) {
+    println!(
+        "Converged update={} y={:.1} z={:.3} return_slope={:.6} return_se={:.6} timeout_slope={:.6} timeout_se={:.6}",
+        sample.update,
+        sample.y,
+        sample.z,
+        sample.return_fit.slope,
+        sample.return_fit.std_error,
+        sample.timeout_fit.slope,
+        sample.timeout_fit.std_error,
+    );
+}
+
+fn backend_f32_dtype(backend: &SupportedTensorBackend) -> Result<DType, TrainingError> {
+    match backend {
+        SupportedTensorBackend::None => Err(TrainingError::UnsupportedBackend(backend.clone())),
+        SupportedTensorBackend::NdArray => Ok(DType::NdArray(NdArrayDType::F32)),
+        #[cfg(feature = "tch-backend")]
+        SupportedTensorBackend::Tch => Ok(DType::Tch(TchDType::F32)),
+    }
+}
+
+fn decode_discrete_step_actions(
+    action_bytes: &[u8],
+    action_dtype: &DType,
+    n_envs: usize,
+    actor_id: ActorUuid,
+) -> Result<Vec<u8>, TrainingError> {
+    let expected_bytes = n_envs
+        .checked_mul(dtype_to_byte_count(action_dtype.clone()))
+        .ok_or_else(|| {
+            TrainingError::InferenceRequestError(format!(
+                "[TrainingInterface] {actor_id} - discrete action byte count overflow"
+            ))
+        })?;
+    if action_bytes.len() != expected_bytes {
+        return Err(TrainingError::InferenceRequestError(format!(
+            "[TrainingInterface] {actor_id} - expected {expected_bytes} discrete action bytes for {n_envs} envs, got {}",
+            action_bytes.len()
+        )));
+    }
+
+    let indices = convert_byte_dtype_to_i64(action_bytes, action_dtype).map_err(|error| {
+        TrainingError::InferenceRequestError(format!(
+            "[TrainingInterface] {actor_id} - failed to decode discrete actions: {error}"
+        ))
+    })?;
+    if indices.len() != n_envs {
+        return Err(TrainingError::InferenceRequestError(format!(
+            "[TrainingInterface] {actor_id} - expected {n_envs} discrete action indices, got {}",
+            indices.len()
+        )));
+    }
+
+    indices
+        .into_iter()
+        .enumerate()
+        .map(|(env_index, action_index)| {
+            u8::try_from(action_index).map_err(|_| {
+                TrainingError::InferenceRequestError(format!(
+                    "[TrainingInterface] {actor_id} - discrete action index {action_index} for env {env_index} cannot be represented as u8"
+                ))
+            })
+        })
+        .collect()
+}
+
 pub(crate) struct TrainingInterface<B: Backend + BackendMatcher<Backend = B>> {
     _phantom: std::marker::PhantomData<B>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
-    pub(crate) fn train_ppo<KindIn, KindOut, Pi>(
+    pub(crate) async fn train_ppo<KindIn, KindOut, Pi>(
         actor_id: ActorUuid,
         mut shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
         runtime: Arc<dyn ErasedActorRuntime<B>>,
-        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
-        loop_iters: usize,
+        env_map: Arc<DashMap<ActorUuid, Arc<Mutex<EnvironmentInterface>>>>,
+        budget: TrainingBudget,
         max_traj_length: usize,
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
-    ) -> Result<ModelModule<B>, TrainingError>
+    ) -> Result<TrainingOutcome<B>, TrainingError>
     where
         KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
         KindOut: TensorKind<B> + Numeric<B> + Send + 'static,
@@ -185,21 +374,126 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                 let learner_device = device.clone();
                 let learner_kernel_snapshot = Arc::clone(&kernel_snapshot);
 
+                let strict_windows = sync_epoch_boundary && rollout_len.is_some();
                 let learner_handle = tokio::task::spawn_local(async move {
                     let mut trainer = trainer;
+                    let mut sealed_waiting: Option<ObservationNormalizerState> = None;
+                    let mut pending_ack: Option<tokio::sync::oneshot::Sender<Result<i64, String>>> = None;
+                    let mut window_generation: Option<i64> = None;
+                    let mut epoch_normalizer: Option<ObservationNormalizerState> = None;
+                    let mut latest_bound: Option<ObservationNormalizerState> = None;
                     let mut pending_train: Option<tokio::task::JoinHandle<EpochTrainOutput<B, KindIn, KindOut, Pi>>> = None;
 
                     // Shared "epoch landed" handling: log + refresh models + republish kernel
                     // snapshot. Used by both the overlapped and synchronous select branches to
                     // avoid tripling this block. A macro (not an async closure) is used because
                     // the block does `.await` while holding `&mut trainer` across awaits.
-                    macro_rules! land_epoch {
-                        ($output:expr) => {{
-                            log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, $output, &learner_epoch_count);
-                            refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device).await?;
-                            let next_kernel_snapshot = trainer
-                                .get_ppo_actor_kernel()
-                                .map_err(|e| TrainingError::TrainerError(e.to_string()))?
+                            if log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, $output, &learner_epoch_count) {
+                                let published = trainer.model_version();
+                                if let Some(mut state) = epoch_normalizer.take() {
+                                    state.bind_policy_version(published);
+                                    trainer.set_deployable_normalizer(Some(state.clone()));
+                                    latest_bound = Some(state);
+                                }
+                                refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device, published).await?;
+                                let next_kernel_snapshot = trainer
+                                    .get_ppo_actor_kernel()
+                                    .map_err(|e| TrainingError::TrainerError(e.to_string()))?
+                                    .to_arc_snapshot();
+                                learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
+                                if let Some(ack) = pending_ack.take() {
+                                    let _ = ack.send(Ok(published));
+                                }
+                            } else if let Some(ack) = pending_ack.take() {
+                                let _ = ack.send(Err(
+                                    "epoch had no trainable batch".to_string(),
+                                ));
+                            }
+                        }};
+                    }
+
+                    macro_rules! fail_window {
+                        ($ack:expr, $message:expr) => {{
+                            let message = $message;
+                            let _ = $ack.send(Err(message.clone()));
+                            return Err(TrainingError::TrainerError(message));
+                        }};
+                    }
+
+                    macro_rules! note_epoch_started {
+                        () => {
+                            if pending_train.is_some() && epoch_normalizer.is_none() {
+                                epoch_normalizer = sealed_waiting.take();
+                            }
+                        };
+                    }
+
+                    macro_rules! ingest_segment {
+                        ($segment:expr, $start_epoch:expr) => {{
+                            let segment: CollectedSegment = $segment;
+                            let version = segment.trajectory.policy_version;
+                            let window_end = segment.window_end;
+                            let normalizer = segment.normalizer;
+                            if strict_windows {
+                                if version < 0 {
+                                    return Err(TrainingError::TrainerError(
+                                        "strict window trajectory was not stamped with a policy generation".to_string(),
+                                    ));
+                                }
+                                if let Some(expected) = window_generation {
+                                    if version != expected {
+                                        return Err(TrainingError::TrainerError(format!(
+                                            "strict window mixed policy generations {expected} and {version}"
+                                        )));
+                                    }
+                                } else {
+                                    window_generation = Some(version);
+                                }
+                            }
+                            let ready = trainer.receive_trajectory(segment.trajectory).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                            if ready && let Some(state) = normalizer {
+                                sealed_waiting = Some(state);
+                            }
+                            if let Some(end) = window_end {
+                                if strict_windows {
+                                    if end.generation != version {
+                                        fail_window!(end.ack, "window marker generation does not match its trajectory".to_string());
+                                    }
+                                    if !ready {
+                                        fail_window!(end.ack, "final trajectory did not complete the update batch".to_string());
+                                    }
+                                    let complete_steps = trainer.first_slot_complete_steps();
+                                    if complete_steps != end.expected_steps {
+                                        fail_window!(
+                                            end.ack,
+                                            format!("window closed {complete_steps} steps, expected {}", end.expected_steps)
+                                        );
+                                    }
+                                    if let Some((batch_steps, stale_steps)) = trainer.first_slot_ready_accounting()
+                                        && (stale_steps > 0 || batch_steps != end.expected_steps)
+                                    {
+                                        fail_window!(
+                                            end.ack,
+                                            format!("strict window batch_steps={batch_steps} stale_steps={stale_steps}")
+                                        );
+                                    }
+                                    window_generation = None;
+                                    pending_ack = Some(end.ack);
+                                    pending_train = trainer.start_epoch_training();
+                                    note_epoch_started!();
+                                    if pending_train.is_none() {
+                                        if let Some(ack) = pending_ack.take() {
+                                            fail_window!(ack, "strict window did not start training".to_string());
+                                        }
+                                    }
+                                } else if $start_epoch && ready {
+                                    pending_train = trainer.start_epoch_training();
+                                    note_epoch_started!();
+                                }
+                            } else if $start_epoch && ready && !strict_windows {
+                                pending_train = trainer.start_epoch_training();
+                                note_epoch_started!();
+                            }
                                 .to_arc_snapshot();
                             learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
                         }};
