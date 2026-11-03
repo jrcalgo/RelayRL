@@ -1,15 +1,11 @@
 //! NATS transport operations for the experimental client transport path.
 //!
-//! The local/default client runtime is the supported `0.5.0` path. NATS-backed workflows in
+//! The local/default agent runtime is the supported `0.5.0` path. NATS-backed workflows in
 //! this module remain experimental.
 
-use crate::agent::client::agent::{AlgorithmInitArgs, ModelMode};
-use crate::agent::client::runtime::data::router::{
-    ControlPayload, RoutedMessage, RoutingProtocol,
-};
-use crate::agent::client::runtime::data::sinks::transport_sink::{
-    ScalingOperation, TransportError,
-};
+use crate::agent::builder::{AlgorithmInitArgs, ModelMode};
+use crate::agent::runtime::data::router::{ControlPayload, RoutedMessage, RoutingProtocol};
+use crate::agent::runtime::data::sinks::transport_sink::{ScalingOperation, TransportError};
 use crate::utilities::configuration::Algorithm;
 
 use super::inference_subjects::{
@@ -51,7 +47,7 @@ use tokio_stream::{Stream, StreamExt};
 // Every payload struct is serialized to `bytes::Bytes` via bincode v2 and sent
 // as the body of a NATS/JetStream message.
 mod payloads {
-    use crate::agent::client::agent::AlgorithmInitArgs;
+    use crate::agent::builder::AlgorithmInitArgs;
     use relayrl_types::HyperparameterArgs;
     use relayrl_types::prelude::trajectory::EncodedTrajectory;
     use serde::{Deserialize, Serialize};
@@ -443,7 +439,7 @@ impl Drop for NatsModelListenerHandle {
 }
 
 pub(super) struct NatsConnectionManager {
-    pub(super) client_namespace: Arc<str>,
+    pub(super) agent_namespace: Arc<str>,
     inference_client: Option<async_nats::Client>,
     inference_address_fingerprint: Option<u64>,
     training_client: Option<async_nats::Client>,
@@ -512,7 +508,7 @@ impl NatsConnectionManager {
         self.training_address_fingerprint = None;
 
         Some(NatsShutdownClients {
-            client_namespace: self.client_namespace.clone(),
+            agent_namespace: self.agent_namespace.clone(),
             inference_client: self.inference_client.take(),
             training_client: self.training_client.take(),
         })
@@ -1126,7 +1122,7 @@ impl NatsTrainingOps {
         {
             drain_errors.push(format!(
                 "Failed to drain inference NATS client for '{}': {}",
-                shutdown_clients.client_namespace, drain_error
+                shutdown_clients.agent_namespace, drain_error
             ));
         }
 
@@ -1135,7 +1131,7 @@ impl NatsTrainingOps {
         {
             drain_errors.push(format!(
                 "Failed to drain training NATS client for '{}': {}",
-                shutdown_clients.client_namespace, drain_error
+                shutdown_clients.agent_namespace, drain_error
             ));
         }
 
@@ -1643,7 +1639,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> NatsTrainingExecution<B> for Nats
 mod unit_tests {
     use super::*;
 
-    use crate::agent::client::runtime::data::router::{ControlPayload, DataPayload};
+    use crate::agent::runtime::data::router::{ControlPayload, DataPayload};
     use tokio::sync::mpsc;
 
     fn make_model_update_payload(

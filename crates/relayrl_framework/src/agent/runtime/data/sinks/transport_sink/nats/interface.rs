@@ -1,11 +1,9 @@
-use crate::agent::client::agent::ClientModes;
-use crate::agent::client::agent::{
-    ActorDataMode, ActorInferenceMode, AlgorithmInitArgs, ModelMode,
-};
-use crate::agent::client::runtime::control::coordinator::ClientNamespace;
-use crate::agent::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
-use crate::agent::client::runtime::data::router::RoutedMessage;
-use crate::agent::client::runtime::data::sinks::transport_sink::{
+use crate::agent::builder::RuntimeModes;
+use crate::agent::builder::{ActorDataMode, ActorInferenceMode, AlgorithmInitArgs, ModelMode};
+use crate::agent::runtime::control::coordinator::AgentNamespace;
+use crate::agent::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::agent::runtime::data::router::RoutedMessage;
+use crate::agent::runtime::data::sinks::transport_sink::{
     AsyncClientInferenceTransportOps, AsyncClientScalingTransportOps,
     AsyncClientTrainingTransportOps, AsyncClientTransportInterface, ScalingOperation,
     TransportError, TransportUuid,
@@ -59,27 +57,27 @@ impl<B: Backend + BackendMatcher<Backend = B>> AsyncClientTransportInterface<B>
     for NatsInterface<B>
 {
     async fn new(
-        client_namespace: ClientNamespace,
-        shared_client_modes: Arc<ClientModes>,
+        agent_namespace: AgentNamespace,
+        shared_modes: Arc<RuntimeModes>,
     ) -> Result<Self, TransportError> {
-        let _transport_id: TransportUuid = client_namespace
+        let _transport_id: TransportUuid = agent_namespace
             .reserve_id_with(crate::agent::NATS_CLIENT_CONTEXT, 42, 100)
             .map_err(TransportError::from)?;
 
         let transport_entry = (
-            client_namespace.to_string(),
+            agent_namespace.to_string(),
             crate::agent::NATS_CLIENT_CONTEXT.to_string(),
         );
 
         let nats_connection_manager = Arc::new(RwLock::new(NatsConnectionManager::new(
-            client_namespace.as_arc(),
+            agent_namespace.as_arc(),
         )));
         let nats_inference_ops =
             NatsInferenceOps::new(transport_entry.clone(), nats_connection_manager.clone());
         let nats_training_ops =
             NatsTrainingOps::new(transport_entry.clone(), nats_connection_manager.clone());
 
-        let inference_protocol = match shared_client_modes.actor_inference_mode {
+        let inference_protocol = match shared_modes.actor_inference_mode {
             ActorInferenceMode::Server(_) => {
                 let config = NatsPolicyConfig::for_inference();
                 Some(NatsProtocol {

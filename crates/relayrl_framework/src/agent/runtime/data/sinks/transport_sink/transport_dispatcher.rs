@@ -1,7 +1,7 @@
-use crate::agent::client::agent::{AlgorithmInitArgs, ModelMode};
-use crate::agent::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
-use crate::agent::client::runtime::data::sinks::transport_sink::ScalingOperation;
-use crate::agent::client::runtime::data::sinks::transport_sink::{
+use crate::agent::builder::{AlgorithmInitArgs, ModelMode};
+use crate::agent::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::agent::runtime::data::sinks::transport_sink::ScalingOperation;
+use crate::agent::runtime::data::sinks::transport_sink::{
     ClientTransportInterface, RoutedMessage, TransportError,
 };
 use crate::utilities::configuration::Algorithm;
@@ -38,11 +38,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.send_inference_request(actor_entry, obs_bytes, transport_addresses)
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_inference_request(actor_entry, obs_bytes, transport_addresses)
@@ -60,11 +56,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> InferenceDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.send_flag_last_inference(actor_entry, reward, transport_addresses)
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_flag_last_inference(actor_entry, reward, transport_addresses)
@@ -91,11 +83,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.initial_model_handshake(actor_entry, transport_addresses)
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .initial_model_handshake(actor_entry, transport_addresses)
@@ -113,22 +101,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(_) => {
-                let transport = self.transport.clone();
-                tokio::task::spawn_blocking(move || match &*transport {
-                    ClientTransportInterface::Sync(sync_tr) => sync_tr.listen_for_model(
-                        receiver_entry,
-                        model_update_tx,
-                        transport_addresses,
-                    ),
-                    #[cfg(feature = "nats-transport")]
-                    ClientTransportInterface::Async(_) => unreachable!(),
-                })
-                .await
-                .map_err(|join_error| TransportError::JoinError(join_error.to_string()))?
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .listen_for_model(receiver_entry, model_update_tx, transport_addresses)
@@ -142,9 +115,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         receiver_entry: (NamespaceString, ContextString, Uuid),
     ) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => sync_tr.stop_model_listener(receiver_entry),
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr.stop_model_listener(receiver_entry).await
             }
@@ -160,11 +131,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.send_trajectory(buffer_entry, encoded_trajectory, transport_addresses)
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_trajectory(buffer_entry, encoded_trajectory, transport_addresses)
@@ -200,15 +167,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         match process_init_request {
             ProcessInitRequest::TrainingAlgorithmInit(model_mode, algorithm_args) => {
                 match &*self.transport {
-                    #[cfg(feature = "zmq-transport")]
-                    ClientTransportInterface::Sync(sync_tr) => sync_tr.send_algorithm_init_request(
-                        scaling_entry,
-                        actor_entries,
-                        model_mode,
-                        algorithm_args,
-                        transport_addresses,
-                    ),
-                    #[cfg(feature = "nats-transport")]
+                    #[cfg(feature = "transport")]
                     ClientTransportInterface::Async(async_tr) => {
                         async_tr
                             .send_algorithm_init_request(
@@ -224,15 +183,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
             }
             ProcessInitRequest::InferenceModelInit(model_mode, model_module) => {
                 match &*self.transport {
-                    #[cfg(feature = "zmq-transport")]
-                    ClientTransportInterface::Sync(sync_tr) => sync_tr
-                        .send_inference_model_init_request(
-                            scaling_entry,
-                            model_mode,
-                            model_module,
-                            transport_addresses,
-                        ),
-                    #[cfg(feature = "nats-transport")]
+                    #[cfg(feature = "transport")]
                     ClientTransportInterface::Async(async_tr) => {
                         async_tr
                             .send_inference_model_init_request(
@@ -258,14 +209,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => sync_tr.send_client_ids(
-                scaling_entry,
-                client_ids,
-                replace_context,
-                transport_addresses,
-            ),
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_client_ids(
@@ -288,11 +232,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.send_scaling_warning(scaling_entry, operation, transport_addresses)
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_scaling_warning(scaling_entry, operation, transport_addresses)
@@ -310,11 +250,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.send_scaling_complete(scaling_entry, operation, transport_addresses)
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_scaling_complete(scaling_entry, operation, transport_addresses)
@@ -331,11 +267,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
         let transport_addresses = shared_transport_addresses.read().await.clone();
 
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => {
-                sync_tr.send_shutdown_signal(scaling_entry, transport_addresses)
-            }
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => {
                 async_tr
                     .send_shutdown_signal(scaling_entry, transport_addresses)
@@ -346,9 +278,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 
     pub(crate) async fn shutdown_transport(&self) -> Result<(), TransportError> {
         match &*self.transport {
-            #[cfg(feature = "zmq-transport")]
-            ClientTransportInterface::Sync(sync_tr) => sync_tr.shutdown(),
-            #[cfg(feature = "nats-transport")]
+            #[cfg(feature = "transport")]
             ClientTransportInterface::Async(async_tr) => async_tr.shutdown().await,
         }
     }
@@ -357,7 +287,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> ScalingDispatcher<B> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    use crate::agent::client::agent::ModelMode;
+    use crate::agent::builder::ModelMode;
     use crate::utilities::configuration::Algorithm;
     use burn_ndarray::NdArray;
     use std::collections::HashMap;

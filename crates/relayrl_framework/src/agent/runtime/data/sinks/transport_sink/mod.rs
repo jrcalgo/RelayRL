@@ -1,22 +1,18 @@
 //! Transport dispatch abstractions for experimental client networking paths.
 //!
-//! These components sit behind `zmq-transport` and `nats-transport`. They remain experimental in
-//! `0.5.0`; the local/default client runtime is the supported path.
+//! These components sit behind `transport`. They remain experimental in
+//! `0.5.0`; the local/default agent runtime is the supported path.
 
 use crate::agent::TransportMode;
-use crate::agent::client::agent::AlgorithmInitArgs;
-use crate::agent::client::agent::ModelMode;
-use crate::agent::client::runtime::control::coordinator::ClientNamespace;
-use crate::agent::client::runtime::control::lifecycle_manager::SharedTransportAddresses;
-use crate::agent::client::runtime::control::scale_manager::ScalingOperation;
-use crate::agent::client::runtime::data::router::RoutedMessage;
-#[cfg(feature = "nats-transport")]
-use crate::agent::client::runtime::data::sinks::transport_sink::nats::interface::NatsInterface;
-#[cfg(feature = "zmq-transport")]
-use crate::agent::client::runtime::data::sinks::transport_sink::zmq::ZmqClientError;
-#[cfg(feature = "zmq-transport")]
-use crate::agent::client::runtime::data::sinks::transport_sink::zmq::interface::ZmqInterface;
-use crate::prelude::network::ClientModes;
+use crate::agent::builder::AlgorithmInitArgs;
+use crate::agent::builder::ModelMode;
+use crate::agent::runtime::control::coordinator::AgentNamespace;
+use crate::agent::runtime::control::lifecycle_manager::SharedTransportAddresses;
+use crate::agent::runtime::control::scale_manager::ScalingOperation;
+use crate::agent::runtime::data::router::RoutedMessage;
+#[cfg(feature = "transport")]
+use crate::agent::runtime::data::sinks::transport_sink::nats::interface::NatsInterface;
+use crate::prelude::agent::RuntimeModes;
 
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::BackendMatcher;
@@ -103,40 +99,25 @@ fn combine_scaling_results(
 }
 
 pub(crate) enum ClientTransportInterface<B: Backend + BackendMatcher<Backend = B>> {
-    #[cfg(feature = "zmq-transport")]
-    Sync(Box<dyn SyncClientTransportInterface<B>>),
-    #[cfg(feature = "nats-transport")]
+    #[cfg(feature = "transport")]
     Async(Box<dyn AsyncClientTransportInterface<B>>),
 }
 
-#[cfg(feature = "nats-transport")]
+#[cfg(feature = "transport")]
 #[async_trait]
 pub(crate) trait AsyncClientTransportInterface<B: Backend + BackendMatcher<Backend = B>>:
     AsyncClientInferenceTransportOps<B> + AsyncClientTrainingTransportOps<B>
 {
     async fn new(
-        client_namespace: ClientNamespace,
-        shared_client_modes: Arc<ClientModes>,
+        agent_namespace: AgentNamespace,
+        shared_modes: Arc<RuntimeModes>,
     ) -> Result<Self, TransportError>
     where
         Self: Sized;
     async fn shutdown(&self) -> Result<(), TransportError>;
 }
 
-#[cfg(feature = "zmq-transport")]
-pub(crate) trait SyncClientTransportInterface<B: Backend + BackendMatcher<Backend = B>>:
-    SyncClientInferenceTransportOps<B> + SyncClientTrainingTransportOps<B>
-{
-    fn new(
-        client_namespace: ClientNamespace,
-        shared_client_modes: Arc<ClientModes>,
-    ) -> Result<Self, TransportError>
-    where
-        Self: Sized;
-    fn shutdown(&self) -> Result<(), TransportError>;
-}
-
-#[cfg(feature = "nats-transport")]
+#[cfg(feature = "transport")]
 #[async_trait]
 pub(crate) trait AsyncClientInferenceTransportOps<B: Backend + BackendMatcher<Backend = B>>:
     Send + Sync + AsyncClientScalingTransportOps<B>
