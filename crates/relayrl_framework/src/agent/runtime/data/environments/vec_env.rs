@@ -48,6 +48,41 @@ fn dtype_bytes_per_elem_dtype(dtype: &DType) -> usize {
     }
 }
 
+fn assemble_discrete_masks(
+    mask_slots: &[Option<Vec<u8>>],
+    act_dim: usize,
+    discrete: bool,
+) -> Result<Option<Vec<u8>>, VecEnvError> {
+    if !discrete || act_dim == 0 {
+        return Ok(None);
+    }
+
+    let has_mask = mask_slots
+        .iter()
+        .any(|slot| slot.as_ref().is_some_and(|mask| !mask.is_empty()));
+    if !has_mask {
+        return Ok(None);
+    }
+
+    let mut flat = Vec::with_capacity(mask_slots.len().saturating_mul(act_dim));
+    for (env_index, slot) in mask_slots.iter().enumerate() {
+        match slot {
+            Some(mask) if !mask.is_empty() => {
+                if mask.len() != act_dim {
+                    return Err(VecEnvError::TensorError(format!(
+                        "invalid action mask length for environment {env_index}: expected {act_dim}, got {}",
+                        mask.len()
+                    )));
+                }
+                flat.extend_from_slice(mask);
+            }
+            _ => flat.resize(flat.len() + act_dim, 1),
+        }
+    }
+
+    Ok(Some(flat))
+}
+
 pub(crate) trait VecEnvTrait: Send + Sync {
     fn get_env_count(&self) -> Result<usize, VecEnvError>;
     #[allow(unused)]
@@ -387,7 +422,19 @@ impl VecEnvTrait for ScalarVecEnv {
                 .all(|r| r.is_some());
 
             if ok {
-                Some((self.obs_flat.clone(), None, rewards, dones, truncateds))
+                let mask_flat = match assemble_discrete_masks(
+                    &mask_slots,
+                    self.act_dim,
+                    self.prototype.action_is_discrete(),
+                ) {
+                    Ok(mask) => mask,
+                    Err(error) => {
+                        log::error!("[ScalarVecEnv] {error}");
+                        return None;
+                    }
+                };
+                self.mask_flat = mask_flat.clone();
+                Some((self.obs_flat.clone(), mask_flat, rewards, dones, truncateds))
             } else {
                 None
             }
@@ -395,16 +442,30 @@ impl VecEnvTrait for ScalarVecEnv {
             let mut rewards = Vec::with_capacity(n);
             let mut dones = Vec::with_capacity(n);
             let mut truncateds = Vec::with_capacity(n);
+            let mut mask_slots = Vec::with_capacity(n);
 
             for (i, env) in self.envs.iter().enumerate() {
                 let env_act = &actions[i * act_bpe..(i + 1) * act_bpe];
-                let (obs, _mask, reward, done, truncated) = env.dyn_step(env_act)?;
+                let (obs, mask, reward, done, truncated) = env.dyn_step(env_act)?;
                 self.obs_flat[i * obs_bpe..(i + 1) * obs_bpe].copy_from_slice(&obs);
+                mask_slots.push(mask);
                 rewards.push(reward);
                 dones.push(done);
                 truncateds.push(truncated);
             }
-            Some((self.obs_flat.clone(), None, rewards, dones, truncateds))
+            let mask_flat = match assemble_discrete_masks(
+                &mask_slots,
+                self.act_dim,
+                self.prototype.action_is_discrete(),
+            ) {
+                Ok(mask) => mask,
+                Err(error) => {
+                    log::error!("[ScalarVecEnv] {error}");
+                    return None;
+                }
+            };
+            self.mask_flat = mask_flat.clone();
+            Some((self.obs_flat.clone(), mask_flat, rewards, dones, truncateds))
         }
     }
 

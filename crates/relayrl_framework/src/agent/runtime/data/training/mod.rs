@@ -20,7 +20,7 @@ use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, DeviceType};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -522,6 +522,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                                         let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
                                         land_epoch!(output);
                                         pending_train = trainer.start_epoch_training();
+                                        note_epoch_started!();
                                     }
                                 }
                             } else {
@@ -540,12 +541,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                                         let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
                                         land_epoch!(output);
                                         pending_train = trainer.start_epoch_training();
+                                        note_epoch_started!();
                                     }
 
-                                    maybe_traj = traj_rx.recv() => {
+                                    // One full update may sit behind the job in flight. Past that,
+                                    // leave the segment in the bounded channel so the collector waits.
+                                    maybe_traj = traj_rx.recv(), if !trainer.first_slot_backlogged() => {
                                         match maybe_traj {
-                                            Some(traj) => {
-                                                trainer.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                                            Some(segment) => {
+                                                ingest_segment!(segment, false);
                                             }
                                             None => {
                                                 if let Some(handle) = pending_train.take() &&
@@ -719,6 +723,61 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                             None => None,
                         };
 
+                        per_env_episode_return[i] += rewards[i];
+                        if !per_env_trajs[i].is_empty()
+                            && per_env_trajs[i].policy_version >= 0
+                            && per_env_trajs[i].policy_version != current_generation
+                        {
+                            let mut previous = std::mem::replace(
+                                &mut per_env_trajs[i],
+                                RelayRLTrajectory::new(trajectory_capacity),
+                            );
+                            if let Some(action) = previous.actions.last_mut() {
+                                let start = i * obs_bytes_per_env;
+                                action.insert_data(
+                                    BOOTSTRAP_OBS_KEY,
+                                    RelayRLData::Tensor(TensorData::new(
+                                        vec![obs_dim],
+                                        obs_dtype.clone(),
+                                        current_obs_bytes[start..start + obs_bytes_per_env].to_vec(),
+                                        backend.clone(),
+                                    )),
+                                );
+                            }
+                            previous.set_truncated();
+                            previous.set_episode(per_env_episode[i]);
+                            traj_tx
+                                .send(collected_segment(
+                                    previous,
+                                    None,
+                                    obs_normalizer.as_ref(),
+                                ))
+                                .await
+                                .map_err(|_| {
+                                    TrainingError::TrainerError(
+                                        "trajectory receiver closed during a policy-generation split"
+                                            .to_string(),
+                                    )
+                                })?;
+                        }
+                        if per_env_trajs[i].is_empty() || per_env_trajs[i].policy_version < 0 {
+                            per_env_trajs[i].set_policy_version(current_generation);
+                        }
+
+                        // Both natural termination and the environment's time limit close GAE
+                        // with a zero bootstrap. Only internal rollout chunking bootstraps.
+                        let episode_ended = dones[i] || truncateds[i];
+                        let rollout_limit = window_boundary;
+                        let trajectory_limit = per_env_trajs[i]
+                            .len()
+                            .saturating_add(1)
+                            >= max_traj_length;
+                        let needs_bootstrap = should_bootstrap_cutoff(
+                            episode_ended,
+                            rollout_limit,
+                            trajectory_limit,
+                        );
+
                         let data_map = {
                             let logp_i = {
                                 let start = i * 4;
@@ -730,9 +789,21 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                                 TensorData::new(vec![1], backend_f32_dtype.clone(), bytes.to_le_bytes().to_vec(), backend.clone())
                             };
 
-                            let mut map: HashMap<String, RelayRLData> = HashMap::new();
+                            let mut map: HashMap<String, RelayRLData> = HashMap::with_capacity(3);
                             map.insert("logp_a".to_string(), RelayRLData::Tensor(logp_i));
                             map.insert("val".to_string(), RelayRLData::Tensor(value_i));
+                            if needs_bootstrap {
+                                let start = i * obs_bytes_per_env;
+                                map.insert(
+                                    BOOTSTRAP_OBS_KEY.to_string(),
+                                    RelayRLData::Tensor(TensorData::new(
+                                        vec![obs_dim],
+                                        obs_dtype.clone(),
+                                        new_obs_bytes[start..start + obs_bytes_per_env].to_vec(),
+                                        backend.clone(),
+                                    )),
+                                );
+                            }
                             map
                         };
 
