@@ -1,9 +1,9 @@
 # RelayRL Framework
 
-The multi-actor reinforcement learning client runtime that powers RelayRL.
+The multi-actor reinforcement learning agent runtime that powers RelayRL.
 This crate is the top-level runtime: it composes the data model from
 `relayrl_types` and the learning logic from `relayrl_algorithms` into a
-controllable, scalable client that runs many actors, performs local inference,
+controllable, scalable agent that runs many actors, performs local inference,
 and streams trajectories to data sinks. It is:
 
 * **Heterogeneous**: each actor runs as its own task and (in `Independent`
@@ -59,20 +59,20 @@ of the stack together:
 * `relayrl_env_trait`: the `Environment`, `ScalarEnvironment`, and
   `VectorEnvironment` contracts the runtime drives.
 
-The supported path in `0.5.0` is the local/default client runtime. Client
-network transport (ZMQ/NATS) is **experimental**. Server-backed
+The supported path in `0.5.0` is the local/default agent runtime. Client
+network transport (NATS) is **experimental**. Server-backed
 inference/training runtimes are **not shipped** in this branch. See
 [Feature flags](#feature-flags) and [Current support](#current-support).
 
 ## Architecture
 
-The client runtime is layered, with a small public API over an internal,
+The agent runtime is layered, with a small public API over an internal,
 concurrency-oriented runtime:
 
 ```text
 Public API ......... RelayRLAgent + AgentBuilder
        |
-Coordination ....... ClientCoordinator (orchestrator)
+Coordination ....... Coordinator (orchestrator)
        |             ScaleManager (router scaling)
        |             StateManager (actor state)
        |             LifecycleManager (config, shutdown)
@@ -81,16 +81,16 @@ Routing ............ RouterDispatcher + scalable Router workers
        |
 Actors ............. concurrent actors, local model inference, trajectory building
        |
-Data sinks ......... file sink (Arrow/CSV), transport sink (ZMQ/NATS, experimental)
+Data sinks ......... file sink (Arrow/CSV), transport sink (NATS, experimental)
 ```
 
 The local/default control flow is:
-`AgentBuilder -> RelayRLAgent -> ClientCoordinator -> actors/data routers -> data sinks`.
+`AgentBuilder -> RelayRLAgent -> Coordinator -> actors/data routers -> data sinks`.
 
 ## Module structure
 
 * `network`: the runtime.
-  * `network::client`: the multi-actor client runtime (rewritten in v0.5.0). The
+  * `agent`: the multi-actor agent runtime (rewritten in v0.5.0). The
     public `agent` module holds the `RelayRLAgent` facade, `AgentBuilder`
     construction API, and the `ActorInfo` actor handle; the internal `runtime`
     holds `control` (coordinator, lifecycle, scaling, state), `data::router`
@@ -118,7 +118,7 @@ down. The example is `no_run` because it expects a model directory and config
 on disk:
 
 ```rust,no_run
-use relayrl_framework::prelude::network::*;
+use relayrl_framework::prelude::agent::*;
 use relayrl_framework::prelude::types::model::ModelModule;
 use relayrl_framework::prelude::types::tensor::DeviceType;
 use relayrl_framework::prelude::types::tensor::burn::{Tensor, Float, ndarray::NdArray};
@@ -160,22 +160,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Feature flags
 
-* `client` (default): core client runtime.
+* `agent` (default): core agent runtime.
 * `logging-init`: log4rs logging.
 * `tch-backend`: LibTorch (`tch`) backend support via `relayrl_types`.
 * `metrics`: Prometheus/OpenTelemetry metrics.
 * `profile`: flamegraph and tokio-console profiling.
-* `zmq-transport` / `nats-transport`: experimental client network transports.
+* `transport`: experimental client network transports.
 * `inference-server` / `training-server`: reserved/no-op feature flags; no
   server runtime ships in this branch.
 
 ## Current support
 
-* **Supported:** the local/default client runtime, including local inference and
+* **Supported:** the local/default agent runtime, including local inference and
   actor lifecycle management, live router scaling, local Arrow/CSV trajectory
   writing, in-memory trajectory retrieval, parallelized environment batching,
   and PPO training rollouts.
-* **Experimental:** client ZMQ/NATS transport paths, even when their feature
+* **Experimental:** client NATS transport paths, even when their feature
   flags are enabled.
 * **Not shipped:** server-backed inference or training runtimes.
 

@@ -106,27 +106,23 @@ pub struct ZmqTrainingAddressesArgs {
 }
 
 /// Experimental transport address configuration for server-backed inference.
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum InferenceAddressesArgs {
-    #[cfg(feature = "zmq-transport")]
-    ZMQ(ZmqInferenceAddressesArgs),
-    #[cfg(feature = "nats-transport")]
+    #[cfg(feature = "transport")]
     NATS(Option<NetworkParams>),
 }
 
 /// Experimental transport address configuration for server-backed training.
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrainingAddressesArgs {
-    #[cfg(feature = "zmq-transport")]
-    ZMQ(ZmqTrainingAddressesArgs),
-    #[cfg(feature = "nats-transport")]
+    #[cfg(feature = "transport")]
     NATS(Option<NetworkParams>),
 }
 
 /// Experimental configuration for server-backed inference.
-#[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+#[cfg(feature = "transport")]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct InferenceParams {
     pub model_mode: ModelMode,
@@ -358,24 +354,39 @@ impl Default for ActorDataMode {
     }
 }
 
-pub(crate) fn uses_local_file_writing(training_data_mode: &ActorDataMode) -> bool {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+pub(crate) fn uses_transport(_actor_data_mode: &ActorDataMode) -> bool {
+    #[cfg(feature = "transport")]
     return matches!(
-        training_data_mode,
+        _actor_data_mode,
+        ActorDataMode::Online(_)
+            | ActorDataMode::OnlineWithFiles(..)
+            | ActorDataMode::OnlineWithCache(..)
+            | ActorDataMode::OnlineWithFilesAndCache(..)
+    );
+
+    #[cfg(not(feature = "transport"))]
+    return false;
+}
+
+pub(crate) fn uses_local_file_writing(actor_data_mode: &ActorDataMode) -> bool {
+    #[cfg(feature = "transport")]
+    return matches!(
+        actor_data_mode,
         ActorDataMode::OfflineWithFiles(_)
             | ActorDataMode::OfflineWithFilesAndCache(..)
             | ActorDataMode::OnlineWithFiles(..)
             | ActorDataMode::OnlineWithFilesAndCache(..)
     );
-    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+
+    #[cfg(not(feature = "transport"))]
     return matches!(
         training_data_mode,
         ActorDataMode::OfflineWithFiles(_) | ActorDataMode::OfflineWithFilesAndCache(..)
     );
 }
 
-pub(crate) fn uses_trajectory_cache(training_data_mode: &ActorDataMode) -> bool {
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+pub(crate) fn uses_trajectory_cache(actor_data_mode: &ActorDataMode) -> bool {
+    #[cfg(feature = "transport")]
     return matches!(
         training_data_mode,
         ActorDataMode::OfflineWithCache(_)
@@ -384,16 +395,16 @@ pub(crate) fn uses_trajectory_cache(training_data_mode: &ActorDataMode) -> bool 
             | ActorDataMode::OnlineWithFilesAndCache(..)
     );
 
-    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    #[cfg(not(feature = "transport"))]
     return matches!(
-        training_data_mode,
+        actor_data_mode,
         ActorDataMode::OfflineWithCache(_) | ActorDataMode::OfflineWithFilesAndCache(..)
     );
 }
 
 /// Active inference and data-collection modes applied across all runtime actors.
 #[derive(Default, Debug, Clone, PartialEq)]
-pub struct ClientModes {
+pub struct RuntimeModes {
     pub actor_inference_mode: ActorInferenceMode,
     pub actor_data_mode: ActorDataMode,
 }
@@ -563,36 +574,36 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuildParameters<B> {
     }
 
     /// Supplies default PPO hyperparameters forwarded to the training server. Requires a transport feature.
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     pub fn default_ppo_params(mut self, ppo_params: PPOParams) -> Self {
         self.builder.settings.default_hyperparameters.ppo = Some(ppo_params);
         self
     }
 
     /// Supplies default IPPO hyperparameters forwarded to the training server. Requires a transport feature.
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     pub fn default_ippo_params(mut self, ippo_params: IPPOParams) -> Self {
         self.builder.settings.default_hyperparameters.ippo = Some(ippo_params);
         self
     }
 
     /// Supplies default MAPPO hyperparameters forwarded to the training server. Requires a transport feature.
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg(feature = "transport")]
     pub fn default_mappo_params(mut self, mappo_params: MAPPOParams) -> Self {
         self.builder.settings.default_hyperparameters.mappo = Some(mappo_params);
         self
     }
 
     /// Runs build on the internal `AgentBuilder<B>`
-    pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), ClientError> {
+    pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), AgentError> {
         self.builder.build().await
     }
 }
 
 #[derive(Clone)]
 pub struct BuilderSettings<B: Backend + BackendMatcher<Backend = B>> {
-    pub client_modes: ClientModes,
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    pub modes: RuntimeModes,
+    #[cfg(feature = "transport")]
     pub transport_mode: Option<TransportMode>,
     pub data_routers: Option<u32>,
     pub data_buffer_size: Option<usize>,
@@ -689,12 +700,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuilder<B> {
     /// agent.start(params).await?;
     /// agent.shutdown().await?;
     /// ```
-    pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), ClientError> {
+    pub async fn build(self) -> Result<(RelayRLAgent<B>, AgentStartParameters<B>), AgentError> {
         // Initialize agent object
         let agent: RelayRLAgent<B> = RelayRLAgent::<B>::init(
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             self.settings.transport_mode.unwrap_or_default(),
-            self.settings.client_modes,
+            self.settings.modes,
         );
 
         // Tuple parameters
@@ -702,7 +713,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> AgentBuilder<B> {
             data_routers: self.settings.data_routers.unwrap_or(1),
             data_buffer_size: self.settings.data_buffer_size.unwrap_or(1024),
             default_model: self.settings.default_model,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             default_hyperparameters: self.settings.default_hyperparameters,
             config_polling_seconds: self.settings.config_polling_seconds,
             config_path: self.settings.config_path,

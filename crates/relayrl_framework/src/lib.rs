@@ -8,18 +8,18 @@
 //! RelayRL is a high-performance, multi-actor reinforcement learning framework built for
 //! concurrent actor execution and efficient trajectory collection. This crate is the
 //! top-level runtime: it composes the data model from [`relayrl_types`] and the learning
-//! logic from [`relayrl_algorithms`] into a controllable, scalable client that runs many
+//! logic from [`relayrl_algorithms`] into a controllable, scalable agent that runs many
 //! actors, performs local inference, and streams trajectories to data sinks.
 //!
 //! ## Architecture overview
 //!
-//! The client runtime is layered, with a small public API over an internal,
+//! The agent runtime is layered, with a small public API over an internal,
 //! concurrency-oriented runtime:
 //!
 //! ```text
 //! Public API ......... RelayRLAgent + AgentBuilder
 //!        |
-//! Coordination ....... ClientCoordinator (orchestrator)
+//! Coordination ....... Coordinator (orchestrator)
 //!        |             ScaleManager (router scaling)
 //!        |             StateManager (actor state)
 //!        |             LifecycleManager (config, shutdown)
@@ -28,18 +28,18 @@
 //!        |
 //! Actors ............. concurrent actors, local model inference, trajectory building
 //!        |
-//! Data sinks ......... file sink (Arrow/CSV), transport sink (ZMQ/NATS, experimental)
+//! Data sinks ......... file sink (Arrow/CSV), transport sink (NATS, experimental)
 //! ```
 //!
 //! The local/default control flow is:
-//! `AgentBuilder` -> `RelayRLAgent` -> `ClientCoordinator` -> routers/actors -> data sinks.
+//! `AgentBuilder` -> `RelayRLAgent` -> `Coordinator` -> routers/actors -> data sinks.
 //!
 //! ## Module structure
 //!
 //! - [`network`]: the runtime.
-//!   - [`network::client`]: the multi-actor client runtime (rewritten in v0.5.0).
-//!     - [`agent`](network::client::agent): the public [`RelayRLAgent`](network::client::agent)
-//!       facade and [`AgentBuilder`](network::client::agent) construction API.
+//!   - [`agent`]: the multi-actor agent runtime (rewritten in v0.5.0).
+//!     - [`agent`](agent): the public [`RelayRLAgent`](agent)
+//!       facade and [`AgentBuilder`](agent) construction API.
 //!     - The internal `runtime` holds `control` (coordinator, lifecycle, scaling, state),
 //!       `data::router` (message routing), and `data` (file sinks plus experimental
 //!       transport sinks).
@@ -53,8 +53,8 @@
 //!
 //! ## Design notes
 //!
-//! - **Generic over a Burn backend.** [`RelayRLAgent`](network::client::agent) and
-//!   [`AgentBuilder`](network::client::agent) are parameterized by a single backend `B`
+//! - **Generic over a Burn backend.** [`RelayRLAgent`](agent) and
+//!   [`AgentBuilder`](agent) are parameterized by a single backend `B`
 //!   (e.g. `burn_ndarray::NdArray`); observation/action tensor ranks and kinds are supplied
 //!   per call to `request_action`, not on the builder.
 //! - **Builder produces a `(RelayRLAgent, AgentStartParameters)` pair.** The agent handle and
@@ -71,7 +71,7 @@
 //! `no_run` because it expects a model directory and config on disk:
 //!
 //! ```rust,no_run
-//! use relayrl_framework::prelude::network::*;
+//! use relayrl_framework::prelude::agent::*;
 //! use relayrl_framework::prelude::types::model::ModelModule;
 //! use relayrl_framework::prelude::types::tensor::DeviceType;
 //! use burn_ndarray::NdArray;
@@ -100,7 +100,7 @@
 //!         1_000,
 //!         None,
 //!         None,
-//!         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+//!         #[cfg(feature = "transport")]
 //!         None,
 //!     )
 //!     .await?;
@@ -119,12 +119,12 @@
 //!
 //! ## Feature flags
 //!
-//! - `client` (default): core client runtime.
+//! - `agent` (default): core agent runtime.
 //! - `logging-init`: log4rs logging initialization.
 //! - `tch-backend`: LibTorch (`tch`) backend support via [`relayrl_types`].
 //! - `metrics`: Prometheus/OpenTelemetry metrics.
 //! - `profile`: flamegraph and tokio-console profiling.
-//! - `zmq-transport` / `nats-transport`: experimental client network transports.
+//! - `transport`: experimental client network transports.
 //! - `inference-server` / `training-server`: reserved/no-op feature flags; no server
 //!   runtime ships in this branch.
 
@@ -135,9 +135,9 @@
 /// ## Agent Runtime
 ///
 /// The [`agent`](agent) module contains the complete rewrite (v0.5.0) of the
-/// client (& server) from v0.4.52
+/// agent (& server) from v0.4.52
 ///
-/// In `0.5.0`, the supported path is the local/default client runtime, including:
+/// In `0.5.0`, the supported path is the local/default agent runtime, including:
 /// - Public [`agent`](agent) API for agent construction and control
 /// - Internal runtime control (scaling, lifecycle, state management)
 /// - Router-based message dispatching
@@ -167,7 +167,7 @@ pub mod utilities {
 /// This module re-exports commonly used types and traits for easier access:
 ///
 /// ```rust
-/// use relayrl_framework::prelude::network::*;  // Agent API
+/// use relayrl_framework::prelude::agent::*;  // Agent API
 /// use relayrl_framework::prelude::utilities::config::*;  // Configuration
 /// use relayrl_framework::prelude::types::tensor::*;  // RelayRL tensor types, burn-related module re-exports
 /// use relayrl_framework::prelude::types::tensor::burn::*;  // Burn tensor types
@@ -178,12 +178,12 @@ pub mod utilities {
 /// use relayrl_framework::prelude::templates::algorithms::*;  // Algorithm types
 /// ```
 pub mod prelude {
-    pub mod algorithms {
-        pub use relayrl_algorithms::algorithms::*;
+    pub mod agent {
+        pub use crate::agent::process::*;
     }
 
-    pub mod network {
-        pub use crate::agent::process::*;
+    pub mod algorithms {
+        pub use relayrl_algorithms::algorithms::*;
     }
 
     pub mod templates {
@@ -237,7 +237,7 @@ pub mod prelude {
                 TrainingServerConfigParams, TransportConfigBuilder, TransportConfigParams,
             };
             pub use relayrl_types::HyperparameterArgs;
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             pub mod network_codec {
                 pub use relayrl_types::data::utilities::chunking::*;
                 pub use relayrl_types::data::utilities::compress::*;
