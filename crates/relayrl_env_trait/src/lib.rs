@@ -120,7 +120,12 @@ pub mod traits {
 
     /// Flat byte observation buffer; its element encoding is given by the env's [`EnvDType`].
     pub type Observation = Vec<u8>;
-    /// Optional action mask as raw bytes; `None` means all actions are valid.
+    /// Optional discrete-action eligibility mask as raw bytes.
+    ///
+    /// `None` means every action is valid. For a discrete environment, return exactly one byte
+    /// per action (`action_dim()` bytes for a scalar environment and
+    /// `num_envs * action_dim()` bytes for a vector environment), where zero means invalid and
+    /// any nonzero value means valid. Continuous environments should return `None`.
     pub type Mask = Option<Vec<u8>>;
     /// `true` when the episode has terminated naturally.
     pub type Done = bool;
@@ -288,7 +293,11 @@ pub mod traits {
     pub trait ScalarEnvironment: Environment + Send + Sync {
         /// Resets the environment and returns the initial observation plus optional info.
         fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError>;
-        /// Applies one action (raw bytes) and returns the next observation, mask, reward, done, and truncated flags.
+        /// Applies one action and returns the next observation, mask, reward, done, and truncated flags.
+        ///
+        /// For discrete environments, the current runtime adapter passes one raw `u8` action
+        /// index, so the supported action dimension is at most 256. Continuous actions use the
+        /// byte representation declared by [`Environment::action_dtype`].
         fn step_bytes(&self, action: &[u8])
         -> Option<(Observation, Mask, Reward, Done, Truncated)>;
     }
@@ -304,7 +313,11 @@ pub mod traits {
         ) -> Result<Vec<VectorEnvReset>, EnvironmentError>;
         /// Returns the number of logical environments currently held.
         fn n_envs(&self) -> usize;
-        /// Applies a batch of actions (raw bytes) and returns batched observations, mask, rewards, done, and truncated flags.
+        /// Applies a batch of actions and returns batched observations, mask, rewards, done, and truncated flags.
+        ///
+        /// For discrete environments, actions are one raw `u8` index per logical environment.
+        /// Continuous actions use the byte representation declared by
+        /// [`Environment::action_dtype`].
         #[allow(clippy::type_complexity)]
         fn step_bytes(
             &self,

@@ -9,6 +9,9 @@ keywords = ['environment', 'integration', 'deep-learning', 'ai', 'batching']
 categories = ['science', 'algorithms', 'simulation', 'concurrency', 'mathematics']
 license = "Apache-2.0"
 
+[lib]
+bench = false
+
 [dependencies]
 thiserror = { workspace = true }
 uuid = { workspace = true }
