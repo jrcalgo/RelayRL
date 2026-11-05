@@ -57,7 +57,7 @@ client runtime. Highlights of the `0.5.0` line:
   `relayrl_env_trait`).
 
 The supported path in `0.5.x` is the local/default client runtime. Client
-network transport (ZMQ/NATS) is **experimental**. Server-backed
+network transport (NATS) is **experimental**. Server-backed
 inference/training runtimes are **not shipped** in this branch. See
 [Feature flags](#feature-flags) and [Current support](#current-support).
 
@@ -180,11 +180,12 @@ The supported `0.5.0` path is the local/default client runtime, including:
 * live data routing and buffer scaling
 * local Arrow/CSV trajectory writing and cached trajectory retrieval
 * parallelized environment batching per actor
-* PPO training rollouts per actor
+* PPO training rollouts per actor with `TrainingBudget::VectorSteps` or
+  `TrainingBudget::UntilConvergence`, returning a structured `TrainingOutcome`
 
 In the `relayrl_framework` crate:
 
-* Experimental client transports: `zmq-transport` and `nats-transport`
+* Experimental client transports: `transport`
 * Reserved/no-op server flags: `training-server` and `inference-server`
   (no server runtime ships in this branch)
 

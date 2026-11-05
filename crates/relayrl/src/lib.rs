@@ -130,7 +130,7 @@
 //!
 //! Setting the default model is optional, but it is **recommended** to do so to avoid the overhead of loading the model into memory for each actor.
 //!
-//! There are a series of client modes and parameters that can be set on the builder when `zmq-transport` or `nats-transport` feature flags are enabled;
+//! There are a series of runtime modes and parameters that can be set on the builder when `transport` feature flags are enabled;
 //! see [Experimental Network Transport](#experimental-network-transport).
 //!
 //! #### Inference Configuration
@@ -184,8 +184,7 @@
 //!         "metrics": { "meter_name": "relayrl-client", "otlp_endpoint": { "prefix": "http://", "host": "127.0.0.1", "port": "4317" } }
 //!     },
 //!     "transport_config": {
-//!         "nats_addresses": { "...": "..." },
-//!         "zmq_addresses": { "...": "..." }
+//!         "nats_addresses": { "...": "..." }
 //!     }
 //! }
 //! ```
@@ -289,15 +288,15 @@
 //!
 //!     // Create two groups of actors with different obs/action ranks on different devices.
 //!     // The trailing `None` is an optional `AlgorithmInitArgs`, only present when a
-//!     // transport feature (`nats-transport` / `zmq-transport`) is enabled.
+//!     // transport feature (`transport`) is enabled.
 //!     let team1_actor_info = npc_team_1.new_actors::<ENV1_OBS_IN, ENV1_ACT_OUT>(
 //!         team1_actors, DeviceType::Cpu, team1_max_traj_length, Some("routing_decision"), no_nd_model.clone(),
-//!         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+//!         #[cfg(feature = "transport")]
 //!         None,
 //!     ).await?;
 //!     let team2_actor_info = npc_team_2.new_actors::<ENV2_OBS_IN, ENV2_ACT_OUT>(
 //!         team2_actors, DeviceType::Cpu, team2_max_traj_length, Some("compute_decision"), no_nd_model,
-//!         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+//!         #[cfg(feature = "transport")]
 //!         None,
 //!     ).await?;
 //!
@@ -323,7 +322,7 @@
 //!
 //! - `get_actor(id)` - returns the [`ActorInfo`](crate::agent::ActorInfo) handle for a single live
 //!   actor by its current `ActorUuid`.
-//! - `get_all_actors()` - returns the `ActorInfo` handles of all live actors by reading the client's
+//! - `get_all_actors()` - returns the `ActorInfo` handles of all live actors by reading the agent's
 //!   slice of the namespaced UUID registry. Because it is the registry view, callers should not rely on
 //!   any particular ordering. Returns an error if the agent has not been started (no runtime instance).
 //! - `get_actors_by_rank<D_IN, D_OUT>()` - returns the `ActorInfo` handles of all live actors that
@@ -608,16 +607,16 @@
 //! environment can be removed entirely with `remove_env`.
 //!
 //! Only one `run_env_*` loop may be active per actor at a time; attempting to start a second
-//! returns `ClientError::RunEnvActive` immediately.
+//! returns `AgentError::RunEnvActive` immediately.
 //!
 //! ##### Evaluation
 //!
-//! `run_env_eval(actor, loop_iters)` - runs `loop_iters` evaluation iterations on the bound
-//!   environment; no training update is applied. Each iteration steps every bound env copy once, so
-//!   the total number of transitions performed is `loop_iters * count`, not `loop_iters` itself.
+//! `run_env_eval(actor, vector_steps)` - runs `vector_steps` evaluation iterations on the bound
+//!   environment; no training update is applied. Each vector step advances every bound env copy once, so
+//!   the total number of transitions performed is `vector_steps * count`, not `vector_steps` itself.
 //!
 //! ```rust
-//! use relayrl::agent::{RelayRLAgent, RelayRLBatchEnv, RelayRLActors};
+//! use relayrl::agent::{RelayRLAgent, RelayRLBatchEnv, RelayRLActors, TrainingBudget};
 //! use relayrl::types::tensor::burn::ndarray::NdArray;
 //!
 //! async fn drive_car(
@@ -632,11 +631,11 @@
 //!
 //!     // sequential env stepping is enabled when env count < 8
 //!     agent.set_env(&actor1, pedals, 7).await?;       // 7 vectorized env copies on this actor
-//!     agent.run_env_eval(&actor1, 10_000).await?;  // 10k loop iters -> 70k env-copy transitions
+//!     agent.run_env_eval(&actor1, 10_000).await?;  // 10k vector steps -> 70k env-copy transitions
 //!
 //!     // rayon data parallelism is enabled when env count >= 8
 //!     agent.set_env(&actor2, steering_wheel, 1024).await?;    // 1024 vectorized env copies on this actor
-//!     agent.run_env_eval(&actor2, 1_000).await?;   // 1k loop iters -> 1.024m env-copy transitions
+//!     agent.run_env_eval(&actor2, 1_000).await?;   // 1k vector steps -> 1.024m env-copy transitions
 //!
 //!     let count = agent.get_env_count(&actor2).await?;
 //!     agent.set_env_count(&actor2, count / 2).await?;  // halve the env count live
@@ -648,8 +647,12 @@
 //!
 //! ##### Training
 //!
-//! `run_env_with_ppo(actor, loop_iters, max_traj_length, trainer_spec)` - runs a
-//!   single-agent PPO training rollout until `loop_iters` complete. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
+//! `run_env_with_ppo(actor, budget, max_traj_length, trainer_spec)` - runs a single-agent PPO
+//!   training rollout under a [`TrainingBudget`](crate::agent::TrainingBudget). Each vector step
+//!   advances every bound env copy once. The returned outcome contains the trained model, complete
+//!   accounting, observed curve, and an optional convergence sample. `UntilConvergence` first
+//!   requires a statistically significant improvement in the last-100-completed-episode return,
+//!   then waits for both return and timeout curves to remain flat. Requires a `PPOTrainerSpec<B, KindIn, KindOut, Pi>`
 //!   where **Pi** is a [`NeuralNetwork<B, KindIn, KindOut>`](crate::algorithms::NeuralNetwork). See [`relayrl_algorithms`](https://docs.rs/relayrl_algorithms/0.5.0/relayrl_algorithms/) for details on
 //!   constructing the trainer spec.
 //! `run_env_with_ippo` and `run_env_with_mappo` - independent and multi-agent PPO training
@@ -672,9 +675,16 @@
 //!     };
 //!     agent.set_env(&actor1, video_game, 7).await?;
 //!
-//!     let new_model = agent.run_env_with_ppo(&actor1, 10_000, 10_000, ppo_spec).await?;
-//!     new_model.save(save_model_path)?;
-//!     agent.update_models::<3, 1>(Some(&[actor1]), new_model).await?;
+//!     let outcome = agent
+//!         .run_env_with_ppo(
+//!             &actor1,
+//!             TrainingBudget::VectorSteps(10_000),
+//!             10_000,
+//!             ppo_spec,
+//!         )
+//!         .await?;
+//!     outcome.model.save(save_model_path)?;
+//!     agent.update_models::<3, 1>(Some(&[actor1]), outcome.model).await?;
 //!
 //!     Ok(())
 //! }
@@ -688,20 +698,19 @@
 // even when their feature flags are enabled. The current supported path is the local runtime.
 // </div>
 //
-// With the `zmq-transport` and/or `nats-transport` features enabled, an agent can be configured
+// With the `transport` features enabled, an agent can be configured
 // for server-backed workflows. The following **transport-gated** surface becomes available:
 //
 // #### Builder setters
 //
-// - `transport_type(TransportMode)` - selects `TransportMode::ZMQ` or `TransportMode::NATS`; defaults to ZMQ when zmq-transport is enabled.
+// - `transport_type(TransportMode)` - selects `TransportMode::NATS`, the default when transport is enabled.
 // - `default_ppo_params(PPOParams)` / `default_ippo_params(IPPOParams)` / `default_mappo_params(MAPPOParams)` - supply
 //   hyperparameters forwarded to the training server at handshake time.
 //
 // #### Inference modes
 // - `ActorInferenceMode::Server(InferenceParams)` - all actor inference is routed to a remote inference server.
 //   `InferenceParams` holds the `ModelMode`, an optional `CodecConfig` (compression, encryption, integrity), and
-//   the server addresses via `InferenceAddressesArgs` (`ZMQ` or `NATS` variants, wrapping `ZmqInferenceAddressesArgs`
-//   or a NATS subject string).
+//   the server addresses via `InferenceAddressesArgs` (the NATS address args).
 // - `ActorInferenceMode::ClientFallback(ModelMode, InferenceParams)` - all actors performs inference locally
 //   as a fallback while the rest route to the server.
 //
@@ -712,14 +721,13 @@
 // - `ActorDataMode::OnlineWithFilesAndCache(TrainingParams, ...)` - all three simultaneously.
 //
 // `TrainingParams` mirrors `InferenceParams` with the addition of optional hyperparameter args and
-// training-specific addresses via `TrainingAddressesArgs` (`ZMQ` wrapping `ZmqTrainingAddressesArgs`,
-// or `NATS`). `ZmqTrainingAddressesArgs` exposes the agent listener, model server, trajectory server,
-// and scaling server endpoints individually.
+// training-specific addresses via `TrainingAddressesArgs` (the NATS address args).
 //
 // These paths are under active development and are not covered by the 0.5.x support promise.
 
 pub mod agent {
-    pub use relayrl_framework::agent::process::*;
+    pub use relayrl_framework::prelude::agent::*;
+    pub use relayrl_framework::prelude::*;
 }
 
 pub mod algorithms {

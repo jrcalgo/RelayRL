@@ -1,6 +1,6 @@
 [package]
 name = "relayrl"
-version = "0.5.0-rc.1"
+version = "0.5.0"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 edition = "2024"
 description = "A deep reinforcement learning actor-system runtime for concurrent inference and training."
@@ -11,12 +11,15 @@ keywords = ["reinforcement", "multi-agent", "multi-actor", "machine-learning", "
 categories = ["concurrency", "asynchronous", "science", "simulation", "network-programming"]
 license = "Apache-2.0"
 
+[lib]
+bench = false
+
 [dependencies]
 relayrl_framework = { workspace = true }
 
 [features]
-default = ["client", "logging-init"]
-client = ["relayrl_framework/client"]
+default = ["agent", "logging-init"]
+agent = ["relayrl_framework/agent"]
 metrics = ["relayrl_framework/metrics"]
 logging-init = ["relayrl_framework/logging-init"]
 tch-backend = ["relayrl_framework/tch-backend"]
