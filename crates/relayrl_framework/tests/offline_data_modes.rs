@@ -87,6 +87,45 @@ async fn cache_mode_drains_completed_trajectories() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
+async fn cache_mode_preserves_trajectories_when_actor_is_removed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut ctx) = start_offline_agent(ActorDataMode::OfflineWithCache(10)).await? else {
+        return Ok(());
+    };
+
+    let actor = ctx
+        .agent
+        .new_actor::<1, 1>(
+            DeviceType::Cpu,
+            1_000,
+            None,
+            None,
+            #[cfg(feature = "transport")]
+            None,
+        )
+        .await?;
+
+    complete_one_episode(&mut ctx.agent, &actor).await?;
+    ctx.agent.remove_actor(&actor).await?;
+
+    let drained = ctx
+        .agent
+        .drain_trajectory_caches(std::slice::from_ref(&actor))
+        .and_then(|mut cache| cache.remove(&actor.id()))
+        .unwrap_or_default();
+    assert_eq!(drained.len(), 1);
+    assert!(
+        ctx.agent
+            .drain_trajectory_caches(std::slice::from_ref(&actor))
+            .is_none(),
+        "removed actor cache should be a one-shot drain"
+    );
+
+    ctx.agent.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn cache_mode_evicts_oldest_trajectory_beyond_its_size()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut ctx) = start_offline_agent(ActorDataMode::OfflineWithCache(2)).await? else {

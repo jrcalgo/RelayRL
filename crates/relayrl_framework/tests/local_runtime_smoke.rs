@@ -1,17 +1,17 @@
-#![cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+#![cfg(not(feature = "transport"))]
 
 mod common;
 
 use burn_ndarray::NdArrayDevice;
 use burn_tensor::{Float, Tensor, TensorData};
 use common::{TestBackend, try_load_test_model_module};
-use relayrl_framework::prelude::network::{AgentBuilder, RelayRLActors, RelayRLStepDriven};
+use relayrl_framework::prelude::agent::{AgentBuilder, RelayRLActors, RelayRLStepDriven};
 use relayrl_framework::prelude::types::tensor::DeviceType;
 use std::fs;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn local_client_smoke_covers_build_start_request_and_shutdown()
+async fn local_runtime_smoke_covers_build_start_request_and_shutdown()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("client_config.json");
@@ -38,7 +38,7 @@ async fn local_client_smoke_covers_build_start_request_and_shutdown()
             1000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;

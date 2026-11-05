@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// A minimal continuous scalar environment double: rank-1 `f32` observation/action of size 2.
 /// Env-driven rollouts batch those into `[n_envs, 2]` and therefore need
-/// [`try_load_batched_test_model_module`]. Never terminates on its own, so `loop_iters` fully
+/// [`try_load_batched_test_model_module`]. Never terminates on its own, so `vector_steps` fully
 /// controls how long a rollout runs.
 #[derive(Clone)]
 struct ContinuousTestEnv;
@@ -150,7 +150,7 @@ async fn set_env_reports_the_configured_copy_count() -> Result<(), Box<dyn std::
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -178,7 +178,7 @@ async fn set_env_count_increases_and_decreases_live() -> Result<(), Box<dyn std:
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -210,7 +210,7 @@ async fn remove_env_makes_the_actor_report_no_bound_environment()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -244,7 +244,7 @@ async fn run_env_eval_completes_a_small_rollout() -> Result<(), Box<dyn std::err
     std::fs::write(&config_path, "{}")?;
 
     let (mut agent, params) =
-        relayrl_framework::prelude::network::AgentBuilder::<TestBackend>::builder()
+        relayrl_framework::prelude::agent::AgentBuilder::<TestBackend>::builder()
             .modes()
             .actor_data_mode(ActorDataMode::Disabled)
             .params()
@@ -260,7 +260,7 @@ async fn run_env_eval_completes_a_small_rollout() -> Result<(), Box<dyn std::err
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -277,9 +277,9 @@ async fn run_env_eval_completes_a_small_rollout() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
--> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test(flavor = "current_thread")]
+async fn run_env_eval_completes_on_current_thread_runtime() -> Result<(), Box<dyn std::error::Error>>
+{
     let Some((_model_dir, default_model)) = try_load_batched_test_model_module() else {
         return Ok(());
     };
@@ -289,7 +289,7 @@ async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
     std::fs::write(&config_path, "{}")?;
 
     let (mut agent, params) =
-        relayrl_framework::prelude::network::AgentBuilder::<TestBackend>::builder()
+        relayrl_framework::prelude::agent::AgentBuilder::<TestBackend>::builder()
             .modes()
             .actor_data_mode(ActorDataMode::Disabled)
             .params()
@@ -305,7 +305,48 @@ async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
+            None,
+        )
+        .await?;
+    agent
+        .set_env(&actor, Box::new(ContinuousTestEnv), 1)
+        .await?;
+
+    agent.run_env_eval(&actor, 5).await?;
+    agent.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some((_model_dir, default_model)) = try_load_batched_test_model_module() else {
+        return Ok(());
+    };
+
+    let config_dir = tempfile::tempdir()?;
+    let config_path = config_dir.path().join("client_config.json");
+    std::fs::write(&config_path, "{}")?;
+
+    let (mut agent, params) =
+        relayrl_framework::prelude::agent::AgentBuilder::<TestBackend>::builder()
+            .modes()
+            .actor_data_mode(ActorDataMode::Disabled)
+            .params()
+            .default_model(default_model)
+            .config_path(config_path)
+            .build()
+            .await?;
+    agent.start(params).await?;
+
+    let actor = agent
+        .new_actor::<1, 1>(
+            DeviceType::Cpu,
+            1_000,
+            None,
+            None,
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -326,7 +367,7 @@ async fn run_env_eval_rejects_a_concurrent_call_on_the_same_actor()
 
     let second_call = agent.run_env_eval(&actor, 5).await;
     assert!(
-        matches!(second_call, Err(ClientError::RunEnvActive(_))),
+        matches!(second_call, Err(AgentError::RunEnvActive(_))),
         "a second run_env_eval on the same actor should be rejected while the first is active"
     );
 

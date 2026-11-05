@@ -1,11 +1,11 @@
 //! Offline actor lifecycle integration tests: batch creation, lookup by rank/tag, renaming, and
 //! removal through the public `RelayRLAgent` API. No transport feature is required or exercised.
-#![cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+#![cfg(not(feature = "transport"))]
 
 mod common;
 
 use common::start_offline_agent;
-use relayrl_framework::prelude::network::{ActorDataMode, RelayRLActors};
+use relayrl_framework::prelude::agent::{ActorDataMode, RelayRLActors};
 use relayrl_types::data::tensor::DeviceType;
 
 #[tokio::test]
@@ -22,7 +22,7 @@ async fn new_actors_batch_creates_requested_count() -> Result<(), Box<dyn std::e
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -54,7 +54,7 @@ async fn get_actors_by_rank_filters_on_observation_and_action_rank()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -65,7 +65,7 @@ async fn get_actors_by_rank_filters_on_observation_and_action_rank()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -98,7 +98,7 @@ async fn get_actors_by_tag_filters_by_nametag_and_none_matches_untagged()
             1_000,
             Some("scout"),
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -109,7 +109,7 @@ async fn get_actors_by_tag_filters_by_nametag_and_none_matches_untagged()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -138,7 +138,7 @@ async fn set_actor_id_updates_lookup_and_old_id_no_longer_resolves()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -174,7 +174,7 @@ async fn set_actor_nametag_updates_tag_based_lookup() -> Result<(), Box<dyn std:
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -209,7 +209,7 @@ async fn remove_actors_shrinks_all_actors_list() -> Result<(), Box<dyn std::erro
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -239,7 +239,7 @@ async fn remove_single_actor_is_equivalent_to_remove_actors_of_one()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -257,7 +257,7 @@ async fn remove_single_actor_is_equivalent_to_remove_actors_of_one()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;

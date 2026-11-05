@@ -32,7 +32,7 @@ async fn request_action_tags_the_requesting_actor_and_reward()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -70,7 +70,7 @@ async fn request_actions_broadcasts_one_observation_to_every_actor()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -112,7 +112,7 @@ async fn flag_last_action_succeeds_after_a_request() -> Result<(), Box<dyn std::
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -158,7 +158,7 @@ async fn flag_last_actions_covers_every_named_actor() -> Result<(), Box<dyn std:
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;

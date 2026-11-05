@@ -1,12 +1,12 @@
-//! Shared helpers for the offline (local, non-transport) client integration tests.
+//! Shared helpers for the offline (local, non-transport) agent integration tests.
 //!
-//! Every helper here is scoped to the local/default client runtime: no ZMQ or NATS transport
+//! Every helper here is scoped to the local/default agent runtime: no network transport
 //! feature is ever enabled, and every test file that uses this module gates itself with
-//! `#![cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]`.
+//! `#![cfg(not(feature = "transport"))]`.
 #![allow(dead_code)]
 
 use burn_ndarray::NdArray;
-use relayrl_framework::prelude::network::{
+use relayrl_framework::prelude::agent::{
     ActorDataMode, ActorInferenceMode, ActorInfo, AgentBuilder, RelayRLActors, RelayRLAgent,
 };
 use relayrl_types::data::tensor::DeviceType;
@@ -58,6 +58,10 @@ pub fn load_test_model_module() -> Result<(TempDir, ModelModule<TestBackend>), M
         input_shape: vec![2],
         output_shape: vec![2],
         default_device: Some(DeviceType::Cpu),
+        obs_preprocess:
+            relayrl_types::model::obs_preprocess::ObservationPreprocessMetadata::caller_normalized(
+                2,
+            ),
     };
 
     let model_module =
@@ -78,6 +82,10 @@ pub fn load_batched_test_model_module() -> Result<(TempDir, ModelModule<TestBack
         input_shape: vec![1, 2],
         output_shape: vec![1, 2],
         default_device: Some(DeviceType::Cpu),
+        obs_preprocess:
+            relayrl_types::model::obs_preprocess::ObservationPreprocessMetadata::caller_normalized(
+                2,
+            ),
     };
 
     let model_module =

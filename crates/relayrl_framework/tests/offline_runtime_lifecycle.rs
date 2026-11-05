@@ -47,7 +47,7 @@ async fn shutdown_returns_still_buffered_trajectories() -> Result<(), Box<dyn st
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -103,7 +103,7 @@ async fn restart_tears_down_and_reinitializes_with_an_empty_actor_list()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -120,7 +120,7 @@ async fn restart_tears_down_and_reinitializes_with_an_empty_actor_list()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -166,7 +166,7 @@ async fn scale_data_routers_out_and_in_keeps_actors_usable()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -218,7 +218,7 @@ async fn scale_data_routers_zero_is_rejected_as_a_noop() -> Result<(), Box<dyn s
     agent.start(params).await?;
 
     let result = agent.scale_data_routers(0).await;
-    assert!(matches!(result, Err(ClientError::NoopRouterScale(_))));
+    assert!(matches!(result, Err(AgentError::NoopRouterScale(_))));
 
     agent.shutdown().await?;
     Ok(())
@@ -251,7 +251,7 @@ async fn scale_data_buffers_resizes_without_disrupting_requests()
             1_000,
             None,
             None,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            #[cfg(feature = "transport")]
             None,
         )
         .await?;
@@ -271,7 +271,7 @@ async fn scale_data_buffers_resizes_without_disrupting_requests()
     let zero_size_result = agent.scale_data_buffers(0).await;
     assert!(matches!(
         zero_size_result,
-        Err(ClientError::InvalidDataParams(_))
+        Err(AgentError::InvalidDataParams(_))
     ));
 
     agent.shutdown().await?;
@@ -304,7 +304,7 @@ async fn get_config_returns_error_when_config_path_is_missing()
 
     let result = agent.get_config().await;
     assert!(
-        matches!(result, Err(ClientError::CoordinatorError(_))),
+        matches!(result, Err(AgentError::CoordinatorError(_))),
         "missing config path should surface as a coordinator/config load error, got: {result:?}"
     );
 
